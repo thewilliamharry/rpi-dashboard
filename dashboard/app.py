@@ -44,13 +44,13 @@ _found             = 0
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
 def init_db():
     with _db_lock:
         conn = get_db()
+        conn.execute("PRAGMA journal_mode=WAL")   # set once; persists in the DB file
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS stats_history (
                 ts      INTEGER PRIMARY KEY,
@@ -170,33 +170,34 @@ def fetch_thumbnail(port):
         )
         if og and og.get('content'):
             img_url = urljoin(f"http://127.0.0.1:{port}/", og['content'])
-            # SSRF guard: only follow URLs that stay on localhost
-            if not _is_localhost(img_url):
-                log.warning("Skipping non-localhost og:image URL for port %d: %s", port, img_url)
-                return None, None
-            img_r = requests.get(img_url, timeout=5, verify=False, stream=True)
-            if img_r.ok:
-                ct = img_r.headers.get('Content-Type', 'image/jpeg').split(';')[0].strip()
-                if not ct.startswith('image/'):
-                    return None, None
-                # Size cap: reject images larger than THUMB_MAX_BYTES.
-                # Check Content-Length header first (fast path), then stream
-                # in 64 KB chunks and abort early if the limit is crossed.
-                declared = int(img_r.headers.get('Content-Length', 0))
-                if declared > THUMB_MAX_BYTES:
-                    log.warning("og:image for port %d too large (%d bytes), skipping", port, declared)
-                    return None, None
-                buf = bytearray()
-                for chunk in img_r.iter_content(chunk_size=65536):
-                    if not chunk:
-                        continue
-                    buf.extend(chunk)
-                    if len(buf) > THUMB_MAX_BYTES:
-                        log.warning("og:image for port %d exceeded size cap, skipping", port)
-                        buf = None
-                        break
-                if buf:
-                    return bytes(buf), ct
+            # SSRF guard: only follow URLs that stay on localhost.
+            # If the og:image points to an external CDN, skip it and fall
+            # through to the screenshot path below instead of returning empty.
+            if _is_localhost(img_url):
+                img_r = requests.get(img_url, timeout=5, verify=False, stream=True)
+                if img_r.ok:
+                    ct = img_r.headers.get('Content-Type', 'image/jpeg').split(';')[0].strip()
+                    if ct.startswith('image/'):
+                        # Size cap: reject images larger than THUMB_MAX_BYTES.
+                        # Check Content-Length header first (fast path), then stream
+                        # in 64 KB chunks and abort early if the limit is crossed.
+                        declared = int(img_r.headers.get('Content-Length', 0))
+                        if declared > THUMB_MAX_BYTES:
+                            log.warning("og:image for port %d too large (%d bytes), skipping", port, declared)
+                        else:
+                            buf = bytearray()
+                            for chunk in img_r.iter_content(chunk_size=65536):
+                                if not chunk:
+                                    continue
+                                buf.extend(chunk)
+                                if len(buf) > THUMB_MAX_BYTES:
+                                    log.warning("og:image for port %d exceeded size cap, skipping", port)
+                                    buf = None
+                                    break
+                            if buf:
+                                return bytes(buf), ct
+            else:
+                log.warning("Skipping non-localhost og:image for port %d: %s", port, img_url)
     except Exception:
         pass
     # og:image not found or fetch failed — fall back to headless screenshot
@@ -235,7 +236,10 @@ def stats_loop():
 def do_discovery():
     global _last_discovery, _scanning, _found
 
-    ports_to_scan = [p for p in range(2000, 10000, 100) if p != 80]
+    # Scan every 100th port from 2000–9900, plus common self-hosted service
+    # ports that fall in the gaps (8080, 8443, 8888, 9090, 3001, etc.)
+    _COMMON_PORTS = {3001, 8080, 8443, 8888, 9090}
+    ports_to_scan = sorted(set(range(2000, 10000, 100)) | _COMMON_PORTS)
     open_ports = []
 
     for port in ports_to_scan:
@@ -257,7 +261,8 @@ def do_discovery():
                 timeout=2.5, verify=False, allow_redirects=True
             )
             soup  = BeautifulSoup(r.text, "html.parser")
-            title = soup.title.string.strip() if soup.title else f":{port}"
+            title = soup.title.get_text(strip=True) if soup.title else ""
+            title = title or f":{port}"
             http_ports.append(port)
             port_titles[port] = title
         except Exception:
@@ -422,7 +427,11 @@ def scan_loop():
         if _last_discovery is None or now - _last_discovery >= 86400:
             with _scan_lock:
                 _scanning = True
-            do_discovery()
+            try:
+                do_discovery()
+            except Exception as e:
+                log.error("Discovery failed unexpectedly: %s", e)
+                _scanning = False
         elif _last_uptime_check is None or now - _last_uptime_check >= 300:
             do_uptime_check(only_down=False)
         elif _last_down_check is None or now - _last_down_check >= 60:

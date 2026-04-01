@@ -613,6 +613,7 @@ function updateCard(card, svc) {
 }
 
 function updateServices(services) {
+  if (!Array.isArray(services)) return;
   const grid       = document.getElementById('services-grid');
   const currentPorts = new Set(services.map(s => s.port));
 

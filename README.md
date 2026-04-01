@@ -7,10 +7,11 @@ A self-hosted monitoring dashboard for Raspberry Pi. Runs as a single Docker con
 ## Features
 
 - **System metrics** — live CPU, RAM, and disk gauges with 24-hour sparkline history and CPU temperature
-- **Service discovery** — automatically finds every HTTP service running on the Pi by scanning ports 2000–9900
+- **Service discovery** — automatically finds every HTTP service running on the Pi by scanning ports 2000–9900 (plus common ports like 8080, 8443, 8888, 9090)
 - **Uptime tracking** — 7-day visual uptime history per service, checks every 5 minutes (every 60 seconds for services that are currently down)
-- **Live thumbnails** — headless Chromium screenshots of each service's homepage, refreshed daily
-- **Dark / light theme** — with a smooth radial wipe transition
+- **Live thumbnails** — headless Chromium screenshots of each service's homepage, refreshed daily; falls back to `og:image` when available
+- **Status favicon** — browser tab icon is a live colour-coded bulb (green / amber / red) reflecting the current state of your services and CPU load
+- **Dark / light theme** — two distinct visual styles with a smooth radial-wipe transition between them
 - **Zero configuration** — discovers services automatically; no manifest or config file to maintain
 
 ## Requirements
@@ -59,7 +60,7 @@ Open `http://<your-pi-ip>` in a browser. The first port scan runs automatically 
 
 On startup (and every 24 hours), the scanner:
 
-1. Checks every port from 2000–9900 in steps of 100 for an open TCP connection
+1. Checks every port from 2000–9900 in steps of 100, plus a curated list of common self-hosted service ports (3001, 8080, 8443, 8888, 9090), for an open TCP connection
 2. Makes an HTTP request to each open port and reads the page `<title>`
 3. Takes a headless Chromium screenshot of the homepage and caches it
 
@@ -73,7 +74,17 @@ Services that have been offline for longer than `EXPIRE_DAYS` are removed automa
 
 ### Thumbnails
 
-Screenshots are taken with Playwright (headless Chromium) and stored as PNG blobs in SQLite. They are refreshed once per day. If a service has an `og:image` meta tag, that image is used instead of a screenshot.
+Screenshots are taken with Playwright (headless Chromium) and stored as PNG blobs in SQLite. They are refreshed once per day. If a service has a localhost-hosted `og:image` meta tag, that image is used instead of a screenshot.
+
+### Status favicon
+
+The browser tab icon is a canvas-drawn colour bulb that updates in real time:
+
+- 🟢 **Green** — all services online, CPU normal
+- 🟡 **Amber** — one or more services offline, or CPU above 80 %
+- 🔴 **Red** — all services offline, or CPU above 90 %
+
+The page title also updates to show the offline count when things go wrong (e.g., `Beacon — 2 offline`). An Apple touch icon (180×180) is generated alongside the standard favicon for home-screen shortcuts on iOS/macOS.
 
 ## Configuration
 
