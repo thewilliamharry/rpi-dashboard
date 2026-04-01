@@ -1,0 +1,12 @@
+# Internal build artefacts
+CLAUDE_CODE_PROMPT_FINAL.md
+mockup-v4.html
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Claude
+.claude/

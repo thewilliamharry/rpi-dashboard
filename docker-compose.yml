@@ -1,0 +1,12 @@
+services:
+  dashboard:
+    build: ./dashboard
+    container_name: pi-dashboard
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - dashboard-data:/data
+    environment:
+      - EXPIRE_DAYS=7
+volumes:
+  dashboard-data:
