@@ -165,6 +165,18 @@
 
 <script>
 const APP_NAME = 'Beacon';
+let _titleHost = '';
+
+function capFirst(text) {
+  const v = (text || '').trim();
+  if (!v) return '';
+  return v[0].toUpperCase() + v.slice(1);
+}
+
+function pageTitleBase() {
+  const host = capFirst(_titleHost);
+  return host ? `${host} ${APP_NAME}` : APP_NAME;
+}
 
 // ── Favicon status bulb ────────────────────────────────────────────────────────
 
@@ -230,7 +242,8 @@ function drawFavicon() {
 
   // Update page title — surface offline count when things go wrong
   const offline = (_fvTotal !== null && _fvOnline !== null) ? _fvTotal - _fvOnline : 0;
-  document.title = offline > 0 ? `${APP_NAME} — ${offline} offline` : APP_NAME;
+  const baseTitle = pageTitleBase();
+  document.title = offline > 0 ? `${baseTitle} — ${offline} offline` : baseTitle;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -377,9 +390,10 @@ let _lastStatsTs = null;
 function updateStats(d) {
   _lastStatsTs = Math.floor(Date.now() / 1000);
   _fvCpu = d.cpu;
+  const hostname = (d.hostname || 'pi').trim();
+  _titleHost = hostname;
+  document.getElementById('tb-host').textContent = hostname;
   drawFavicon();
-
-  document.getElementById('tb-host').textContent = d.hostname || 'pi';
 
   document.getElementById('cpu-arc').setAttribute('stroke-dashoffset', arcOffset(d.cpu).toFixed(1));
   document.getElementById('cpu-pct').textContent = Math.round(d.cpu);

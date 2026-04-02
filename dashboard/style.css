@@ -486,3 +486,77 @@ html:not(.light) .svc-card.offline { filter: saturate(0.2); }
   color: var(--muted); font-size: 10px; letter-spacing: 0.1em;
 }
 html.light .svc-empty { font-family: 'Outfit', sans-serif; font-weight: 300; letter-spacing: 0; font-size: 11px; }
+
+/* ═══════════════════════════════════════════════════════
+   MOBILE
+═══════════════════════════════════════════════════════ */
+@media (max-width: 720px) {
+  .topbar {
+    padding: 0 12px;
+  }
+  html:not(.light) .topbar::after {
+    left: 12px;
+    right: 12px;
+  }
+
+  .tb-left { gap: 10px; min-width: 0; }
+  .tb-right { gap: 8px; flex-shrink: 0; }
+  .tb-host { font-size: 15px; letter-spacing: 0.12em; }
+  .tb-meta { font-size: 9px; }
+  .scan-status { white-space: nowrap; }
+  .btn-scan { padding: 4px 8px; }
+
+  .page {
+    padding: 20px 10px 48px;
+    gap: 32px;
+  }
+  html.light .page { gap: 40px; }
+
+  .metrics-row { grid-template-columns: 1fr; }
+  .metric-panel {
+    padding: 14px 12px;
+    gap: 0 12px;
+  }
+  .metric-name { font-size: 10px; letter-spacing: 0.16em; }
+  .metric-sub { font-size: 9px; }
+  .sparkline { height: 34px; }
+  .temp-row { padding: 8px 12px; }
+
+  html.light .metrics-row {
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+  }
+  html.light .metric-panel {
+    padding: 14px 12px;
+    grid-template-columns: 84px 1fr;
+    justify-items: stretch;
+    text-align: left;
+    background: var(--bg2);
+    gap: 0 12px;
+  }
+  html.light .metric-panel + .metric-panel {
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+  html.light .arc-wrap {
+    width: 84px;
+    height: 84px;
+    margin-bottom: 0;
+  }
+  html.light .arc-pct {
+    font-size: 24px;
+    font-weight: 300;
+  }
+  html.light .metric-right {
+    align-items: flex-start;
+    gap: 4px;
+  }
+  html.light .metric-name {
+    font-size: 10px;
+    letter-spacing: 0.16em;
+  }
+  html.light .metric-sub {
+    font-size: 10px;
+  }
+}
