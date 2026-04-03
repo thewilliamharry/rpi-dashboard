@@ -456,6 +456,7 @@ html.light .svc-uptime-pct { display: none; }
 
 /* Uptime strip — 168 thin segments, 7-day view */
 .uptime-strip { display: flex; gap: 0.5px; height: 16px; }
+.uptime-strip[data-density="low"] { gap: 1px; }
 html.light .uptime-strip { gap: 1px; height: 4px; border-radius: 2px; overflow: hidden; }
 .us { flex: 1; border-radius: 0; }
 html.light .us { border-radius: 2px; }
@@ -492,11 +493,11 @@ html.light .svc-empty { font-family: 'Outfit', sans-serif; font-weight: 300; let
 ═══════════════════════════════════════════════════════ */
 @media (max-width: 720px) {
   .topbar {
-    padding: 0 12px;
+    padding: 0 20px;
   }
   html:not(.light) .topbar::after {
-    left: 12px;
-    right: 12px;
+    left: 20px;
+    right: 20px;
   }
 
   .tb-left { gap: 10px; min-width: 0; }
@@ -507,10 +508,15 @@ html.light .svc-empty { font-family: 'Outfit', sans-serif; font-weight: 300; let
   .btn-scan { padding: 4px 8px; }
 
   .page {
-    padding: 20px 10px 48px;
+    padding: 20px 20px 48px;
     gap: 32px;
   }
   html.light .page { gap: 40px; }
+
+  .hud-c.tl { left: 20px; top: 54px; }
+  .hud-c.tr { right: 20px; top: 54px; }
+  .hud-c.bl { left: 20px; bottom: 20px; }
+  .hud-c.br { right: 20px; bottom: 20px; }
 
   .metrics-row { grid-template-columns: 1fr; }
   .metric-panel {

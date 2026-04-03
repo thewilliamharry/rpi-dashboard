@@ -287,10 +287,18 @@ function buildSparkPath(rows, key) {
   return { line, fill };
 }
 
+function getUptimeBucketConfig(dpr = window.devicePixelRatio || 1) {
+  // Keep fine-grained 1h buckets on high-density screens.
+  // Use 2h buckets on low-density displays to prevent segment pile-up.
+  if (dpr >= 1.5) return { buckets: 168, bucketSeconds: 3600, density: 'high' };
+  return { buckets: 84, bucketSeconds: 7200, density: 'low' };
+}
+
 function buildUptimeStrip(checks) {
+  const cfg = getUptimeBucketConfig();
   const now = Math.floor(Date.now() / 1000);
-  const BUCKETS  = 168;   // 7 days × 24 hours
-  const BUCKET_S = 3600;  // 1 hour per bucket
+  const BUCKETS  = cfg.buckets;
+  const BUCKET_S = cfg.bucketSeconds;
 
   const buckets = Array(BUCKETS).fill('unknown');
   for (const c of checks) {
@@ -309,6 +317,7 @@ function buildUptimeStrip(checks) {
 
   const strip = document.createElement('div');
   strip.className = 'uptime-strip';
+  strip.dataset.density = cfg.density;
   buckets.forEach(state => {
     const seg = document.createElement('div');
     seg.className = 'us ' + state;
