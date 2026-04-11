@@ -6,8 +6,6 @@
   <title>Beacon</title>
   <link rel="icon" id="favicon" type="image/png" sizes="32x32">
   <link rel="apple-touch-icon" id="apple-favicon" sizes="180x180">
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&family=Outfit:wght@200;300;400;500&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="/style.css"/>
 </head>
 <body>
@@ -19,7 +17,6 @@
 <div class="hud-c bl"></div>
 <div class="hud-c br"></div>
 
-<!-- Topbar -->
 <div class="topbar">
   <div class="tb-left">
     <span class="tb-host" id="tb-host">loading...</span>
@@ -39,8 +36,6 @@
 </div>
 
 <div class="page">
-
-  <!-- System -->
   <div>
     <div class="sh">
       <span class="sh-label">System</span>
@@ -49,8 +44,6 @@
     </div>
 
     <div class="metrics-row">
-
-      <!-- CPU -->
       <div class="metric-panel cpu">
         <div class="arc-wrap">
           <svg viewBox="0 0 84 84">
@@ -80,7 +73,6 @@
         </div>
       </div>
 
-      <!-- RAM -->
       <div class="metric-panel ram">
         <div class="arc-wrap">
           <svg viewBox="0 0 84 84">
@@ -110,7 +102,6 @@
         </div>
       </div>
 
-      <!-- Disk -->
       <div class="metric-panel disk">
         <div class="arc-wrap">
           <svg viewBox="0 0 84 84">
@@ -139,7 +130,6 @@
           </div>
         </div>
       </div>
-
     </div>
 
     <div class="temp-row">
@@ -149,7 +139,6 @@
     </div>
   </div>
 
-  <!-- Services -->
   <div>
     <div class="sh">
       <span class="sh-label">Services</span>
@@ -161,11 +150,29 @@
     </div>
   </div>
 
+  <div>
+    <div class="sh">
+      <span class="sh-label">Events</span>
+      <div class="sh-line"></div>
+      <span class="sh-r" id="events-label">—</span>
+    </div>
+    <div class="events-panel" id="events-panel">
+      <div class="evt-empty">no recent incidents</div>
+    </div>
+  </div>
 </div>
 
 <script>
 const APP_NAME = 'Beacon';
+const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated']);
 let _titleHost = '';
+let _fvCpu = 0;
+let _fvOnline = null;
+let _fvTotal = null;
+let _lastStatsTs = null;
+let _scanAuthRequired = true;
+let _scanToken = localStorage.getItem('scan_token') || '';
+let _servicesByPort = new Map();
 
 function capFirst(text) {
   const v = (text || '').trim();
@@ -178,39 +185,53 @@ function pageTitleBase() {
   return host ? `${host} ${APP_NAME}` : APP_NAME;
 }
 
-// ── Favicon status bulb ────────────────────────────────────────────────────────
+function fmtAgo(ts) {
+  const d = Math.floor(Date.now() / 1000) - ts;
+  if (d < 5) return 'just now';
+  if (d < 60) return d + 's ago';
+  if (d < 3600) return Math.floor(d / 60) + 'm ago';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+  return Math.floor(d / 86400) + 'd ago';
+}
 
-// State updated independently by stats and services polls
-let _fvCpu    = 0;
-let _fvOnline = null;   // null until first services response
-let _fvTotal  = null;
+function fmtBytes(b) {
+  if (b >= 1e12) return (b / 1e12).toFixed(1) + ' TB';
+  if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
+  return Math.round(b / 1e6) + ' MB';
+}
+
+function fmtLatency(ms) {
+  if (ms === null || ms === undefined) return 'n/a';
+  return Math.round(ms) + ' ms';
+}
+
+function arcOffset(pct) {
+  return 53 + 160.6 * (1 - pct / 100);
+}
 
 function _makeBulbCanvas(size, color, solidBg) {
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
-  const ctx    = canvas.getContext('2d');
-  const cx     = size / 2, cy = size / 2;
-  const bulbR  = size * 0.34;
+  const ctx = canvas.getContext('2d');
+  const cx = size / 2;
+  const cy = size / 2;
+  const bulbR = size * 0.34;
 
-  // Solid white background for Apple touch icon; transparent for browser tab
   if (solidBg) {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, size, size);
   }
 
-  // Soft outer glow
   ctx.beginPath();
   ctx.arc(cx, cy, bulbR + size * 0.09, 0, Math.PI * 2);
-  ctx.fillStyle = color + '33';   // 20 % opacity halo
+  ctx.fillStyle = color + '33';
   ctx.fill();
 
-  // Main bulb
   ctx.beginPath();
   ctx.arc(cx, cy, bulbR, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
 
-  // Glass catch-light — top-left highlight
   ctx.beginPath();
   ctx.arc(cx - bulbR * 0.28, cy - bulbR * 0.30, bulbR * 0.30, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(255,255,255,0.40)';
@@ -220,50 +241,24 @@ function _makeBulbCanvas(size, color, solidBg) {
 }
 
 function drawFavicon() {
-  // Status colours — match the dashboard's light-mode palette
   const someDown = _fvTotal !== null && _fvOnline !== null && _fvOnline < _fvTotal;
-  const allDown  = _fvTotal  >  0    && _fvOnline === 0;
+  const allDown = _fvTotal > 0 && _fvOnline === 0;
   let color;
+
   if (_fvCpu > 90 || allDown) {
-    color = '#dc2626';   // red — critical (darker, less neon)
+    color = '#dc2626';
   } else if (someDown || _fvCpu > 80) {
-    color = '#f59e0b';   // amber — warning
+    color = '#f59e0b';
   } else {
-    color = '#22c55e';   // green — all good (rich, natural green)
+    color = '#22c55e';
   }
 
-  // 32×32 for browser tab — transparent background so it floats cleanly
-  document.getElementById('favicon').href =
-    _makeBulbCanvas(32, color, false).toDataURL('image/png');
+  document.getElementById('favicon').href = _makeBulbCanvas(32, color, false).toDataURL('image/png');
+  document.getElementById('apple-favicon').href = _makeBulbCanvas(180, color, true).toDataURL('image/png');
 
-  // 180×180 for Apple touch icon — white background required by iOS
-  document.getElementById('apple-favicon').href =
-    _makeBulbCanvas(180, color, true).toDataURL('image/png');
-
-  // Update page title — surface offline count when things go wrong
-  const offline = (_fvTotal !== null && _fvOnline !== null) ? _fvTotal - _fvOnline : 0;
+  const offline = (_fvTotal !== null && _fvOnline !== null) ? (_fvTotal - _fvOnline) : 0;
   const baseTitle = pageTitleBase();
-  document.title = offline > 0 ? `${baseTitle} — ${offline} offline` : baseTitle;
-}
-
-// ── Utilities ──────────────────────────────────────────────────────────────────
-
-function fmtAgo(ts) {
-  const d = Math.floor(Date.now() / 1000) - ts;
-  if (d < 5)     return 'just now';
-  if (d < 60)    return d + 's ago';
-  if (d < 3600)  return Math.floor(d / 60) + 'm ago';
-  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
-  return Math.floor(d / 86400) + 'd ago';
-}
-
-function fmtBytes(b) {
-  if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
-  return Math.round(b / 1e6) + ' MB';
-}
-
-function arcOffset(pct) {
-  return 53 + 160.6 * (1 - pct / 100);
+  document.title = offline > 0 ? `${baseTitle} - ${offline} offline` : baseTitle;
 }
 
 function buildSparkPath(rows, key) {
@@ -275,52 +270,45 @@ function buildSparkPath(rows, key) {
   }
   const vals = data.map(r => r[key]);
   const W = 200, H = 40, pad = 2;
-  // Absolute 0–100 scale so value position reflects actual level
   const pts = vals.map((v, i) => [
     (i / Math.max(vals.length - 1, 1)) * W,
     pad + (1 - Math.min(Math.max(v, 0), 100) / 100) * (H - 2 * pad)
   ]);
-  const line = pts.map((p, i) =>
-    (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)
-  ).join(' ');
+  const line = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
   const fill = line + ' L' + W + ',' + H + ' L0,' + H + 'Z';
   return { line, fill };
 }
 
-function getUptimeBucketConfig(dpr = window.devicePixelRatio || 1) {
-  // Keep fine-grained 1h buckets on high-density screens.
-  // Use 2h buckets on low-density displays to prevent segment pile-up.
-  if (dpr >= 1.5) return { buckets: 168, bucketSeconds: 3600, density: 'high' };
-  return { buckets: 84, bucketSeconds: 7200, density: 'low' };
-}
-
-function buildUptimeStrip(checks) {
-  const cfg = getUptimeBucketConfig();
-  const now = Math.floor(Date.now() / 1000);
-  const BUCKETS  = cfg.buckets;
-  const BUCKET_S = cfg.bucketSeconds;
-
-  const buckets = Array(BUCKETS).fill('unknown');
-  for (const c of checks) {
-    const age = now - c.ts;
-    if (age < 0 || age > BUCKETS * BUCKET_S) continue;
-    const idx = BUCKETS - 1 - Math.floor(age / BUCKET_S);
-    if (idx >= 0 && idx < BUCKETS) {
-      // Pessimistic: one 'down' in a bucket marks the whole bucket red
-      if (!c.online) {
-        buckets[idx] = 'down';
-      } else if (buckets[idx] === 'unknown') {
-        buckets[idx] = 'up';
-      }
+function downsampleBuckets(buckets) {
+  if (!Array.isArray(buckets)) return [];
+  const dpr = window.devicePixelRatio || 1;
+  if (dpr >= 1.5) return buckets;
+  const reduced = [];
+  for (let i = 0; i < buckets.length; i += 2) {
+    const a = buckets[i];
+    const b = buckets[i + 1];
+    if (a === 0 || b === 0) {
+      reduced.push(0);
+    } else if (a === 1 || b === 1) {
+      reduced.push(1);
+    } else {
+      reduced.push(-1);
     }
   }
+  return reduced;
+}
+
+function buildUptimeStrip(buckets) {
+  const src = downsampleBuckets(Array.isArray(buckets) ? buckets : []);
+  const states = src.length > 0 ? src : Array(168).fill(-1);
 
   const strip = document.createElement('div');
   strip.className = 'uptime-strip';
-  strip.dataset.density = cfg.density;
-  buckets.forEach(state => {
+  strip.dataset.density = states.length < 120 ? 'low' : 'high';
+
+  states.forEach(v => {
     const seg = document.createElement('div');
-    seg.className = 'us ' + state;
+    seg.className = 'us ' + (v === 0 ? 'down' : (v === 1 ? 'up' : 'unknown'));
     strip.appendChild(seg);
   });
 
@@ -334,30 +322,19 @@ function buildUptimeStrip(checks) {
   return wrapper;
 }
 
-function calcUptimePct(checks) {
-  if (!checks || checks.length === 0) return null;
-  const known = checks.filter(c => c.online !== undefined && c.online !== null);
-  if (known.length === 0) return null;
-  return Math.round(known.filter(c => c.online).length / known.length * 100);
-}
-
-// ── Gauge weight (JS sets attribute, CSS var is the primary driver) ───────────
-
 function setGaugeWeight(isLight) {
   document.querySelectorAll('.arc-track, .arc-fill').forEach(el =>
     el.setAttribute('stroke-width', isLight ? '1.5' : '5')
   );
 }
 
-// ── Theme ──────────────────────────────────────────────────────────────────────
-
 function doTransition(toLight) {
   const toggle = document.getElementById('toggle');
-  const rect   = toggle.getBoundingClientRect();
-  const cx     = rect.left + rect.width  / 2;
-  const cy     = rect.top  + rect.height / 2;
-  const maxR   = Math.hypot(
-    Math.max(cx, window.innerWidth  - cx),
+  const rect = toggle.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const maxR = Math.hypot(
+    Math.max(cx, window.innerWidth - cx),
     Math.max(cy, window.innerHeight - cy)
   );
 
@@ -387,14 +364,13 @@ function doTransition(toLight) {
 }
 
 function applyTheme(isLight, animate) {
-  if (animate) { doTransition(isLight); return; }
+  if (animate) {
+    doTransition(isLight);
+    return;
+  }
   document.documentElement.classList.toggle('light', isLight);
   setGaugeWeight(isLight);
 }
-
-// ── Stats update ───────────────────────────────────────────────────────────────
-
-let _lastStatsTs = null;
 
 function updateStats(d) {
   _lastStatsTs = Math.floor(Date.now() / 1000);
@@ -417,10 +393,11 @@ function updateStats(d) {
   document.getElementById('disk-sub').textContent = fmtBytes(d.disk_used) + ' / ' + fmtBytes(d.disk_total);
 
   if (d.temp !== null && d.temp !== undefined) {
-    document.getElementById('temp-val').textContent = d.temp.toFixed(1) + ' °C';
+    document.getElementById('temp-val').textContent = d.temp.toFixed(1) + ' C';
   } else {
     document.getElementById('temp-val').textContent = 'n/a';
   }
+
   document.getElementById('temp-ts').textContent = 'just now';
   document.getElementById('stats-ts').textContent = 'updated just now';
 }
@@ -428,15 +405,13 @@ function updateStats(d) {
 function tickStatsLabel() {
   if (_lastStatsTs) {
     document.getElementById('stats-ts').textContent = 'updated ' + fmtAgo(_lastStatsTs);
-    document.getElementById('temp-ts').textContent  = fmtAgo(_lastStatsTs);
+    document.getElementById('temp-ts').textContent = fmtAgo(_lastStatsTs);
   }
 }
 
-// ── History / sparklines ───────────────────────────────────────────────────────
-
 function updateHistory(rows) {
-  const cpu  = buildSparkPath(rows, 'cpu');
-  const ram  = buildSparkPath(rows, 'ram');
+  const cpu = buildSparkPath(rows, 'cpu');
+  const ram = buildSparkPath(rows, 'ram');
   const disk = buildSparkPath(rows, 'disk');
 
   document.getElementById('cpu-sparkfill').setAttribute('d', cpu.fill);
@@ -447,12 +422,9 @@ function updateHistory(rows) {
   document.getElementById('disk-sparkline').setAttribute('d', disk.line);
 }
 
-// ── Scan status ────────────────────────────────────────────────────────────────
-
 function updateScanStatus(d) {
-  const pip   = document.getElementById('scan-pip');
+  const pip = document.getElementById('scan-pip');
   const label = document.getElementById('scan-label');
-
   pip.className = 'scan-pip';
 
   if (d.scanning) {
@@ -466,51 +438,95 @@ function updateScanStatus(d) {
   }
 }
 
-// ── Services ───────────────────────────────────────────────────────────────────
-
-const renderedPorts = new Set();
-
 function loadThumbnail(port, imgEl, fallbackDiv) {
-  imgEl.dataset.thumbTried = '1';   // prevent repeated retries on every poll
-  imgEl.onload  = () => { imgEl.style.display = ''; fallbackDiv.style.display = 'none'; };
-  imgEl.onerror = () => { imgEl.style.display = 'none'; fallbackDiv.style.display = 'flex'; };
+  imgEl.onload = () => {
+    imgEl.style.display = '';
+    fallbackDiv.style.display = 'none';
+  };
+  imgEl.onerror = () => {
+    imgEl.style.display = 'none';
+    fallbackDiv.style.display = 'flex';
+  };
   imgEl.src = '/api/thumbnail/' + port;
 }
 
+async function openMetaEditor(svc, evt) {
+  evt.preventDefault();
+  evt.stopPropagation();
+
+  const displayName = prompt('Display name', svc.display_name || '');
+  if (displayName === null) return;
+
+  const url = prompt('URL override (blank uses default local URL)', svc.url || '');
+  if (url === null) return;
+
+  const criticalRaw = prompt('Critical service? (yes/no)', svc.critical ? 'yes' : 'no');
+  if (criticalRaw === null) return;
+  const critical = /^(1|y|yes|true)$/i.test(criticalRaw.trim());
+
+  const tagsRaw = prompt('Tags (comma separated)', Array.isArray(svc.tags) ? svc.tags.join(', ') : '');
+  if (tagsRaw === null) return;
+
+  try {
+    const r = await fetch('/api/service-meta/' + svc.port, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        display_name: displayName.trim(),
+        url: url.trim(),
+        critical,
+        tags: tagsRaw
+      })
+    });
+
+    if (!r.ok) {
+      let msg = 'Failed to save metadata';
+      try {
+        const data = await r.json();
+        if (data && data.error) msg = data.error;
+      } catch (e) {}
+      alert(msg);
+      return;
+    }
+
+    await fetchServices();
+    await fetchEvents();
+  } catch (e) {
+    alert('Metadata update failed');
+  }
+}
+
 function buildCard(svc) {
-  const port    = svc.port;
-  const online  = !!svc.is_online;
-  const href    = 'http://' + window.location.hostname + ':' + port;
+  const port = svc.port;
+  const online = !!svc.is_online;
+  const href = svc.url || ('http://' + window.location.hostname + ':' + port);
 
   const card = document.createElement('a');
-  card.className    = 'svc-card' + (online ? '' : ' offline');
-  card.href         = href;
-  card.target       = '_blank';
-  card.rel          = 'noopener noreferrer';
+  card.className = 'svc-card' + (online ? '' : ' offline');
+  card.href = href;
+  card.target = '_blank';
+  card.rel = 'noopener noreferrer';
   card.dataset.port = port;
 
-  // HUD corners
-  ['tl','tr','bl','br'].forEach(c => {
+  ['tl', 'tr', 'bl', 'br'].forEach(c => {
     const d = document.createElement('div');
     d.className = 'corner corner-' + c;
     card.appendChild(d);
   });
 
-  // Offline badge
   const badge = document.createElement('div');
-  badge.className   = 'offline-badge';
+  badge.className = 'offline-badge';
   badge.textContent = 'OFFLINE';
   if (online) badge.style.display = 'none';
   card.appendChild(badge);
 
-  // Preview — thumbnail image with text fallback
-  const preview  = document.createElement('div');
+  const preview = document.createElement('div');
   preview.className = 'svc-preview';
 
   const thumb = document.createElement('img');
-  thumb.className    = 'svc-thumb';
+  thumb.className = 'svc-thumb';
   thumb.style.display = 'none';
-  thumb.alt          = '';
+  thumb.alt = '';
 
   const fallback = document.createElement('div');
   fallback.className = 'svc-preview-fallback';
@@ -524,23 +540,41 @@ function buildCard(svc) {
   preview.appendChild(fade);
   card.appendChild(preview);
 
-  // Only fetch if the server already has a screenshot stored
   if (svc.has_thumb) loadThumbnail(port, thumb, fallback);
 
-  // Meta
   const meta = document.createElement('div');
   meta.className = 'svc-meta';
 
   const titleRow = document.createElement('div');
   titleRow.className = 'svc-title-row';
+
   const titleEl = document.createElement('span');
-  titleEl.className   = 'svc-title';
-  titleEl.textContent = svc.title || (':' + port);
+  titleEl.className = 'svc-title';
+  titleEl.textContent = svc.display_name || svc.title || (':' + port);
+
+  const right = document.createElement('div');
+  right.className = 'svc-title-right';
+
+  if (svc.critical) {
+    const critical = document.createElement('span');
+    critical.className = 'svc-critical';
+    critical.textContent = 'critical';
+    right.appendChild(critical);
+  }
+
   const badgeEl = document.createElement('span');
-  badgeEl.className   = 'svc-port-badge';
+  badgeEl.className = 'svc-port-badge';
   badgeEl.textContent = ':' + port;
+  right.appendChild(badgeEl);
+
+  const edit = document.createElement('button');
+  edit.className = 'svc-edit';
+  edit.textContent = 'edit';
+  edit.addEventListener('click', (evt) => openMetaEditor(svc, evt));
+  right.appendChild(edit);
+
   titleRow.appendChild(titleEl);
-  titleRow.appendChild(badgeEl);
+  titleRow.appendChild(right);
 
   const statusRow = document.createElement('div');
   statusRow.className = 'svc-status-row';
@@ -560,132 +594,205 @@ function buildCard(svc) {
   const statusRight = document.createElement('div');
   statusRight.style.cssText = 'display:flex;align-items:center;gap:4px;';
   const sinceEl = document.createElement('span');
-  sinceEl.className   = 'svc-since';
-  sinceEl.textContent = online
-    ? 'since ' + fmtAgo(svc.first_seen)
-    : 'last seen ' + fmtAgo(svc.last_seen);
+  sinceEl.className = 'svc-since';
+  sinceEl.textContent = online ? ('since ' + fmtAgo(svc.first_seen)) : ('last seen ' + fmtAgo(svc.last_seen));
+
   const pctEl = document.createElement('span');
   pctEl.className = 'svc-uptime-pct';
-  const pct = calcUptimePct(svc.checks);
-  pctEl.textContent = pct !== null ? '· ' + pct + '%' : '';
+  pctEl.textContent = svc.uptime_pct !== null && svc.uptime_pct !== undefined ? ('- ' + svc.uptime_pct + '%') : '';
+
   statusRight.appendChild(sinceEl);
   statusRight.appendChild(pctEl);
-
   statusRow.appendChild(statusLeft);
   statusRow.appendChild(statusRight);
 
-  const uptimeWrapper = buildUptimeStrip(svc.checks || []);
+  const detailRow = document.createElement('div');
+  detailRow.className = 'svc-detail-row';
+
+  const latencyEl = document.createElement('span');
+  latencyEl.className = 'svc-latency';
+  latencyEl.textContent = 'latency ' + fmtLatency(svc.latency_ms);
+
+  const errorEl = document.createElement('span');
+  errorEl.className = 'svc-error';
+  errorEl.textContent = svc.last_error ? ('error ' + svc.last_error) : '';
+
+  detailRow.appendChild(latencyEl);
+  detailRow.appendChild(errorEl);
+
+  const tagRow = document.createElement('div');
+  tagRow.className = 'svc-tags';
+  const tags = Array.isArray(svc.tags) ? svc.tags : [];
+  if (tags.length > 0) {
+    tagRow.textContent = tags.map(t => '#' + t).join(' ');
+  }
 
   meta.appendChild(titleRow);
   meta.appendChild(statusRow);
-  meta.appendChild(uptimeWrapper);
+  meta.appendChild(detailRow);
+  if (tags.length > 0) meta.appendChild(tagRow);
+  meta.appendChild(buildUptimeStrip(svc.uptime_buckets || []));
   card.appendChild(meta);
 
   return card;
 }
 
-function updateCard(card, svc) {
-  const online = !!svc.is_online;
-
-  card.classList.toggle('offline', !online);
-
-  // Thumbnail: driven entirely by svc.has_thumb from the server.
-  // - If has_thumb just became true (screenshot finished in background), load it.
-  // - If has_thumb is false, clear thumbTried so we pick it up next poll.
-  const thumb = card.querySelector('.svc-thumb');
-  const fallback = card.querySelector('.svc-preview-fallback');
-  if (thumb && fallback) {
-    if (svc.has_thumb && !thumb.dataset.thumbTried) {
-      loadThumbnail(svc.port, thumb, fallback);
-    } else if (!svc.has_thumb) {
-      delete thumb.dataset.thumbTried;
-    }
-  }
-
-  // Offline badge
-  const badge = card.querySelector('.offline-badge');
-  if (badge) badge.style.display = online ? 'none' : '';
-
-  // Status indicator
-  const statusEl   = card.querySelector('.svc-online, .svc-offline');
-  const statusLabel = statusEl ? statusEl.querySelector('span:last-child') : null;
-  if (statusEl) {
-    statusEl.className = online ? 'svc-online' : 'svc-offline';
-    if (statusLabel) statusLabel.textContent = online ? 'online' : 'offline';
-  }
-
-  // Since + uptime %
-  const sinceEl = card.querySelector('.svc-since');
-  if (sinceEl) {
-    sinceEl.textContent = online
-      ? 'since ' + fmtAgo(svc.first_seen)
-      : 'last seen ' + fmtAgo(svc.last_seen);
-  }
-  const pctEl = card.querySelector('.svc-uptime-pct');
-  if (pctEl) {
-    const pct = calcUptimePct(svc.checks);
-    pctEl.textContent = pct !== null ? '· ' + pct + '%' : '';
-  }
-
-  // Rebuild uptime strip
-  const meta = card.querySelector('.svc-meta');
-  const oldUptime = meta && meta.lastElementChild;
-  if (oldUptime && oldUptime.querySelector('.uptime-strip')) {
-    oldUptime.replaceWith(buildUptimeStrip(svc.checks || []));
-  }
-}
-
 function updateServices(services) {
   if (!Array.isArray(services)) return;
-  const grid       = document.getElementById('services-grid');
-  const currentPorts = new Set(services.map(s => s.port));
 
-  // Remove empty state
-  const empty = grid.querySelector('.svc-empty');
-  if (empty && services.length > 0) empty.remove();
+  _servicesByPort = new Map(services.map(s => [s.port, s]));
 
-  // Remove gone ports
-  for (const port of renderedPorts) {
-    if (!currentPorts.has(port)) {
-      const card = grid.querySelector('[data-port="' + port + '"]');
-      if (card) card.remove();
-      renderedPorts.delete(port);
-    }
-  }
+  const grid = document.getElementById('services-grid');
+  grid.innerHTML = '';
 
-  // Insert or update
-  for (const svc of services) {
-    const port = svc.port;
-    if (renderedPorts.has(port)) {
-      const card = grid.querySelector('[data-port="' + port + '"]');
-      if (card) updateCard(card, svc);
-    } else {
-      const card = buildCard(svc);
-      renderedPorts.add(port);
+  if (services.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'svc-empty';
+    empty.textContent = 'no services found yet';
+    grid.appendChild(empty);
+  } else {
+    const ordered = [...services].sort((a, b) => {
+      const ao = (a.pinned_order === null || a.pinned_order === undefined) ? a.port : a.pinned_order;
+      const bo = (b.pinned_order === null || b.pinned_order === undefined) ? b.port : b.pinned_order;
+      if (ao !== bo) return ao - bo;
+      return a.port - b.port;
+    });
 
-      // Insert in ascending port order
-      const cards = Array.from(grid.querySelectorAll('.svc-card'));
-      let inserted = false;
-      for (const c of cards) {
-        if (parseInt(c.dataset.port) > port) {
-          grid.insertBefore(card, c);
-          inserted = true;
-          break;
-        }
-      }
-      if (!inserted) grid.appendChild(card);
-    }
+    ordered.forEach(svc => {
+      grid.appendChild(buildCard(svc));
+    });
   }
 
   const online = services.filter(s => s.is_online).length;
+  const criticalDown = services.filter(s => s.critical && !s.is_online).length;
   _fvOnline = online;
-  _fvTotal  = services.length;
+  _fvTotal = services.length;
   drawFavicon();
-  document.getElementById('svc-count-label').textContent =
-    online + ' online · ' + services.length + ' discovered';
+
+  let label = online + ' online - ' + services.length + ' discovered';
+  if (criticalDown > 0) {
+    label += ' - ' + criticalDown + ' critical down';
+  }
+  document.getElementById('svc-count-label').textContent = label;
 }
 
-// ── Fetch helpers ──────────────────────────────────────────────────────────────
+function eventText(evt) {
+  if (evt.event_type === 'state_change') {
+    return evt.online ? 'Recovered' : 'Down';
+  }
+  if (evt.event_type === 'alert_failed') return 'Alert failed';
+  if (evt.event_type === 'meta_updated') return 'Service updated';
+  return 'Event';
+}
+
+function showEvent(evt) {
+  return !!evt && EVENT_TYPES_VISIBLE.has(evt.event_type);
+}
+
+function humanizeErrorClass(value) {
+  if (!value) return '';
+  const known = {
+    timeout: 'timeout',
+    connection_error: 'connection failed',
+    request_error: 'request failed',
+    probe_error: 'probe error',
+    invalid_url: 'invalid URL',
+    invalid_host: 'invalid host',
+    invalid_scheme: 'invalid URL scheme',
+    redirect_offhost: 'redirect blocked',
+    not_responding: 'not responding',
+  };
+  return known[value] || value.replaceAll('_', ' ');
+}
+
+function humanizeAlertStatus(value) {
+  if (!value) return '';
+  if (value.startsWith('http_')) return 'HTTP ' + value.slice(5);
+  return value.replaceAll('_', ' ');
+}
+
+function eventSubtext(evt) {
+  const parts = [];
+  if (evt.service_name) {
+    parts.push(evt.service_name);
+  } else if (evt.port !== null && evt.port !== undefined) {
+    parts.push(':' + evt.port);
+  }
+
+  if (evt.event_type === 'state_change') {
+    if (evt.online && evt.latency_ms !== null && evt.latency_ms !== undefined) {
+      parts.push(Math.round(evt.latency_ms) + ' ms');
+    } else if (!evt.online && evt.error_class) {
+      parts.push(humanizeErrorClass(evt.error_class));
+    }
+  } else if (evt.event_type === 'alert_failed') {
+    if (evt.alert_status) parts.push(humanizeAlertStatus(evt.alert_status));
+    if (evt.error_class) parts.push(humanizeErrorClass(evt.error_class));
+    if (evt.details && evt.details !== 'webhook delivered') parts.push(evt.details);
+  } else if (evt.event_type === 'meta_updated' && evt.details) {
+    parts.push(evt.details);
+  }
+
+  return parts.join(' - ');
+}
+
+function renderEvents(events) {
+  const panel = document.getElementById('events-panel');
+  panel.innerHTML = '';
+  const visibleEvents = Array.isArray(events) ? events.filter(showEvent) : [];
+
+  if (visibleEvents.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'evt-empty';
+    empty.textContent = 'no recent incidents';
+    panel.appendChild(empty);
+    document.getElementById('events-label').textContent = '0 shown';
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  visibleEvents.forEach(evt => {
+    const row = document.createElement('div');
+    row.className = 'evt-row evt-' + evt.event_type;
+    if (evt.event_type === 'state_change') {
+      row.classList.add(evt.online ? 'evt-up' : 'evt-down');
+    }
+
+    const left = document.createElement('div');
+    left.className = 'evt-left';
+
+    const title = document.createElement('div');
+    title.className = 'evt-title';
+    title.textContent = eventText(evt);
+
+    const sub = document.createElement('div');
+    sub.className = 'evt-sub';
+    sub.textContent = eventSubtext(evt) || 'system event';
+
+    left.appendChild(title);
+    left.appendChild(sub);
+
+    const timeEl = document.createElement('div');
+    timeEl.className = 'evt-time';
+    timeEl.textContent = fmtAgo(evt.ts);
+
+    row.appendChild(left);
+    row.appendChild(timeEl);
+    frag.appendChild(row);
+  });
+
+  panel.appendChild(frag);
+  document.getElementById('events-label').textContent = visibleEvents.length + ' shown';
+}
+
+async function fetchConfig() {
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) return;
+    const d = await r.json();
+    _scanAuthRequired = !!d.scan_auth_required;
+  } catch (e) {}
+}
 
 async function fetchStats() {
   try {
@@ -715,11 +822,53 @@ async function fetchServices() {
   } catch (e) {}
 }
 
-// ── Init ───────────────────────────────────────────────────────────────────────
+async function fetchEvents() {
+  try {
+    const r = await fetch('/api/events?limit=120');
+    if (r.ok) renderEvents(await r.json());
+  } catch (e) {}
+}
 
-(function () {
-  // Theme
-  const mq     = window.matchMedia('(prefers-color-scheme: light)');
+async function triggerScan() {
+  const headers = {};
+
+  if (_scanAuthRequired) {
+    if (!_scanToken) {
+      const entered = prompt('Enter scan token');
+      if (!entered) return;
+      _scanToken = entered.trim();
+      localStorage.setItem('scan_token', _scanToken);
+    }
+    headers['X-Scan-Token'] = _scanToken;
+  }
+
+  try {
+    const r = await fetch('/api/trigger-scan', { method: 'POST', headers });
+    if (r.status === 401) {
+      _scanToken = '';
+      localStorage.removeItem('scan_token');
+      alert('Invalid scan token');
+      return;
+    }
+
+    if (r.status === 429) {
+      let msg = 'Scan already running or rate limited';
+      try {
+        const data = await r.json();
+        if (data.reason === 'rate_limited' && data.retry_after) {
+          msg = 'Rate limited. Retry in ' + data.retry_after + 's';
+        }
+      } catch (e) {}
+      alert(msg);
+    }
+
+    await fetchScanStatus();
+    await fetchEvents();
+  } catch (e) {}
+}
+
+(function init() {
+  const mq = window.matchMedia('(prefers-color-scheme: light)');
   const stored = localStorage.getItem('theme');
   const isLight = stored ? stored === 'light' : mq.matches;
   applyTheme(isLight, false);
@@ -734,26 +883,22 @@ async function fetchServices() {
     doTransition(next);
   });
 
-  document.querySelector('.btn-scan').addEventListener('click', () => {
-    fetch('/api/trigger-scan', { method: 'POST' });
-  });
+  document.querySelector('.btn-scan').addEventListener('click', triggerScan);
 
-  // Draw favicon immediately so Apple devices see it before data loads
   drawFavicon();
 
-  // Initial fetches
+  fetchConfig();
   fetchStats();
   fetchHistory();
   fetchScanStatus();
   fetchServices();
+  fetchEvents();
 
-  // Polling
-  setInterval(fetchStats,      5000);
-  setInterval(fetchHistory,   30000);
+  setInterval(fetchStats, 5000);
+  setInterval(fetchHistory, 30000);
   setInterval(fetchScanStatus, 4000);
-  setInterval(fetchServices,  20000);
-
-  // Tick labels every second
+  setInterval(fetchServices, 20000);
+  setInterval(fetchEvents, 15000);
   setInterval(tickStatsLabel, 1000);
 })();
 </script>

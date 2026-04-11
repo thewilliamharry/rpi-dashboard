@@ -7,12 +7,15 @@ A self-hosted monitoring dashboard for Raspberry Pi. Runs as a single Docker con
 ## Features
 
 - **System metrics** — live CPU, RAM, and disk gauges with 24-hour sparkline history and CPU temperature
-- **Service discovery** — automatically finds every HTTP service running on the Pi by scanning ports 2000–9900 (plus common ports like 8080, 8443, 8888, 9090)
-- **Uptime tracking** — 7-day visual uptime history per service, checks every 5 minutes (every 60 seconds for services that are currently down)
-- **Live thumbnails** — headless Chromium screenshots of each service's homepage, refreshed daily; falls back to `og:image` when available
-- **Status favicon** — browser tab icon is a live colour-coded bulb (green / amber / red) reflecting the current state of your services and CPU load
-- **Dark / light theme** — two distinct visual styles with a smooth radial-wipe transition between them
-- **Zero configuration** — discovers services automatically; no manifest or config file to maintain
+- **Service discovery** — automatically finds HTTP services running on the Pi by scanning ports 2000–9900 (plus common ports like 8080, 8443, 8888, 9090)
+- **Uptime tracking** — 7-day bucketed uptime history per service, checks every 5 minutes (plus 60-second checks for currently-down services)
+- **Latency + error telemetry** — stores latest response latency and probe error class per service
+- **Transition events + webhook alerts** — records down/recovery events and can post alert payloads to a webhook with cooldowns
+- **Service metadata** — editable display name, URL override, critical flag, pin order, and tags per service
+- **Secure manual scans** — `/api/trigger-scan` requires a token header and is rate limited
+- **Live thumbnails** — headless Chromium screenshots of each service homepage, refreshed daily; falls back to localhost `og:image` when available
+- **Status favicon** — browser tab icon is a live color-coded bulb (green / amber / red) reflecting service state and CPU load
+- **Dark / light theme** — two distinct visual styles with a smooth radial-wipe transition
 
 ## Requirements
 
@@ -37,11 +40,14 @@ Open `http://<your-pi-ip>` in a browser. The first port scan runs automatically 
 ┌─────────────────────────────────────────────┐
 │               Docker container               │
 │                                              │
-│  Flask (port 80)                             │
+│  Gunicorn + Flask (port 80)                  │
 │    ├── serves index.html + style.css         │
 │    └── REST API  /api/stats                  │
 │                  /api/history                │
 │                  /api/services               │
+│                  /api/events                 │
+│                  /api/config                 │
+│                  /api/service-meta/<port>    │
 │                  /api/thumbnail/<port>       │
 │                  /api/scan-status            │
 │                  /api/trigger-scan           │
@@ -93,6 +99,12 @@ Environment variables can be set in `docker-compose.yml`:
 | Variable | Default | Description |
 |---|---|---|
 | `EXPIRE_DAYS` | `7` | Days before an offline service is removed from the dashboard |
+| `TRIGGER_SCAN_TOKEN` | `change-me` | Required `X-Scan-Token` header value for `POST /api/trigger-scan` |
+| `TRIGGER_SCAN_RATE_LIMIT` | `4` | Max manual scan trigger requests per rate-limit window per client IP |
+| `TRIGGER_SCAN_WINDOW_SECONDS` | `60` | Rate-limit window for manual scan trigger requests |
+| `ALERT_WEBHOOK_URL` | empty | Optional webhook target for up/down transition alerts |
+| `ALERT_COOLDOWN_SECONDS` | `300` | Minimum seconds between repeated alert sends for the same port/state |
+| `ALERT_ONLY_CRITICAL` | `0` | If `1`, only send webhook alerts for services marked `critical` |
 
 ## Project structure
 
