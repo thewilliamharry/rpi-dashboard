@@ -559,6 +559,9 @@ html.light .svc-empty { font-family: var(--font-sans); font-weight: 300; letter-
   background: rgba(1, 10, 20, 0.72);
   backdrop-filter: blur(2px);
 }
+.meta-modal-backdrop[hidden] {
+  display: none !important;
+}
 .meta-modal-window {
   width: min(560px, 100%);
   border: 1px solid var(--border);

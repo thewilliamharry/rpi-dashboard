@@ -16,7 +16,7 @@ class UiContractTests(unittest.TestCase):
 
     def test_styles_include_events_and_service_ops_classes(self):
         css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
-        for token in ['.events-panel', '.evt-row', '.svc-critical', '.svc-edit', '.svc-detail-row', '.meta-modal-window', '.meta-btn-primary']:
+        for token in ['.events-panel', '.evt-row', '.svc-critical', '.svc-edit', '.svc-detail-row', '.meta-modal-window', '.meta-modal-backdrop[hidden]', '.meta-btn-primary']:
             self.assertIn(token, css)
 
 
