@@ -8,7 +8,6 @@ services:
       - dashboard-data:/data
     environment:
       - EXPIRE_DAYS=7
-      - TRIGGER_SCAN_TOKEN=change-me
       - TRIGGER_SCAN_RATE_LIMIT=4
       - TRIGGER_SCAN_WINDOW_SECONDS=60
       - ALERT_WEBHOOK_URL=

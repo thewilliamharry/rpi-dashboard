@@ -30,7 +30,6 @@ THUMB_REFRESH_DAYS = int(os.environ.get("THUMB_REFRESH_DAYS", 1))
 UPTIME_WINDOW_SECONDS = 7 * 86400
 UPTIME_BUCKETS = 168
 
-TRIGGER_SCAN_TOKEN = os.environ.get("TRIGGER_SCAN_TOKEN", "change-me")
 TRIGGER_SCAN_RATE_LIMIT = int(os.environ.get("TRIGGER_SCAN_RATE_LIMIT", 4))
 TRIGGER_SCAN_WINDOW_SECONDS = int(os.environ.get("TRIGGER_SCAN_WINDOW_SECONDS", 60))
 
@@ -958,7 +957,6 @@ def serve_css():
 @app.route("/api/config")
 def api_config():
     return jsonify({
-        "scan_auth_required": bool(TRIGGER_SCAN_TOKEN),
         "alerting_enabled": bool(ALERT_WEBHOOK_URL),
         "uptime_buckets": UPTIME_BUCKETS,
         "trigger_rate_limit": TRIGGER_SCAN_RATE_LIMIT,
@@ -1208,10 +1206,6 @@ def api_scan_status():
 
 @app.route("/api/trigger-scan", methods=["POST"])
 def api_trigger_scan():
-    token = request.headers.get('X-Scan-Token', '')
-    if TRIGGER_SCAN_TOKEN and token != TRIGGER_SCAN_TOKEN:
-        return jsonify({"started": False, "reason": "unauthorized"}), 401
-
     client_key = request.remote_addr or 'unknown'
     allowed, retry_after = _check_scan_rate_limit(client_key)
     if not allowed:

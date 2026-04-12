@@ -50,7 +50,6 @@ def _ensure_psutil_stub():
 def load_app(extra_env=None):
     env = {
         'DISABLE_BACKGROUND': '1',
-        'TRIGGER_SCAN_TOKEN': 'test-token',
         'TRIGGER_SCAN_RATE_LIMIT': '2',
         'TRIGGER_SCAN_WINDOW_SECONDS': '60',
         'ALERT_WEBHOOK_URL': '',

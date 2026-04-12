@@ -7,7 +7,6 @@ from tests.helpers import cleanup_db, load_app
 class ApiAndAuthTests(unittest.TestCase):
     def setUp(self):
         self.appmod, self.db_path = load_app({
-            'TRIGGER_SCAN_TOKEN': 'secret-token',
             'TRIGGER_SCAN_RATE_LIMIT': '1',
             'TRIGGER_SCAN_WINDOW_SECONDS': '60',
         })
@@ -35,18 +34,20 @@ class ApiAndAuthTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
-    def test_trigger_scan_requires_token(self):
+    def test_trigger_scan_no_auth_required(self):
+        self.appmod.trigger_discovery = lambda: True
         r = self.client.post('/api/trigger-scan')
-        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()['started'])
 
     def test_trigger_scan_rate_limit(self):
         self.appmod.trigger_discovery = lambda: True
 
-        r1 = self.client.post('/api/trigger-scan', headers={'X-Scan-Token': 'secret-token'})
+        r1 = self.client.post('/api/trigger-scan')
         self.assertEqual(r1.status_code, 200)
         self.assertTrue(r1.get_json()['started'])
 
-        r2 = self.client.post('/api/trigger-scan', headers={'X-Scan-Token': 'secret-token'})
+        r2 = self.client.post('/api/trigger-scan')
         self.assertEqual(r2.status_code, 429)
         self.assertEqual(r2.get_json()['reason'], 'rate_limited')
 

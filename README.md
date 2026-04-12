@@ -11,8 +11,8 @@ A self-hosted monitoring dashboard for Raspberry Pi. Runs as a single Docker con
 - **Uptime tracking** — 7-day bucketed uptime history per service, checks every 5 minutes (plus 60-second checks for currently-down services)
 - **Latency + error telemetry** — stores latest response latency and probe error class per service
 - **Transition events + webhook alerts** — records down/recovery events and can post alert payloads to a webhook with cooldowns
-- **Service metadata** — editable display name, URL override, critical flag, pin order, and tags per service
-- **Secure manual scans** — `/api/trigger-scan` requires a token header and is rate limited
+- **Service metadata** — editable display name, path/URL override, critical flag, pin order, and tags per service
+- **Manual scan trigger** — `/api/trigger-scan` is rate limited
 - **Live thumbnails** — headless Chromium screenshots of each service homepage, refreshed daily; falls back to localhost `og:image` when available
 - **Status favicon** — browser tab icon is a live color-coded bulb (green / amber / red) reflecting service state and CPU load
 - **Dark / light theme** — two distinct visual styles with a smooth radial-wipe transition
@@ -99,7 +99,6 @@ Environment variables can be set in `docker-compose.yml`:
 | Variable | Default | Description |
 |---|---|---|
 | `EXPIRE_DAYS` | `7` | Days before an offline service is removed from the dashboard |
-| `TRIGGER_SCAN_TOKEN` | `change-me` | Required `X-Scan-Token` header value for `POST /api/trigger-scan` |
 | `TRIGGER_SCAN_RATE_LIMIT` | `4` | Max manual scan trigger requests per rate-limit window per client IP |
 | `TRIGGER_SCAN_WINDOW_SECONDS` | `60` | Rate-limit window for manual scan trigger requests |
 | `ALERT_WEBHOOK_URL` | empty | Optional webhook target for up/down transition alerts |

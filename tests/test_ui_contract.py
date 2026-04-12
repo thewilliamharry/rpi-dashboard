@@ -7,7 +7,7 @@ class UiContractTests(unittest.TestCase):
         html = pathlib.Path('dashboard/index.html').read_text(encoding='utf-8')
         self.assertIn('id="events-panel"', html)
         self.assertIn('openMetaEditor', html)
-        self.assertIn('scan_token', html)
+        self.assertNotIn('scan_token', html)
         self.assertIn('id="meta-modal"', html)
         self.assertIn('id="meta-path"', html)
         self.assertIn('id="meta-url"', html)

@@ -217,8 +217,6 @@ let _fvCpu = 0;
 let _fvOnline = null;
 let _fvTotal = null;
 let _lastStatsTs = null;
-let _scanAuthRequired = true;
-let _scanToken = localStorage.getItem('scan_token') || '';
 let _servicesByPort = new Map();
 let _metaModalSvc = null;
 let _metaModalSaving = false;
@@ -932,15 +930,6 @@ function renderEvents(events) {
   document.getElementById('events-label').textContent = visibleEvents.length + ' shown';
 }
 
-async function fetchConfig() {
-  try {
-    const r = await fetch('/api/config');
-    if (!r.ok) return;
-    const d = await r.json();
-    _scanAuthRequired = !!d.scan_auth_required;
-  } catch (e) {}
-}
-
 async function fetchStats() {
   try {
     const r = await fetch('/api/stats');
@@ -977,27 +966,8 @@ async function fetchEvents() {
 }
 
 async function triggerScan() {
-  const headers = {};
-
-  if (_scanAuthRequired) {
-    if (!_scanToken) {
-      const entered = prompt('Enter scan token');
-      if (!entered) return;
-      _scanToken = entered.trim();
-      localStorage.setItem('scan_token', _scanToken);
-    }
-    headers['X-Scan-Token'] = _scanToken;
-  }
-
   try {
-    const r = await fetch('/api/trigger-scan', { method: 'POST', headers });
-    if (r.status === 401) {
-      _scanToken = '';
-      localStorage.removeItem('scan_token');
-      alert('Invalid scan token');
-      return;
-    }
-
+    const r = await fetch('/api/trigger-scan', { method: 'POST' });
     if (r.status === 429) {
       let msg = 'Scan already running or rate limited';
       try {
@@ -1044,7 +1014,6 @@ async function triggerScan() {
 
   drawFavicon();
 
-  fetchConfig();
   fetchStats();
   fetchHistory();
   fetchScanStatus();
