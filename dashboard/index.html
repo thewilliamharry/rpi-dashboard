@@ -162,6 +162,53 @@
   </div>
 </div>
 
+<div class="meta-modal-backdrop" id="meta-modal" hidden>
+  <div class="meta-modal-window" role="dialog" aria-modal="true" aria-labelledby="meta-modal-title">
+    <div class="meta-modal-head">
+      <h2 id="meta-modal-title">Edit Service</h2>
+      <span class="meta-modal-port" id="meta-modal-port">:—</span>
+    </div>
+
+    <form id="meta-form" class="meta-form">
+      <label class="meta-field">
+        <span class="meta-label">Display name</span>
+        <input type="text" id="meta-display-name" autocomplete="off" />
+      </label>
+
+      <label class="meta-field">
+        <span class="meta-label">Path</span>
+        <input type="text" id="meta-path" placeholder="/" autocomplete="off" />
+        <span class="meta-help">Used for checks, previews, and link target.</span>
+      </label>
+
+      <label class="meta-field meta-checkbox">
+        <input type="checkbox" id="meta-critical" />
+        <span>Critical service</span>
+      </label>
+
+      <label class="meta-field">
+        <span class="meta-label">Tags</span>
+        <input type="text" id="meta-tags" placeholder="core, prod" autocomplete="off" />
+      </label>
+
+      <details class="meta-advanced" id="meta-advanced">
+        <summary>Advanced</summary>
+        <label class="meta-field">
+          <span class="meta-label">Base URL override</span>
+          <input type="text" id="meta-url" placeholder="http://host:port" autocomplete="off" />
+        </label>
+      </details>
+
+      <div class="meta-error" id="meta-error" hidden></div>
+
+      <div class="meta-actions">
+        <button type="button" class="meta-btn meta-btn-ghost" id="meta-cancel">Cancel</button>
+        <button type="submit" class="meta-btn meta-btn-primary" id="meta-save">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
 const APP_NAME = 'Beacon';
 const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated']);
@@ -173,6 +220,8 @@ let _lastStatsTs = null;
 let _scanAuthRequired = true;
 let _scanToken = localStorage.getItem('scan_token') || '';
 let _servicesByPort = new Map();
+let _metaModalSvc = null;
+let _metaModalSaving = false;
 
 function capFirst(text) {
   const v = (text || '').trim();
@@ -450,33 +499,127 @@ function loadThumbnail(port, imgEl, fallbackDiv) {
   imgEl.src = '/api/thumbnail/' + port;
 }
 
+function isLoopbackHost(hostname) {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
+}
+
+function normalizePathForUi(value) {
+  const raw = (value || '').trim();
+  if (!raw) return '/';
+  if (raw.startsWith('?') || raw.startsWith('#')) {
+    return '/' + raw;
+  }
+  if (raw.startsWith('/')) return raw;
+  return '/' + raw;
+}
+
+function editorBaseUrl(svc) {
+  try {
+    const parsed = new URL((svc && svc.url) || '', window.location.href);
+    return parsed.protocol + '//' + parsed.host;
+  } catch (e) {
+    return 'http://' + window.location.hostname + ':' + svc.port;
+  }
+}
+
+function buildServiceHref(svc) {
+  const fallbackPath = normalizePathForUi(svc && svc.path);
+  const fallback = '//' + window.location.hostname + ':' + svc.port + fallbackPath;
+  if (!svc || !svc.url) return fallback;
+
+  try {
+    const parsed = new URL(svc.url, window.location.href);
+    if (!isLoopbackHost(parsed.hostname)) {
+      return parsed.href;
+    }
+
+    const targetPort = parsed.port || String(svc.port);
+    const suffix = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
+    return '//' + window.location.hostname + ':' + targetPort + suffix;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function setMetaFormError(message) {
+  const el = document.getElementById('meta-error');
+  if (!message) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+}
+
+function setMetaFormSaving(saving) {
+  _metaModalSaving = !!saving;
+  const form = document.getElementById('meta-form');
+  const save = document.getElementById('meta-save');
+  const cancel = document.getElementById('meta-cancel');
+  form.querySelectorAll('input').forEach((input) => {
+    input.disabled = _metaModalSaving;
+  });
+  save.disabled = _metaModalSaving;
+  cancel.disabled = _metaModalSaving;
+  save.textContent = _metaModalSaving ? 'Saving...' : 'Save';
+}
+
+function closeMetaEditor() {
+  if (_metaModalSaving) return;
+  const modal = document.getElementById('meta-modal');
+  modal.hidden = true;
+  document.body.classList.remove('modal-open');
+  _metaModalSvc = null;
+  setMetaFormError('');
+}
+
 async function openMetaEditor(svc, evt) {
   evt.preventDefault();
   evt.stopPropagation();
+  _metaModalSvc = svc;
+  document.getElementById('meta-modal-port').textContent = ':' + svc.port;
+  document.getElementById('meta-display-name').value = svc.display_name || '';
+  document.getElementById('meta-path').value = normalizePathForUi(svc.path || '/');
+  document.getElementById('meta-critical').checked = !!svc.critical;
+  document.getElementById('meta-tags').value = Array.isArray(svc.tags) ? svc.tags.join(', ') : '';
+  document.getElementById('meta-url').value = editorBaseUrl(svc);
+  document.getElementById('meta-advanced').open = false;
+  setMetaFormError('');
+  setMetaFormSaving(false);
+  document.getElementById('meta-modal').hidden = false;
+  document.body.classList.add('modal-open');
+  document.getElementById('meta-display-name').focus();
+  document.getElementById('meta-display-name').select();
+}
 
-  const displayName = prompt('Display name', svc.display_name || '');
-  if (displayName === null) return;
+async function submitMetaEditor(evt) {
+  evt.preventDefault();
+  if (!_metaModalSvc || _metaModalSaving) return;
 
-  const url = prompt('URL override (blank uses default local URL)', svc.url || '');
-  if (url === null) return;
+  const displayName = document.getElementById('meta-display-name').value.trim();
+  const pathRaw = document.getElementById('meta-path').value.trim();
+  const critical = document.getElementById('meta-critical').checked;
+  const tags = document.getElementById('meta-tags').value.trim();
+  const urlRaw = document.getElementById('meta-url').value.trim();
 
-  const criticalRaw = prompt('Critical service? (yes/no)', svc.critical ? 'yes' : 'no');
-  if (criticalRaw === null) return;
-  const critical = /^(1|y|yes|true)$/i.test(criticalRaw.trim());
+  const payload = {
+    display_name: displayName,
+    path: pathRaw,
+    critical,
+    tags,
+  };
+  if (urlRaw !== '') {
+    payload.url = urlRaw;
+  }
 
-  const tagsRaw = prompt('Tags (comma separated)', Array.isArray(svc.tags) ? svc.tags.join(', ') : '');
-  if (tagsRaw === null) return;
-
+  setMetaFormSaving(true);
+  setMetaFormError('');
   try {
-    const r = await fetch('/api/service-meta/' + svc.port, {
+    const r = await fetch('/api/service-meta/' + _metaModalSvc.port, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        display_name: displayName.trim(),
-        url: url.trim(),
-        critical,
-        tags: tagsRaw
-      })
+      body: JSON.stringify(payload),
     });
 
     if (!r.ok) {
@@ -485,21 +628,25 @@ async function openMetaEditor(svc, evt) {
         const data = await r.json();
         if (data && data.error) msg = data.error;
       } catch (e) {}
-      alert(msg);
+      setMetaFormError(msg);
+      setMetaFormSaving(false);
       return;
     }
 
+    setMetaFormSaving(false);
+    closeMetaEditor();
     await fetchServices();
     await fetchEvents();
   } catch (e) {
-    alert('Metadata update failed');
+    setMetaFormError('Metadata update failed');
+    setMetaFormSaving(false);
   }
 }
 
 function buildCard(svc) {
   const port = svc.port;
   const online = !!svc.is_online;
-  const href = svc.url || ('http://' + window.location.hostname + ':' + port);
+  const href = buildServiceHref(svc);
 
   const card = document.createElement('a');
   card.className = 'svc-card' + (online ? '' : ' offline');
@@ -884,6 +1031,16 @@ async function triggerScan() {
   });
 
   document.querySelector('.btn-scan').addEventListener('click', triggerScan);
+  document.getElementById('meta-form').addEventListener('submit', submitMetaEditor);
+  document.getElementById('meta-cancel').addEventListener('click', closeMetaEditor);
+  document.getElementById('meta-modal').addEventListener('click', (evt) => {
+    if (evt.target.id === 'meta-modal') closeMetaEditor();
+  });
+  document.addEventListener('keydown', (evt) => {
+    if (evt.key === 'Escape' && !document.getElementById('meta-modal').hidden) {
+      closeMetaEditor();
+    }
+  });
 
   drawFavicon();
 

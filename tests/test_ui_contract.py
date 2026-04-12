@@ -8,10 +8,15 @@ class UiContractTests(unittest.TestCase):
         self.assertIn('id="events-panel"', html)
         self.assertIn('openMetaEditor', html)
         self.assertIn('scan_token', html)
+        self.assertIn('id="meta-modal"', html)
+        self.assertIn('id="meta-path"', html)
+        self.assertIn('id="meta-url"', html)
+        self.assertNotIn("prompt('Display name'", html)
+        self.assertNotIn("prompt('URL override", html)
 
     def test_styles_include_events_and_service_ops_classes(self):
         css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
-        for token in ['.events-panel', '.evt-row', '.svc-critical', '.svc-edit', '.svc-detail-row']:
+        for token in ['.events-panel', '.evt-row', '.svc-critical', '.svc-edit', '.svc-detail-row', '.meta-modal-window', '.meta-btn-primary']:
             self.assertIn(token, css)
 
 

@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 from collections import defaultdict
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import psutil
 import requests
@@ -196,6 +196,72 @@ def _normalize_service_url(value, port):
         raise ValueError("URL must include a host")
     normalized = parsed.geturl().rstrip('/')
     return normalized
+
+
+def _normalize_service_path(value):
+    if value is None or str(value).strip() == '':
+        return '/'
+    raw = str(value).strip()
+    parsed = urlparse(raw)
+    if parsed.scheme or parsed.netloc:
+        raise ValueError("Path must not include scheme or host")
+
+    path = parsed.path or '/'
+    if not path.startswith('/'):
+        path = '/' + path
+
+    normalized = path
+    if parsed.query:
+        normalized += f"?{parsed.query}"
+    if parsed.fragment:
+        normalized += f"#{parsed.fragment}"
+    return normalized
+
+
+def _service_url_with_path(base_url, path, port):
+    base = _normalize_service_url(base_url, port)
+    normalized_path = _normalize_service_path(path)
+    base_parsed = urlparse(base)
+    path_parsed = urlparse(normalized_path)
+    return urlunparse(
+        (
+            base_parsed.scheme,
+            base_parsed.netloc,
+            path_parsed.path or '/',
+            '',
+            path_parsed.query,
+            path_parsed.fragment,
+        )
+    )
+
+
+def _service_path_from_url(url, port):
+    try:
+        normalized = _normalize_service_url(url, port)
+    except ValueError:
+        normalized = _default_service_url(port)
+    parsed = urlparse(normalized)
+    path = parsed.path or '/'
+    if not path.startswith('/'):
+        path = '/' + path
+    normalized_path = path
+    if parsed.query:
+        normalized_path += f"?{parsed.query}"
+    if parsed.fragment:
+        normalized_path += f"#{parsed.fragment}"
+    return normalized_path
+
+
+def _discovery_probe_url(port, existing_url):
+    if not existing_url:
+        return _default_service_url(port)
+    try:
+        normalized = _normalize_service_url(existing_url, port)
+    except ValueError:
+        return _default_service_url(port)
+    if _is_localhost_url(normalized):
+        return normalized
+    return _default_service_url(port)
 
 
 def _parse_tags(tags):
@@ -402,11 +468,15 @@ def _handle_state_transition(*, port, previous_online, online, title, display_na
     )
 
 
-def _screenshot_service(port):
+def _screenshot_service(port, target_url=None):
     """Capture a service screenshot using Chromium. Returns (bytes, mime) or (None, None)."""
     if not _screenshot_sem.acquire(blocking=False):
         log.info("Screenshot for port %d deferred: another screenshot in progress", port)
         return None, None
+    try:
+        navigate_url = _normalize_service_url(target_url, port) if target_url else _default_service_url(port)
+    except ValueError:
+        navigate_url = _default_service_url(port)
     try:
         from playwright.sync_api import TimeoutError as PWTimeout
         from playwright.sync_api import sync_playwright
@@ -415,7 +485,7 @@ def _screenshot_service(port):
             browser = p.chromium.launch(args=['--no-sandbox', '--disable-dev-shm-usage'])
             try:
                 page = browser.new_page(viewport={'width': 1280, 'height': 800})
-                page.goto(_default_service_url(port) + '/', timeout=15_000, wait_until='load')
+                page.goto(navigate_url, timeout=15_000, wait_until='load')
                 page.wait_for_timeout(1500)
                 data = page.screenshot(type='png')
                 if len(data) <= THUMB_MAX_BYTES:
@@ -432,15 +502,18 @@ def _screenshot_service(port):
     return None, None
 
 
-def fetch_thumbnail(port):
+def fetch_thumbnail(port, service_url=None):
     """Try og:image first (localhost only), then fallback to screenshot."""
-    base_url = _default_service_url(port) + '/'
+    try:
+        base_url = _normalize_service_url(service_url, port) if service_url else _default_service_url(port)
+    except ValueError:
+        base_url = _default_service_url(port)
     try:
         ok, _, _, r = _probe_http(base_url, timeout=3, allow_remote=False)
         if not ok or r is None:
-            return _screenshot_service(port)
+            return _screenshot_service(port, base_url)
         if 'text/html' not in r.headers.get('Content-Type', ''):
-            return _screenshot_service(port)
+            return _screenshot_service(port, base_url)
 
         soup = BeautifulSoup(r.text, 'html.parser')
         og = (
@@ -479,7 +552,7 @@ def fetch_thumbnail(port):
                 log.warning("Skipping non-localhost og:image for port %d: %s", port, img_url)
     except Exception:
         pass
-    return _screenshot_service(port)
+    return _screenshot_service(port, base_url)
 
 
 def _build_uptime_buckets(checks, now):
@@ -552,9 +625,20 @@ def do_discovery(source='scheduled'):
                 pass
             time.sleep(0.05)
 
+        existing_probe_urls = {}
+        with _db_lock:
+            conn = get_db()
+            rows = conn.execute(
+                "SELECT s.port, COALESCE(m.url, '') AS url "
+                "FROM services s LEFT JOIN service_meta m ON m.port = s.port"
+            ).fetchall()
+            conn.close()
+        for row in rows:
+            existing_probe_urls[int(row['port'])] = _discovery_probe_url(int(row['port']), row['url'])
+
         discovered = {}
         for port in open_ports:
-            probe_url = _default_service_url(port)
+            probe_url = existing_probe_urls.get(port, _default_service_url(port))
             online, latency_ms, error_class, resp = _probe_http(probe_url, timeout=2.5, allow_remote=False)
             if not online:
                 continue
@@ -648,7 +732,7 @@ def do_discovery(source='scheduled'):
             thumb_ts = ex.get('thumb_ts') or 0
             if ex.get('has_thumb') and thumb_ts >= refresh_cutoff:
                 continue
-            thumb_data, thumb_mime = fetch_thumbnail(port)
+            thumb_data, thumb_mime = fetch_thumbnail(port, discovered[port].get('url'))
             if thumb_data:
                 with _db_lock:
                     conn = get_db()
@@ -725,7 +809,7 @@ def do_uptime_check(only_down=False):
                     (now, latency_ms, port),
                 )
                 if not row['has_thumb']:
-                    thumb_candidates.append(port)
+                    thumb_candidates.append((port, service_url))
             else:
                 conn.execute(
                     "UPDATE services SET is_online=0, last_latency_ms=NULL, last_error=? WHERE port=?",
@@ -753,8 +837,8 @@ def do_uptime_check(only_down=False):
         conn.commit()
         conn.close()
 
-    for port in thumb_candidates:
-        thumb_data, thumb_mime = fetch_thumbnail(port)
+    for port, service_url in thumb_candidates:
+        thumb_data, thumb_mime = fetch_thumbnail(port, service_url)
         if thumb_data:
             with _db_lock:
                 conn = get_db()
@@ -840,6 +924,8 @@ def _service_meta_row(conn, port):
     if not row:
         return None
     d = dict(row)
+    d['url'] = _normalize_service_url(d.get('url'), port)
+    d['path'] = _service_path_from_url(d['url'], port)
     d['tags'] = _parse_tags(d.get('tags'))
     d['critical'] = bool(d.get('critical'))
     return d
@@ -946,6 +1032,7 @@ def api_services():
         result = []
         for svc in services:
             checks = checks_by_port.get(svc['port'], [])
+            effective_url = _normalize_service_url(svc['url'], svc['port'])
             result.append({
                 "port": svc['port'],
                 "title": svc['title'],
@@ -957,7 +1044,8 @@ def api_services():
                 "latency_ms": svc['last_latency_ms'],
                 "last_error": svc['last_error'],
                 "critical": bool(svc['critical']),
-                "url": svc['url'] or _default_service_url(svc['port']),
+                "url": effective_url,
+                "path": _service_path_from_url(effective_url, svc['port']),
                 "tags": _parse_tags(svc['tags']),
                 "pinned_order": svc['pinned_order'],
                 "uptime_pct": _calc_uptime_pct(checks),
@@ -1027,7 +1115,7 @@ def api_service_meta(port):
         return jsonify(row)
 
     payload = request.get_json(silent=True) or {}
-    allowed_fields = {'display_name', 'url', 'critical', 'pinned_order', 'tags'}
+    allowed_fields = {'display_name', 'url', 'path', 'critical', 'pinned_order', 'tags'}
     unknown = [k for k in payload.keys() if k not in allowed_fields]
     if unknown:
         return jsonify({"error": f"unknown fields: {', '.join(unknown)}"}), 400
@@ -1060,14 +1148,18 @@ def api_service_meta(port):
             return jsonify({"error": "pinned_order must be an integer"}), 400
         next_tags = current['tags'] if 'tags' not in payload else _tags_to_db(payload.get('tags'))
 
-        if 'url' in payload:
-            try:
-                next_url = _normalize_service_url(payload.get('url'), port)
-            except ValueError as exc:
-                conn.close()
-                return jsonify({"error": str(exc)}), 400
-        else:
-            next_url = _normalize_service_url(current.get('url'), port)
+        has_url = 'url' in payload
+        has_path = 'path' in payload
+        base_url_input = payload.get('url') if has_url else current.get('url')
+        try:
+            base_url = _normalize_service_url(base_url_input, port)
+            if has_path:
+                next_url = _service_url_with_path(base_url, payload.get('path'), port)
+            else:
+                next_url = base_url
+        except ValueError as exc:
+            conn.close()
+            return jsonify({"error": str(exc)}), 400
 
         conn.execute(
             "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags) VALUES (?,?,?,?,?,?) "

@@ -42,7 +42,7 @@ class UptimeIntegrationTests(unittest.TestCase):
             return False, None, 'connection_error', None
 
         self.appmod._probe_http = fake_probe
-        self.appmod.fetch_thumbnail = lambda _port: (None, None)
+        self.appmod.fetch_thumbnail = lambda _port, _service_url=None: (None, None)
 
         self.appmod.do_uptime_check(only_down=False)
         with self.appmod._db_lock:
@@ -78,6 +78,34 @@ class UptimeIntegrationTests(unittest.TestCase):
 
         self.appmod._probe_http = original_probe
         self.appmod.fetch_thumbnail = original_thumb
+
+    def test_uptime_check_uses_path_for_probe_and_thumbnail(self):
+        self._insert_service('http://127.0.0.1:2500/app?view=1')
+
+        original_probe = self.appmod._probe_http
+        original_thumb = self.appmod.fetch_thumbnail
+        seen_probe = []
+        seen_thumb = []
+
+        def fake_probe(url, *_args, **_kwargs):
+            seen_probe.append(url)
+            return True, 12.6, None, None
+
+        def fake_thumb(port, service_url=None):
+            seen_thumb.append((port, service_url))
+            return None, None
+
+        self.appmod._probe_http = fake_probe
+        self.appmod.fetch_thumbnail = fake_thumb
+
+        try:
+            self.appmod.do_uptime_check(only_down=False)
+        finally:
+            self.appmod._probe_http = original_probe
+            self.appmod.fetch_thumbnail = original_thumb
+
+        self.assertEqual(seen_probe[0], 'http://127.0.0.1:2500/app?view=1')
+        self.assertIn((2500, 'http://127.0.0.1:2500/app?view=1'), seen_thumb)
 
 
 if __name__ == '__main__':

@@ -53,6 +53,7 @@ body {
   font-family: var(--font-mono);
   font-size: 12px;
 }
+body.modal-open { overflow: hidden; }
 html.light body { font-family: var(--font-sans); font-weight: 300; }
 
 /* grid overlay */
@@ -546,6 +547,233 @@ html:not(.light) .svc-card.offline { filter: saturate(0.2); }
 }
 html.light .svc-empty { font-family: var(--font-sans); font-weight: 300; letter-spacing: 0; font-size: 11px; }
 
+/* Service editor modal */
+.meta-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(1, 10, 20, 0.72);
+  backdrop-filter: blur(2px);
+}
+.meta-modal-window {
+  width: min(560px, 100%);
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  box-shadow: 0 0 0 1px var(--border2), 0 28px 70px rgba(0, 0, 0, 0.55);
+  clip-path: polygon(12px 0%, 100% 0%, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0% 100%, 0% 12px);
+  overflow: hidden;
+}
+.meta-modal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.08), transparent);
+}
+.meta-modal-head h2 {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 600;
+}
+.meta-modal-port {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.meta-form {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.meta-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.meta-label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.meta-field input[type="text"] {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.meta-field input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.3);
+}
+.meta-help {
+  color: var(--muted);
+  font-size: 9px;
+}
+.meta-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.meta-checkbox input { accent-color: var(--accent); }
+.meta-checkbox span {
+  color: var(--text);
+  font-size: 11px;
+}
+.meta-advanced {
+  border: 1px solid var(--border2);
+  padding: 8px;
+}
+.meta-advanced summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.meta-error {
+  border: 1px solid rgba(220, 38, 38, 0.5);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--red);
+  font-size: 10px;
+  padding: 8px 10px;
+}
+.meta-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.meta-btn {
+  min-width: 84px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-family: var(--font-sans);
+}
+.meta-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.meta-btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+.meta-btn-primary {
+  border-color: rgba(0, 212, 255, 0.35);
+  color: var(--accent);
+}
+.meta-btn-primary:hover {
+  background: rgba(0, 212, 255, 0.1);
+}
+html.light .meta-modal-backdrop {
+  background: rgba(15, 23, 42, 0.22);
+  backdrop-filter: blur(1px);
+}
+html.light .meta-modal-window {
+  clip-path: none;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  background: #ffffff;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.12);
+}
+html.light .meta-modal-head {
+  background: transparent;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+html.light .meta-modal-head h2 {
+  color: #0f172a;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  font-size: 16px;
+}
+html.light .meta-modal-port {
+  color: #64748b;
+  font-family: var(--font-sans);
+}
+html.light .meta-form { gap: 10px; }
+html.light .meta-label,
+html.light .meta-help,
+html.light .meta-advanced summary,
+html.light .meta-checkbox span,
+html.light .meta-btn,
+html.light .meta-error {
+  font-family: var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+}
+html.light .meta-label {
+  color: #475569;
+  font-size: 12px;
+}
+html.light .meta-field input[type="text"] {
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  color: #0f172a;
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+html.light .meta-field input[type="text"]:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);
+}
+html.light .meta-help {
+  color: #64748b;
+  font-size: 11px;
+}
+html.light .meta-advanced {
+  border-color: #e2e8f0;
+  border-radius: 8px;
+  padding: 10px;
+}
+html.light .meta-advanced summary {
+  color: #334155;
+  font-size: 12px;
+}
+html.light .meta-error {
+  border-radius: 8px;
+  border-color: rgba(185, 28, 28, 0.25);
+  background: rgba(254, 226, 226, 0.7);
+  color: #b91c1c;
+  font-size: 12px;
+}
+html.light .meta-btn {
+  border-radius: 8px;
+  font-size: 12px;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+}
+html.light .meta-btn-ghost:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+html.light .meta-btn-primary {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+  color: #ffffff;
+}
+html.light .meta-btn-primary:hover {
+  background: #1e40af;
+}
+
 /* Events */
 .events-panel {
   border: 1px solid var(--border);
@@ -692,6 +920,12 @@ html.light .evt-meta_updated .evt-title {
   .svc-critical, .svc-edit { font-size: 8px; }
   .evt-row { padding: 10px 8px; }
   .evt-sub { font-size: 9px; }
+  .meta-modal-backdrop { padding: 14px; }
+  .meta-modal-window { width: 100%; }
+  .meta-modal-head { padding: 12px; }
+  .meta-form { padding: 12px; gap: 10px; }
+  .meta-actions { flex-direction: column-reverse; }
+  .meta-btn { width: 100%; }
 
   html.light .metrics-row {
     gap: 1px;
