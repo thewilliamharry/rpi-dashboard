@@ -48,7 +48,7 @@ class UptimeIntegrationTests(unittest.TestCase):
             return False, None, 'connection_error', None
 
         self.appmod._probe_http = fake_probe
-        self.appmod.fetch_thumbnail = lambda _port, _service_url=None: (None, None)
+        self.appmod.fetch_thumbnail = lambda _port, _service_url=None, **_kwargs: (None, None)
 
         self.appmod.do_uptime_check(only_down=False)
         with self.appmod._db_lock:
@@ -100,8 +100,8 @@ class UptimeIntegrationTests(unittest.TestCase):
                 headers={'Content-Type': 'text/html'},
             )
 
-        def fake_thumb(port, service_url=None):
-            seen_thumb.append((port, service_url))
+        def fake_thumb(port, service_url=None, **kwargs):
+            seen_thumb.append((port, service_url, kwargs.get('allow_remote')))
             return None, None
 
         self.appmod._probe_http = fake_probe
@@ -122,7 +122,7 @@ class UptimeIntegrationTests(unittest.TestCase):
 
         self.assertEqual(row['title'], 'Path Service')
         self.assertEqual(seen_probe[0], 'http://127.0.0.1:2500/app?view=1')
-        self.assertIn((2500, 'http://127.0.0.1:2500/app?view=1'), seen_thumb)
+        self.assertIn((2500, 'http://127.0.0.1:2500/app?view=1', True), seen_thumb)
 
 
 if __name__ == '__main__':

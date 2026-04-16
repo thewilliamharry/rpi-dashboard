@@ -196,6 +196,7 @@
         <label class="meta-field">
           <span class="meta-label">Base URL override</span>
           <input type="text" id="meta-url" placeholder="http://host:port" autocomplete="off" />
+          <span class="meta-help">Host/protocol used for checks and preview refresh.</span>
         </label>
       </details>
 
@@ -514,6 +515,10 @@ function normalizePathForUi(value) {
 function editorBaseUrl(svc) {
   try {
     const parsed = new URL((svc && svc.url) || '', window.location.href);
+    const port = parsed.port || String((svc && svc.port) || '');
+    if (isLoopbackHost(parsed.hostname) && window.location.hostname && !isLoopbackHost(window.location.hostname)) {
+      return parsed.protocol + '//' + window.location.hostname + (port ? (':' + port) : '');
+    }
     return parsed.protocol + '//' + parsed.host;
   } catch (e) {
     return 'http://' + window.location.hostname + ':' + svc.port;

@@ -150,38 +150,38 @@ class ApiAndAuthTests(unittest.TestCase):
     def test_service_meta_refresh_success_updates_title_and_thumbnail(self):
         self._insert_service(url='http://127.0.0.1:8080/root')
 
-        original_probe = self.appmod._probe_http
+        original_html_fetch = self.appmod._fetch_html_response
         original_thumb = self.appmod.fetch_thumbnail
-        seen_probe = []
+        seen_fetch = []
         seen_thumb = []
 
-        def fake_probe(url, *_args, **_kwargs):
-            seen_probe.append(url)
-            return True, 12.4, None, FakeResponse(
+        def fake_html_fetch(url, *_args, **_kwargs):
+            seen_fetch.append(url)
+            return True, None, FakeResponse(
                 text='<html><head><title>Path Title</title></head><body></body></html>',
                 status_code=200,
                 headers={'Content-Type': 'text/html'},
-            )
+            ), url
 
-        def fake_thumb(port, service_url=None):
-            seen_thumb.append((port, service_url))
+        def fake_thumb(port, service_url=None, **kwargs):
+            seen_thumb.append((port, service_url, kwargs.get('allow_remote')))
             return b'png-bytes', 'image/png'
 
-        self.appmod._probe_http = fake_probe
+        self.appmod._fetch_html_response = fake_html_fetch
         self.appmod.fetch_thumbnail = fake_thumb
 
         try:
             r = self.client.put('/api/service-meta/8080', json={'path': '/app?view=1'})
         finally:
-            self.appmod._probe_http = original_probe
+            self.appmod._fetch_html_response = original_html_fetch
             self.appmod.fetch_thumbnail = original_thumb
 
         self.assertEqual(r.status_code, 200)
         body = r.get_json()
         self.assertEqual(body['path'], '/app?view=1')
         self.assertIsNone(body['refresh_warning'])
-        self.assertEqual(seen_probe[-1], 'http://127.0.0.1:8080/app?view=1')
-        self.assertIn((8080, 'http://127.0.0.1:8080/app?view=1'), seen_thumb)
+        self.assertEqual(seen_fetch[-1], 'http://127.0.0.1:8080/app?view=1')
+        self.assertIn((8080, 'http://127.0.0.1:8080/app?view=1', True), seen_thumb)
 
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
@@ -205,23 +205,23 @@ class ApiAndAuthTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
-        original_probe = self.appmod._probe_http
+        original_html_fetch = self.appmod._fetch_html_response
         original_thumb = self.appmod.fetch_thumbnail
 
-        def fake_probe(url, *_args, **_kwargs):
+        def fake_html_fetch(url, *_args, **_kwargs):
             _ = url
-            return False, None, 'connection_error', None
+            return False, 'connection_error', None, url
 
         def fake_thumb(*_args, **_kwargs):
             raise AssertionError('thumbnail refresh should be skipped when path probe fails')
 
-        self.appmod._probe_http = fake_probe
+        self.appmod._fetch_html_response = fake_html_fetch
         self.appmod.fetch_thumbnail = fake_thumb
 
         try:
             r = self.client.put('/api/service-meta/8080', json={'path': '/broken'})
         finally:
-            self.appmod._probe_http = original_probe
+            self.appmod._fetch_html_response = original_html_fetch
             self.appmod.fetch_thumbnail = original_thumb
 
         self.assertEqual(r.status_code, 200)

@@ -75,7 +75,7 @@ class SecurityAndScanningTests(unittest.TestCase):
         self.appmod.time.sleep = lambda _secs: None
         self.appmod.socket.create_connection = lambda *_args, **_kwargs: DummySock()
         self.appmod._probe_http = lambda *_args, **_kwargs: (True, 12.0, None, FakeResponse(200, {'Content-Type': 'text/html'}))
-        self.appmod.fetch_thumbnail = lambda _port, _service_url=None: (_ for _ in ()).throw(RuntimeError('thumb-failure'))
+        self.appmod.fetch_thumbnail = lambda _port, _service_url=None, **_kwargs: (_ for _ in ()).throw(RuntimeError('thumb-failure'))
 
         self.appmod._scanning = True
         try:

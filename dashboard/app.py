@@ -313,17 +313,104 @@ def _probe_http(url, timeout=2.5, allow_remote=False):
         return False, None, "probe_error", None
 
 
+def _is_html_content_type(content_type):
+    ctype = (content_type or '').split(';')[0].strip().lower()
+    return ctype in ("text/html", "application/xhtml+xml")
+
+
+def _fetch_html_response(url, timeout=3, allow_remote=False):
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False, "invalid_scheme", None, url
+        if not parsed.hostname:
+            return False, "invalid_host", None, url
+        if not allow_remote and not _is_loopback_host(parsed.hostname):
+            return False, "non_loopback", None, url
+
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            verify=False,
+            allow_redirects=True,
+        )
+        final_url = resp.url or url
+        final_host = urlparse(final_url).hostname or ''
+        if not allow_remote and not _is_loopback_host(final_host):
+            return False, "redirect_offhost", None, final_url
+        if not _is_html_content_type(resp.headers.get('Content-Type', '')):
+            return False, "non_html", resp, final_url
+        return True, None, resp, final_url
+    except requests.exceptions.Timeout:
+        return False, "timeout", None, url
+    except requests.exceptions.ConnectionError:
+        return False, "connection_error", None, url
+    except requests.exceptions.RequestException:
+        return False, "request_error", None, url
+    except Exception:
+        return False, "probe_error", None, url
+
+
 def _extract_title(resp, port):
     if not resp:
         return f":{port}"
-    if 'text/html' not in resp.headers.get('Content-Type', ''):
+    if not _is_html_content_type(resp.headers.get('Content-Type', '')):
         return f":{port}"
     try:
         soup = BeautifulSoup(resp.text, "html.parser")
         title = soup.title.get_text(strip=True) if soup.title else ""
-        return title or f":{port}"
+        if title:
+            return title
+
+        meta_candidates = [
+            ('meta', {'property': 'og:title'}),
+            ('meta', {'name': 'og:title'}),
+            ('meta', {'name': 'title'}),
+            ('meta', {'property': 'title'}),
+            ('meta', {'name': 'application-name'}),
+            ('meta', {'name': 'apple-mobile-web-app-title'}),
+        ]
+        for tag, attrs in meta_candidates:
+            el = soup.find(tag, attrs=attrs)
+            if not el:
+                continue
+            content = (el.get('content') or '').strip()
+            if content:
+                return content
+
+        for heading in soup.find_all(['h1', 'h2'], limit=2):
+            text = heading.get_text(" ", strip=True)
+            if text:
+                return text[:120]
+
+        return f":{port}"
     except Exception:
         return f":{port}"
+
+
+def _browser_page_title(url):
+    if not _screenshot_sem.acquire(blocking=False):
+        return None
+    try:
+        from playwright.sync_api import TimeoutError as PWTimeout
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=['--no-sandbox', '--disable-dev-shm-usage'])
+            try:
+                page = browser.new_page(viewport={'width': 1280, 'height': 800})
+                page.goto(url, timeout=15_000, wait_until='domcontentloaded')
+                page.wait_for_timeout(1000)
+                title = (page.title() or '').strip()
+                return title or None
+            except PWTimeout:
+                return None
+            finally:
+                browser.close()
+    except Exception:
+        return None
+    finally:
+        _screenshot_sem.release()
 
 
 def _insert_event(conn, *, ts, event_type, port=None, online=None, previous_online=None,
@@ -501,57 +588,111 @@ def _screenshot_service(port, target_url=None):
     return None, None
 
 
-def fetch_thumbnail(port, service_url=None):
-    """Try og:image first (localhost only), then fallback to screenshot."""
+def _fetch_image_bytes(img_url, port, allow_remote=False):
+    if not allow_remote and not _is_localhost_url(img_url):
+        return None, None
+    try:
+        img_r = requests.get(
+            img_url,
+            timeout=5,
+            verify=False,
+            stream=True,
+            allow_redirects=True,
+        )
+        final_url = img_r.url or img_url
+        if not allow_remote and not _is_localhost_url(final_url):
+            return None, None
+        if not img_r.ok:
+            return None, None
+
+        ct = img_r.headers.get('Content-Type', 'image/jpeg').split(';')[0].strip()
+        if not ct.startswith('image/'):
+            return None, None
+
+        declared = int(img_r.headers.get('Content-Length', 0) or 0)
+        if declared > THUMB_MAX_BYTES:
+            log.warning("image for port %d too large (%d bytes)", port, declared)
+            return None, None
+
+        buf = bytearray()
+        for chunk in img_r.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            buf.extend(chunk)
+            if len(buf) > THUMB_MAX_BYTES:
+                log.warning("image for port %d exceeded size cap", port)
+                return None, None
+
+        if not buf:
+            return None, None
+        return bytes(buf), ct
+    except Exception:
+        return None, None
+
+
+def fetch_thumbnail(port, service_url=None, allow_remote=False):
+    """Try og:image/icon first, then fallback to screenshot."""
     try:
         base_url = _normalize_service_url(service_url, port) if service_url else _default_service_url(port)
     except ValueError:
         base_url = _default_service_url(port)
+    final_url = base_url
+
     try:
-        ok, _, _, r = _probe_http(base_url, timeout=3, allow_remote=False)
+        ok, error_class, r, final_url = _fetch_html_response(base_url, timeout=3, allow_remote=allow_remote)
         if not ok or r is None:
-            return _screenshot_service(port, base_url)
-        if 'text/html' not in r.headers.get('Content-Type', ''):
-            return _screenshot_service(port, base_url)
+            if error_class and error_class not in ('non_html',):
+                return _screenshot_service(port, base_url)
+            return _screenshot_service(port, final_url or base_url)
 
         soup = BeautifulSoup(r.text, 'html.parser')
+
         og = (
             soup.find('meta', property='og:image') or
             soup.find('meta', attrs={'name': 'og:image'})
         )
         if og and og.get('content'):
-            img_url = urljoin(base_url, og['content'])
-            if _is_localhost_url(img_url):
-                img_r = requests.get(
-                    img_url,
-                    timeout=5,
-                    verify=False,
-                    stream=True,
-                    allow_redirects=False,
-                )
-                if img_r.ok:
-                    ct = img_r.headers.get('Content-Type', 'image/jpeg').split(';')[0].strip()
-                    if ct.startswith('image/'):
-                        declared = int(img_r.headers.get('Content-Length', 0) or 0)
-                        if declared > THUMB_MAX_BYTES:
-                            log.warning("og:image for port %d too large (%d bytes)", port, declared)
-                        else:
-                            buf = bytearray()
-                            for chunk in img_r.iter_content(chunk_size=65536):
-                                if not chunk:
-                                    continue
-                                buf.extend(chunk)
-                                if len(buf) > THUMB_MAX_BYTES:
-                                    buf = None
-                                    log.warning("og:image for port %d exceeded size cap", port)
-                                    break
-                            if buf:
-                                return bytes(buf), ct
-            else:
+            img_url = urljoin(final_url or base_url, og['content'])
+            data, mime = _fetch_image_bytes(img_url, port, allow_remote=allow_remote)
+            if data:
+                return data, mime
+            if not allow_remote and not _is_localhost_url(img_url):
                 log.warning("Skipping non-localhost og:image for port %d: %s", port, img_url)
+
+        icon = soup.find(
+            'link',
+            attrs={
+                'rel': lambda rel: (
+                    isinstance(rel, str) and 'icon' in rel.lower()
+                ) or (
+                    isinstance(rel, list) and any('icon' in str(part).lower() for part in rel)
+                )
+            },
+        )
+        if icon and icon.get('href'):
+            icon_url = urljoin(final_url or base_url, icon.get('href'))
+            data, mime = _fetch_image_bytes(icon_url, port, allow_remote=allow_remote)
+            if data:
+                return data, mime
+
+        parsed_final = urlparse(final_url or base_url)
+        origin = f"{parsed_final.scheme}://{parsed_final.netloc}"
+        fallback_icons = [
+            urljoin(final_url or base_url, 'favicon.ico'),
+            urljoin(origin + '/', 'favicon.ico'),
+            urljoin(origin + '/', 'apple-touch-icon.png'),
+        ]
+        seen = set()
+        for candidate in fallback_icons:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            data, mime = _fetch_image_bytes(candidate, port, allow_remote=allow_remote)
+            if data:
+                return data, mime
     except Exception:
         pass
-    return _screenshot_service(port, base_url)
+    return _screenshot_service(port, final_url or base_url)
 
 
 def _refresh_service_preview(port, service_url):
@@ -561,15 +702,19 @@ def _refresh_service_preview(port, service_url):
     thumb_mime = None
 
     try:
-        ok, _, error_class, resp = _probe_http(service_url, timeout=3, allow_remote=True)
+        ok, error_class, resp, final_url = _fetch_html_response(service_url, timeout=3, allow_remote=True)
         if ok and resp is not None:
             extracted = _extract_title(resp, port)
             if extracted and extracted != f":{port}":
                 next_title = extracted
             else:
-                warnings.append("title not found at configured path")
+                browser_title = _browser_page_title(final_url or service_url)
+                if browser_title:
+                    next_title = browser_title
+                else:
+                    warnings.append("title not found at configured path")
 
-            thumb_data, thumb_mime = fetch_thumbnail(port, service_url)
+            thumb_data, thumb_mime = fetch_thumbnail(port, final_url or service_url, allow_remote=True)
             if not thumb_data:
                 warnings.append("thumbnail refresh failed")
         else:
@@ -873,7 +1018,7 @@ def do_uptime_check(only_down=False):
         conn.close()
 
     for port, service_url in thumb_candidates:
-        thumb_data, thumb_mime = fetch_thumbnail(port, service_url)
+        thumb_data, thumb_mime = fetch_thumbnail(port, service_url, allow_remote=True)
         if thumb_data:
             with _db_lock:
                 conn = get_db()
