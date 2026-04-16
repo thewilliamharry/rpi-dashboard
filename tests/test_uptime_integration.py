@@ -4,6 +4,12 @@ import unittest
 from tests.helpers import cleanup_db, load_app
 
 
+class FakeResponse:
+    def __init__(self, text='', headers=None):
+        self.text = text
+        self.headers = headers or {}
+
+
 class UptimeIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.appmod, self.db_path = load_app()
@@ -89,7 +95,10 @@ class UptimeIntegrationTests(unittest.TestCase):
 
         def fake_probe(url, *_args, **_kwargs):
             seen_probe.append(url)
-            return True, 12.6, None, None
+            return True, 12.6, None, FakeResponse(
+                text='<html><head><title>Path Service</title></head><body></body></html>',
+                headers={'Content-Type': 'text/html'},
+            )
 
         def fake_thumb(port, service_url=None):
             seen_thumb.append((port, service_url))
@@ -104,6 +113,14 @@ class UptimeIntegrationTests(unittest.TestCase):
             self.appmod._probe_http = original_probe
             self.appmod.fetch_thumbnail = original_thumb
 
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = conn.execute(
+                "SELECT title FROM services WHERE port=2500"
+            ).fetchone()
+            conn.close()
+
+        self.assertEqual(row['title'], 'Path Service')
         self.assertEqual(seen_probe[0], 'http://127.0.0.1:2500/app?view=1')
         self.assertIn((2500, 'http://127.0.0.1:2500/app?view=1'), seen_thumb)
 

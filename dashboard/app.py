@@ -554,6 +554,34 @@ def fetch_thumbnail(port, service_url=None):
     return _screenshot_service(port, base_url)
 
 
+def _refresh_service_preview(port, service_url):
+    warnings = []
+    next_title = None
+    thumb_data = None
+    thumb_mime = None
+
+    try:
+        ok, _, error_class, resp = _probe_http(service_url, timeout=3, allow_remote=True)
+        if ok and resp is not None:
+            extracted = _extract_title(resp, port)
+            if extracted and extracted != f":{port}":
+                next_title = extracted
+            else:
+                warnings.append("title not found at configured path")
+
+            thumb_data, thumb_mime = fetch_thumbnail(port, service_url)
+            if not thumb_data:
+                warnings.append("thumbnail refresh failed")
+        else:
+            warnings.append(f"title refresh failed ({error_class or 'probe_failed'})")
+            warnings.append("thumbnail refresh skipped")
+    except Exception:
+        warnings.append("title refresh failed (exception)")
+        warnings.append("thumbnail refresh skipped")
+
+    return next_title, thumb_data, thumb_mime, ('; '.join(warnings) if warnings else None)
+
+
 def _build_uptime_buckets(checks, now):
     bucket_seconds = max(1, UPTIME_WINDOW_SECONDS // UPTIME_BUCKETS)
     buckets = [-1] * UPTIME_BUCKETS
@@ -794,19 +822,27 @@ def do_uptime_check(only_down=False):
             previous_online = int(row['is_online'] or 0)
             try:
                 service_url = _normalize_service_url(row['url'], port)
-                online, latency_ms, error_class, _ = _probe_http(service_url, timeout=2.0, allow_remote=True)
+                online, latency_ms, error_class, resp = _probe_http(service_url, timeout=2.0, allow_remote=True)
             except ValueError:
                 service_url = _default_service_url(port)
                 online = False
                 latency_ms = None
                 error_class = 'invalid_url'
+                resp = None
             online_int = 1 if online else 0
 
             if online:
-                conn.execute(
-                    "UPDATE services SET is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL WHERE port=?",
-                    (now, latency_ms, port),
-                )
+                title_update = _extract_title(resp, port) if resp is not None else ''
+                if title_update and title_update != f":{port}":
+                    conn.execute(
+                        "UPDATE services SET title=?, is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL WHERE port=?",
+                        (title_update, now, latency_ms, port),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE services SET is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL WHERE port=?",
+                        (now, latency_ms, port),
+                    )
                 if not row['has_thumb']:
                     thumb_candidates.append((port, service_url))
             else:
@@ -1118,6 +1154,7 @@ def api_service_meta(port):
     if unknown:
         return jsonify({"error": f"unknown fields: {', '.join(unknown)}"}), 400
 
+    next_url = None
     with _db_lock:
         conn = get_db()
         svc = conn.execute("SELECT port FROM services WHERE port=?", (port,)).fetchone()
@@ -1166,12 +1203,27 @@ def api_service_meta(port):
             (port, next_display_name, next_url, next_critical, next_pinned_order, next_tags),
         )
         conn.commit()
+        conn.close()
 
+    refreshed_title, refreshed_thumb_data, refreshed_thumb_mime, refresh_warning = _refresh_service_preview(port, next_url)
+
+    with _db_lock:
+        conn = get_db()
+        if refreshed_title:
+            conn.execute("UPDATE services SET title=? WHERE port=?", (refreshed_title, port))
+        if refreshed_thumb_data:
+            conn.execute(
+                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=? WHERE port=?",
+                (refreshed_thumb_data, refreshed_thumb_mime, int(time.time()), port),
+            )
+        conn.commit()
         row = _service_meta_row(conn, port)
         conn.close()
 
     _record_event('meta_updated', port=port, details='service metadata updated')
-    return jsonify(row)
+    payload = dict(row or {})
+    payload['refresh_warning'] = refresh_warning
+    return jsonify(payload)
 
 
 @app.route("/api/thumbnail/<int:port>")

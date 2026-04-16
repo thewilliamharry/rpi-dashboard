@@ -539,13 +539,15 @@ function buildServiceHref(svc) {
   }
 }
 
-function setMetaFormError(message) {
+function setMetaFormMessage(message, kind) {
   const el = document.getElementById('meta-error');
   if (!message) {
     el.hidden = true;
     el.textContent = '';
+    el.classList.remove('meta-warning');
     return;
   }
+  el.classList.toggle('meta-warning', kind === 'warning');
   el.hidden = false;
   el.textContent = message;
 }
@@ -569,7 +571,7 @@ function closeMetaEditor() {
   modal.hidden = true;
   document.body.classList.remove('modal-open');
   _metaModalSvc = null;
-  setMetaFormError('');
+  setMetaFormMessage('');
 }
 
 async function openMetaEditor(svc, evt) {
@@ -583,7 +585,7 @@ async function openMetaEditor(svc, evt) {
   document.getElementById('meta-tags').value = Array.isArray(svc.tags) ? svc.tags.join(', ') : '';
   document.getElementById('meta-url').value = editorBaseUrl(svc);
   document.getElementById('meta-advanced').open = false;
-  setMetaFormError('');
+  setMetaFormMessage('');
   setMetaFormSaving(false);
   document.getElementById('meta-modal').hidden = false;
   document.body.classList.add('modal-open');
@@ -612,7 +614,7 @@ async function submitMetaEditor(evt) {
   }
 
   setMetaFormSaving(true);
-  setMetaFormError('');
+  setMetaFormMessage('');
   try {
     const r = await fetch('/api/service-meta/' + _metaModalSvc.port, {
       method: 'PUT',
@@ -626,17 +628,29 @@ async function submitMetaEditor(evt) {
         const data = await r.json();
         if (data && data.error) msg = data.error;
       } catch (e) {}
-      setMetaFormError(msg);
+      setMetaFormMessage(msg, 'error');
       setMetaFormSaving(false);
       return;
     }
 
+    let data = {};
+    try {
+      data = await r.json();
+    } catch (e) {}
+
     setMetaFormSaving(false);
+    if (data && data.refresh_warning) {
+      setMetaFormMessage('Saved. ' + data.refresh_warning, 'warning');
+      await fetchServices();
+      await fetchEvents();
+      return;
+    }
+
     closeMetaEditor();
     await fetchServices();
     await fetchEvents();
   } catch (e) {
-    setMetaFormError('Metadata update failed');
+    setMetaFormMessage('Metadata update failed', 'error');
     setMetaFormSaving(false);
   }
 }
