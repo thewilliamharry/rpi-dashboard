@@ -631,19 +631,21 @@ def _fetch_image_bytes(img_url, port, allow_remote=False):
 
 
 def fetch_thumbnail(port, service_url=None, allow_remote=False):
-    """Try og:image/icon first, then fallback to screenshot."""
+    """Prefer Playwright screenshot; fallback to og:image/icon extraction."""
     try:
         base_url = _normalize_service_url(service_url, port) if service_url else _default_service_url(port)
     except ValueError:
         base_url = _default_service_url(port)
     final_url = base_url
 
+    screenshot_data, screenshot_mime = _screenshot_service(port, base_url)
+    if screenshot_data:
+        return screenshot_data, screenshot_mime
+
     try:
         ok, error_class, r, final_url = _fetch_html_response(base_url, timeout=3, allow_remote=allow_remote)
         if not ok or r is None:
-            if error_class and error_class not in ('non_html',):
-                return _screenshot_service(port, base_url)
-            return _screenshot_service(port, final_url or base_url)
+            return None, None
 
         soup = BeautifulSoup(r.text, 'html.parser')
 
@@ -692,7 +694,7 @@ def fetch_thumbnail(port, service_url=None, allow_remote=False):
                 return data, mime
     except Exception:
         pass
-    return _screenshot_service(port, final_url or base_url)
+    return None, None
 
 
 def _refresh_service_preview(port, service_url):
