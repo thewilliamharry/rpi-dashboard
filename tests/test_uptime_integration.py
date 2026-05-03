@@ -48,7 +48,7 @@ class UptimeIntegrationTests(unittest.TestCase):
             return False, None, 'connection_error', None
 
         self.appmod._probe_http = fake_probe
-        self.appmod.fetch_thumbnail = lambda _port, _service_url=None, **_kwargs: (None, None)
+        self.appmod.fetch_thumbnail = lambda _port, _service_url=None, **_kwargs: (None, None, None)
 
         self.appmod.do_uptime_check(only_down=False)
         with self.appmod._db_lock:
@@ -102,7 +102,7 @@ class UptimeIntegrationTests(unittest.TestCase):
 
         def fake_thumb(port, service_url=None, **kwargs):
             seen_thumb.append((port, service_url, kwargs.get('allow_remote')))
-            return None, None
+            return None, None, None
 
         self.appmod._probe_http = fake_probe
         self.appmod.fetch_thumbnail = fake_thumb

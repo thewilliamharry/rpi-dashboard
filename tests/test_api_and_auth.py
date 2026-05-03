@@ -165,7 +165,7 @@ class ApiAndAuthTests(unittest.TestCase):
 
         def fake_thumb(port, service_url=None, **kwargs):
             seen_thumb.append((port, service_url, kwargs.get('allow_remote')))
-            return b'png-bytes', 'image/png'
+            return b'png-bytes', 'image/png', 'screenshot'
 
         self.appmod._fetch_html_response = fake_html_fetch
         self.appmod.fetch_thumbnail = fake_thumb
@@ -186,13 +186,14 @@ class ApiAndAuthTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             row = conn.execute(
-                "SELECT title, thumb_data, thumb_mime FROM services WHERE port=8080"
+                "SELECT title, thumb_data, thumb_mime, thumb_source FROM services WHERE port=8080"
             ).fetchone()
             conn.close()
 
         self.assertEqual(row['title'], 'Path Title')
         self.assertIsNotNone(row['thumb_data'])
         self.assertEqual(row['thumb_mime'], 'image/png')
+        self.assertEqual(row['thumb_source'], 'screenshot')
 
     def test_service_meta_refresh_failure_keeps_existing_values_and_warns(self):
         self._insert_service(url='http://127.0.0.1:8080/root')
@@ -241,6 +242,74 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(row['title'], 'Existing Title')
         self.assertEqual(bytes(row['thumb_data']), b'old-bytes')
         self.assertEqual(row['thumb_mime'], 'image/png')
+
+    def test_fetch_thumbnail_marks_playwright_screenshot_source(self):
+        original_screenshot = self.appmod._screenshot_service
+        original_fetch_html = self.appmod._fetch_html_response
+
+        def fake_screenshot(port, target_url=None):
+            self.assertEqual(port, 8080)
+            self.assertEqual(target_url, 'http://127.0.0.1:8080/app?view=1')
+            return b'png-bytes', 'image/png'
+
+        def fake_fetch_html(*_args, **_kwargs):
+            raise AssertionError('fallback should not run after screenshot succeeds')
+
+        self.appmod._screenshot_service = fake_screenshot
+        self.appmod._fetch_html_response = fake_fetch_html
+        try:
+            data, mime, source = self.appmod.fetch_thumbnail(
+                8080,
+                'http://127.0.0.1:8080/app?view=1',
+                allow_remote=True,
+            )
+        finally:
+            self.appmod._screenshot_service = original_screenshot
+            self.appmod._fetch_html_response = original_fetch_html
+
+        self.assertEqual(data, b'png-bytes')
+        self.assertEqual(mime, 'image/png')
+        self.assertEqual(source, 'screenshot')
+
+    def test_fetch_thumbnail_marks_image_fallback_source_after_screenshot_failure(self):
+        original_screenshot = self.appmod._screenshot_service
+        original_fetch_html = self.appmod._fetch_html_response
+        original_fetch_image = self.appmod._fetch_image_bytes
+        seen_images = []
+
+        def fake_screenshot(port, target_url=None):
+            self.assertEqual((port, target_url), (8080, 'http://127.0.0.1:8080/app'))
+            return None, None
+
+        def fake_fetch_html(url, *_args, **_kwargs):
+            return True, None, FakeResponse(
+                text='<html><head><meta property="og:image" content="/preview.png"></head></html>',
+                status_code=200,
+                headers={'Content-Type': 'text/html'},
+            ), url
+
+        def fake_fetch_image(img_url, port, **kwargs):
+            seen_images.append((img_url, port, kwargs.get('allow_remote')))
+            return b'fallback-bytes', 'image/png'
+
+        self.appmod._screenshot_service = fake_screenshot
+        self.appmod._fetch_html_response = fake_fetch_html
+        self.appmod._fetch_image_bytes = fake_fetch_image
+        try:
+            data, mime, source = self.appmod.fetch_thumbnail(
+                8080,
+                'http://127.0.0.1:8080/app',
+                allow_remote=True,
+            )
+        finally:
+            self.appmod._screenshot_service = original_screenshot
+            self.appmod._fetch_html_response = original_fetch_html
+            self.appmod._fetch_image_bytes = original_fetch_image
+
+        self.assertEqual(data, b'fallback-bytes')
+        self.assertEqual(mime, 'image/png')
+        self.assertEqual(source, 'fallback')
+        self.assertEqual(seen_images, [('http://127.0.0.1:8080/preview.png', 8080, True)])
 
 
 if __name__ == '__main__':

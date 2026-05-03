@@ -86,6 +86,7 @@ def init_db():
                 thumb_data       BLOB,
                 thumb_mime       TEXT DEFAULT 'image/jpeg',
                 thumb_ts         INTEGER,
+                thumb_source     TEXT,
                 last_latency_ms  REAL,
                 last_error       TEXT
             );
@@ -136,6 +137,8 @@ def init_db():
             conn.execute("ALTER TABLE services ADD COLUMN thumb_mime TEXT DEFAULT 'image/jpeg'")
         if 'thumb_ts' not in svc_cols:
             conn.execute("ALTER TABLE services ADD COLUMN thumb_ts INTEGER")
+        if 'thumb_source' not in svc_cols:
+            conn.execute("ALTER TABLE services ADD COLUMN thumb_source TEXT")
         if 'last_latency_ms' not in svc_cols:
             conn.execute("ALTER TABLE services ADD COLUMN last_latency_ms REAL")
         if 'last_error' not in svc_cols:
@@ -556,9 +559,7 @@ def _handle_state_transition(*, port, previous_online, online, title, display_na
 
 def _screenshot_service(port, target_url=None):
     """Capture a service screenshot using Chromium. Returns (bytes, mime) or (None, None)."""
-    if not _screenshot_sem.acquire(blocking=False):
-        log.info("Screenshot for port %d deferred: another screenshot in progress", port)
-        return None, None
+    _screenshot_sem.acquire()
     try:
         navigate_url = _normalize_service_url(target_url, port) if target_url else _default_service_url(port)
     except ValueError:
@@ -640,7 +641,7 @@ def fetch_thumbnail(port, service_url=None, allow_remote=False):
 
     screenshot_data, screenshot_mime = _screenshot_service(port, base_url)
     if screenshot_data:
-        return screenshot_data, screenshot_mime
+        return screenshot_data, screenshot_mime, 'screenshot'
 
     try:
         ok, error_class, r, final_url = _fetch_html_response(base_url, timeout=3, allow_remote=allow_remote)
@@ -657,7 +658,7 @@ def fetch_thumbnail(port, service_url=None, allow_remote=False):
             img_url = urljoin(final_url or base_url, og['content'])
             data, mime = _fetch_image_bytes(img_url, port, allow_remote=allow_remote)
             if data:
-                return data, mime
+                return data, mime, 'fallback'
             if not allow_remote and not _is_localhost_url(img_url):
                 log.warning("Skipping non-localhost og:image for port %d: %s", port, img_url)
 
@@ -675,7 +676,7 @@ def fetch_thumbnail(port, service_url=None, allow_remote=False):
             icon_url = urljoin(final_url or base_url, icon.get('href'))
             data, mime = _fetch_image_bytes(icon_url, port, allow_remote=allow_remote)
             if data:
-                return data, mime
+                return data, mime, 'fallback'
 
         parsed_final = urlparse(final_url or base_url)
         origin = f"{parsed_final.scheme}://{parsed_final.netloc}"
@@ -691,10 +692,10 @@ def fetch_thumbnail(port, service_url=None, allow_remote=False):
             seen.add(candidate)
             data, mime = _fetch_image_bytes(candidate, port, allow_remote=allow_remote)
             if data:
-                return data, mime
+                return data, mime, 'fallback'
     except Exception:
         pass
-    return None, None
+    return None, None, None
 
 
 def _refresh_service_preview(port, service_url):
@@ -702,6 +703,7 @@ def _refresh_service_preview(port, service_url):
     next_title = None
     thumb_data = None
     thumb_mime = None
+    thumb_source = None
 
     try:
         ok, error_class, resp, final_url = _fetch_html_response(service_url, timeout=3, allow_remote=True)
@@ -716,7 +718,7 @@ def _refresh_service_preview(port, service_url):
                 else:
                     warnings.append("title not found at configured path")
 
-            thumb_data, thumb_mime = fetch_thumbnail(port, final_url or service_url, allow_remote=True)
+            thumb_data, thumb_mime, thumb_source = fetch_thumbnail(port, final_url or service_url, allow_remote=True)
             if not thumb_data:
                 warnings.append("thumbnail refresh failed")
         else:
@@ -726,7 +728,7 @@ def _refresh_service_preview(port, service_url):
         warnings.append("title refresh failed (exception)")
         warnings.append("thumbnail refresh skipped")
 
-    return next_title, thumb_data, thumb_mime, ('; '.join(warnings) if warnings else None)
+    return next_title, thumb_data, thumb_mime, thumb_source, ('; '.join(warnings) if warnings else None)
 
 
 def _build_uptime_buckets(checks, now):
@@ -834,7 +836,8 @@ def do_discovery(source='scheduled'):
         with _db_lock:
             conn = get_db()
             existing_rows = conn.execute(
-                "SELECT s.port, s.title, s.is_online, s.thumb_ts, (s.thumb_data IS NOT NULL) AS has_thumb, "
+                "SELECT s.port, s.title, s.is_online, s.thumb_ts, s.thumb_source, "
+                "(s.thumb_data IS NOT NULL) AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
                 "COALESCE(m.critical, 0) AS critical "
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port"
@@ -904,15 +907,16 @@ def do_discovery(source='scheduled'):
         for port in discovered_ports:
             ex = existing.get(port, {})
             thumb_ts = ex.get('thumb_ts') or 0
-            if ex.get('has_thumb') and thumb_ts >= refresh_cutoff:
+            thumb_source = ex.get('thumb_source')
+            if ex.get('has_thumb') and thumb_ts >= refresh_cutoff and thumb_source is not None:
                 continue
-            thumb_data, thumb_mime = fetch_thumbnail(port, discovered[port].get('url'))
+            thumb_data, thumb_mime, thumb_source = fetch_thumbnail(port, discovered[port].get('url'))
             if thumb_data:
                 with _db_lock:
                     conn = get_db()
                     conn.execute(
-                        "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=? WHERE port=?",
-                        (thumb_data, thumb_mime, int(time.time()), port),
+                        "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=? WHERE port=?",
+                        (thumb_data, thumb_mime, int(time.time()), thumb_source, port),
                     )
                     conn.commit()
                     conn.close()
@@ -1020,13 +1024,13 @@ def do_uptime_check(only_down=False):
         conn.close()
 
     for port, service_url in thumb_candidates:
-        thumb_data, thumb_mime = fetch_thumbnail(port, service_url, allow_remote=True)
+        thumb_data, thumb_mime, thumb_source = fetch_thumbnail(port, service_url, allow_remote=True)
         if thumb_data:
             with _db_lock:
                 conn = get_db()
                 conn.execute(
-                    "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=? WHERE port=?",
-                    (thumb_data, thumb_mime, now, port),
+                    "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=? WHERE port=?",
+                    (thumb_data, thumb_mime, now, thumb_source, port),
                 )
                 conn.commit()
                 conn.close()
@@ -1352,7 +1356,7 @@ def api_service_meta(port):
         conn.commit()
         conn.close()
 
-    refreshed_title, refreshed_thumb_data, refreshed_thumb_mime, refresh_warning = _refresh_service_preview(port, next_url)
+    refreshed_title, refreshed_thumb_data, refreshed_thumb_mime, refreshed_thumb_source, refresh_warning = _refresh_service_preview(port, next_url)
 
     with _db_lock:
         conn = get_db()
@@ -1360,8 +1364,8 @@ def api_service_meta(port):
             conn.execute("UPDATE services SET title=? WHERE port=?", (refreshed_title, port))
         if refreshed_thumb_data:
             conn.execute(
-                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=? WHERE port=?",
-                (refreshed_thumb_data, refreshed_thumb_mime, int(time.time()), port),
+                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=? WHERE port=?",
+                (refreshed_thumb_data, refreshed_thumb_mime, int(time.time()), refreshed_thumb_source, port),
             )
         conn.commit()
         row = _service_meta_row(conn, port)
