@@ -87,6 +87,8 @@ def init_db():
                 thumb_mime       TEXT DEFAULT 'image/jpeg',
                 thumb_ts         INTEGER,
                 thumb_source     TEXT,
+                thumb_attempt_ts INTEGER,
+                thumb_error      TEXT,
                 last_latency_ms  REAL,
                 last_error       TEXT
             );
@@ -139,10 +141,19 @@ def init_db():
             conn.execute("ALTER TABLE services ADD COLUMN thumb_ts INTEGER")
         if 'thumb_source' not in svc_cols:
             conn.execute("ALTER TABLE services ADD COLUMN thumb_source TEXT")
+        if 'thumb_attempt_ts' not in svc_cols:
+            conn.execute("ALTER TABLE services ADD COLUMN thumb_attempt_ts INTEGER")
+        if 'thumb_error' not in svc_cols:
+            conn.execute("ALTER TABLE services ADD COLUMN thumb_error TEXT")
         if 'last_latency_ms' not in svc_cols:
             conn.execute("ALTER TABLE services ADD COLUMN last_latency_ms REAL")
         if 'last_error' not in svc_cols:
             conn.execute("ALTER TABLE services ADD COLUMN last_error TEXT")
+
+        conn.execute(
+            "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL "
+            "WHERE thumb_source='fallback'"
+        )
 
         checks_cols = _table_columns(conn, "service_checks")
         if 'latency_ms' not in checks_cols:
@@ -557,8 +568,13 @@ def _handle_state_transition(*, port, previous_online, online, title, display_na
     )
 
 
+def _thumb_error(exc):
+    text = str(exc).strip() or exc.__class__.__name__
+    return f"{exc.__class__.__name__}: {text}"[:240]
+
+
 def _screenshot_service(port, target_url=None):
-    """Capture a service screenshot using Chromium. Returns (bytes, mime) or (None, None)."""
+    """Capture a service screenshot using Chromium. Returns (bytes, mime, error)."""
     _screenshot_sem.acquire()
     try:
         navigate_url = _normalize_service_url(target_url, port) if target_url else _default_service_url(port)
@@ -572,21 +588,24 @@ def _screenshot_service(port, target_url=None):
             browser = p.chromium.launch(args=['--no-sandbox', '--disable-dev-shm-usage'])
             try:
                 page = browser.new_page(viewport={'width': 1280, 'height': 800})
-                page.goto(navigate_url, timeout=15_000, wait_until='load')
+                page.goto(navigate_url, timeout=15_000, wait_until='domcontentloaded')
                 page.wait_for_timeout(1500)
                 data = page.screenshot(type='png')
                 if len(data) <= THUMB_MAX_BYTES:
-                    return data, 'image/png'
+                    return data, 'image/png', None
                 log.warning("Screenshot for port %d too large (%d bytes)", port, len(data))
+                return None, None, f"screenshot too large ({len(data)} bytes)"
             except PWTimeout:
                 log.warning("Screenshot timed out for port %d", port)
+                return None, None, "screenshot timeout"
             finally:
                 browser.close()
     except Exception as exc:
         log.warning("Screenshot failed for port %d: %s", port, exc)
+        return None, None, _thumb_error(exc)
     finally:
         _screenshot_sem.release()
-    return None, None
+    return None, None, "screenshot failed"
 
 
 def _fetch_image_bytes(img_url, port, allow_remote=False):
@@ -632,70 +651,33 @@ def _fetch_image_bytes(img_url, port, allow_remote=False):
 
 
 def fetch_thumbnail(port, service_url=None, allow_remote=False):
-    """Prefer Playwright screenshot; fallback to og:image/icon extraction."""
+    """Capture a page thumbnail with Playwright. Returns (bytes, mime, source, error)."""
+    _ = allow_remote
     try:
         base_url = _normalize_service_url(service_url, port) if service_url else _default_service_url(port)
     except ValueError:
         base_url = _default_service_url(port)
-    final_url = base_url
 
-    screenshot_data, screenshot_mime = _screenshot_service(port, base_url)
+    screenshot_data, screenshot_mime, screenshot_error = _screenshot_service(port, base_url)
     if screenshot_data:
-        return screenshot_data, screenshot_mime, 'screenshot'
+        return screenshot_data, screenshot_mime, 'screenshot', None
+    return None, None, None, screenshot_error or "screenshot failed"
 
-    try:
-        ok, error_class, r, final_url = _fetch_html_response(base_url, timeout=3, allow_remote=allow_remote)
-        if not ok or r is None:
-            return None, None
 
-        soup = BeautifulSoup(r.text, 'html.parser')
-
-        og = (
-            soup.find('meta', property='og:image') or
-            soup.find('meta', attrs={'name': 'og:image'})
+def _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None):
+    ts = ts or int(time.time())
+    if thumb_data and thumb_source == 'screenshot':
+        conn.execute(
+            "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=?, "
+            "thumb_attempt_ts=?, thumb_error=NULL WHERE port=?",
+            (thumb_data, thumb_mime, ts, thumb_source, ts, port),
         )
-        if og and og.get('content'):
-            img_url = urljoin(final_url or base_url, og['content'])
-            data, mime = _fetch_image_bytes(img_url, port, allow_remote=allow_remote)
-            if data:
-                return data, mime, 'fallback'
-            if not allow_remote and not _is_localhost_url(img_url):
-                log.warning("Skipping non-localhost og:image for port %d: %s", port, img_url)
-
-        icon = soup.find(
-            'link',
-            attrs={
-                'rel': lambda rel: (
-                    isinstance(rel, str) and 'icon' in rel.lower()
-                ) or (
-                    isinstance(rel, list) and any('icon' in str(part).lower() for part in rel)
-                )
-            },
+    else:
+        conn.execute(
+            "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL, "
+            "thumb_attempt_ts=?, thumb_error=? WHERE port=?",
+            (ts, (thumb_error or 'screenshot failed')[:240], port),
         )
-        if icon and icon.get('href'):
-            icon_url = urljoin(final_url or base_url, icon.get('href'))
-            data, mime = _fetch_image_bytes(icon_url, port, allow_remote=allow_remote)
-            if data:
-                return data, mime, 'fallback'
-
-        parsed_final = urlparse(final_url or base_url)
-        origin = f"{parsed_final.scheme}://{parsed_final.netloc}"
-        fallback_icons = [
-            urljoin(final_url or base_url, 'favicon.ico'),
-            urljoin(origin + '/', 'favicon.ico'),
-            urljoin(origin + '/', 'apple-touch-icon.png'),
-        ]
-        seen = set()
-        for candidate in fallback_icons:
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-            data, mime = _fetch_image_bytes(candidate, port, allow_remote=allow_remote)
-            if data:
-                return data, mime, 'fallback'
-    except Exception:
-        pass
-    return None, None, None
 
 
 def _refresh_service_preview(port, service_url):
@@ -704,6 +686,7 @@ def _refresh_service_preview(port, service_url):
     thumb_data = None
     thumb_mime = None
     thumb_source = None
+    thumb_error = None
 
     try:
         ok, error_class, resp, final_url = _fetch_html_response(service_url, timeout=3, allow_remote=True)
@@ -718,7 +701,7 @@ def _refresh_service_preview(port, service_url):
                 else:
                     warnings.append("title not found at configured path")
 
-            thumb_data, thumb_mime, thumb_source = fetch_thumbnail(port, final_url or service_url, allow_remote=True)
+            thumb_data, thumb_mime, thumb_source, thumb_error = fetch_thumbnail(port, final_url or service_url, allow_remote=True)
             if not thumb_data:
                 warnings.append("thumbnail refresh failed")
         else:
@@ -728,7 +711,7 @@ def _refresh_service_preview(port, service_url):
         warnings.append("title refresh failed (exception)")
         warnings.append("thumbnail refresh skipped")
 
-    return next_title, thumb_data, thumb_mime, thumb_source, ('; '.join(warnings) if warnings else None)
+    return next_title, thumb_data, thumb_mime, thumb_source, thumb_error, ('; '.join(warnings) if warnings else None)
 
 
 def _build_uptime_buckets(checks, now):
@@ -908,18 +891,14 @@ def do_discovery(source='scheduled'):
             ex = existing.get(port, {})
             thumb_ts = ex.get('thumb_ts') or 0
             thumb_source = ex.get('thumb_source')
-            if ex.get('has_thumb') and thumb_ts >= refresh_cutoff and thumb_source is not None:
+            if ex.get('has_thumb') and thumb_ts >= refresh_cutoff and thumb_source == 'screenshot':
                 continue
-            thumb_data, thumb_mime, thumb_source = fetch_thumbnail(port, discovered[port].get('url'))
-            if thumb_data:
-                with _db_lock:
-                    conn = get_db()
-                    conn.execute(
-                        "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=? WHERE port=?",
-                        (thumb_data, thumb_mime, int(time.time()), thumb_source, port),
-                    )
-                    conn.commit()
-                    conn.close()
+            thumb_data, thumb_mime, thumb_source, thumb_error = fetch_thumbnail(port, discovered[port].get('url'))
+            with _db_lock:
+                conn = get_db()
+                _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error)
+                conn.commit()
+                conn.close()
 
         for t in transitions:
             _handle_state_transition(**t)
@@ -951,7 +930,8 @@ def do_uptime_check(only_down=False):
         conn = get_db()
         if only_down:
             rows = conn.execute(
-                "SELECT s.port, s.title, s.is_online, (s.thumb_data IS NOT NULL) AS has_thumb, "
+                "SELECT s.port, s.title, s.is_online, "
+                "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
                 "COALESCE(m.critical, 0) AS critical "
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
@@ -960,7 +940,8 @@ def do_uptime_check(only_down=False):
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT s.port, s.title, s.is_online, (s.thumb_data IS NOT NULL) AS has_thumb, "
+                "SELECT s.port, s.title, s.is_online, "
+                "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
                 "COALESCE(m.critical, 0) AS critical "
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
@@ -1024,16 +1005,12 @@ def do_uptime_check(only_down=False):
         conn.close()
 
     for port, service_url in thumb_candidates:
-        thumb_data, thumb_mime, thumb_source = fetch_thumbnail(port, service_url, allow_remote=True)
-        if thumb_data:
-            with _db_lock:
-                conn = get_db()
-                conn.execute(
-                    "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=? WHERE port=?",
-                    (thumb_data, thumb_mime, now, thumb_source, port),
-                )
-                conn.commit()
-                conn.close()
+        thumb_data, thumb_mime, thumb_source, thumb_error = fetch_thumbnail(port, service_url, allow_remote=True)
+        with _db_lock:
+            conn = get_db()
+            _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=now)
+            conn.commit()
+            conn.close()
 
     for t in transitions:
         _handle_state_transition(**t)
@@ -1192,7 +1169,8 @@ def api_services():
         conn = get_db()
         services = conn.execute(
             "SELECT s.port, s.title, s.first_seen, s.last_seen, s.is_online, "
-            "(s.thumb_data IS NOT NULL) AS has_thumb, s.last_latency_ms, s.last_error, "
+            "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
+            "s.last_latency_ms, s.last_error, "
             "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
             "COALESCE(m.critical, 0) AS critical, COALESCE(m.pinned_order, s.port) AS pinned_order, "
             "COALESCE(m.tags, '') AS tags "
@@ -1356,16 +1334,20 @@ def api_service_meta(port):
         conn.commit()
         conn.close()
 
-    refreshed_title, refreshed_thumb_data, refreshed_thumb_mime, refreshed_thumb_source, refresh_warning = _refresh_service_preview(port, next_url)
+    refreshed_title, refreshed_thumb_data, refreshed_thumb_mime, refreshed_thumb_source, refreshed_thumb_error, refresh_warning = _refresh_service_preview(port, next_url)
 
     with _db_lock:
         conn = get_db()
         if refreshed_title:
             conn.execute("UPDATE services SET title=? WHERE port=?", (refreshed_title, port))
-        if refreshed_thumb_data:
-            conn.execute(
-                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=? WHERE port=?",
-                (refreshed_thumb_data, refreshed_thumb_mime, int(time.time()), refreshed_thumb_source, port),
+        if refreshed_thumb_data or refreshed_thumb_error:
+            _store_thumbnail_result(
+                conn,
+                port,
+                refreshed_thumb_data,
+                refreshed_thumb_mime,
+                refreshed_thumb_source,
+                refreshed_thumb_error,
             )
         conn.commit()
         row = _service_meta_row(conn, port)
@@ -1382,7 +1364,7 @@ def api_thumbnail(port):
     with _db_lock:
         conn = get_db()
         row = conn.execute(
-            "SELECT thumb_data, thumb_mime FROM services WHERE port=?",
+            "SELECT thumb_data, thumb_mime FROM services WHERE port=? AND thumb_source='screenshot'",
             (port,),
         ).fetchone()
         conn.close()
@@ -1394,6 +1376,36 @@ def api_thumbnail(port):
         return resp
 
     return '', 404
+
+
+@app.route("/api/thumbnail-status")
+def api_thumbnail_status():
+    with _db_lock:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT s.port, s.thumb_source, s.thumb_ts, s.thumb_attempt_ts, s.thumb_error, "
+            "COALESCE(m.url, '') AS url "
+            "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
+            "ORDER BY s.port ASC"
+        ).fetchall()
+        conn.close()
+
+    result = []
+    for row in rows:
+        port = int(row['port'])
+        try:
+            effective_url = _normalize_service_url(row['url'], port)
+        except ValueError:
+            effective_url = _default_service_url(port)
+        result.append({
+            "port": port,
+            "url": effective_url,
+            "thumb_source": row['thumb_source'],
+            "thumb_ts": row['thumb_ts'],
+            "thumb_attempt_ts": row['thumb_attempt_ts'],
+            "thumb_error": row['thumb_error'],
+        })
+    return jsonify(result)
 
 
 @app.route("/api/scan-status")

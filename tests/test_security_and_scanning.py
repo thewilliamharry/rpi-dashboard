@@ -128,7 +128,13 @@ class SecurityAndScanningTests(unittest.TestCase):
 
         self.appmod.range = lambda a, b, c: [3000]
         self.appmod.time.sleep = lambda _secs: None
-        self.appmod.socket.create_connection = lambda *_args, **_kwargs: DummySock()
+
+        def fake_create_connection(address, *_args, **_kwargs):
+            if address[1] != 3000:
+                raise OSError('closed')
+            return DummySock()
+
+        self.appmod.socket.create_connection = fake_create_connection
 
         def fake_probe(url, *_args, **_kwargs):
             captured_probe_urls.append(url)
@@ -136,7 +142,7 @@ class SecurityAndScanningTests(unittest.TestCase):
 
         def fake_thumbnail(port, service_url=None):
             captured_thumb.append((port, service_url))
-            return None, None, None
+            return None, None, None, 'screenshot failed'
 
         self.appmod._probe_http = fake_probe
         self.appmod.fetch_thumbnail = fake_thumbnail
@@ -197,7 +203,7 @@ class SecurityAndScanningTests(unittest.TestCase):
 
         def fake_thumbnail(port, service_url=None):
             captured_thumb.append((port, service_url))
-            return b'new-bytes', 'image/png', 'screenshot'
+            return b'new-bytes', 'image/png', 'screenshot', None
 
         self.appmod.fetch_thumbnail = fake_thumbnail
         self.appmod._scanning = True
@@ -263,7 +269,7 @@ class SecurityAndScanningTests(unittest.TestCase):
 
         self.appmod.socket.create_connection = fake_create_connection
         self.appmod._probe_http = lambda *_args, **_kwargs: (True, 8.2, None, FakeResponse(200, {'Content-Type': 'text/html'}))
-        self.appmod.fetch_thumbnail = lambda *args, **kwargs: captured_thumb.append((args, kwargs)) or (b'unexpected', 'image/png', 'screenshot')
+        self.appmod.fetch_thumbnail = lambda *args, **kwargs: captured_thumb.append((args, kwargs)) or (b'unexpected', 'image/png', 'screenshot', None)
         self.appmod._scanning = True
 
         try:

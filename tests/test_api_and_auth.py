@@ -102,6 +102,44 @@ class ApiAndAuthTests(unittest.TestCase):
         for key in ['event_type', 'ts', 'service_name', 'details']:
             self.assertIn(key, evt)
 
+    def test_only_screenshot_thumbnails_are_served_and_reported(self):
+        now = int(time.time())
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = [
+                (8080, 'Fallback Thumb', b'fallback-bytes', 'image/png', now, 'fallback', now, 'old fallback'),
+                (8081, 'Legacy Thumb', b'legacy-bytes', 'image/png', now, None, now, None),
+                (8082, 'Screenshot Thumb', b'screenshot-bytes', 'image/png', now, 'screenshot', now, None),
+            ]
+            for port, title, data, mime, thumb_ts, source, attempt_ts, error in rows:
+                conn.execute(
+                    "INSERT INTO services (port, title, first_seen, last_seen, is_online, thumb_data, thumb_mime, thumb_ts, thumb_source, thumb_attempt_ts, thumb_error) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (port, title, now - 120, now, 1, data, mime, thumb_ts, source, attempt_ts, error),
+                )
+                conn.execute(
+                    "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags) VALUES (?,?,?,?,?,?)",
+                    (port, title, f'http://127.0.0.1:{port}', 0, port, ''),
+                )
+            conn.commit()
+            conn.close()
+
+        services = {svc['port']: svc for svc in self.client.get('/api/services').get_json()}
+        self.assertFalse(services[8080]['has_thumb'])
+        self.assertFalse(services[8081]['has_thumb'])
+        self.assertTrue(services[8082]['has_thumb'])
+
+        self.assertEqual(self.client.get('/api/thumbnail/8080').status_code, 404)
+        self.assertEqual(self.client.get('/api/thumbnail/8081').status_code, 404)
+        screenshot = self.client.get('/api/thumbnail/8082')
+        self.assertEqual(screenshot.status_code, 200)
+        self.assertEqual(screenshot.data, b'screenshot-bytes')
+
+        status = {row['port']: row for row in self.client.get('/api/thumbnail-status').get_json()}
+        self.assertEqual(status[8080]['thumb_source'], 'fallback')
+        self.assertEqual(status[8080]['thumb_error'], 'old fallback')
+        self.assertEqual(status[8082]['thumb_source'], 'screenshot')
+
     def test_service_meta_path_normalization_variants(self):
         self._insert_service()
         cases = [
@@ -165,7 +203,7 @@ class ApiAndAuthTests(unittest.TestCase):
 
         def fake_thumb(port, service_url=None, **kwargs):
             seen_thumb.append((port, service_url, kwargs.get('allow_remote')))
-            return b'png-bytes', 'image/png', 'screenshot'
+            return b'png-bytes', 'image/png', 'screenshot', None
 
         self.appmod._fetch_html_response = fake_html_fetch
         self.appmod.fetch_thumbnail = fake_thumb
@@ -194,6 +232,31 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertIsNotNone(row['thumb_data'])
         self.assertEqual(row['thumb_mime'], 'image/png')
         self.assertEqual(row['thumb_source'], 'screenshot')
+
+    def test_thumbnail_result_records_error_and_clears_it_on_success(self):
+        self._insert_service()
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            self.appmod._store_thumbnail_result(conn, 8080, None, None, None, 'browser missing', ts=111)
+            failed = conn.execute(
+                "SELECT thumb_data, thumb_source, thumb_attempt_ts, thumb_error FROM services WHERE port=8080"
+            ).fetchone()
+            self.appmod._store_thumbnail_result(conn, 8080, b'png-bytes', 'image/png', 'screenshot', None, ts=222)
+            succeeded = conn.execute(
+                "SELECT thumb_data, thumb_mime, thumb_source, thumb_ts, thumb_attempt_ts, thumb_error FROM services WHERE port=8080"
+            ).fetchone()
+            conn.close()
+
+        self.assertIsNone(failed['thumb_data'])
+        self.assertIsNone(failed['thumb_source'])
+        self.assertEqual(failed['thumb_attempt_ts'], 111)
+        self.assertEqual(failed['thumb_error'], 'browser missing')
+        self.assertEqual(bytes(succeeded['thumb_data']), b'png-bytes')
+        self.assertEqual(succeeded['thumb_mime'], 'image/png')
+        self.assertEqual(succeeded['thumb_source'], 'screenshot')
+        self.assertEqual(succeeded['thumb_ts'], 222)
+        self.assertEqual(succeeded['thumb_attempt_ts'], 222)
+        self.assertIsNone(succeeded['thumb_error'])
 
     def test_service_meta_refresh_failure_keeps_existing_values_and_warns(self):
         self._insert_service(url='http://127.0.0.1:8080/root')
@@ -250,7 +313,7 @@ class ApiAndAuthTests(unittest.TestCase):
         def fake_screenshot(port, target_url=None):
             self.assertEqual(port, 8080)
             self.assertEqual(target_url, 'http://127.0.0.1:8080/app?view=1')
-            return b'png-bytes', 'image/png'
+            return b'png-bytes', 'image/png', None
 
         def fake_fetch_html(*_args, **_kwargs):
             raise AssertionError('fallback should not run after screenshot succeeds')
@@ -258,7 +321,7 @@ class ApiAndAuthTests(unittest.TestCase):
         self.appmod._screenshot_service = fake_screenshot
         self.appmod._fetch_html_response = fake_fetch_html
         try:
-            data, mime, source = self.appmod.fetch_thumbnail(
+            data, mime, source, error = self.appmod.fetch_thumbnail(
                 8080,
                 'http://127.0.0.1:8080/app?view=1',
                 allow_remote=True,
@@ -270,8 +333,9 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(data, b'png-bytes')
         self.assertEqual(mime, 'image/png')
         self.assertEqual(source, 'screenshot')
+        self.assertIsNone(error)
 
-    def test_fetch_thumbnail_marks_image_fallback_source_after_screenshot_failure(self):
+    def test_fetch_thumbnail_does_not_use_image_fallback_after_screenshot_failure(self):
         original_screenshot = self.appmod._screenshot_service
         original_fetch_html = self.appmod._fetch_html_response
         original_fetch_image = self.appmod._fetch_image_bytes
@@ -279,7 +343,7 @@ class ApiAndAuthTests(unittest.TestCase):
 
         def fake_screenshot(port, target_url=None):
             self.assertEqual((port, target_url), (8080, 'http://127.0.0.1:8080/app'))
-            return None, None
+            return None, None, 'browser failed'
 
         def fake_fetch_html(url, *_args, **_kwargs):
             return True, None, FakeResponse(
@@ -296,7 +360,7 @@ class ApiAndAuthTests(unittest.TestCase):
         self.appmod._fetch_html_response = fake_fetch_html
         self.appmod._fetch_image_bytes = fake_fetch_image
         try:
-            data, mime, source = self.appmod.fetch_thumbnail(
+            data, mime, source, error = self.appmod.fetch_thumbnail(
                 8080,
                 'http://127.0.0.1:8080/app',
                 allow_remote=True,
@@ -306,10 +370,11 @@ class ApiAndAuthTests(unittest.TestCase):
             self.appmod._fetch_html_response = original_fetch_html
             self.appmod._fetch_image_bytes = original_fetch_image
 
-        self.assertEqual(data, b'fallback-bytes')
-        self.assertEqual(mime, 'image/png')
-        self.assertEqual(source, 'fallback')
-        self.assertEqual(seen_images, [('http://127.0.0.1:8080/preview.png', 8080, True)])
+        self.assertIsNone(data)
+        self.assertIsNone(mime)
+        self.assertIsNone(source)
+        self.assertEqual(error, 'browser failed')
+        self.assertEqual(seen_images, [])
 
 
 if __name__ == '__main__':

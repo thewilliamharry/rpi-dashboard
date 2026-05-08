@@ -13,7 +13,7 @@ A self-hosted monitoring dashboard for Raspberry Pi. Runs as a single Docker con
 - **Transition events + webhook alerts** — records down/recovery events and can post alert payloads to a webhook with cooldowns
 - **Service metadata** — editable display name, path/URL override, critical flag, pin order, and tags per service
 - **Manual scan trigger** — `/api/trigger-scan` is rate limited
-- **Live thumbnails** — headless Chromium screenshots of each service homepage, refreshed daily; falls back to localhost `og:image` when available
+- **Live thumbnails** — headless Chromium screenshots of each service page, refreshed daily; failed captures show no preview and retry later
 - **Status favicon** — browser tab icon is a live color-coded bulb (green / amber / red) reflecting service state and CPU load
 - **Dark / light theme** — two distinct visual styles with a smooth radial-wipe transition
 
@@ -49,6 +49,7 @@ Open `http://<your-pi-ip>` in a browser. The first port scan runs automatically 
 │                  /api/config                 │
 │                  /api/service-meta/<port>    │
 │                  /api/thumbnail/<port>       │
+│                  /api/thumbnail-status       │
 │                  /api/scan-status            │
 │                  /api/trigger-scan           │
 │                                              │
@@ -80,7 +81,7 @@ Services that have been offline for longer than `EXPIRE_DAYS` are removed automa
 
 ### Thumbnails
 
-Screenshots are taken with Playwright (headless Chromium) and stored as PNG blobs in SQLite. They are refreshed once per day. If a service has a localhost-hosted `og:image` meta tag, that image is used instead of a screenshot.
+Screenshots are taken with Playwright (headless Chromium) and stored as PNG blobs in SQLite. They are refreshed once per day from the service's configured URL/path. `og:image` and favicon images are not used as thumbnail fallbacks; if Chromium cannot capture the page, the card shows no preview and `/api/thumbnail-status` exposes the last screenshot error.
 
 ### Status favicon
 
