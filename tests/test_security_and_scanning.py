@@ -39,7 +39,7 @@ class SecurityAndScanningTests(unittest.TestCase):
         self.assertIsNotNone(latency)
         self.assertEqual(error_class, 'redirect_offhost')
 
-    def test_probe_allows_redirect_response_when_remote_allowed(self):
+    def test_probe_rejects_offhost_redirect_even_with_legacy_flag(self):
         original_get = self.appmod.requests.get
 
         def fake_get(url, timeout, verify, allow_redirects):
@@ -56,8 +56,8 @@ class SecurityAndScanningTests(unittest.TestCase):
         finally:
             self.appmod.requests.get = original_get
 
-        self.assertTrue(ok)
-        self.assertIsNone(error_class)
+        self.assertFalse(ok)
+        self.assertEqual(error_class, 'redirect_offhost')
         self.assertEqual(resp.status_code, 302)
 
     def test_discovery_finally_clears_scanning_state_after_error(self):
@@ -83,7 +83,6 @@ class SecurityAndScanningTests(unittest.TestCase):
         self.appmod._probe_http = lambda *_args, **_kwargs: (True, 12.0, None, FakeResponse(200, {'Content-Type': 'text/html'}))
         self.appmod.fetch_thumbnail = lambda _port, _service_url=None, **_kwargs: (_ for _ in ()).throw(RuntimeError('thumb-failure'))
 
-        self.appmod._scanning = True
         try:
             self.appmod.do_discovery(source='manual')
         finally:
@@ -96,9 +95,9 @@ class SecurityAndScanningTests(unittest.TestCase):
             self.appmod._probe_http = original_probe
             self.appmod.fetch_thumbnail = original_thumb
 
-        self.assertFalse(self.appmod._scanning)
+        self.assertFalse(self.appmod._read_scan_state()['scanning'])
 
-    def test_discovery_uses_existing_service_path_for_probe_and_thumbnail(self):
+    def test_discovery_uses_existing_path_and_queues_preview(self):
         now = int(time.time())
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
@@ -146,8 +145,6 @@ class SecurityAndScanningTests(unittest.TestCase):
 
         self.appmod._probe_http = fake_probe
         self.appmod.fetch_thumbnail = fake_thumbnail
-        self.appmod._scanning = True
-
         try:
             self.appmod.do_discovery(source='manual')
         finally:
@@ -161,9 +158,14 @@ class SecurityAndScanningTests(unittest.TestCase):
             self.appmod.fetch_thumbnail = original_thumb
 
         self.assertIn('http://127.0.0.1:3000/app', captured_probe_urls)
-        self.assertIn((3000, 'http://127.0.0.1:3000/app'), captured_thumb)
+        self.assertEqual(captured_thumb, [])
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            preview = conn.execute("SELECT status FROM preview_requests WHERE port=3000").fetchone()
+            conn.close()
+        self.assertEqual(preview['status'], 'queued')
 
-    def test_discovery_refreshes_legacy_thumbnail_without_source(self):
+    def test_discovery_queues_legacy_thumbnail_without_source(self):
         now = int(time.time())
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
@@ -206,8 +208,6 @@ class SecurityAndScanningTests(unittest.TestCase):
             return b'new-bytes', 'image/png', 'screenshot', None
 
         self.appmod.fetch_thumbnail = fake_thumbnail
-        self.appmod._scanning = True
-
         try:
             self.appmod.do_discovery(source='manual')
         finally:
@@ -227,10 +227,14 @@ class SecurityAndScanningTests(unittest.TestCase):
             ).fetchone()
             conn.close()
 
-        self.assertIn((3000, 'http://127.0.0.1:3000/app'), captured_thumb)
-        self.assertEqual(bytes(row['thumb_data']), b'new-bytes')
-        self.assertEqual(row['thumb_mime'], 'image/png')
-        self.assertEqual(row['thumb_source'], 'screenshot')
+        self.assertEqual(captured_thumb, [])
+        self.assertEqual(bytes(row['thumb_data']), b'old-bytes')
+        self.assertIsNone(row['thumb_source'])
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            preview = conn.execute("SELECT status FROM preview_requests WHERE port=3000").fetchone()
+            conn.close()
+        self.assertEqual(preview['status'], 'queued')
 
     def test_discovery_skips_recent_screenshot_thumbnail(self):
         now = int(time.time())
@@ -270,8 +274,6 @@ class SecurityAndScanningTests(unittest.TestCase):
         self.appmod.socket.create_connection = fake_create_connection
         self.appmod._probe_http = lambda *_args, **_kwargs: (True, 8.2, None, FakeResponse(200, {'Content-Type': 'text/html'}))
         self.appmod.fetch_thumbnail = lambda *args, **kwargs: captured_thumb.append((args, kwargs)) or (b'unexpected', 'image/png', 'screenshot', None)
-        self.appmod._scanning = True
-
         try:
             self.appmod.do_discovery(source='manual')
         finally:

@@ -18,6 +18,7 @@ class ApiAndAuthTests(unittest.TestCase):
             'TRIGGER_SCAN_WINDOW_SECONDS': '60',
         })
         self.client = self.appmod.app.test_client()
+        self.ui_headers = {'X-Beacon-UI': '1'}
 
     def tearDown(self):
         cleanup_db(self.db_path)
@@ -41,20 +42,18 @@ class ApiAndAuthTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
-    def test_trigger_scan_no_auth_required(self):
-        self.appmod.trigger_discovery = lambda: True
-        r = self.client.post('/api/trigger-scan')
-        self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.get_json()['started'])
+    def test_trigger_scan_requires_ui_header_and_queues(self):
+        self.assertEqual(self.client.post('/api/trigger-scan').status_code, 403)
+        r = self.client.post('/api/trigger-scan', headers=self.ui_headers)
+        self.assertEqual(r.status_code, 202)
+        self.assertTrue(r.get_json()['queued'])
 
     def test_trigger_scan_rate_limit(self):
-        self.appmod.trigger_discovery = lambda: True
+        r1 = self.client.post('/api/trigger-scan', headers=self.ui_headers)
+        self.assertEqual(r1.status_code, 202)
+        self.assertTrue(r1.get_json()['queued'])
 
-        r1 = self.client.post('/api/trigger-scan')
-        self.assertEqual(r1.status_code, 200)
-        self.assertTrue(r1.get_json()['started'])
-
-        r2 = self.client.post('/api/trigger-scan')
+        r2 = self.client.post('/api/trigger-scan', headers=self.ui_headers)
         self.assertEqual(r2.status_code, 429)
         self.assertEqual(r2.get_json()['reason'], 'rate_limited')
 
@@ -155,6 +154,7 @@ class ApiAndAuthTests(unittest.TestCase):
             r = self.client.put(
                 '/api/service-meta/8080',
                 json={'path': raw},
+                headers=self.ui_headers,
             )
             self.assertEqual(r.status_code, 200)
             body = r.get_json()
@@ -167,11 +167,11 @@ class ApiAndAuthTests(unittest.TestCase):
     def test_service_meta_path_merge_rules(self):
         self._insert_service(url='http://127.0.0.1:8080/root')
 
-        url_only = self.client.put('/api/service-meta/8080', json={'url': 'http://127.0.0.1:8080/alpha'})
+        url_only = self.client.put('/api/service-meta/8080', json={'url': 'http://127.0.0.1:8080/alpha'}, headers=self.ui_headers)
         self.assertEqual(url_only.status_code, 200)
         self.assertEqual(url_only.get_json()['path'], '/alpha')
 
-        path_only = self.client.put('/api/service-meta/8080', json={'path': '/beta?x=1'})
+        path_only = self.client.put('/api/service-meta/8080', json={'path': '/beta?x=1'}, headers=self.ui_headers)
         self.assertEqual(path_only.status_code, 200)
         self.assertEqual(path_only.get_json()['path'], '/beta?x=1')
         self.assertTrue(path_only.get_json()['url'].startswith('http://127.0.0.1:8080/'))
@@ -179,6 +179,7 @@ class ApiAndAuthTests(unittest.TestCase):
         both = self.client.put(
             '/api/service-meta/8080',
             json={'url': 'http://127.0.0.1:9090/ignored', 'path': '/gamma#frag'},
+            headers=self.ui_headers,
         )
         self.assertEqual(both.status_code, 200)
         both_json = both.get_json()
@@ -201,15 +202,16 @@ class ApiAndAuthTests(unittest.TestCase):
                 headers={'Content-Type': 'text/html'},
             ), url
 
-        def fake_thumb(port, service_url=None, **kwargs):
-            seen_thumb.append((port, service_url, kwargs.get('allow_remote')))
+        def fake_thumb(port, service_url=None):
+            seen_thumb.append((port, service_url))
             return b'png-bytes', 'image/png', 'screenshot', None
 
         self.appmod._fetch_html_response = fake_html_fetch
         self.appmod.fetch_thumbnail = fake_thumb
 
         try:
-            r = self.client.put('/api/service-meta/8080', json={'path': '/app?view=1'})
+            r = self.client.put('/api/service-meta/8080', json={'path': '/app?view=1'}, headers=self.ui_headers)
+            processed = self.appmod.process_preview_requests()
         finally:
             self.appmod._fetch_html_response = original_html_fetch
             self.appmod.fetch_thumbnail = original_thumb
@@ -217,9 +219,11 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.get_json()
         self.assertEqual(body['path'], '/app?view=1')
+        self.assertTrue(body['preview_queued'])
+        self.assertTrue(processed)
         self.assertIsNone(body['refresh_warning'])
         self.assertEqual(seen_fetch[-1], 'http://127.0.0.1:8080/app?view=1')
-        self.assertIn((8080, 'http://127.0.0.1:8080/app?view=1', True), seen_thumb)
+        self.assertIn((8080, 'http://127.0.0.1:8080/app?view=1'), seen_thumb)
 
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
@@ -258,6 +262,26 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(succeeded['thumb_attempt_ts'], 222)
         self.assertIsNone(succeeded['thumb_error'])
 
+    def test_invalid_legacy_service_url_is_safe_in_api_output(self):
+        self._insert_service(port=8085, url='ftp://legacy-host/app')
+
+        services_resp = self.client.get('/api/services')
+        self.assertEqual(services_resp.status_code, 200)
+        svc = services_resp.get_json()[0]
+        self.assertEqual(svc['url'], 'http://127.0.0.1:8085')
+        self.assertEqual(svc['path'], '/')
+
+        meta_resp = self.client.get('/api/service-meta/8085')
+        self.assertEqual(meta_resp.status_code, 200)
+        meta = meta_resp.get_json()
+        self.assertEqual(meta['url'], 'http://127.0.0.1:8085')
+        self.assertEqual(meta['path'], '/')
+
+        status_resp = self.client.get('/api/thumbnail-status')
+        self.assertEqual(status_resp.status_code, 200)
+        status = status_resp.get_json()[0]
+        self.assertEqual(status['url'], 'http://127.0.0.1:8085')
+
     def test_service_meta_refresh_failure_keeps_existing_values_and_warns(self):
         self._insert_service(url='http://127.0.0.1:8080/root')
         with self.appmod._db_lock:
@@ -283,7 +307,8 @@ class ApiAndAuthTests(unittest.TestCase):
         self.appmod.fetch_thumbnail = fake_thumb
 
         try:
-            r = self.client.put('/api/service-meta/8080', json={'path': '/broken'})
+            r = self.client.put('/api/service-meta/8080', json={'path': '/broken'}, headers=self.ui_headers)
+            processed = self.appmod.process_preview_requests()
         finally:
             self.appmod._fetch_html_response = original_html_fetch
             self.appmod.fetch_thumbnail = original_thumb
@@ -291,20 +316,22 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.get_json()
         self.assertEqual(body['path'], '/broken')
-        self.assertIsInstance(body.get('refresh_warning'), str)
-        self.assertIn('title refresh failed', body['refresh_warning'])
-        self.assertIn('thumbnail refresh skipped', body['refresh_warning'])
+        self.assertTrue(body['preview_queued'])
+        self.assertTrue(processed)
 
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             row = conn.execute(
                 "SELECT title, thumb_data, thumb_mime FROM services WHERE port=8080"
             ).fetchone()
+            preview = conn.execute("SELECT status, error FROM preview_requests WHERE port=8080").fetchone()
             conn.close()
 
         self.assertEqual(row['title'], 'Existing Title')
         self.assertEqual(bytes(row['thumb_data']), b'old-bytes')
         self.assertEqual(row['thumb_mime'], 'image/png')
+        self.assertEqual(preview['status'], 'failed')
+        self.assertIn('title refresh failed', preview['error'])
 
     def test_fetch_thumbnail_marks_playwright_screenshot_source(self):
         original_screenshot = self.appmod._screenshot_service
@@ -324,7 +351,6 @@ class ApiAndAuthTests(unittest.TestCase):
             data, mime, source, error = self.appmod.fetch_thumbnail(
                 8080,
                 'http://127.0.0.1:8080/app?view=1',
-                allow_remote=True,
             )
         finally:
             self.appmod._screenshot_service = original_screenshot
@@ -335,46 +361,32 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(source, 'screenshot')
         self.assertIsNone(error)
 
-    def test_fetch_thumbnail_does_not_use_image_fallback_after_screenshot_failure(self):
+    def test_fetch_thumbnail_returns_error_without_html_fallback_after_screenshot_failure(self):
         original_screenshot = self.appmod._screenshot_service
         original_fetch_html = self.appmod._fetch_html_response
-        original_fetch_image = self.appmod._fetch_image_bytes
-        seen_images = []
 
         def fake_screenshot(port, target_url=None):
             self.assertEqual((port, target_url), (8080, 'http://127.0.0.1:8080/app'))
             return None, None, 'browser failed'
 
-        def fake_fetch_html(url, *_args, **_kwargs):
-            return True, None, FakeResponse(
-                text='<html><head><meta property="og:image" content="/preview.png"></head></html>',
-                status_code=200,
-                headers={'Content-Type': 'text/html'},
-            ), url
-
-        def fake_fetch_image(img_url, port, **kwargs):
-            seen_images.append((img_url, port, kwargs.get('allow_remote')))
-            return b'fallback-bytes', 'image/png'
+        def fake_fetch_html(*_args, **_kwargs):
+            raise AssertionError('HTML fallback should not run after screenshot failure')
 
         self.appmod._screenshot_service = fake_screenshot
         self.appmod._fetch_html_response = fake_fetch_html
-        self.appmod._fetch_image_bytes = fake_fetch_image
         try:
             data, mime, source, error = self.appmod.fetch_thumbnail(
                 8080,
                 'http://127.0.0.1:8080/app',
-                allow_remote=True,
             )
         finally:
             self.appmod._screenshot_service = original_screenshot
             self.appmod._fetch_html_response = original_fetch_html
-            self.appmod._fetch_image_bytes = original_fetch_image
 
         self.assertIsNone(data)
         self.assertIsNone(mime)
         self.assertIsNone(source)
         self.assertEqual(error, 'browser failed')
-        self.assertEqual(seen_images, [])
 
 
 if __name__ == '__main__':

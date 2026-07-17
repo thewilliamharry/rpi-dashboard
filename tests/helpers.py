@@ -21,6 +21,7 @@ def _ensure_psutil_stub():
     class _Mem:
         percent = 42.0
         used = 1024 * 1024 * 256
+        available = 1024 * 1024 * 640
         total = 1024 * 1024 * 1024
 
     class _Disk:
@@ -72,13 +73,6 @@ def load_app(extra_env=None):
     import dashboard.app as appmod
     appmod = importlib.reload(appmod)
     appmod.DB_PATH = db_path
-
-    appmod._trigger_hits.clear()
-    appmod._last_discovery = None
-    appmod._last_uptime_check = None
-    appmod._last_down_check = None
-    appmod._scanning = False
-    appmod._found = 0
 
     appmod.init_db()
     return appmod, db_path

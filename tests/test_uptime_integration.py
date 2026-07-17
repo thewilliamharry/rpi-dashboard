@@ -48,7 +48,7 @@ class UptimeIntegrationTests(unittest.TestCase):
             return False, None, 'connection_error', None
 
         self.appmod._probe_http = fake_probe
-        self.appmod.fetch_thumbnail = lambda _port, _service_url=None, **_kwargs: (None, None, None, 'screenshot failed')
+        self.appmod.fetch_thumbnail = lambda _port, _service_url=None: (None, None, None, 'screenshot failed')
 
         self.appmod.do_uptime_check(only_down=False)
         with self.appmod._db_lock:
@@ -85,7 +85,7 @@ class UptimeIntegrationTests(unittest.TestCase):
         self.appmod._probe_http = original_probe
         self.appmod.fetch_thumbnail = original_thumb
 
-    def test_uptime_check_uses_path_for_probe_and_thumbnail(self):
+    def test_uptime_check_uses_path_and_queues_thumbnail(self):
         self._insert_service('http://127.0.0.1:2500/app?view=1')
 
         original_probe = self.appmod._probe_http
@@ -100,8 +100,8 @@ class UptimeIntegrationTests(unittest.TestCase):
                 headers={'Content-Type': 'text/html'},
             )
 
-        def fake_thumb(port, service_url=None, **kwargs):
-            seen_thumb.append((port, service_url, kwargs.get('allow_remote')))
+        def fake_thumb(port, service_url=None):
+            seen_thumb.append((port, service_url))
             return None, None, None, 'screenshot failed'
 
         self.appmod._probe_http = fake_probe
@@ -122,7 +122,12 @@ class UptimeIntegrationTests(unittest.TestCase):
 
         self.assertEqual(row['title'], 'Path Service')
         self.assertEqual(seen_probe[0], 'http://127.0.0.1:2500/app?view=1')
-        self.assertIn((2500, 'http://127.0.0.1:2500/app?view=1', True), seen_thumb)
+        self.assertEqual(seen_thumb, [])
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            preview = conn.execute("SELECT status FROM preview_requests WHERE port=2500").fetchone()
+            conn.close()
+        self.assertEqual(preview['status'], 'queued')
 
 
 if __name__ == '__main__':

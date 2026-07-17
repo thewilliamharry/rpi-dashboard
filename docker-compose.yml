@@ -1,17 +1,64 @@
+x-beacon-common: &beacon-common
+  build: ./dashboard
+  image: beacon:2.0.0
+  restart: unless-stopped
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=128m,uid=10001,gid=10001
+  volumes:
+    - dashboard-data:/data
+  environment: &beacon-environment
+    EXPIRE_DAYS: "7"
+    METRIC_SAMPLE_SECONDS: "5"
+    METRIC_HISTORY_SECONDS: "60"
+    WORKER_READY_SECONDS: "20"
+    DISCOVERY_TIMEOUT_SECONDS: "180"
+    EXTRA_SCAN_PORTS: "8100"
+    TRUSTED_HOSTS: "${BEACON_TRUSTED_HOSTS:-raspi.local,localhost,127.0.0.1,::1}"
+    LOCAL_SERVICE_HOSTS: "${BEACON_LOCAL_SERVICE_HOSTS:-raspi.local}"
+    TRIGGER_SCAN_RATE_LIMIT: "4"
+    TRIGGER_SCAN_WINDOW_SECONDS: "60"
+    ALERT_WEBHOOK_URL: ""
+    ALERT_COOLDOWN_SECONDS: "300"
+    ALERT_ONLY_CRITICAL: "0"
+    ENABLE_PROMETHEUS: "0"
+
 services:
-  dashboard:
-    build: ./dashboard
-    container_name: pi-dashboard
+  worker:
+    <<: *beacon-common
+    container_name: beacon-worker
+    command: ["python", "worker.py"]
     network_mode: host
-    restart: unless-stopped
-    volumes:
-      - dashboard-data:/data
-    environment:
-      - EXPIRE_DAYS=7
-      - TRIGGER_SCAN_RATE_LIMIT=4
-      - TRIGGER_SCAN_WINDOW_SECONDS=60
-      - ALERT_WEBHOOK_URL=
-      - ALERT_COOLDOWN_SECONDS=300
-      - ALERT_ONLY_CRITICAL=0
+    mem_limit: 1g
+    pids_limit: 256
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,sqlite3,time; c=sqlite3.connect('/data/dashboard.db'); r=c.execute(\"select value from runtime_state where key='worker_heartbeat'\").fetchone(); assert r and time.time()-json.loads(r[0])['ts'] < 20"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    <<: *beacon-common
+    container_name: beacon-web
+    ports:
+      - "80:8080"
+    mem_limit: 256m
+    pids_limit: 128
+    depends_on:
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   dashboard-data:

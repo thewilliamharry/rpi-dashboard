@@ -56,6 +56,14 @@ body {
 body.modal-open { overflow: hidden; }
 html.light body { font-family: var(--font-sans); font-weight: 300; }
 
+.connection-banner {
+  position: sticky; top: 48px; z-index: 99;
+  padding: 9px 20px; text-align: center;
+  color: #1c1400; background: var(--accent2);
+  font-size: 10px; letter-spacing: .06em;
+}
+.connection-banner[hidden] { display: none; }
+
 /* grid overlay */
 .grid-overlay {
   position: fixed; inset: 0; pointer-events: none; z-index: 0;
@@ -358,6 +366,11 @@ html.light .services-grid {
   text-decoration: none; color: inherit;
   position: relative; overflow: hidden; cursor: pointer;
 }
+.svc-link { display: block; color: inherit; text-decoration: none; }
+.svc-title-link { color: inherit; text-decoration: none; min-width: 0; }
+.svc-link:focus-visible, .svc-title-link:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 html:not(.light) .svc-card:hover { background: #041d30; }
 html:not(.light) .svc-card::after {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
@@ -521,9 +534,11 @@ html.light .uptime-strip { gap: 1px; height: 4px; border-radius: 2px; overflow: 
 html.light .us { border-radius: 2px; }
 .us.up      { background: var(--green); opacity: 0.6; }
 .us.down    { background: var(--red);   opacity: 0.55; }
+.us.partial { background: var(--accent2); opacity: 0.75; }
 .us.unknown { background: var(--muted2); opacity: 0.4; }
 html.light .us.up      { opacity: 0.3; }
 html.light .us.down    { opacity: 0.4; }
+html.light .us.partial { background: #f59e0b; opacity: 0.55; }
 html.light .us.unknown { background: #e8e8e8; opacity: 1; }
 .uptime-labels { display: flex; justify-content: space-between; font-size: 9px; color: var(--muted); margin-top: 2px; }
 html.light .uptime-labels { display: none; }
@@ -857,6 +872,16 @@ html.light .evt-time,
 html.light .evt-empty {
   font-family: var(--font-sans);
   letter-spacing: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+  .scanline { display: none; }
 }
 html.light .evt-title {
   text-transform: none;

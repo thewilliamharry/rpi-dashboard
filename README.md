@@ -1,137 +1,98 @@
 # Beacon
 
-A self-hosted monitoring dashboard for Raspberry Pi. Runs as a single Docker container — no cloud, no accounts, no dependencies beyond Docker.
+Beacon is a self-contained Raspberry Pi dashboard for system pressure, HTTP-service discovery, time-weighted availability, screenshots, and service events on a trusted LAN. It does not require an account or an external monitoring backend.
 
-![Dark mode](https://github.com/user-attachments/assets/dark-mode-placeholder)
+## Architecture
 
-## Features
+Compose runs one immutable image as two non-root services sharing `/data/dashboard.db`:
 
-- **System metrics** — live CPU, RAM, and disk gauges with 24-hour sparkline history and CPU temperature
-- **Service discovery** — automatically finds HTTP services running on the Pi by scanning ports 2000–9900 (plus common ports like 8080, 8443, 8888, 9090)
-- **Uptime tracking** — 7-day bucketed uptime history per service, checks every 5 minutes (plus 60-second checks for currently-down services)
-- **Latency + error telemetry** — stores latest response latency and probe error class per service
-- **Transition events + webhook alerts** — records down/recovery events and can post alert payloads to a webhook with cooldowns
-- **Service metadata** — editable display name, path/URL override, critical flag, pin order, and tags per service
-- **Manual scan trigger** — `/api/trigger-scan` is rate limited
-- **Live thumbnails** — headless Chromium screenshots of each service page, refreshed daily; failed captures show no preview and retry later
-- **Status favicon** — browser tab icon is a live color-coded bulb (green / amber / red) reflecting service state and CPU load
-- **Dark / light theme** — two distinct visual styles with a smooth radial-wipe transition
+- `web` uses bridge networking and exposes container port 8080 on host port 80. It serves cached data and queues mutations.
+- `worker` uses host networking so it can probe the Pi. APScheduler collects metrics, checks uptime, discovers services, captures previews, cleans history, and sends alerts.
 
-## Requirements
-
-- Docker and Docker Compose
-- Raspberry Pi 4 or 5 running a **64-bit OS** (Raspberry Pi OS Lite 64-bit or Ubuntu Server)
-
-> Playwright's Chromium binary requires ARM64. 32-bit Pi OS is not supported.
+Metrics, probes, and screenshots use separate executors. A slow Chromium preview cannot block the five-second system sampler. SQLite migrations are additive and versioned.
 
 ## Quick start
 
+Requirements: Docker Compose and a Raspberry Pi 4/5 running a 64-bit OS.
+
 ```bash
-git clone https://github.com/your-username/rpi-dashboard.git
+git clone git@github.com:thewilliamharry/rpi-dashboard.git
 cd rpi-dashboard
-docker compose up -d
+docker compose up -d --build
 ```
 
-Open `http://<your-pi-ip>` in a browser. The first port scan runs automatically within a few seconds of startup and takes 1–2 minutes to complete.
+Open `http://raspi.local`. BlueMap is discovered as an ordinary HTTP service because port 8100 is included through `EXTRA_SCAN_PORTS`.
 
-## How it works
+Check health:
 
+```bash
+curl http://raspi.local/healthz
+curl http://raspi.local/readyz
+docker compose ps
 ```
-┌─────────────────────────────────────────────┐
-│               Docker container               │
-│                                              │
-│  Gunicorn + Flask (port 80)                  │
-│    ├── serves index.html + style.css         │
-│    └── REST API  /api/stats                  │
-│                  /api/history                │
-│                  /api/services               │
-│                  /api/events                 │
-│                  /api/config                 │
-│                  /api/service-meta/<port>    │
-│                  /api/thumbnail/<port>       │
-│                  /api/thumbnail-status       │
-│                  /api/scan-status            │
-│                  /api/trigger-scan           │
-│                                              │
-│  Background threads                          │
-│    ├── stats_loop   — metrics every 60s      │
-│    └── scan_loop    — discovery every 24h    │
-│                       uptime check every 5m  │
-│                       down check every 60s   │
-│                                              │
-│  SQLite  /data/dashboard.db  (persisted)     │
-└─────────────────────────────────────────────┘
-```
-
-### Service discovery
-
-On startup (and every 24 hours), the scanner:
-
-1. Checks every port from 2000–9900 in steps of 100, plus a curated list of common self-hosted service ports (3001, 8080, 8443, 8888, 9090), for an open TCP connection
-2. Makes an HTTP request to each open port and reads the page `<title>`
-3. Takes a headless Chromium screenshot of the homepage and caches it
-
-Services that have been offline for longer than `EXPIRE_DAYS` are removed automatically.
-
-### Uptime checks
-
-- **Full check** (all services) — every 5 minutes
-- **Down-only check** — every 60 seconds for services currently marked offline, so recovery is detected quickly
-- Each check updates the 7-day uptime strip shown on the service card
-
-### Thumbnails
-
-Screenshots are taken with Playwright (headless Chromium) and stored as PNG blobs in SQLite. They are refreshed once per day from the service's configured URL/path. `og:image` and favicon images are not used as thumbnail fallbacks; if Chromium cannot capture the page, the card shows no preview and `/api/thumbnail-status` exposes the last screenshot error.
-
-### Status favicon
-
-The browser tab icon is a canvas-drawn colour bulb that updates in real time:
-
-- 🟢 **Green** — all services online, CPU normal
-- 🟡 **Amber** — one or more services offline, or CPU above 80 %
-- 🔴 **Red** — all services offline, or CPU above 90 %
-
-The page title also updates to show the offline count when things go wrong (e.g., `Beacon — 2 offline`). An Apple touch icon (180×180) is generated alongside the standard favicon for home-screen shortcuts on iOS/macOS.
 
 ## Configuration
 
-Environment variables can be set in `docker-compose.yml`:
+Edit `docker-compose.yml` or supply equivalent environment values.
 
-| Variable | Default | Description |
-|---|---|---|
-| `EXPIRE_DAYS` | `7` | Days before an offline service is removed from the dashboard |
-| `TRIGGER_SCAN_RATE_LIMIT` | `4` | Max manual scan trigger requests per rate-limit window per client IP |
-| `TRIGGER_SCAN_WINDOW_SECONDS` | `60` | Rate-limit window for manual scan trigger requests |
-| `ALERT_WEBHOOK_URL` | empty | Optional webhook target for up/down transition alerts |
-| `ALERT_COOLDOWN_SECONDS` | `300` | Minimum seconds between repeated alert sends for the same port/state |
-| `ALERT_ONLY_CRITICAL` | `0` | If `1`, only send webhook alerts for services marked `critical` |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `EXTRA_SCAN_PORTS` | `8100` | Additional comma-separated HTTP ports. |
+| `TRUSTED_HOSTS` | local aliases | Accepted HTTP Host/Origin aliases for the UI. Add the Pi's IP if accessing Beacon by IP. |
+| `LOCAL_SERVICE_HOSTS` | `raspi.local` | Aliases service URLs may target; they are stored canonically as loopback. |
+| `METRIC_SAMPLE_SECONDS` | `5` | Cached metric collection cadence. |
+| `METRIC_HISTORY_SECONDS` | `60` | Persistent history cadence. |
+| `DISCOVERY_TIMEOUT_SECONDS` | `180` | Full discovery deadline. |
+| `WORKER_READY_SECONDS` | `20` | Maximum heartbeat age for readiness. |
+| `ENABLE_PROMETHEUS` | `0` | Enables the optional `/metrics` endpoint. |
+| `THUMB_REFRESH_DAYS` | `1` | Successful screenshot refresh interval. |
+| `EXPIRE_DAYS` | `7` | Remove long-unseen services. |
+| `ALERT_WEBHOOK_URL` | empty | Optional transition webhook. |
+| `ALERT_COOLDOWN_SECONDS` | `300` | Persistent per-state alert cooldown. |
+| `ALERT_ONLY_CRITICAL` | `0` | Limit alerts to critical services. |
 
-## Project structure
+Service health defaults to HTTP 200–399. The editor accepts exceptional codes/ranges such as `200-399,401` for authenticated endpoints. Targets, redirects, and userinfo URLs outside loopback or configured Pi aliases are rejected.
 
-```
-rpi-dashboard/
-├── docker-compose.yml
-└── dashboard/
-    ├── Dockerfile
-    ├── requirements.txt
-    ├── app.py          # Flask backend + background threads
-    ├── index.html      # Single-page frontend (vanilla JS)
-    └── style.css       # Dark + light theme styles
-```
+## Data and operations
 
-## Data persistence
-
-Service history and thumbnails are stored in a named Docker volume (`dashboard-data`) mounted at `/data/dashboard.db` inside the container. The volume survives container restarts and image rebuilds.
-
-To reset all data:
+The named volume stores metrics, services, checks, events, runtime state, queued work, rate limits, and screenshots. Back it up before a release:
 
 ```bash
-docker compose down -v
-docker compose up -d
+docker compose stop
+docker run --rm -v rpi-dashboard_dashboard-data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/beacon-data.tgz -C /data .
+docker compose start
 ```
 
-## Rebuilding after an update
+Record the running image, deploy, then observe two uptime cycles and one discovery:
 
 ```bash
-docker compose build && docker compose up -d
+docker compose images
+docker compose build --pull
+docker compose up -d --force-recreate
+docker compose logs -f worker web
 ```
+
+For rollback, restore the previous Compose/image definition. Schema changes are additive, so the prior application can keep using the upgraded database. Restore the backup only if validation finds corrupted data.
+
+Thumbnail diagnostics:
+
+```bash
+curl http://raspi.local/api/thumbnail-status
+docker compose logs worker | grep -i preview
+docker compose exec worker playwright --version
+```
+
+## Development and security gates
+
+Dependencies are declared in `dashboard/pyproject.toml` and frozen in `dashboard/uv.lock`.
+
+```bash
+uv sync --project dashboard --frozen
+uv run --project dashboard python -m pytest -q
+uv run --project dashboard pip-audit
+docker compose config -q
+docker compose build
+```
+
+CI runs tests, `pip-audit`, and a Trivy image scan. Dependabot covers Python, Docker, and GitHub Actions. A release requires no unreviewed fixable high/critical vulnerabilities. Raspberry Pi acceptance must also confirm the Chromium sandbox starts without `--no-sandbox`, containers run as UID 10001, filesystems remain read-only except `/data` and tmpfs `/tmp`, and metrics show no gap longer than two collection intervals during discovery.

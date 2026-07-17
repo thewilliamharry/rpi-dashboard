@@ -1,5 +1,7 @@
 import logging
 import os
+import json
+import ipaddress
 import socket
 import sqlite3
 import threading
@@ -23,12 +25,43 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-DB_PATH = "/data/dashboard.db"
+DB_PATH = os.environ.get("DB_PATH", "/data/dashboard.db")
 EXPIRE_DAYS = int(os.environ.get("EXPIRE_DAYS", 7))
 THUMB_MAX_BYTES = 2 * 1024 * 1024
 THUMB_REFRESH_DAYS = int(os.environ.get("THUMB_REFRESH_DAYS", 1))
 UPTIME_WINDOW_SECONDS = 7 * 86400
 UPTIME_BUCKETS = 168
+CHECK_RETENTION_SECONDS = UPTIME_WINDOW_SECONDS + 86400
+METRIC_SAMPLE_SECONDS = int(os.environ.get("METRIC_SAMPLE_SECONDS", 5))
+METRIC_HISTORY_SECONDS = int(os.environ.get("METRIC_HISTORY_SECONDS", 60))
+WORKER_READY_SECONDS = int(os.environ.get("WORKER_READY_SECONDS", 20))
+DISCOVERY_TIMEOUT_SECONDS = int(os.environ.get("DISCOVERY_TIMEOUT_SECONDS", 180))
+ENABLE_PROMETHEUS = os.environ.get("ENABLE_PROMETHEUS", "0") in ("1", "true", "TRUE", "yes", "on")
+
+DEFAULT_TRUSTED_HOSTS = "raspi.local,localhost,127.0.0.1,::1"
+TRUSTED_HOSTS = {
+    item.strip().lower().strip('[]')
+    for item in os.environ.get("TRUSTED_HOSTS", DEFAULT_TRUSTED_HOSTS).split(',')
+    if item.strip()
+}
+LOCAL_SERVICE_HOSTS = TRUSTED_HOSTS | {
+    item.strip().lower().strip('[]')
+    for item in os.environ.get("LOCAL_SERVICE_HOSTS", "").split(',')
+    if item.strip()
+}
+try:
+    LOCAL_SERVICE_HOSTS.add(socket.gethostname().lower())
+except Exception:
+    pass
+
+EXTRA_SCAN_PORTS = set()
+for _port_text in os.environ.get("EXTRA_SCAN_PORTS", "8100").split(','):
+    try:
+        _extra_port = int(_port_text.strip())
+        if 1 <= _extra_port <= 65535:
+            EXTRA_SCAN_PORTS.add(_extra_port)
+    except (TypeError, ValueError):
+        pass
 
 TRIGGER_SCAN_RATE_LIMIT = int(os.environ.get("TRIGGER_SCAN_RATE_LIMIT", 4))
 TRIGGER_SCAN_WINDOW_SECONDS = int(os.environ.get("TRIGGER_SCAN_WINDOW_SECONDS", 60))
@@ -40,23 +73,21 @@ ALERT_ONLY_CRITICAL = os.environ.get("ALERT_ONLY_CRITICAL", "0") in ("1", "true"
 _db_lock = threading.Lock()
 _scan_lock = threading.Lock()
 _startup_lock = threading.Lock()
-_rate_lock = threading.Lock()
 _screenshot_sem = threading.Semaphore(1)
+_uptime_lock = threading.Lock()
+_browser_lock = threading.Lock()
+_browser_playwright = None
+_browser_instance = None
+_preview_context = threading.local()
 
-# Scan state
-_last_discovery = None
-_last_uptime_check = None
-_last_down_check = None
-_scanning = False
-_found = 0
 _bg_started = False
-
-_trigger_hits = {}
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -69,12 +100,33 @@ def init_db():
         conn = get_db()
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version     INTEGER PRIMARY KEY,
+                applied_ts  INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS stats_history (
                 ts      INTEGER PRIMARY KEY,
                 cpu     REAL,
                 ram     REAL,
                 disk    REAL,
                 temp    REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS system_stats (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                sample_ts       INTEGER NOT NULL,
+                cpu             REAL NOT NULL,
+                ram             REAL NOT NULL,
+                ram_used        INTEGER NOT NULL,
+                ram_available   INTEGER NOT NULL,
+                ram_used_strict INTEGER NOT NULL,
+                ram_total       INTEGER NOT NULL,
+                disk            REAL NOT NULL,
+                disk_used       INTEGER NOT NULL,
+                disk_total      INTEGER NOT NULL,
+                temp            REAL,
+                hostname        TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS services (
@@ -124,11 +176,42 @@ def init_db():
                 details        TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS runtime_state (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_ts  INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_requests (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                requested_ts  INTEGER NOT NULL,
+                requested_by  TEXT,
+                status        TEXT NOT NULL DEFAULT 'queued',
+                started_ts    INTEGER,
+                completed_ts  INTEGER,
+                error         TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_rate_hits (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_key  TEXT NOT NULL,
+                ts          INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS preview_requests (
+                port          INTEGER PRIMARY KEY,
+                requested_ts  INTEGER NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'queued',
+                error         TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_stats_ts        ON stats_history(ts);
             CREATE INDEX IF NOT EXISTS idx_checks_ts       ON service_checks(ts);
             CREATE INDEX IF NOT EXISTS idx_checks_port     ON service_checks(port);
             CREATE INDEX IF NOT EXISTS idx_events_ts       ON events(ts);
             CREATE INDEX IF NOT EXISTS idx_events_port_ts  ON events(port, ts);
+            CREATE INDEX IF NOT EXISTS idx_scan_requests_status ON scan_requests(status, requested_ts);
+            CREATE INDEX IF NOT EXISTS idx_scan_rate_hits_client_ts ON scan_rate_hits(client_key, ts);
         """)
 
         # Migration for older services table
@@ -149,6 +232,12 @@ def init_db():
             conn.execute("ALTER TABLE services ADD COLUMN last_latency_ms REAL")
         if 'last_error' not in svc_cols:
             conn.execute("ALTER TABLE services ADD COLUMN last_error TEXT")
+        if 'state_since' not in svc_cols:
+            conn.execute("ALTER TABLE services ADD COLUMN state_since INTEGER")
+
+        meta_cols = _table_columns(conn, "service_meta")
+        if 'healthy_statuses' not in meta_cols:
+            conn.execute("ALTER TABLE service_meta ADD COLUMN healthy_statuses TEXT DEFAULT '200-399'")
 
         conn.execute(
             "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL "
@@ -163,12 +252,121 @@ def init_db():
 
         # Ensure metadata exists for previously discovered services
         conn.execute(
-            "INSERT OR IGNORE INTO service_meta (port, url, critical, pinned_order, tags) "
-            "SELECT port, 'http://127.0.0.1:' || port, 0, port, '' FROM services"
+            "INSERT OR IGNORE INTO service_meta (port, url, critical, pinned_order, tags, healthy_statuses) "
+            "SELECT port, 'http://127.0.0.1:' || port, 0, port, '', '200-399' FROM services"
+        )
+
+        # Initialize state_since once from the latest matching transition. Older
+        # binaries simply ignore this additive column.
+        conn.execute("""
+            UPDATE services
+               SET state_since = COALESCE(
+                   (SELECT MAX(e.ts) FROM events e
+                     WHERE e.port = services.port
+                       AND e.event_type = 'state_change'
+                       AND e.online = services.is_online),
+                   CASE WHEN services.is_online = 1 THEN services.first_seen ELSE services.last_seen END
+               )
+             WHERE state_since IS NULL
+        """)
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_ts) VALUES(1, ?)",
+            (int(time.time()),),
         )
 
         conn.commit()
         conn.close()
+
+
+def _set_runtime_state(key, value, *, conn=None, now=None):
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_db()
+    now = int(time.time()) if now is None else int(now)
+    conn.execute(
+        "INSERT INTO runtime_state(key, value, updated_ts) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+        (key, json.dumps(value, separators=(',', ':')), now),
+    )
+    if owns_conn:
+        conn.commit()
+        conn.close()
+
+
+def _get_runtime_state(key, default=None, *, conn=None):
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_db()
+    row = conn.execute("SELECT value, updated_ts FROM runtime_state WHERE key=?", (key,)).fetchone()
+    if owns_conn:
+        conn.close()
+    if not row:
+        return default
+    try:
+        return json.loads(row['value'])
+    except (TypeError, ValueError):
+        return default
+
+
+def update_worker_heartbeat(now=None):
+    now = int(time.time()) if now is None else int(now)
+    with _db_lock:
+        _set_runtime_state('worker_heartbeat', {'ts': now}, now=now)
+
+
+def recover_worker_state():
+    """Requeue work interrupted by a worker/container restart."""
+    with _db_lock:
+        conn = get_db()
+        conn.execute("UPDATE scan_requests SET status='queued', started_ts=NULL WHERE status='running'")
+        conn.execute("UPDATE preview_requests SET status='queued' WHERE status='running'")
+        state = _read_scan_state(conn)
+        queued = conn.execute("SELECT 1 FROM scan_requests WHERE status='queued' LIMIT 1").fetchone()
+        state.update({
+            'stage': 'queued' if queued else 'idle',
+            'scanning': False,
+            'progress': 0.0,
+            'current_found': 0,
+            'last_error': 'worker restarted during active scan' if state.get('scanning') else state.get('last_error'),
+        })
+        _set_runtime_state('scan_state', state, conn=conn)
+        conn.commit()
+        conn.close()
+
+
+def _default_scan_state():
+    return {
+        'stage': 'idle',
+        'scanning': False,
+        'progress': 0.0,
+        'current_candidates': 0,
+        'current_found': 0,
+        'last_completed_found': 0,
+        'last_discovery': None,
+        'last_uptime_check': None,
+        'last_down_check': None,
+        'timings': {},
+        'last_error': None,
+    }
+
+
+def _read_scan_state(conn=None):
+    state = _default_scan_state()
+    stored = _get_runtime_state('scan_state', {}, conn=conn)
+    if isinstance(stored, dict):
+        state.update(stored)
+    return state
+
+
+def _update_scan_state(**changes):
+    with _db_lock:
+        conn = get_db()
+        state = _read_scan_state(conn)
+        state.update(changes)
+        _set_runtime_state('scan_state', state, conn=conn)
+        conn.commit()
+        conn.close()
+    return state
 
 
 def get_temp():
@@ -183,13 +381,26 @@ def get_temp():
 
 
 def _is_loopback_host(host):
-    return host in ("127.0.0.1", "localhost", "::1")
+    if not host:
+        return False
+    host = str(host).lower().strip('[]')
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == 'localhost'
+
+
+def _is_local_service_host(host):
+    if not host:
+        return False
+    host = str(host).lower().rstrip('.').strip('[]')
+    return _is_loopback_host(host) or host in {item.rstrip('.') for item in LOCAL_SERVICE_HOSTS}
 
 
 def _is_localhost_url(url):
     try:
         host = urlparse(url).hostname or ''
-        return _is_loopback_host(host)
+        return _is_local_service_host(host)
     except Exception:
         return False
 
@@ -207,8 +418,27 @@ def _normalize_service_url(value, port):
         raise ValueError("URL must use http:// or https://")
     if not parsed.hostname:
         raise ValueError("URL must include a host")
-    normalized = parsed.geturl().rstrip('/')
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL must not include user information")
+    if not _is_local_service_host(parsed.hostname):
+        raise ValueError("URL target must be this Pi or a configured local alias")
+    try:
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ValueError("URL port is invalid") from exc
+    if parsed_port is None:
+        parsed_port = int(port)
+    canonical_host = '127.0.0.1'
+    netloc = f"{canonical_host}:{parsed_port}"
+    normalized = urlunparse((parsed.scheme.lower(), netloc, parsed.path or '', '', parsed.query, parsed.fragment)).rstrip('/')
     return normalized
+
+
+def _safe_service_url(value, port):
+    try:
+        return _normalize_service_url(value, port)
+    except ValueError:
+        return _default_service_url(port)
 
 
 def _normalize_service_path(value):
@@ -249,10 +479,7 @@ def _service_url_with_path(base_url, path, port):
 
 
 def _service_path_from_url(url, port):
-    try:
-        normalized = _normalize_service_url(url, port)
-    except ValueError:
-        normalized = _default_service_url(port)
+    normalized = _safe_service_url(url, port)
     parsed = urlparse(normalized)
     path = parsed.path or '/'
     if not path.startswith('/'):
@@ -268,10 +495,7 @@ def _service_path_from_url(url, port):
 def _discovery_probe_url(port, existing_url):
     if not existing_url:
         return _default_service_url(port)
-    try:
-        normalized = _normalize_service_url(existing_url, port)
-    except ValueError:
-        return _default_service_url(port)
+    normalized = _safe_service_url(existing_url, port)
     if _is_localhost_url(normalized):
         return normalized
     return _default_service_url(port)
@@ -289,15 +513,45 @@ def _tags_to_db(tags):
     return ','.join(_parse_tags(tags))
 
 
-def _probe_http(url, timeout=2.5, allow_remote=False):
+def _parse_healthy_statuses(value):
+    raw = str(value or '200-399').strip()
+    if not raw:
+        raise ValueError('healthy_statuses must not be empty')
+    ranges = []
+    normalized = []
+    for item in raw.split(','):
+        item = item.strip()
+        if not item:
+            raise ValueError('healthy_statuses contains an empty value')
+        if '-' in item:
+            parts = item.split('-', 1)
+            try:
+                start, end = int(parts[0]), int(parts[1])
+            except ValueError as exc:
+                raise ValueError('healthy_statuses must contain HTTP codes or ranges') from exc
+        else:
+            try:
+                start = end = int(item)
+            except ValueError as exc:
+                raise ValueError('healthy_statuses must contain HTTP codes or ranges') from exc
+        if start < 100 or end > 599 or start > end:
+            raise ValueError('healthy_statuses values must be between 100 and 599')
+        ranges.append((start, end))
+        normalized.append(str(start) if start == end else f'{start}-{end}')
+    return ranges, ','.join(normalized)
+
+
+def _status_is_healthy(status, healthy_statuses='200-399'):
+    ranges, _ = _parse_healthy_statuses(healthy_statuses)
+    return any(start <= int(status) <= end for start, end in ranges)
+
+
+def _probe_http(url, timeout=2.5, allow_remote=False, healthy_statuses='200-399'):
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False, None, "invalid_scheme", None
-        if not parsed.hostname:
-            return False, None, "invalid_host", None
-        if not allow_remote and not _is_loopback_host(parsed.hostname):
-            return False, None, "non_loopback", None
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        url = _normalize_service_url(url, port)
+        _parse_healthy_statuses(healthy_statuses)
 
         start = time.monotonic()
         resp = requests.get(
@@ -313,10 +567,17 @@ def _probe_http(url, timeout=2.5, allow_remote=False):
             location = resp.headers.get('Location')
             if location:
                 redirect_url = urljoin(url, location)
-                if not allow_remote and not _is_localhost_url(redirect_url):
+                redirect_parsed = urlparse(redirect_url)
+                if redirect_parsed.username is not None or redirect_parsed.password is not None:
+                    return False, latency_ms, "redirect_userinfo", resp
+                if not _is_local_service_host(redirect_parsed.hostname):
                     return False, latency_ms, "redirect_offhost", resp
 
+        if not _status_is_healthy(resp.status_code, healthy_statuses):
+            return False, latency_ms, f"http_{resp.status_code}", resp
         return True, latency_ms, None, resp
+    except ValueError:
+        return False, None, "invalid_target", None
     except requests.exceptions.Timeout:
         return False, None, "timeout", None
     except requests.exceptions.ConnectionError:
@@ -335,26 +596,31 @@ def _is_html_content_type(content_type):
 def _fetch_html_response(url, timeout=3, allow_remote=False):
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False, "invalid_scheme", None, url
-        if not parsed.hostname:
-            return False, "invalid_host", None, url
-        if not allow_remote and not _is_loopback_host(parsed.hostname):
-            return False, "non_loopback", None, url
-
-        resp = requests.get(
-            url,
-            timeout=timeout,
-            verify=False,
-            allow_redirects=True,
-        )
-        final_url = resp.url or url
-        final_host = urlparse(final_url).hostname or ''
-        if not allow_remote and not _is_loopback_host(final_host):
-            return False, "redirect_offhost", None, final_url
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        url = _normalize_service_url(url, port)
+        final_url = url
+        resp = None
+        for _ in range(6):
+            current = urlparse(final_url)
+            current_port = current.port or (443 if current.scheme == 'https' else 80)
+            final_url = _normalize_service_url(final_url, current_port)
+            resp = requests.get(final_url, timeout=timeout, verify=False, allow_redirects=False)
+            if not (300 <= resp.status_code < 400) or not resp.headers.get('Location'):
+                break
+            candidate = urljoin(final_url, resp.headers['Location'])
+            candidate_parsed = urlparse(candidate)
+            if candidate_parsed.username is not None or candidate_parsed.password is not None:
+                return False, "redirect_userinfo", None, candidate
+            if not _is_local_service_host(candidate_parsed.hostname):
+                return False, "redirect_offhost", None, candidate
+            final_url = candidate
+        else:
+            return False, 'too_many_redirects', None, final_url
         if not _is_html_content_type(resp.headers.get('Content-Type', '')):
             return False, "non_html", resp, final_url
         return True, None, resp, final_url
+    except ValueError:
+        return False, "invalid_target", None, url
     except requests.exceptions.Timeout:
         return False, "timeout", None, url
     except requests.exceptions.ConnectionError:
@@ -402,29 +668,54 @@ def _extract_title(resp, port):
         return f":{port}"
 
 
-def _browser_page_title(url):
-    if not _screenshot_sem.acquire(blocking=False):
-        return None
-    try:
-        from playwright.sync_api import TimeoutError as PWTimeout
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(args=['--no-sandbox', '--disable-dev-shm-usage'])
+def _get_browser():
+    global _browser_playwright, _browser_instance
+    with _browser_lock:
+        if _browser_instance is not None and _browser_instance.is_connected():
+            return _browser_instance
+        if _browser_playwright is not None:
             try:
-                page = browser.new_page(viewport={'width': 1280, 'height': 800})
-                page.goto(url, timeout=15_000, wait_until='domcontentloaded')
-                page.wait_for_timeout(1000)
-                title = (page.title() or '').strip()
-                return title or None
-            except PWTimeout:
-                return None
-            finally:
-                browser.close()
-    except Exception:
-        return None
-    finally:
-        _screenshot_sem.release()
+                _browser_playwright.stop()
+            except Exception:
+                pass
+            _browser_playwright = None
+        from playwright.sync_api import sync_playwright
+        launch_started = time.monotonic()
+        try:
+            _browser_playwright = sync_playwright().start()
+            _browser_instance = _browser_playwright.chromium.launch(
+                timeout=15_000,
+                args=['--disable-dev-shm-usage'],
+            )
+        except Exception:
+            if _browser_playwright is not None:
+                try:
+                    _browser_playwright.stop()
+                except Exception:
+                    pass
+            _browser_playwright = None
+            _browser_instance = None
+            raise
+        if hasattr(_preview_context, 'timings'):
+            _preview_context.timings['browser_launch_ms'] = round((time.monotonic() - launch_started) * 1000, 1)
+        return _browser_instance
+
+
+def shutdown_browser():
+    global _browser_playwright, _browser_instance
+    with _browser_lock:
+        if _browser_instance is not None:
+            try:
+                _browser_instance.close()
+            except Exception:
+                pass
+        if _browser_playwright is not None:
+            try:
+                _browser_playwright.stop()
+            except Exception:
+                pass
+        _browser_instance = None
+        _browser_playwright = None
 
 
 def _insert_event(conn, *, ts, event_type, port=None, online=None, previous_online=None,
@@ -580,85 +871,69 @@ def _screenshot_service(port, target_url=None):
         navigate_url = _normalize_service_url(target_url, port) if target_url else _default_service_url(port)
     except ValueError:
         navigate_url = _default_service_url(port)
+    context = None
+    started = time.monotonic()
+    _preview_context.timings = {}
+    _preview_context.page_title = None
     try:
-        from playwright.sync_api import TimeoutError as PWTimeout
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(args=['--no-sandbox', '--disable-dev-shm-usage'])
-            try:
-                page = browser.new_page(viewport={'width': 1280, 'height': 800})
-                page.goto(navigate_url, timeout=15_000, wait_until='domcontentloaded')
-                page.wait_for_timeout(1500)
-                data = page.screenshot(type='png')
-                if len(data) <= THUMB_MAX_BYTES:
-                    return data, 'image/png', None
-                log.warning("Screenshot for port %d too large (%d bytes)", port, len(data))
-                return None, None, f"screenshot too large ({len(data)} bytes)"
-            except PWTimeout:
-                log.warning("Screenshot timed out for port %d", port)
-                return None, None, "screenshot timeout"
-            finally:
-                browser.close()
+        browser = _get_browser()
+        context_started = time.monotonic()
+        context = browser.new_context(viewport={'width': 1280, 'height': 800})
+        page = context.new_page()
+        _preview_context.timings['context_ms'] = round((time.monotonic() - context_started) * 1000, 1)
+        navigation_started = time.monotonic()
+        page.goto(navigate_url, timeout=15_000, wait_until='domcontentloaded')
+        _preview_context.timings['navigation_ms'] = round((time.monotonic() - navigation_started) * 1000, 1)
+        if not _is_localhost_url(page.url):
+            return None, None, 'redirect_offhost'
+        _preview_context.page_title = (page.title() or '').strip() or None
+        # HTML probing consumes up to three seconds before capture. Capping the
+        # browser phase at 22 seconds keeps the complete preview under 25.
+        remaining_ms = max(0, 22_000 - int((time.monotonic() - started) * 1000))
+        if remaining_ms <= 0:
+            return None, None, 'preview timeout'
+        page.wait_for_timeout(min(1000, remaining_ms))
+        screenshot_started = time.monotonic()
+        data = page.screenshot(type='png', timeout=max(1, remaining_ms))
+        _preview_context.timings['screenshot_ms'] = round((time.monotonic() - screenshot_started) * 1000, 1)
+        if len(data) <= THUMB_MAX_BYTES:
+            return data, 'image/png', None
+        log.warning("Screenshot for port %d too large (%d bytes)", port, len(data))
+        return None, None, f"screenshot too large ({len(data)} bytes)"
     except Exception as exc:
         log.warning("Screenshot failed for port %d: %s", port, exc)
         return None, None, _thumb_error(exc)
     finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
         _screenshot_sem.release()
     return None, None, "screenshot failed"
 
 
-def _fetch_image_bytes(img_url, port, allow_remote=False):
-    if not allow_remote and not _is_localhost_url(img_url):
-        return None, None
-    try:
-        img_r = requests.get(
-            img_url,
-            timeout=5,
-            verify=False,
-            stream=True,
-            allow_redirects=True,
-        )
-        final_url = img_r.url or img_url
-        if not allow_remote and not _is_localhost_url(final_url):
-            return None, None
-        if not img_r.ok:
-            return None, None
-
-        ct = img_r.headers.get('Content-Type', 'image/jpeg').split(';')[0].strip()
-        if not ct.startswith('image/'):
-            return None, None
-
-        declared = int(img_r.headers.get('Content-Length', 0) or 0)
-        if declared > THUMB_MAX_BYTES:
-            log.warning("image for port %d too large (%d bytes)", port, declared)
-            return None, None
-
-        buf = bytearray()
-        for chunk in img_r.iter_content(chunk_size=65536):
-            if not chunk:
-                continue
-            buf.extend(chunk)
-            if len(buf) > THUMB_MAX_BYTES:
-                log.warning("image for port %d exceeded size cap", port)
-                return None, None
-
-        if not buf:
-            return None, None
-        return bytes(buf), ct
-    except Exception:
-        return None, None
-
-
-def fetch_thumbnail(port, service_url=None, allow_remote=False):
+def fetch_thumbnail(port, service_url=None):
     """Capture a page thumbnail with Playwright. Returns (bytes, mime, source, error)."""
-    _ = allow_remote
     try:
         base_url = _normalize_service_url(service_url, port) if service_url else _default_service_url(port)
     except ValueError:
         base_url = _default_service_url(port)
 
+    _preview_context.timings = {}
+    started = time.monotonic()
     screenshot_data, screenshot_mime, screenshot_error = _screenshot_service(port, base_url)
+    timings = dict(getattr(_preview_context, 'timings', {}))
+    timings['total_ms'] = round((time.monotonic() - started) * 1000, 1)
+    timings['success'] = bool(screenshot_data)
+    log.info('preview_capture %s', json.dumps({'port': port, **timings}, sort_keys=True))
+    try:
+        _record_event(
+            'preview_capture', port=port, error_class=screenshot_error,
+            details=json.dumps(timings, separators=(',', ':'), sort_keys=True),
+        )
+    except Exception:
+        log.exception('Could not persist preview timing for port %d', port)
     if screenshot_data:
         return screenshot_data, screenshot_mime, 'screenshot', None
     return None, None, None, screenshot_error or "screenshot failed"
@@ -689,19 +964,17 @@ def _refresh_service_preview(port, service_url):
     thumb_error = None
 
     try:
-        ok, error_class, resp, final_url = _fetch_html_response(service_url, timeout=3, allow_remote=True)
+        ok, error_class, resp, final_url = _fetch_html_response(service_url, timeout=3)
         if ok and resp is not None:
             extracted = _extract_title(resp, port)
             if extracted and extracted != f":{port}":
                 next_title = extracted
-            else:
-                browser_title = _browser_page_title(final_url or service_url)
-                if browser_title:
-                    next_title = browser_title
-                else:
-                    warnings.append("title not found at configured path")
 
-            thumb_data, thumb_mime, thumb_source, thumb_error = fetch_thumbnail(port, final_url or service_url, allow_remote=True)
+            thumb_data, thumb_mime, thumb_source, thumb_error = fetch_thumbnail(port, final_url or service_url)
+            if not next_title:
+                next_title = getattr(_preview_context, 'page_title', None)
+                if not next_title:
+                    warnings.append("title not found at configured path")
             if not thumb_data:
                 warnings.append("thumbnail refresh failed")
         else:
@@ -714,99 +987,209 @@ def _refresh_service_preview(port, service_url):
     return next_title, thumb_data, thumb_mime, thumb_source, thumb_error, ('; '.join(warnings) if warnings else None)
 
 
+def _uptime_summary(checks, now):
+    """Return time-weighted 7-day uptime and hourly availability buckets.
+
+    A sample before the window establishes boundary state. Time before the first
+    in-window observation is unknown when no boundary exists.
+    """
+    start = int(now) - UPTIME_WINDOW_SECONDS
+    points = sorted((int(ts), 1 if int(online) else 0) for ts, online in checks if int(ts) <= int(now))
+    boundary = None
+    in_window = []
+    for point in points:
+        if point[0] < start:
+            boundary = point
+        else:
+            in_window.append(point)
+
+    intervals = []
+    if boundary is not None:
+        cursor, state = start, boundary[1]
+    elif in_window:
+        cursor, state = in_window[0][0], in_window[0][1]
+        in_window = in_window[1:]
+    else:
+        return None, [-1] * UPTIME_BUCKETS
+
+    for ts, next_state in in_window:
+        ts = min(max(ts, start), int(now))
+        if ts > cursor:
+            intervals.append((cursor, ts, state))
+        cursor, state = ts, next_state
+    if cursor < int(now):
+        intervals.append((cursor, int(now), state))
+
+    observed = sum(end - begin for begin, end, _ in intervals)
+    online_time = sum((end - begin) for begin, end, online in intervals if online)
+    if observed > 0:
+        raw_uptime = (online_time / observed) * 100
+        uptime = round(raw_uptime, 3)
+        if raw_uptime < 100 and uptime == 100:
+            uptime = 99.999
+    else:
+        uptime = None
+
+    bucket_seconds = UPTIME_WINDOW_SECONDS / UPTIME_BUCKETS
+    buckets = []
+    for idx in range(UPTIME_BUCKETS):
+        bucket_start = start + int(idx * bucket_seconds)
+        bucket_end = start + int((idx + 1) * bucket_seconds)
+        if idx == UPTIME_BUCKETS - 1:
+            bucket_end = int(now)
+        bucket_observed = 0
+        bucket_online = 0
+        for begin, end, online in intervals:
+            overlap = max(0, min(end, bucket_end) - max(begin, bucket_start))
+            bucket_observed += overlap
+            if online:
+                bucket_online += overlap
+        buckets.append(-1 if bucket_observed == 0 else round(bucket_online / bucket_observed, 3))
+    return uptime, buckets
+
+
 def _build_uptime_buckets(checks, now):
-    bucket_seconds = max(1, UPTIME_WINDOW_SECONDS // UPTIME_BUCKETS)
-    buckets = [-1] * UPTIME_BUCKETS
-    for ts, online in checks:
-        age = now - int(ts)
-        if age < 0 or age > UPTIME_WINDOW_SECONDS:
-            continue
-        idx = UPTIME_BUCKETS - 1 - int(age // bucket_seconds)
-        if 0 <= idx < UPTIME_BUCKETS:
-            if int(online) == 0:
-                buckets[idx] = 0
-            elif buckets[idx] == -1:
-                buckets[idx] = 1
-    return buckets
+    return _uptime_summary(checks, now)[1]
 
 
-def _calc_uptime_pct(checks):
-    if not checks:
-        return None
-    total = len(checks)
-    up = sum(1 for _, online in checks if int(online) == 1)
-    return round((up / total) * 100)
+def _calc_uptime_pct(checks, now=None):
+    return _uptime_summary(checks, int(time.time()) if now is None else now)[0]
 
 
-def stats_loop():
-    while True:
-        try:
-            now = int(time.time())
-            cpu = psutil.cpu_percent(interval=0.5)
-            ram = psutil.virtual_memory()
-            disk = psutil.disk_usage("/")
-            temp = get_temp()
+def collect_system_stats(now=None, persist_history=None):
+    now = int(time.time()) if now is None else int(now)
+    cpu = psutil.cpu_percent(interval=None)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    temp = get_temp()
+    ram_available = int(ram.available)
+    ram_total = int(ram.total)
+    ram_used = max(0, ram_total - ram_available)
+    ram_used_strict = int(ram.used)
+    ram_pct = (ram_used / ram_total * 100) if ram_total else 0.0
+    sample = {
+        'sample_ts': now,
+        'cpu': round(float(cpu), 1),
+        'ram': round(float(ram_pct), 1),
+        'ram_used': ram_used,
+        'ram_available': ram_available,
+        'ram_used_strict': ram_used_strict,
+        'ram_total': ram_total,
+        'disk': round(float(disk.percent), 1),
+        'disk_used': int(disk.used),
+        'disk_total': int(disk.total),
+        'temp': temp,
+        'hostname': socket.gethostname(),
+    }
+    with _db_lock:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO system_stats(id,sample_ts,cpu,ram,ram_used,ram_available,ram_used_strict,ram_total,disk,disk_used,disk_total,temp,hostname) "
+            "VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "sample_ts=excluded.sample_ts,cpu=excluded.cpu,ram=excluded.ram,ram_used=excluded.ram_used,"
+            "ram_available=excluded.ram_available,ram_used_strict=excluded.ram_used_strict,ram_total=excluded.ram_total,"
+            "disk=excluded.disk,disk_used=excluded.disk_used,disk_total=excluded.disk_total,temp=excluded.temp,hostname=excluded.hostname",
+            (sample['sample_ts'], sample['cpu'], sample['ram'], sample['ram_used'], sample['ram_available'],
+             sample['ram_used_strict'], sample['ram_total'], sample['disk'], sample['disk_used'], sample['disk_total'],
+             sample['temp'], sample['hostname']),
+        )
+        if persist_history is None:
+            last = conn.execute("SELECT MAX(ts) AS ts FROM stats_history").fetchone()['ts']
+            persist_history = last is None or now - int(last) >= METRIC_HISTORY_SECONDS
+        if persist_history:
+            conn.execute(
+                "INSERT OR REPLACE INTO stats_history(ts,cpu,ram,disk,temp) VALUES(?,?,?,?,?)",
+                (now, sample['cpu'], sample['ram'], sample['disk'], sample['temp']),
+            )
+        conn.commit()
+        conn.close()
+    return sample
 
-            with _db_lock:
-                conn = get_db()
-                conn.execute(
-                    "INSERT OR REPLACE INTO stats_history VALUES (?,?,?,?,?)",
-                    (now, cpu, ram.percent, disk.percent, temp),
-                )
-                conn.execute("DELETE FROM stats_history WHERE ts < ?", (now - 86400,))
-                conn.execute("DELETE FROM service_checks WHERE ts < ?", (now - UPTIME_WINDOW_SECONDS,))
-                conn.execute("DELETE FROM events WHERE ts < ?", (now - (14 * 86400),))
-                conn.commit()
-                conn.close()
-        except Exception as exc:
-            log.error("stats_loop error: %s", exc)
 
-        time.sleep(60)
+def cleanup_history(now=None):
+    now = int(time.time()) if now is None else int(now)
+    with _db_lock:
+        conn = get_db()
+        conn.execute("DELETE FROM stats_history WHERE ts < ?", (now - 86400,))
+        conn.execute("DELETE FROM service_checks WHERE ts < ?", (now - CHECK_RETENTION_SECONDS,))
+        conn.execute("DELETE FROM events WHERE ts < ?", (now - (14 * 86400),))
+        conn.execute("DELETE FROM scan_rate_hits WHERE ts < ?", (now - TRIGGER_SCAN_WINDOW_SECONDS,))
+        conn.commit()
+        conn.close()
 
 
 def do_discovery(source='scheduled'):
-    global _last_discovery, _last_uptime_check, _last_down_check, _scanning, _found
-
+    scan_started = time.monotonic()
+    timings = {}
+    discovered = {}
     try:
         now = int(time.time())
         _record_event("scan_start", details=f"source={source}")
+        _update_scan_state(
+            stage='port_scan', scanning=True, progress=0.0, current_candidates=0,
+            current_found=0, timings={}, last_error=None,
+        )
 
         common_ports = {3001, 8080, 8443, 8888, 9090}
-        ports_to_scan = sorted(set(range(2000, 10000, 100)) | common_ports)
+        ports_to_scan = sorted(set(range(2000, 10000, 100)) | common_ports | EXTRA_SCAN_PORTS)
         open_ports = []
 
-        for port in ports_to_scan:
+        phase = time.monotonic()
+        for idx, port in enumerate(ports_to_scan):
+            if time.monotonic() - scan_started >= DISCOVERY_TIMEOUT_SECONDS:
+                raise TimeoutError('discovery deadline exceeded during port scan')
             try:
                 s = socket.create_connection(("127.0.0.1", port), timeout=0.15)
                 s.close()
                 open_ports.append(port)
             except Exception:
                 pass
-            time.sleep(0.05)
+            if idx % 10 == 0:
+                _update_scan_state(progress=round(0.35 * (idx + 1) / len(ports_to_scan), 3), current_candidates=len(open_ports))
+        timings['port_scan_ms'] = round((time.monotonic() - phase) * 1000, 1)
+        _update_scan_state(stage='probing', progress=0.35, current_candidates=len(open_ports), timings=timings)
 
         existing_probe_urls = {}
         with _db_lock:
             conn = get_db()
             rows = conn.execute(
-                "SELECT s.port, COALESCE(m.url, '') AS url "
+                "SELECT s.port, COALESCE(m.url, '') AS url, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port"
             ).fetchall()
             conn.close()
         for row in rows:
-            existing_probe_urls[int(row['port'])] = _discovery_probe_url(int(row['port']), row['url'])
+            existing_probe_urls[int(row['port'])] = (
+                _discovery_probe_url(int(row['port']), row['url']), row['healthy_statuses']
+            )
 
-        discovered = {}
-        for port in open_ports:
-            probe_url = existing_probe_urls.get(port, _default_service_url(port))
-            online, latency_ms, error_class, resp = _probe_http(probe_url, timeout=2.5, allow_remote=False)
+        phase = time.monotonic()
+        title_ms = 0.0
+        for idx, port in enumerate(open_ports):
+            if time.monotonic() - scan_started >= DISCOVERY_TIMEOUT_SECONDS:
+                raise TimeoutError('discovery deadline exceeded during HTTP probes')
+            probe_url, healthy_statuses = existing_probe_urls.get(port, (_default_service_url(port), '200-399'))
+            online, latency_ms, error_class, resp = _probe_http(
+                probe_url, timeout=2.5, healthy_statuses=healthy_statuses,
+            )
             if not online:
+                _update_scan_state(progress=round(0.35 + 0.25 * (idx + 1) / max(1, len(open_ports)), 3))
                 continue
+            title_started = time.monotonic()
+            title = _extract_title(resp, port)
+            title_ms += (time.monotonic() - title_started) * 1000
             discovered[port] = {
-                "title": _extract_title(resp, port),
+                "title": title,
                 "latency_ms": latency_ms,
                 "error_class": error_class,
                 "url": probe_url,
             }
+            _update_scan_state(
+                progress=round(0.35 + 0.25 * (idx + 1) / max(1, len(open_ports)), 3),
+                current_found=len(discovered),
+            )
+        timings['probe_ms'] = round((time.monotonic() - phase) * 1000, 1)
+        timings['title_extraction_ms'] = round(title_ms, 1)
+        _update_scan_state(stage='database', progress=0.62, current_found=len(discovered), timings=timings)
 
         now = int(time.time())
         refresh_cutoff = now - THUMB_REFRESH_DAYS * 86400
@@ -816,11 +1199,12 @@ def do_discovery(source='scheduled'):
         transitions = []
         existing = {}
 
+        phase = time.monotonic()
         with _db_lock:
             conn = get_db()
             existing_rows = conn.execute(
                 "SELECT s.port, s.title, s.is_online, s.thumb_ts, s.thumb_source, "
-                "(s.thumb_data IS NOT NULL) AS has_thumb, "
+                "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
                 "COALESCE(m.critical, 0) AS critical "
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port"
@@ -829,26 +1213,29 @@ def do_discovery(source='scheduled'):
 
             for port, data in discovered.items():
                 if port in existing:
+                    state_changed = int(existing[port]['is_online'] or 0) != 1
                     conn.execute(
-                        "UPDATE services SET title=?, last_seen=?, is_online=1, last_latency_ms=?, last_error=NULL WHERE port=?",
-                        (data['title'], now, data['latency_ms'], port),
+                        "UPDATE services SET title=?, last_seen=?, is_online=1, last_latency_ms=?, last_error=NULL, "
+                        "state_since=CASE WHEN ? THEN ? ELSE state_since END WHERE port=?",
+                        (data['title'], now, data['latency_ms'], state_changed, now, port),
                     )
                 else:
                     conn.execute(
-                        "INSERT INTO services (port, title, first_seen, last_seen, is_online, last_latency_ms, last_error) "
-                        "VALUES (?,?,?,?,1,?,NULL)",
-                        (port, data['title'], now, now, data['latency_ms']),
+                        "INSERT INTO services (port, title, first_seen, last_seen, is_online, state_since, last_latency_ms, last_error) "
+                        "VALUES (?,?,?,?,1,?,?,NULL)",
+                        (port, data['title'], now, now, now, data['latency_ms']),
                     )
 
                 conn.execute(
-                    "INSERT OR IGNORE INTO service_meta (port, url, critical, pinned_order, tags) VALUES (?,?,?,?,?)",
-                    (port, data['url'], 0, port, ''),
+                    "INSERT OR IGNORE INTO service_meta (port, url, critical, pinned_order, tags, healthy_statuses) VALUES (?,?,?,?,?,?)",
+                    (port, data['url'], 0, port, '', '200-399'),
                 )
 
             for port in set(existing.keys()) - discovered_ports:
                 conn.execute(
-                    "UPDATE services SET is_online=0, last_error=?, last_latency_ms=NULL WHERE port=?",
-                    ("not_responding", port),
+                    "UPDATE services SET is_online=0, last_error=?, last_latency_ms=NULL, "
+                    "state_since=CASE WHEN is_online != 0 THEN ? ELSE state_since END WHERE port=?",
+                    ("not_responding", now, port),
                 )
 
             all_known = set(existing.keys()) | discovered_ports
@@ -886,75 +1273,83 @@ def do_discovery(source='scheduled'):
             conn.execute("DELETE FROM service_meta WHERE port NOT IN (SELECT port FROM services)")
             conn.commit()
             conn.close()
+        timings['database_ms'] = round((time.monotonic() - phase) * 1000, 1)
 
-        for port in discovered_ports:
+        _update_scan_state(stage='previews', progress=0.68, timings=timings)
+        phase = time.monotonic()
+        for idx, port in enumerate(discovered_ports):
+            if time.monotonic() - scan_started >= DISCOVERY_TIMEOUT_SECONDS:
+                log.warning('Discovery preview deadline reached; preserving %d services', len(discovered_ports))
+                break
             ex = existing.get(port, {})
             thumb_ts = ex.get('thumb_ts') or 0
             thumb_source = ex.get('thumb_source')
             if ex.get('has_thumb') and thumb_ts >= refresh_cutoff and thumb_source == 'screenshot':
                 continue
-            thumb_data, thumb_mime, thumb_source, thumb_error = fetch_thumbnail(port, discovered[port].get('url'))
             with _db_lock:
                 conn = get_db()
-                _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error)
+                conn.execute(
+                    "INSERT INTO preview_requests(port, requested_ts, status, error) VALUES(?,?,'queued',NULL) "
+                    "ON CONFLICT(port) DO UPDATE SET requested_ts=excluded.requested_ts, status='queued', error=NULL",
+                    (port, int(time.time())),
+                )
                 conn.commit()
                 conn.close()
+            _update_scan_state(progress=round(0.68 + 0.30 * (idx + 1) / max(1, len(discovered_ports)), 3))
+        timings['previews_ms'] = round((time.monotonic() - phase) * 1000, 1)
 
         for t in transitions:
             _handle_state_transition(**t)
 
-        _last_discovery = now
-        _last_uptime_check = now
-        _last_down_check = now
-        _found = len(discovered_ports)
-        _record_event("scan_complete", details=f"source={source}; found={_found}")
-        log.info("Discovery complete: %d HTTP services found", _found)
+        found_count = len(discovered_ports)
+        timings['total_ms'] = round((time.monotonic() - scan_started) * 1000, 1)
+        _update_scan_state(
+            stage='idle', scanning=False, progress=1.0, current_candidates=len(open_ports),
+            current_found=0, last_completed_found=found_count, last_discovery=now,
+            last_uptime_check=now, last_down_check=now, timings=timings, last_error=None,
+        )
+        _record_event("scan_complete", details=f"source={source}; found={found_count}")
+        log.info("Discovery complete: %d HTTP services found", found_count)
     except Exception as exc:
         log.exception("Discovery failed unexpectedly: %s", exc)
+        timings['total_ms'] = round((time.monotonic() - scan_started) * 1000, 1)
+        _update_scan_state(
+            stage='failed', scanning=False, current_found=len(discovered),
+            timings=timings, last_error=f'{exc.__class__.__name__}: {exc}'[:240],
+        )
         _record_event("scan_failed", details=str(exc)[:200])
-    finally:
-        with _scan_lock:
-            _scanning = False
 
 
 def do_uptime_check(only_down=False):
-    global _last_uptime_check, _last_down_check
-
+    if not _uptime_lock.acquire(blocking=False):
+        return False
     now = int(time.time())
     expire_cutoff = now - EXPIRE_DAYS * 86400
-
     transitions = []
-    thumb_candidates = []
-
-    with _db_lock:
-        conn = get_db()
-        if only_down:
+    try:
+        with _db_lock:
+            conn = get_db()
+            where = "WHERE s.last_seen >= ? AND s.is_online = 0" if only_down else "WHERE s.last_seen >= ?"
             rows = conn.execute(
                 "SELECT s.port, s.title, s.is_online, "
                 "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
-                "COALESCE(m.critical, 0) AS critical "
-                "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
-                "WHERE s.last_seen >= ? AND s.is_online = 0",
+                "COALESCE(m.critical, 0) AS critical, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
+                "FROM services s LEFT JOIN service_meta m ON m.port = s.port " + where,
                 (expire_cutoff,),
             ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT s.port, s.title, s.is_online, "
-                "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
-                "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
-                "COALESCE(m.critical, 0) AS critical "
-                "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
-                "WHERE s.last_seen >= ?",
-                (expire_cutoff,),
-            ).fetchall()
+            conn.close()
 
+        # Network I/O is deliberately outside the SQLite lock so the metrics
+        # executor can keep its five-second cadence during slow probes.
         for row in rows:
             port = int(row['port'])
             previous_online = int(row['is_online'] or 0)
             try:
                 service_url = _normalize_service_url(row['url'], port)
-                online, latency_ms, error_class, resp = _probe_http(service_url, timeout=2.0, allow_remote=True)
+                online, latency_ms, error_class, resp = _probe_http(
+                    service_url, timeout=2.0, healthy_statuses=row['healthy_statuses'],
+                )
             except ValueError:
                 service_url = _default_service_url(port)
                 online = False
@@ -962,31 +1357,40 @@ def do_uptime_check(only_down=False):
                 error_class = 'invalid_url'
                 resp = None
             online_int = 1 if online else 0
+            title_update = _extract_title(resp, port) if online and resp is not None else ''
 
-            if online:
-                title_update = _extract_title(resp, port) if resp is not None else ''
-                if title_update and title_update != f":{port}":
+            with _db_lock:
+                conn = get_db()
+                if online and title_update and title_update != f":{port}":
                     conn.execute(
-                        "UPDATE services SET title=?, is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL WHERE port=?",
-                        (title_update, now, latency_ms, port),
+                        "UPDATE services SET title=?, is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL, "
+                        "state_since=CASE WHEN is_online != 1 THEN ? ELSE state_since END WHERE port=?",
+                        (title_update, now, latency_ms, now, port),
+                    )
+                elif online:
+                    conn.execute(
+                        "UPDATE services SET is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL, "
+                        "state_since=CASE WHEN is_online != 1 THEN ? ELSE state_since END WHERE port=?",
+                        (now, latency_ms, now, port),
                     )
                 else:
                     conn.execute(
-                        "UPDATE services SET is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL WHERE port=?",
-                        (now, latency_ms, port),
+                        "UPDATE services SET is_online=0, last_latency_ms=NULL, last_error=?, "
+                        "state_since=CASE WHEN is_online != 0 THEN ? ELSE state_since END WHERE port=?",
+                        (error_class or 'probe_failed', now, port),
                     )
-                if not row['has_thumb']:
-                    thumb_candidates.append((port, service_url))
-            else:
                 conn.execute(
-                    "UPDATE services SET is_online=0, last_latency_ms=NULL, last_error=? WHERE port=?",
-                    (error_class or 'probe_failed', port),
+                    "INSERT OR REPLACE INTO service_checks (ts, port, online, latency_ms, error_class) VALUES (?,?,?,?,?)",
+                    (now, port, online_int, latency_ms, error_class),
                 )
-
-            conn.execute(
-                "INSERT OR REPLACE INTO service_checks (ts, port, online, latency_ms, error_class) VALUES (?,?,?,?,?)",
-                (now, port, online_int, latency_ms, error_class),
-            )
+                if online and not row['has_thumb']:
+                    conn.execute(
+                        "INSERT INTO preview_requests(port, requested_ts, status, error) VALUES(?,?,'queued',NULL) "
+                        "ON CONFLICT(port) DO UPDATE SET requested_ts=excluded.requested_ts, status='queued', error=NULL",
+                        (port, now),
+                    )
+                conn.commit()
+                conn.close()
 
             if previous_online != online_int:
                 transitions.append({
@@ -1001,78 +1405,135 @@ def do_uptime_check(only_down=False):
                     "critical": int(row['critical'] or 0),
                 })
 
+        for transition in transitions:
+            _handle_state_transition(**transition)
+
+        state_changes = {'last_down_check': now}
+        if not only_down:
+            state_changes['last_uptime_check'] = now
+        _update_scan_state(**state_changes)
+        log.info(
+            "Uptime check complete (%s): %d services checked",
+            'down-only' if only_down else 'all', len(rows),
+        )
+        return True
+    finally:
+        _uptime_lock.release()
+
+
+def queue_discovery_request(client_key):
+    now = int(time.time())
+    with _db_lock:
+        conn = get_db()
+        active = conn.execute(
+            "SELECT id FROM scan_requests WHERE status IN ('queued','running') ORDER BY id LIMIT 1"
+        ).fetchone()
+        scan_state = _read_scan_state(conn)
+        if active or scan_state.get('scanning'):
+            conn.close()
+            return None
+        cur = conn.execute(
+            "INSERT INTO scan_requests(requested_ts, requested_by, status) VALUES(?,?,'queued')",
+            (now, str(client_key)[:120]),
+        )
+        request_id = cur.lastrowid
         conn.commit()
         conn.close()
+    _update_scan_state(stage='queued', scanning=False, progress=0.0, current_found=0, last_error=None)
+    return request_id
 
-    for port, service_url in thumb_candidates:
-        thumb_data, thumb_mime, thumb_source, thumb_error = fetch_thumbnail(port, service_url, allow_remote=True)
+
+def process_scan_requests():
+    with _scan_lock:
         with _db_lock:
             conn = get_db()
-            _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=now)
+            row = conn.execute(
+                "SELECT id FROM scan_requests WHERE status='queued' ORDER BY requested_ts, id LIMIT 1"
+            ).fetchone()
+            if not row:
+                conn.close()
+                return False
+            request_id = int(row['id'])
+            now = int(time.time())
+            conn.execute(
+                "UPDATE scan_requests SET status='running', started_ts=? WHERE id=? AND status='queued'",
+                (now, request_id),
+            )
             conn.commit()
             conn.close()
-
-    for t in transitions:
-        _handle_state_transition(**t)
-
-    _last_down_check = now
-    if not only_down:
-        _last_uptime_check = now
-
-    log.info(
-        "Uptime check complete (%s): %d services checked",
-        'down-only' if only_down else 'all',
-        len(rows),
-    )
-
-
-def scan_loop():
-    global _scanning
-
-    time.sleep(5)
-
-    while True:
-        now = int(time.time())
-
-        if _last_discovery is None or now - _last_discovery >= 86400:
-            with _scan_lock:
-                if not _scanning:
-                    _scanning = True
-                    run_discovery = True
-                else:
-                    run_discovery = False
-            if run_discovery:
-                do_discovery(source='scheduled')
-        elif _last_uptime_check is None or now - _last_uptime_check >= 300:
-            do_uptime_check(only_down=False)
-        elif _last_down_check is None or now - _last_down_check >= 60:
-            do_uptime_check(only_down=True)
-
-        time.sleep(10)
+        try:
+            do_discovery(source=f'manual:{request_id}')
+            state = _read_scan_state()
+            status = 'failed' if state.get('last_error') else 'completed'
+            error = state.get('last_error')
+        except Exception as exc:
+            status, error = 'failed', str(exc)[:240]
+        with _db_lock:
+            conn = get_db()
+            conn.execute(
+                "UPDATE scan_requests SET status=?, completed_ts=?, error=? WHERE id=?",
+                (status, int(time.time()), error, request_id),
+            )
+            conn.commit()
+            conn.close()
+        return True
 
 
-def trigger_discovery():
-    global _scanning
-    with _scan_lock:
-        if _scanning:
+def process_preview_requests():
+    with _db_lock:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT p.port, COALESCE(m.url, '') AS url FROM preview_requests p "
+            "LEFT JOIN service_meta m ON m.port=p.port WHERE p.status='queued' ORDER BY p.requested_ts LIMIT 1"
+        ).fetchone()
+        if not row:
+            conn.close()
             return False
-        _scanning = True
-
-    t = threading.Thread(target=lambda: do_discovery(source='manual'), daemon=True)
-    t.start()
+        port = int(row['port'])
+        url = _safe_service_url(row['url'], port)
+        conn.execute("UPDATE preview_requests SET status='running', error=NULL WHERE port=?", (port,))
+        conn.commit()
+        conn.close()
+    started = time.monotonic()
+    title, data, mime, source, thumb_error, warning = _refresh_service_preview(port, url)
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+    with _db_lock:
+        conn = get_db()
+        if title:
+            conn.execute("UPDATE services SET title=? WHERE port=?", (title, port))
+        if data or thumb_error:
+            _store_thumbnail_result(conn, port, data, mime, source, thumb_error)
+        conn.execute(
+            "UPDATE preview_requests SET status=?, error=? WHERE port=?",
+            ('failed' if warning else 'completed', warning, port),
+        )
+        conn.commit()
+        conn.close()
+    _record_event(
+        'preview_complete', port=port, error_class=thumb_error,
+        details=json.dumps({'total_ms': elapsed_ms, 'success': not bool(warning)}, separators=(',', ':')),
+    )
     return True
 
 
 def _check_scan_rate_limit(client_key):
     now = int(time.time())
-    with _rate_lock:
-        recent = [ts for ts in _trigger_hits.get(client_key, []) if now - ts < TRIGGER_SCAN_WINDOW_SECONDS]
-        if len(recent) >= TRIGGER_SCAN_RATE_LIMIT:
-            retry_after = TRIGGER_SCAN_WINDOW_SECONDS - (now - recent[0])
-            _trigger_hits[client_key] = recent
+    with _db_lock:
+        conn = get_db()
+        cutoff = now - TRIGGER_SCAN_WINDOW_SECONDS
+        conn.execute("DELETE FROM scan_rate_hits WHERE ts < ?", (cutoff,))
+        rows = conn.execute(
+            "SELECT ts FROM scan_rate_hits WHERE client_key=? ORDER BY ts ASC",
+            (client_key,),
+        ).fetchall()
+        if len(rows) >= TRIGGER_SCAN_RATE_LIMIT:
+            retry_after = TRIGGER_SCAN_WINDOW_SECONDS - (now - int(rows[0]['ts']))
+            conn.commit()
+            conn.close()
             return False, max(1, retry_after)
-        recent.append(now)
-        _trigger_hits[client_key] = recent
+        conn.execute("INSERT INTO scan_rate_hits(client_key, ts) VALUES(?,?)", (client_key, now))
+        conn.commit()
+        conn.close()
         return True, 0
 
 
@@ -1080,14 +1541,14 @@ def _service_meta_row(conn, port):
     row = conn.execute(
         "SELECT m.port, COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
         "COALESCE(m.critical, 0) AS critical, COALESCE(m.pinned_order, s.port) AS pinned_order, "
-        "COALESCE(m.tags, '') AS tags "
+        "COALESCE(m.tags, '') AS tags, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
         "FROM services s LEFT JOIN service_meta m ON m.port = s.port WHERE s.port = ?",
         (port,),
     ).fetchone()
     if not row:
         return None
     d = dict(row)
-    d['url'] = _normalize_service_url(d.get('url'), port)
+    d['url'] = _safe_service_url(d.get('url'), port)
     d['path'] = _service_path_from_url(d['url'], port)
     d['tags'] = _parse_tags(d.get('tags'))
     d['critical'] = bool(d.get('critical'))
@@ -1100,12 +1561,59 @@ def _ensure_runtime_started():
         if _bg_started:
             return
 
-        os.makedirs('/data', exist_ok=True)
+        os.makedirs(os.path.dirname(DB_PATH) or '.', exist_ok=True)
         init_db()
-
-        threading.Thread(target=stats_loop, daemon=True).start()
-        threading.Thread(target=scan_loop, daemon=True).start()
         _bg_started = True
+
+
+def _request_host():
+    host = (request.host or '').strip().lower()
+    if host.startswith('['):
+        return host.split(']', 1)[0].lstrip('[')
+    return host.rsplit(':', 1)[0]
+
+
+def _origin_is_same_host():
+    origin = request.headers.get('Origin')
+    if not origin:
+        return True
+    try:
+        parsed = urlparse(origin)
+        request_parsed = urlparse(f'//{request.host}', scheme=request.scheme)
+        origin_port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        request_port = request_parsed.port or (443 if request.scheme == 'https' else 80)
+        return bool(
+            parsed.scheme == request.scheme
+            and parsed.hostname
+            and parsed.hostname.lower().rstrip('.') == _request_host().rstrip('.')
+            and origin_port == request_port
+        )
+    except Exception:
+        return False
+
+
+@app.before_request
+def enforce_request_security():
+    if not _is_local_service_host(_request_host()):
+        return jsonify({'error': 'untrusted host'}), 400
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        if request.headers.get('X-Beacon-UI') != '1':
+            return jsonify({'error': 'missing Beacon UI header'}), 403
+        if not _origin_is_same_host():
+            return jsonify({'error': 'unexpected origin'}), 403
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=(), payment=(), usb=()'
+    return response
 
 
 @app.route("/")
@@ -1116,6 +1624,11 @@ def index():
 @app.route("/style.css")
 def serve_css():
     return send_file("style.css", mimetype="text/css")
+
+
+@app.route("/app.js")
+def serve_js():
+    return send_file("app.js", mimetype="application/javascript")
 
 
 @app.route("/api/config")
@@ -1130,21 +1643,15 @@ def api_config():
 
 @app.route("/api/stats")
 def api_stats():
-    cpu = psutil.cpu_percent(interval=0.5)
-    ram = psutil.virtual_memory()
-    disk = psutil.disk_usage("/")
-    temp = get_temp()
-    return jsonify({
-        "cpu": cpu,
-        "ram": ram.percent,
-        "ram_used": ram.used,
-        "ram_total": ram.total,
-        "disk": disk.percent,
-        "disk_used": disk.used,
-        "disk_total": disk.total,
-        "temp": temp,
-        "hostname": socket.gethostname(),
-    })
+    with _db_lock:
+        conn = get_db()
+        row = conn.execute("SELECT * FROM system_stats WHERE id=1").fetchone()
+        conn.close()
+    if row is None:
+        return jsonify({'error': 'metrics not yet sampled'}), 503
+    payload = dict(row)
+    payload.pop('id', None)
+    return jsonify(payload)
 
 
 @app.route("/api/history")
@@ -1168,12 +1675,12 @@ def api_services():
     with _db_lock:
         conn = get_db()
         services = conn.execute(
-            "SELECT s.port, s.title, s.first_seen, s.last_seen, s.is_online, "
+            "SELECT s.port, s.title, s.first_seen, s.last_seen, s.is_online, s.state_since, "
             "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
             "s.last_latency_ms, s.last_error, "
             "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
             "COALESCE(m.critical, 0) AS critical, COALESCE(m.pinned_order, s.port) AS pinned_order, "
-            "COALESCE(m.tags, '') AS tags "
+            "COALESCE(m.tags, '') AS tags, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
             "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
             "WHERE s.last_seen >= ? "
             "ORDER BY COALESCE(m.pinned_order, s.port) ASC, s.port ASC",
@@ -1187,7 +1694,7 @@ def api_services():
             all_checks = conn.execute(
                 f"SELECT ts, port, online FROM service_checks "
                 f"WHERE port IN ({placeholders}) AND ts >= ? ORDER BY ts ASC",
-                (*ports, now - UPTIME_WINDOW_SECONDS),
+                (*ports, now - CHECK_RETENTION_SECONDS),
             ).fetchall()
             for row in all_checks:
                 checks_by_port[row['port']].append((row['ts'], row['online']))
@@ -1195,13 +1702,15 @@ def api_services():
         result = []
         for svc in services:
             checks = checks_by_port.get(svc['port'], [])
-            effective_url = _normalize_service_url(svc['url'], svc['port'])
+            uptime_pct, uptime_buckets = _uptime_summary(checks, now)
+            effective_url = _safe_service_url(svc['url'], svc['port'])
             result.append({
                 "port": svc['port'],
                 "title": svc['title'],
                 "display_name": svc['display_name'] or None,
                 "first_seen": svc['first_seen'],
                 "last_seen": svc['last_seen'],
+                "state_since": svc['state_since'],
                 "is_online": svc['is_online'],
                 "has_thumb": svc['has_thumb'],
                 "latency_ms": svc['last_latency_ms'],
@@ -1211,8 +1720,9 @@ def api_services():
                 "path": _service_path_from_url(effective_url, svc['port']),
                 "tags": _parse_tags(svc['tags']),
                 "pinned_order": svc['pinned_order'],
-                "uptime_pct": _calc_uptime_pct(checks),
-                "uptime_buckets": _build_uptime_buckets(checks, now),
+                "healthy_statuses": svc['healthy_statuses'],
+                "uptime_pct": uptime_pct,
+                "uptime_buckets": uptime_buckets,
             })
 
         conn.close()
@@ -1278,7 +1788,7 @@ def api_service_meta(port):
         return jsonify(row)
 
     payload = request.get_json(silent=True) or {}
-    allowed_fields = {'display_name', 'url', 'path', 'critical', 'pinned_order', 'tags'}
+    allowed_fields = {'display_name', 'url', 'path', 'critical', 'pinned_order', 'tags', 'healthy_statuses'}
     unknown = [k for k in payload.keys() if k not in allowed_fields]
     if unknown:
         return jsonify({"error": f"unknown fields: {', '.join(unknown)}"}), 400
@@ -1292,7 +1802,7 @@ def api_service_meta(port):
             return jsonify({"error": "service not found"}), 404
 
         current = conn.execute(
-            "SELECT display_name, url, critical, pinned_order, tags FROM service_meta WHERE port=?",
+            "SELECT display_name, url, critical, pinned_order, tags, healthy_statuses FROM service_meta WHERE port=?",
             (port,),
         ).fetchone()
         current = dict(current) if current else {
@@ -1301,6 +1811,7 @@ def api_service_meta(port):
             "critical": 0,
             "pinned_order": port,
             "tags": "",
+            "healthy_statuses": "200-399",
         }
 
         next_display_name = current['display_name'] if 'display_name' not in payload else (payload.get('display_name') or '').strip()
@@ -1311,6 +1822,13 @@ def api_service_meta(port):
             conn.close()
             return jsonify({"error": "pinned_order must be an integer"}), 400
         next_tags = current['tags'] if 'tags' not in payload else _tags_to_db(payload.get('tags'))
+        try:
+            _, next_healthy_statuses = _parse_healthy_statuses(
+                current.get('healthy_statuses', '200-399') if 'healthy_statuses' not in payload else payload.get('healthy_statuses')
+            )
+        except ValueError as exc:
+            conn.close()
+            return jsonify({"error": str(exc)}), 400
 
         has_url = 'url' in payload
         has_path = 'path' in payload
@@ -1326,36 +1844,30 @@ def api_service_meta(port):
             return jsonify({"error": str(exc)}), 400
 
         conn.execute(
-            "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags) VALUES (?,?,?,?,?,?) "
+            "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags, healthy_statuses) VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(port) DO UPDATE SET display_name=excluded.display_name, url=excluded.url, "
-            "critical=excluded.critical, pinned_order=excluded.pinned_order, tags=excluded.tags",
-            (port, next_display_name, next_url, next_critical, next_pinned_order, next_tags),
+            "critical=excluded.critical, pinned_order=excluded.pinned_order, tags=excluded.tags, "
+            "healthy_statuses=excluded.healthy_statuses",
+            (port, next_display_name, next_url, next_critical, next_pinned_order, next_tags, next_healthy_statuses),
         )
         conn.commit()
         conn.close()
 
-    refreshed_title, refreshed_thumb_data, refreshed_thumb_mime, refreshed_thumb_source, refreshed_thumb_error, refresh_warning = _refresh_service_preview(port, next_url)
-
     with _db_lock:
         conn = get_db()
-        if refreshed_title:
-            conn.execute("UPDATE services SET title=? WHERE port=?", (refreshed_title, port))
-        if refreshed_thumb_data or refreshed_thumb_error:
-            _store_thumbnail_result(
-                conn,
-                port,
-                refreshed_thumb_data,
-                refreshed_thumb_mime,
-                refreshed_thumb_source,
-                refreshed_thumb_error,
-            )
+        conn.execute(
+            "INSERT INTO preview_requests(port, requested_ts, status, error) VALUES(?,?,'queued',NULL) "
+            "ON CONFLICT(port) DO UPDATE SET requested_ts=excluded.requested_ts, status='queued', error=NULL",
+            (port, int(time.time())),
+        )
         conn.commit()
         row = _service_meta_row(conn, port)
         conn.close()
 
     _record_event('meta_updated', port=port, details='service metadata updated')
     payload = dict(row or {})
-    payload['refresh_warning'] = refresh_warning
+    payload['refresh_warning'] = None
+    payload['preview_queued'] = True
     return jsonify(payload)
 
 
@@ -1393,10 +1905,7 @@ def api_thumbnail_status():
     result = []
     for row in rows:
         port = int(row['port'])
-        try:
-            effective_url = _normalize_service_url(row['url'], port)
-        except ValueError:
-            effective_url = _default_service_url(port)
+        effective_url = _safe_service_url(row['url'], port)
         result.append({
             "port": port,
             "url": effective_url,
@@ -1410,13 +1919,19 @@ def api_thumbnail_status():
 
 @app.route("/api/scan-status")
 def api_scan_status():
-    return jsonify({
-        "last_discovery": _last_discovery,
-        "last_uptime_check": _last_uptime_check,
-        "last_down_check": _last_down_check,
-        "scanning": _scanning,
-        "found": _found,
-    })
+    now = int(time.time())
+    with _db_lock:
+        conn = get_db()
+        state = _read_scan_state(conn)
+        heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
+        queued = conn.execute("SELECT COUNT(*) AS n FROM scan_requests WHERE status='queued'").fetchone()['n']
+        conn.close()
+    heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
+    state['worker_heartbeat'] = heartbeat_ts
+    state['worker_ready'] = bool(heartbeat_ts and now - int(heartbeat_ts) <= WORKER_READY_SECONDS)
+    state['queued_requests'] = int(queued)
+    state['found'] = state['current_found'] if state.get('scanning') else state['last_completed_found']
+    return jsonify(state)
 
 
 @app.route("/api/trigger-scan", methods=["POST"])
@@ -1426,10 +1941,55 @@ def api_trigger_scan():
     if not allowed:
         return jsonify({"started": False, "reason": "rate_limited", "retry_after": retry_after}), 429
 
-    started = trigger_discovery()
-    if started:
-        return jsonify({"started": True})
-    return jsonify({"started": False, "reason": "already_scanning"}), 429
+    request_id = queue_discovery_request(client_key)
+    if request_id is not None:
+        return jsonify({"queued": True, "request_id": request_id}), 202
+    return jsonify({"queued": False, "reason": "already_queued_or_running"}), 409
+
+
+@app.route('/healthz')
+def healthz():
+    try:
+        with _db_lock:
+            conn = get_db()
+            conn.execute('SELECT 1').fetchone()
+            conn.close()
+        return jsonify({'status': 'ok'})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'error': exc.__class__.__name__}), 503
+
+
+@app.route('/readyz')
+def readyz():
+    now = int(time.time())
+    with _db_lock:
+        heartbeat = _get_runtime_state('worker_heartbeat', {})
+    heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
+    ready = bool(heartbeat_ts and now - int(heartbeat_ts) <= WORKER_READY_SECONDS)
+    return jsonify({'ready': ready, 'worker_heartbeat': heartbeat_ts}), (200 if ready else 503)
+
+
+@app.route('/metrics')
+def prometheus_metrics():
+    if not ENABLE_PROMETHEUS:
+        return '', 404
+    with _db_lock:
+        conn = get_db()
+        stats = conn.execute('SELECT * FROM system_stats WHERE id=1').fetchone()
+        online = conn.execute('SELECT COUNT(*) AS n FROM services WHERE is_online=1').fetchone()['n']
+        total = conn.execute('SELECT COUNT(*) AS n FROM services').fetchone()['n']
+        conn.close()
+    if stats is None:
+        return '# metrics are not ready\n', 503, {'Content-Type': 'text/plain; version=0.0.4'}
+    lines = [
+        '# TYPE beacon_cpu_percent gauge', f"beacon_cpu_percent {stats['cpu']}",
+        '# TYPE beacon_ram_pressure_percent gauge', f"beacon_ram_pressure_percent {stats['ram']}",
+        '# TYPE beacon_ram_used_bytes gauge', f"beacon_ram_used_bytes {stats['ram_used']}",
+        '# TYPE beacon_disk_percent gauge', f"beacon_disk_percent {stats['disk']}",
+        '# TYPE beacon_services_online gauge', f'beacon_services_online {online}',
+        '# TYPE beacon_services_total gauge', f'beacon_services_total {total}',
+    ]
+    return '\n'.join(lines) + '\n', 200, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
 
 
 if os.environ.get('DISABLE_BACKGROUND', '0') != '1':
@@ -1438,4 +1998,4 @@ if os.environ.get('DISABLE_BACKGROUND', '0') != '1':
 
 if __name__ == "__main__":
     _ensure_runtime_started()
-    app.run(host="0.0.0.0", port=80)
+    app.run(host="0.0.0.0", port=8080)
