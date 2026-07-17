@@ -64,6 +64,7 @@ console.log(JSON.stringify({
             'command: ["chown", "-R", "10001:10001", "/data"]',
             'network_mode: none', 'cap_drop: [ALL]', 'cap_add: [CHOWN]',
             'condition: service_completed_successfully', 'pull_policy: never',
+            '192.168.0.0/16',
         ]:
             self.assertIn(token, compose)
 

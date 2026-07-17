@@ -9,7 +9,10 @@ from tests.helpers import cleanup_db, load_app
 class ReleaseContractTests(unittest.TestCase):
     def setUp(self):
         self.appmod, self.db_path = load_app({
-            'TRUSTED_HOSTS': 'raspi.local,localhost,127.0.0.1,::1',
+            'TRUSTED_HOSTS': (
+                'raspi.local,raspi,localhost,127.0.0.1,::1,'
+                '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7'
+            ),
             'LOCAL_SERVICE_HOSTS': 'raspi.local',
         })
         self.client = self.appmod.app.test_client()
@@ -118,6 +121,9 @@ class ReleaseContractTests(unittest.TestCase):
             403,
         )
         self.assertEqual(self.client.get('/healthz', headers={'Host': 'evil.test'}).status_code, 400)
+        self.assertEqual(self.client.get('/healthz', headers={'Host': '8.8.8.8'}).status_code, 400)
+        self.assertEqual(self.client.get('/healthz', headers={'Host': '192.168.1.50'}).status_code, 200)
+        self.assertEqual(self.client.get('/healthz', headers={'Host': '[fd00::50]'}).status_code, 200)
         accepted = self.client.post('/api/trigger-scan', headers={**self.ui, 'Origin': 'http://localhost'})
         self.assertEqual(accepted.status_code, 202)
 

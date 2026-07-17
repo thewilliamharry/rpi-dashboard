@@ -39,7 +39,7 @@ Edit `docker-compose.yml` or supply equivalent environment values.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `EXTRA_SCAN_PORTS` | `8100` | Additional comma-separated HTTP ports. |
-| `TRUSTED_HOSTS` | local aliases | Accepted HTTP Host/Origin aliases for the UI. Add the Pi's IP if accessing Beacon by IP. |
+| `TRUSTED_HOSTS` | Pi aliases and private LAN CIDRs | Accepted HTTP Host/Origin aliases or IP ranges for the UI. Defaults include RFC 1918 IPv4 and IPv6 ULA networks so LAN clients can use the Pi's IP. |
 | `LOCAL_SERVICE_HOSTS` | `raspi.local` | Aliases service URLs may target; they are stored canonically as loopback. |
 | `METRIC_SAMPLE_SECONDS` | `5` | Cached metric collection cadence. |
 | `METRIC_HISTORY_SECONDS` | `60` | Persistent history cadence. |

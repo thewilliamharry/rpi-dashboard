@@ -38,12 +38,29 @@ WORKER_READY_SECONDS = int(os.environ.get("WORKER_READY_SECONDS", 20))
 DISCOVERY_TIMEOUT_SECONDS = int(os.environ.get("DISCOVERY_TIMEOUT_SECONDS", 180))
 ENABLE_PROMETHEUS = os.environ.get("ENABLE_PROMETHEUS", "0") in ("1", "true", "TRUE", "yes", "on")
 
-DEFAULT_TRUSTED_HOSTS = "raspi.local,localhost,127.0.0.1,::1"
-TRUSTED_HOSTS = {
-    item.strip().lower().strip('[]')
-    for item in os.environ.get("TRUSTED_HOSTS", DEFAULT_TRUSTED_HOSTS).split(',')
-    if item.strip()
-}
+DEFAULT_TRUSTED_HOSTS = (
+    "raspi.local,raspi,localhost,127.0.0.1,::1,"
+    "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+)
+
+
+def _parse_trusted_hosts(value):
+    hosts = set()
+    networks = set()
+    for raw_item in value.split(','):
+        item = raw_item.strip().lower().strip('[]')
+        if not item:
+            continue
+        if '/' in item:
+            networks.add(ipaddress.ip_network(item, strict=False))
+        else:
+            hosts.add(item)
+    return hosts, networks
+
+
+TRUSTED_HOSTS, TRUSTED_HOST_NETWORKS = _parse_trusted_hosts(
+    os.environ.get("TRUSTED_HOSTS", DEFAULT_TRUSTED_HOSTS)
+)
 LOCAL_SERVICE_HOSTS = TRUSTED_HOSTS | {
     item.strip().lower().strip('[]')
     for item in os.environ.get("LOCAL_SERVICE_HOSTS", "").split(',')
@@ -395,6 +412,16 @@ def _is_local_service_host(host):
         return False
     host = str(host).lower().rstrip('.').strip('[]')
     return _is_loopback_host(host) or host in {item.rstrip('.') for item in LOCAL_SERVICE_HOSTS}
+
+
+def _is_trusted_request_host(host):
+    if _is_local_service_host(host):
+        return True
+    try:
+        address = ipaddress.ip_address(str(host).lower().strip('[]'))
+    except ValueError:
+        return False
+    return any(address in network for network in TRUSTED_HOST_NETWORKS)
 
 
 def _is_localhost_url(url):
@@ -1617,7 +1644,7 @@ def _origin_is_same_host():
 
 @app.before_request
 def enforce_request_security():
-    if not _is_local_service_host(_request_host()):
+    if not _is_trusted_request_host(_request_host()):
         return jsonify({'error': 'untrusted host'}), 400
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
         if request.headers.get('X-Beacon-UI') != '1':

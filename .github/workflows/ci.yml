@@ -59,9 +59,10 @@ jobs:
           docker compose -p beacon-ci up -d --no-build --force-recreate --remove-orphans --wait --wait-timeout 180
           docker compose -p beacon-ci exec -T worker \
             python -c "import sqlite3; c=sqlite3.connect('/data/dashboard.db'); assert c.execute('select value from sentinel').fetchone()[0] == 'preserved'"
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: beacon:ci
+          version: v0.70.0
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
