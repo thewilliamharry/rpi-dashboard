@@ -1,5 +1,6 @@
 x-beacon-common: &beacon-common
   image: beacon:2.0.1
+  pull_policy: never
   restart: unless-stopped
   user: "10001:10001"
   read_only: true
@@ -30,6 +31,7 @@ services:
   data-init:
     build: ./dashboard
     image: beacon:2.0.1
+    pull_policy: never
     user: "0:0"
     command: ["chown", "-R", "10001:10001", "/data"]
     restart: "no"

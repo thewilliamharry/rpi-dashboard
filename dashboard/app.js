@@ -92,8 +92,7 @@ function updateStats(data) {
   $('ram-sub').textContent = fmtRamPair(data.ram_used, data.ram_total);
   $('disk-sub').textContent = fmtDiskPair(data.disk_used, data.disk_total);
   $('temp-val').textContent = data.temp === null ? 'n/a' : `${Number(data.temp).toFixed(1)}°C`;
-  $('stats-ts').textContent = `sampled ${fmtAgo(data.sample_ts)}`;
-  $('temp-ts').textContent = `sampled ${fmtAgo(data.sample_ts)}`;
+  $('stats-ts').textContent = fmtAgo(data.sample_ts);
 }
 
 function updateHistory(rows) {
@@ -358,8 +357,7 @@ if (typeof document !== 'undefined') {
     setInterval(loadHistory, 60000);
     setInterval(() => {
       if (lastStatsSample) {
-        $('stats-ts').textContent = `sampled ${fmtAgo(lastStatsSample)}`;
-        $('temp-ts').textContent = `sampled ${fmtAgo(lastStatsSample)}`;
+        $('stats-ts').textContent = fmtAgo(lastStatsSample);
         if (Date.now() / 1000 - lastStatsSample > 20) setConnectionState(true);
       }
     }, 1000);

@@ -25,6 +25,8 @@ class UiContractTests(unittest.TestCase):
         self.assertNotIn('id="cpu-sub"', html)
         self.assertNotIn('% load', js)
         self.assertNotIn('ram_available)} available', js)
+        self.assertNotIn('id="temp-ts"', html)
+        self.assertNotIn('sampled ${fmtAgo', js)
 
     def test_styles_include_events_and_service_ops_classes(self):
         css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
@@ -61,7 +63,7 @@ console.log(JSON.stringify({
             'data-init:', 'image: beacon:2.0.1', 'user: "0:0"',
             'command: ["chown", "-R", "10001:10001", "/data"]',
             'network_mode: none', 'cap_drop: [ALL]', 'cap_add: [CHOWN]',
-            'condition: service_completed_successfully',
+            'condition: service_completed_successfully', 'pull_policy: never',
         ]:
             self.assertIn(token, compose)
 
