@@ -16,7 +16,7 @@ jobs:
         with:
           version: "0.11.28"
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: uv sync --project dashboard --frozen
