@@ -20,9 +20,26 @@ function fmtAgo(ts) {
   return `${Math.floor(d / 86400)}d ago`;
 }
 
-function fmtGiB(bytes) {
-  return `${(Number(bytes || 0) / (1024 ** 3)).toFixed(1)} GiB`;
+function normalizedBytes(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
 }
+
+function fmtDecimalBytes(bytes, unit = 'GB') {
+  const divisor = unit === 'TB' ? 1e12 : 1e9;
+  return `${(normalizedBytes(bytes) / divisor).toFixed(1)} ${unit}`;
+}
+
+function fmtRamPair(used, total) {
+  return `${fmtDecimalBytes(used)} / ${fmtDecimalBytes(total)}`;
+}
+
+function fmtDiskPair(used, total) {
+  const unit = normalizedBytes(total) >= 1e12 ? 'TB' : 'GB';
+  return `${fmtDecimalBytes(used, unit)} / ${fmtDecimalBytes(total, unit)}`;
+}
+
+globalThis.BeaconFormatters = Object.freeze({fmtDecimalBytes, fmtRamPair, fmtDiskPair});
 
 function fmtLatency(ms) {
   return ms === null || ms === undefined ? 'n/a' : `${Math.round(ms)} ms`;
@@ -72,9 +89,8 @@ function updateStats(data) {
     $(`${key}-pct`).textContent = Math.round(Number(data[key]));
     $(`${key}-arc`).style.strokeDashoffset = arcOffset(data[key]);
   }
-  $('cpu-sub').textContent = `${Number(data.cpu).toFixed(1)}% load`;
-  $('ram-sub').textContent = `${fmtGiB(data.ram_used)} / ${fmtGiB(data.ram_total)} · ${fmtGiB(data.ram_available)} available`;
-  $('disk-sub').textContent = `${fmtGiB(data.disk_used)} / ${fmtGiB(data.disk_total)}`;
+  $('ram-sub').textContent = fmtRamPair(data.ram_used, data.ram_total);
+  $('disk-sub').textContent = fmtDiskPair(data.disk_used, data.disk_total);
   $('temp-val').textContent = data.temp === null ? 'n/a' : `${Number(data.temp).toFixed(1)}°C`;
   $('stats-ts').textContent = `sampled ${fmtAgo(data.sample_ts)}`;
   $('temp-ts').textContent = `sampled ${fmtAgo(data.sample_ts)}`;
@@ -327,23 +343,25 @@ function applyTheme(light) {
   localStorage.setItem('beacon-theme', light ? 'light' : 'dark');
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  applyTheme(localStorage.getItem('beacon-theme') === 'light');
-  $('toggle').addEventListener('click', () => applyTheme(!document.documentElement.classList.contains('light')));
-  document.querySelector('.btn-scan').addEventListener('click', triggerScan);
-  $('meta-form').addEventListener('submit', submitMetaEditor);
-  $('meta-cancel').addEventListener('click', closeMetaEditor);
-  $('meta-modal').addEventListener('click', (event) => { if (event.target === $('meta-modal')) closeMetaEditor(); });
-  $('meta-modal').addEventListener('keydown', trapModalFocus);
-  Promise.allSettled([loadStats(), loadHistory(), loadScan(), loadServices(), loadEvents()]);
-  setInterval(() => { loadStats(); loadScan(); }, 5000);
-  setInterval(() => { loadServices(); loadEvents(); }, 15000);
-  setInterval(loadHistory, 60000);
-  setInterval(() => {
-    if (lastStatsSample) {
-      $('stats-ts').textContent = `sampled ${fmtAgo(lastStatsSample)}`;
-      $('temp-ts').textContent = `sampled ${fmtAgo(lastStatsSample)}`;
-      if (Date.now() / 1000 - lastStatsSample > 20) setConnectionState(true);
-    }
-  }, 1000);
-});
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    applyTheme(localStorage.getItem('beacon-theme') === 'light');
+    $('toggle').addEventListener('click', () => applyTheme(!document.documentElement.classList.contains('light')));
+    document.querySelector('.btn-scan').addEventListener('click', triggerScan);
+    $('meta-form').addEventListener('submit', submitMetaEditor);
+    $('meta-cancel').addEventListener('click', closeMetaEditor);
+    $('meta-modal').addEventListener('click', (event) => { if (event.target === $('meta-modal')) closeMetaEditor(); });
+    $('meta-modal').addEventListener('keydown', trapModalFocus);
+    Promise.allSettled([loadStats(), loadHistory(), loadScan(), loadServices(), loadEvents()]);
+    setInterval(() => { loadStats(); loadScan(); }, 5000);
+    setInterval(() => { loadServices(); loadEvents(); }, 15000);
+    setInterval(loadHistory, 60000);
+    setInterval(() => {
+      if (lastStatsSample) {
+        $('stats-ts').textContent = `sampled ${fmtAgo(lastStatsSample)}`;
+        $('temp-ts').textContent = `sampled ${fmtAgo(lastStatsSample)}`;
+        if (Date.now() / 1000 - lastStatsSample > 20) setConnectionState(true);
+      }
+    }, 1000);
+  });
+}

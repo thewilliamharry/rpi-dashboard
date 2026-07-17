@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from unittest import mock
 
 from tests.helpers import cleanup_db, load_app
 
@@ -178,6 +179,7 @@ class ReleaseContractTests(unittest.TestCase):
                 stage='idle', scanning=False, progress=1.0,
                 last_completed_found=1, current_found=0, last_error=None,
             )
+            return True
 
         self.appmod.do_discovery = fake_discovery
         try:
@@ -191,6 +193,68 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(row['status'], 'completed')
         self.assertIsNotNone(row['completed_ts'])
         self.assertIsNone(row['error'])
+
+    def test_manual_scan_stays_queued_when_discovery_is_busy(self):
+        request_id = self.appmod.queue_discovery_request('test-client')
+        self.assertIsNotNone(request_id)
+        self.assertTrue(self.appmod._scan_lock.acquire(blocking=False))
+        try:
+            self.assertFalse(self.appmod.process_scan_requests())
+        finally:
+            self.appmod._scan_lock.release()
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = conn.execute(
+                "SELECT status,started_ts,completed_ts,error FROM scan_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+            conn.close()
+        self.assertEqual(row['status'], 'queued')
+        self.assertIsNone(row['started_ts'])
+        self.assertIsNone(row['completed_ts'])
+        self.assertIsNone(row['error'])
+
+    def test_all_discovery_entry_points_share_one_mutex(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        original = self.appmod.do_discovery
+
+        def slow_discovery(source):
+            calls.append(source)
+            entered.set()
+            release.wait(timeout=2)
+            return True
+
+        self.appmod.do_discovery = slow_discovery
+        try:
+            first_result = []
+            thread = threading.Thread(
+                target=lambda: first_result.append(self.appmod.run_discovery('scheduled')),
+            )
+            thread.start()
+            self.assertTrue(entered.wait(timeout=1))
+            self.assertEqual(self.appmod.run_discovery('startup'), 'busy')
+            release.set()
+            thread.join(timeout=2)
+            self.assertEqual(first_result, ['completed'])
+            self.assertEqual(calls, ['scheduled'])
+        finally:
+            release.set()
+            self.appmod.do_discovery = original
+
+    def test_alert_webhook_keeps_tls_verification_enabled(self):
+        self.appmod.ALERT_WEBHOOK_URL = 'https://alerts.example.test/beacon'
+        response = mock.Mock(status_code=204, text='')
+        with mock.patch.object(self.appmod.requests, 'post', return_value=response) as post:
+            self.appmod._send_transition_alert(
+                now=int(time.time()), port=8100, previous_online=0, online=1,
+                title='BlueMap', display_name='', url='http://127.0.0.1:8100',
+                critical=0, latency_ms=4.2, error_class=None,
+            )
+        self.assertEqual(post.call_args.kwargs['timeout'], 4)
+        self.assertNotIn('verify', post.call_args.kwargs)
 
     def test_metrics_collection_is_not_blocked_by_preview_capture(self):
         entered = threading.Event()

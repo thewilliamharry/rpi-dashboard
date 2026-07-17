@@ -1,6 +1,5 @@
 x-beacon-common: &beacon-common
-  build: ./dashboard
-  image: beacon:2.0.0
+  image: beacon:2.0.1
   restart: unless-stopped
   user: "10001:10001"
   read_only: true
@@ -28,6 +27,22 @@ x-beacon-common: &beacon-common
     ENABLE_PROMETHEUS: "0"
 
 services:
+  data-init:
+    build: ./dashboard
+    image: beacon:2.0.1
+    user: "0:0"
+    command: ["chown", "-R", "10001:10001", "/data"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    volumes:
+      - dashboard-data:/data
+
   worker:
     <<: *beacon-common
     container_name: beacon-worker
@@ -36,6 +51,9 @@ services:
     mem_limit: 1g
     pids_limit: 256
     shm_size: 256m
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import json,sqlite3,time; c=sqlite3.connect('/data/dashboard.db'); r=c.execute(\"select value from runtime_state where key='worker_heartbeat'\").fetchone(); assert r and time.time()-json.loads(r[0])['ts'] < 20"]
       interval: 10s

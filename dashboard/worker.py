@@ -28,14 +28,16 @@ def scheduled_discovery():
     state = beacon._read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
         return
-    beacon.do_discovery(source='scheduled')
+    beacon.run_discovery(source='scheduled')
 
 
 def startup_discovery():
     state = beacon._read_scan_state()
+    if state.get('scanning') or state.get('stage') == 'queued':
+        return
     last = state.get('last_discovery')
     if not last or int(time.time()) - int(last) >= 300:
-        beacon.do_discovery(source='startup')
+        beacon.run_discovery(source='startup')
 
 
 def stop_worker(*_args):

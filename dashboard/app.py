@@ -796,7 +796,7 @@ def _send_transition_alert(*, now, port, previous_online, online, title, display
     }
 
     try:
-        r = requests.post(ALERT_WEBHOOK_URL, json=payload, timeout=4, verify=False)
+        r = requests.post(ALERT_WEBHOOK_URL, json=payload, timeout=4)
         if 200 <= r.status_code < 300:
             _record_event(
                 "alert_sent",
@@ -1310,6 +1310,7 @@ def do_discovery(source='scheduled'):
         )
         _record_event("scan_complete", details=f"source={source}; found={found_count}")
         log.info("Discovery complete: %d HTTP services found", found_count)
+        return True
     except Exception as exc:
         log.exception("Discovery failed unexpectedly: %s", exc)
         timings['total_ms'] = round((time.monotonic() - scan_started) * 1000, 1)
@@ -1318,6 +1319,17 @@ def do_discovery(source='scheduled'):
             timings=timings, last_error=f'{exc.__class__.__name__}: {exc}'[:240],
         )
         _record_event("scan_failed", details=str(exc)[:200])
+        return False
+
+
+def run_discovery(source='scheduled'):
+    """Run one discovery owner at a time across every scheduler entry point."""
+    if not _scan_lock.acquire(blocking=False):
+        return 'busy'
+    try:
+        return 'completed' if do_discovery(source=source) else 'failed'
+    finally:
+        _scan_lock.release()
 
 
 def do_uptime_check(only_down=False):
@@ -1444,39 +1456,50 @@ def queue_discovery_request(client_key):
 
 
 def process_scan_requests():
-    with _scan_lock:
-        with _db_lock:
-            conn = get_db()
-            row = conn.execute(
-                "SELECT id FROM scan_requests WHERE status='queued' ORDER BY requested_ts, id LIMIT 1"
-            ).fetchone()
-            if not row:
+    with _db_lock:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT id FROM scan_requests WHERE status='queued' ORDER BY requested_ts, id LIMIT 1"
+        ).fetchone()
+        if not row:
+            conn.close()
+            return False
+        request_id = int(row['id'])
+        now = int(time.time())
+        conn.execute(
+            "UPDATE scan_requests SET status='running', started_ts=? WHERE id=? AND status='queued'",
+            (now, request_id),
+        )
+        conn.commit()
+        conn.close()
+
+    try:
+        outcome = run_discovery(source=f'manual:{request_id}')
+        if outcome == 'busy':
+            with _db_lock:
+                conn = get_db()
+                conn.execute(
+                    "UPDATE scan_requests SET status='queued', started_ts=NULL WHERE id=?",
+                    (request_id,),
+                )
+                conn.commit()
                 conn.close()
-                return False
-            request_id = int(row['id'])
-            now = int(time.time())
-            conn.execute(
-                "UPDATE scan_requests SET status='running', started_ts=? WHERE id=? AND status='queued'",
-                (now, request_id),
-            )
-            conn.commit()
-            conn.close()
-        try:
-            do_discovery(source=f'manual:{request_id}')
-            state = _read_scan_state()
-            status = 'failed' if state.get('last_error') else 'completed'
-            error = state.get('last_error')
-        except Exception as exc:
-            status, error = 'failed', str(exc)[:240]
-        with _db_lock:
-            conn = get_db()
-            conn.execute(
-                "UPDATE scan_requests SET status=?, completed_ts=?, error=? WHERE id=?",
-                (status, int(time.time()), error, request_id),
-            )
-            conn.commit()
-            conn.close()
-        return True
+            return False
+        state = _read_scan_state()
+        status = 'failed' if outcome == 'failed' or state.get('last_error') else 'completed'
+        error = state.get('last_error') if status == 'failed' else None
+    except Exception as exc:
+        status, error = 'failed', str(exc)[:240]
+
+    with _db_lock:
+        conn = get_db()
+        conn.execute(
+            "UPDATE scan_requests SET status=?, completed_ts=?, error=? WHERE id=?",
+            (status, int(time.time()), error, request_id),
+        )
+        conn.commit()
+        conn.close()
+    return True
 
 
 def process_preview_requests():

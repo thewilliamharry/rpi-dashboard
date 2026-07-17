@@ -6,6 +6,7 @@ Beacon is a self-contained Raspberry Pi dashboard for system pressure, HTTP-serv
 
 Compose runs one immutable image as two non-root services sharing `/data/dashboard.db`:
 
+- `data-init` is a one-shot, network-isolated ownership migration. It receives only `CAP_CHOWN`, repairs legacy `/data` ownership for UID 10001, and exits before the worker starts.
 - `web` uses bridge networking and exposes container port 8080 on host port 80. It serves cached data and queues mutations.
 - `worker` uses host networking so it can probe the Pi. APScheduler collects metrics, checks uptime, discovers services, captures previews, cleans history, and sends alerts.
 
@@ -18,7 +19,7 @@ Requirements: Docker Compose and a Raspberry Pi 4/5 running a 64-bit OS.
 ```bash
 git clone git@github.com:thewilliamharry/rpi-dashboard.git
 cd rpi-dashboard
-docker compose up -d --build
+docker compose up -d --build --force-recreate --remove-orphans --wait --wait-timeout 180
 ```
 
 Open `http://raspi.local`. BlueMap is discovered as an ordinary HTTP service because port 8100 is included through `EXTRA_SCAN_PORTS`.
@@ -64,14 +65,19 @@ docker run --rm -v rpi-dashboard_dashboard-data:/data -v "$PWD":/backup alpine \
 docker compose start
 ```
 
-Record the running image, deploy, then observe two uptime cycles and one discovery:
+Record the running image, deploy, then observe two uptime cycles and one discovery. `--force-recreate` reruns the one-shot ownership migration, `--remove-orphans` removes containers from older Compose definitions, and `--wait` avoids smoke requests while Gunicorn is still starting:
 
 ```bash
 docker compose images
 docker compose build --pull
-docker compose up -d --force-recreate
+docker compose up -d --build --force-recreate --remove-orphans --wait --wait-timeout 180
+docker compose ps --all
+curl -f http://raspi.local/healthz
+curl -f http://raspi.local/readyz
 docker compose logs -f worker web
 ```
+
+`data-init` should show `Exited (0)`, while `worker` and `web` should show `healthy`. If Docker reports that the kernel does not support memory-limit capabilities or that the memory cgroup is not mounted, Beacon can still run but the configured container memory limits are not enforced. Keep the limits in Compose and enable the host memory controller before relying on them as a hard boundary.
 
 For rollback, restore the previous Compose/image definition. Schema changes are additive, so the prior application can keep using the upgraded database. Restore the backup only if validation finds corrupted data.
 

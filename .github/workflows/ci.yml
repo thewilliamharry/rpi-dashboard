@@ -35,6 +35,30 @@ jobs:
           tags: beacon:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Verify legacy volume migration and Compose health
+        run: |
+          set -eux
+          docker tag beacon:ci beacon:2.0.1
+          trap 'docker compose -p beacon-ci down -v --remove-orphans || true' EXIT
+          docker compose -p beacon-ci run --rm --no-deps --user 0:0 data-init \
+            python -c "import os,sqlite3; os.chown('/data',0,0); c=sqlite3.connect('/data/dashboard.db'); c.execute('create table sentinel(value text)'); c.execute(\"insert into sentinel values('preserved')\"); c.commit(); c.close(); os.chown('/data/dashboard.db',0,0)"
+          docker compose -p beacon-ci run --rm --no-deps data-init
+          docker compose -p beacon-ci run --rm --no-deps --user 10001:10001 data-init \
+            python -c "import os,sqlite3; import app; app.update_worker_heartbeat(); c=sqlite3.connect('/data/dashboard.db'); assert c.execute('select value from sentinel').fetchone()[0] == 'preserved'; assert os.stat('/data/dashboard.db').st_uid == 10001"
+          docker compose -p beacon-ci up -d --no-build --force-recreate --remove-orphans --wait --wait-timeout 180
+          init_id="$(docker compose -p beacon-ci ps --all -q data-init)"
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$init_id")" = "0"
+          test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$init_id")" = "none"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$init_id")" = "true"
+          test "$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$init_id")" = '["ALL"]'
+          test "$(docker inspect --format '{{json .HostConfig.CapAdd}}' "$init_id")" = '["CHOWN"]'
+          curl --fail http://127.0.0.1/healthz
+          curl --fail http://127.0.0.1/readyz
+          docker compose -p beacon-ci exec -T worker \
+            python -c "import sqlite3; c=sqlite3.connect('/data/dashboard.db'); assert c.execute('select value from sentinel').fetchone()[0] == 'preserved'"
+          docker compose -p beacon-ci up -d --no-build --force-recreate --remove-orphans --wait --wait-timeout 180
+          docker compose -p beacon-ci exec -T worker \
+            python -c "import sqlite3; c=sqlite3.connect('/data/dashboard.db'); assert c.execute('select value from sentinel').fetchone()[0] == 'preserved'"
       - uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: beacon:ci
