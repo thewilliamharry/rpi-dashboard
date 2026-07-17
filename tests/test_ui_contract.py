@@ -33,6 +33,17 @@ class UiContractTests(unittest.TestCase):
         for token in ['.events-panel', '.evt-row', '.svc-critical', '.svc-edit', '.svc-detail-row', '.meta-modal-window', '.meta-modal-backdrop[hidden]', '.meta-btn-primary', '.meta-error.meta-warning']:
             self.assertIn(token, css)
 
+    def test_dark_mode_sparklines_have_visible_lines_and_fills(self):
+        css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
+        js = pathlib.Path('dashboard/app.js').read_text(encoding='utf-8')
+        for token in [
+            '.cpu .sp-fill', '.cpu .sp-line', '.ram .sp-fill',
+            '.ram .sp-line', '.disk .sp-fill', '.disk .sp-line',
+        ]:
+            self.assertIn(token, css)
+        self.assertIn("$(`${key}-sparkfill`).setAttribute('d'", js)
+        self.assertIn('L200,40 Z', js)
+
     def test_decimal_metric_formatters(self):
         script = """
 require('./dashboard/app.js');

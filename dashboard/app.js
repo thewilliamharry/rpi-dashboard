@@ -97,10 +97,12 @@ function updateStats(data) {
 
 function updateHistory(rows) {
   for (const key of ['cpu', 'ram', 'disk']) {
-    const values = rows.slice(-80).map((row) => Number(row[key] || 0));
+    const values = rows.slice(-80).map((row) => Math.max(0, Math.min(100, Number(row[key] || 0))));
     if (!values.length) continue;
     const points = values.map((value, i) => `${(i / Math.max(1, values.length - 1)) * 200},${40 - value * 0.4}`).join(' ');
-    $(`${key}-sparkline`).setAttribute('d', `M${points.replaceAll(' ', ' L')}`);
+    const linePoints = points.replaceAll(' ', ' L');
+    $(`${key}-sparkline`).setAttribute('d', `M${linePoints}`);
+    $(`${key}-sparkfill`).setAttribute('d', `M0,40 L${linePoints} L200,40 Z`);
   }
 }
 

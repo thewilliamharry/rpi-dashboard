@@ -335,6 +335,12 @@ html.light .metric-sub {
 .sparkline svg { width: 100%; height: 100%; display: block; overflow: visible; }
 .sp-fill { opacity: 0.15; }
 .sp-line { fill: none; stroke-width: 1.2px; }
+.cpu .sp-fill  { fill: var(--accent); }
+.cpu .sp-line  { stroke: var(--accent); }
+.ram .sp-fill  { fill: var(--accent2); }
+.ram .sp-line  { stroke: var(--accent2); }
+.disk .sp-fill { fill: var(--accent3); }
+.disk .sp-line { stroke: var(--accent3); }
 html.light .sparkline { display: none; }
 
 /* temp row */
