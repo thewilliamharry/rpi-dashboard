@@ -30,7 +30,27 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Operator can create a usable backup before an upgrade and recover Beacon data after a migration failure.
   3. Loading the web application does not start monitoring, browser, probe, or scheduler work; the worker visibly owns shared scheduled work without duplicate execution.
   4. Service probes, fetched previews, redirects, and webhooks consistently block disallowed targets or invalid TLS and report a safe, understandable failure.
-**Plans**: TBD
+**Plans**: 8 plans in 6 waves
+
+**Wave 1**
+- `01-01` — Runtime-ownership tracer and compatibility baseline
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- `01-02` — Web, configuration, persistence, and repository boundaries
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- `01-03` — Monitoring, preview, and worker composition boundaries
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- `01-04` — Legacy database inventory, backups, and transactional migrations
+- `01-07` — Unified outbound-target, redirect, and TLS policy
+
+**Wave 5** *(blocked on relevant Wave 4 plans)*
+- `01-05` — Offline backup recovery workflow
+- `01-06` — Durable worker leases and scan/preview queues
+
+**Wave 6** *(blocked on Wave 5 and outbound-policy completion)*
+- `01-08` — Narrow safety UI and light/dark state verification
 
 ### Phase 2: Bounded Telemetry & Retention
 **Goal**: Beacon maintains an accurate, bounded 90-day telemetry record whose resolution, gaps, and retention rules remain trustworthy under normal operation.
