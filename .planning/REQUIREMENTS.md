@@ -97,57 +97,57 @@
 
 ## Traceability
 
-Roadmap creation will map each v1 requirement to exactly one phase.
+Every v1 requirement maps to exactly one roadmap phase.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FND-01 | TBD | Pending |
-| FND-02 | TBD | Pending |
-| FND-03 | TBD | Pending |
-| FND-04 | TBD | Pending |
-| FND-05 | TBD | Pending |
-| FND-06 | TBD | Pending |
-| FND-07 | TBD | Pending |
-| TEL-01 | TBD | Pending |
-| TEL-02 | TBD | Pending |
-| TEL-03 | TBD | Pending |
-| TEL-04 | TBD | Pending |
-| TEL-05 | TBD | Pending |
-| TEL-06 | TBD | Pending |
-| DIA-01 | TBD | Pending |
-| DIA-02 | TBD | Pending |
-| DIA-03 | TBD | Pending |
-| DIA-04 | TBD | Pending |
-| DIA-05 | TBD | Pending |
-| DIA-06 | TBD | Pending |
-| DIA-07 | TBD | Pending |
-| DIA-08 | TBD | Pending |
-| HIS-01 | TBD | Pending |
-| HIS-02 | TBD | Pending |
-| HIS-03 | TBD | Pending |
-| HIS-04 | TBD | Pending |
-| HIS-05 | TBD | Pending |
-| HIS-06 | TBD | Pending |
-| UX-01 | TBD | Pending |
-| UX-02 | TBD | Pending |
-| UX-03 | TBD | Pending |
-| UX-04 | TBD | Pending |
-| UX-05 | TBD | Pending |
-| UX-06 | TBD | Pending |
-| UX-07 | TBD | Pending |
-| OPS-01 | TBD | Pending |
-| OPS-02 | TBD | Pending |
-| OPS-03 | TBD | Pending |
-| OPS-04 | TBD | Pending |
-| OPS-05 | TBD | Pending |
-| OPS-06 | TBD | Pending |
-| OPS-07 | TBD | Pending |
+| FND-01 | Phase 1 | Pending |
+| FND-02 | Phase 1 | Pending |
+| FND-03 | Phase 1 | Pending |
+| FND-04 | Phase 1 | Pending |
+| FND-05 | Phase 1 | Pending |
+| FND-06 | Phase 1 | Pending |
+| FND-07 | Phase 1 | Pending |
+| TEL-01 | Phase 2 | Pending |
+| TEL-02 | Phase 2 | Pending |
+| TEL-03 | Phase 2 | Pending |
+| TEL-04 | Phase 2 | Pending |
+| TEL-05 | Phase 2 | Pending |
+| TEL-06 | Phase 3 | Pending |
+| DIA-01 | Phase 3 | Pending |
+| DIA-02 | Phase 3 | Pending |
+| DIA-03 | Phase 3 | Pending |
+| DIA-04 | Phase 4 | Pending |
+| DIA-05 | Phase 4 | Pending |
+| DIA-06 | Phase 4 | Pending |
+| DIA-07 | Phase 4 | Pending |
+| DIA-08 | Phase 3 | Pending |
+| HIS-01 | Phase 4 | Pending |
+| HIS-02 | Phase 4 | Pending |
+| HIS-03 | Phase 4 | Pending |
+| HIS-04 | Phase 4 | Pending |
+| HIS-05 | Phase 4 | Pending |
+| HIS-06 | Phase 4 | Pending |
+| UX-01 | Phase 5 | Pending |
+| UX-02 | Phase 3 | Pending |
+| UX-03 | Phase 5 | Pending |
+| UX-04 | Phase 5 | Pending |
+| UX-05 | Phase 5 | Pending |
+| UX-06 | Phase 5 | Pending |
+| UX-07 | Phase 5 | Pending |
+| OPS-01 | Phase 6 | Pending |
+| OPS-02 | Phase 6 | Pending |
+| OPS-03 | Phase 6 | Pending |
+| OPS-04 | Phase 6 | Pending |
+| OPS-05 | Phase 1 | Pending |
+| OPS-06 | Phase 5 | Pending |
+| OPS-07 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 41 total
-- Mapped to phases: 0
-- Unmapped: 41
+- Mapped to phases: 41
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-24*  
-*Last updated: 2026-07-24 after initial definition*
+*Last updated: 2026-07-24 after roadmap creation*
