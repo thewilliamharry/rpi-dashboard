@@ -44,6 +44,13 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("$(`${key}-sparkfill`).setAttribute('d'", js)
         self.assertIn('L200,40 Z', js)
 
+    def test_thumbnail_capture_waits_five_seconds_with_bounded_budget(self):
+        source = pathlib.Path('dashboard/app.py').read_text(encoding='utf-8')
+        self.assertIn('PREVIEW_SETTLE_MS = 5_000', source)
+        self.assertIn('PREVIEW_BROWSER_BUDGET_MS = 27_000', source)
+        self.assertIn('page.wait_for_timeout(PREVIEW_SETTLE_MS)', source)
+        self.assertGreaterEqual(source.count("int((deadline - time.monotonic()) * 1000)"), 3)
+
     def test_decimal_metric_formatters(self):
         script = """
 require('./dashboard/app.js');

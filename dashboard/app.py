@@ -29,6 +29,8 @@ DB_PATH = os.environ.get("DB_PATH", "/data/dashboard.db")
 EXPIRE_DAYS = int(os.environ.get("EXPIRE_DAYS", 7))
 THUMB_MAX_BYTES = 2 * 1024 * 1024
 THUMB_REFRESH_DAYS = int(os.environ.get("THUMB_REFRESH_DAYS", 1))
+PREVIEW_SETTLE_MS = 5_000
+PREVIEW_BROWSER_BUDGET_MS = 27_000
 UPTIME_WINDOW_SECONDS = 7 * 86400
 UPTIME_BUCKETS = 168
 CHECK_RETENTION_SECONDS = UPTIME_WINDOW_SECONDS + 86400
@@ -900,6 +902,7 @@ def _screenshot_service(port, target_url=None):
         navigate_url = _default_service_url(port)
     context = None
     started = time.monotonic()
+    deadline = started + PREVIEW_BROWSER_BUDGET_MS / 1000
     _preview_context.timings = {}
     _preview_context.page_title = None
     try:
@@ -908,20 +911,29 @@ def _screenshot_service(port, target_url=None):
         context = browser.new_context(viewport={'width': 1280, 'height': 800})
         page = context.new_page()
         _preview_context.timings['context_ms'] = round((time.monotonic() - context_started) * 1000, 1)
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        if remaining_ms <= 0:
+            return None, None, 'preview timeout'
         navigation_started = time.monotonic()
-        page.goto(navigate_url, timeout=15_000, wait_until='domcontentloaded')
+        page.goto(navigate_url, timeout=min(15_000, remaining_ms), wait_until='domcontentloaded')
         _preview_context.timings['navigation_ms'] = round((time.monotonic() - navigation_started) * 1000, 1)
         if not _is_localhost_url(page.url):
             return None, None, 'redirect_offhost'
         _preview_context.page_title = (page.title() or '').strip() or None
-        # HTML probing consumes up to three seconds before capture. Capping the
-        # browser phase at 22 seconds keeps the complete preview under 25.
-        remaining_ms = max(0, 22_000 - int((time.monotonic() - started) * 1000))
+        # HTML probing consumes up to three seconds before capture. The browser
+        # gets 27 seconds, including a five-second post-DOM rendering window,
+        # keeping the complete preview within an approximately 30-second cap.
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        if remaining_ms <= PREVIEW_SETTLE_MS:
+            return None, None, 'preview timeout'
+        settle_started = time.monotonic()
+        page.wait_for_timeout(PREVIEW_SETTLE_MS)
+        _preview_context.timings['settle_ms'] = round((time.monotonic() - settle_started) * 1000, 1)
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
         if remaining_ms <= 0:
             return None, None, 'preview timeout'
-        page.wait_for_timeout(min(1000, remaining_ms))
         screenshot_started = time.monotonic()
-        data = page.screenshot(type='png', timeout=max(1, remaining_ms))
+        data = page.screenshot(type='png', timeout=remaining_ms)
         _preview_context.timings['screenshot_ms'] = round((time.monotonic() - screenshot_started) * 1000, 1)
         if len(data) <= THUMB_MAX_BYTES:
             return data, 'image/png', None
