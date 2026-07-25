@@ -26,6 +26,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
         project_root = Path(__file__).resolve().parents[1]
         sentinel = Path(self.tmpdir.name) / 'sentinel.db'
         env = os.environ.copy()
+        env.pop('DISABLE_BACKGROUND', None)
         env.update({
             'DB_PATH': str(sentinel),
             'PYTHONPATH': str(project_root / 'dashboard'),

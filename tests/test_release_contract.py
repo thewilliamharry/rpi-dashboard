@@ -336,6 +336,12 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(response.headers['X-Frame-Options'], 'DENY')
         self.assertEqual(self.client.get('/metrics').status_code, 404)
 
+        self.appmod.collect_system_stats()
+        self.appmod.ENABLE_PROMETHEUS = True
+        metrics = self.client.get('/metrics')
+        self.assertEqual(metrics.status_code, 200)
+        self.assertIn('beacon_cpu_percent', metrics.get_data(as_text=True))
+
 
 if __name__ == '__main__':
     unittest.main()

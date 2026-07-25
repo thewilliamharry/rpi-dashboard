@@ -101,6 +101,65 @@ class ApiAndAuthTests(unittest.TestCase):
         for key in ['event_type', 'ts', 'service_name', 'details']:
             self.assertIn(key, evt)
 
+    def test_browser_route_and_response_compatibility_matrix(self):
+        self._insert_service()
+        self.appmod.collect_system_stats()
+        now = int(time.time())
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source='screenshot' WHERE port=8080",
+                (b'compatibility-thumbnail', 'image/png', now),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,port,event_type,online,previous_online,details) VALUES(?,?,?,?,?,?)",
+                (now, 8080, 'state_change', 1, 0, 'compatibility transition'),
+            )
+            conn.commit()
+            conn.close()
+
+        for path, content_type in [
+            ('/', 'text/html'),
+            ('/style.css', 'text/css'),
+            ('/app.js', 'javascript'),
+        ]:
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(content_type, response.content_type)
+
+        config = self.client.get('/api/config').get_json()
+        self.assertEqual(set(config), {
+            'alerting_enabled', 'uptime_buckets', 'trigger_rate_limit', 'trigger_rate_window_seconds',
+        })
+        stats = self.client.get('/api/stats')
+        self.assertEqual(stats.status_code, 200)
+        for key in ['sample_ts', 'cpu', 'ram', 'ram_used', 'ram_total', 'disk', 'disk_used', 'disk_total', 'temp', 'hostname']:
+            self.assertIn(key, stats.get_json())
+        history = self.client.get('/api/history').get_json()
+        self.assertTrue(history)
+        self.assertEqual(set(history[-1]), {'ts', 'cpu', 'ram', 'disk', 'temp'})
+
+        service = self.client.get('/api/services').get_json()[0]
+        for key in ['port', 'title', 'display_name', 'is_online', 'has_thumb', 'url', 'path', 'tags', 'uptime_pct', 'uptime_buckets']:
+            self.assertIn(key, service)
+        event = self.client.get('/api/events?limit=1').get_json()[0]
+        for key in ['id', 'ts', 'port', 'event_type', 'online', 'previous_online', 'details', 'service_name']:
+            self.assertIn(key, event)
+        metadata = self.client.get('/api/service-meta/8080')
+        self.assertEqual(metadata.status_code, 200)
+        self.assertEqual(metadata.get_json()['display_name'], 'Friendly Demo')
+        thumbnail = self.client.get('/api/thumbnail/8080')
+        self.assertEqual(thumbnail.status_code, 200)
+        self.assertEqual(thumbnail.data, b'compatibility-thumbnail')
+        thumbnail_status = self.client.get('/api/thumbnail-status').get_json()[0]
+        for key in ['port', 'url', 'thumb_source', 'thumb_ts', 'thumb_attempt_ts', 'thumb_error']:
+            self.assertIn(key, thumbnail_status)
+        scan_status = self.client.get('/api/scan-status').get_json()
+        for key in ['stage', 'scanning', 'worker_ready', 'worker_stale', 'worker_heartbeat_ts', 'worker_heartbeat_age_seconds', 'recovery_required', 'queued_requests', 'found']:
+            self.assertIn(key, scan_status)
+        self.assertEqual(self.client.get('/healthz').status_code, 200)
+        self.assertEqual(self.client.get('/readyz').status_code, 503)
+
     def test_only_screenshot_thumbnails_are_served_and_reported(self):
         now = int(time.time())
         with self.appmod._db_lock:
