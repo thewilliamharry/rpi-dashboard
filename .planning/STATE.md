@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 1
+current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
-status: ready_to_execute
-stopped_at: Phase 1 planned and verified
-last_updated: "2026-07-24T15:52:08.000Z"
-last_activity: 2026-07-24
-last_activity_desc: Created and verified eight executable plans for Phase 1.
+status: executing
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-07-25T07:27:54.799Z"
+last_activity: 2026-07-25
+last_activity_desc: Phase 01 execution started
 progress:
-  total_phases: 6
+  total_phases: 1
   completed_phases: 0
   total_plans: 8
-  completed_plans: 0
+  completed_plans: 1
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-24)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 1 — Behavioral Safety & Runtime Ownership
+**Current focus:** Phase 01 — Behavioral Safety & Runtime Ownership
 
 ## Current Position
 
-Phase: 1 of 6 (Behavioral Safety & Runtime Ownership)
-Plan: 8 plans in 6 waves
+Phase: 01 (Behavioral Safety & Runtime Ownership) — EXECUTING
+Plan: 2 of 8
 Status: Ready to execute
-Last activity: 2026-07-24 — Created and verified eight executable plans for Phase 1.
+Last activity: 2026-07-25 — Phase 01 execution started
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 13%
 
 ## Performance Metrics
 
@@ -54,6 +54,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: Not enough data
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 6min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -65,6 +70,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase 2]: Establish bounded raw-to-rollup telemetry and range-query semantics before building analytics visualizations.
 - [Phases 3-5]: Keep the main dashboard glanceable in both themes; add a separate full-capability advanced workspace with intentional light/dark density differences.
 - [Phase 6]: Treat discovery and Chromium previews as optional bounded work that cannot starve essential monitoring.
+- [Phase ?]: Only worker.main() owns database preparation, recovery, scheduler construction, signals, and scheduler startup.
+- [Phase ?]: Worker freshness is a server-derived, non-blocking dashboard condition distinct from browser/API disconnection.
 
 ### Pending Todos
 
@@ -84,6 +91,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-24T15:52:08.000Z
-Stopped at: Phase 1 planned and verified
-Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-01-PLAN.md
+Last session: 2026-07-25T07:27:54.791Z
+Stopped at: Completed 01-01-PLAN.md
+Resume file: None

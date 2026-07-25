@@ -7,10 +7,10 @@
 
 ### Foundation Integrity
 
-- [ ] **FND-01**: Existing dashboard, service-management, discovery, preview, uptime, and event behavior is protected by compatibility tests before restructuring.
+- [x] **FND-01**: Existing dashboard, service-management, discovery, preview, uptime, and event behavior is protected by compatibility tests before restructuring.
 - [ ] **FND-02**: Web delivery, configuration, persistence, monitoring, analytics, discovery, previews, and scheduling have explicit module boundaries.
-- [ ] **FND-03**: Importing the web application starts no scheduler, browser, probe, or other background work.
-- [ ] **FND-04**: The worker is the sole scheduler owner and uses durable persisted coordination for work shared with the web process.
+- [x] **FND-03**: Importing the web application starts no scheduler, browser, probe, or other background work.
+- [x] **FND-04**: The worker is the sole scheduler owner and uses durable persisted coordination for work shared with the web process.
 - [ ] **FND-05**: Database changes use versioned, transactional, idempotent migrations validated against representative existing databases.
 - [ ] **FND-06**: The operator can create and verify a usable backup before a migration and recover existing Beacon data after a failed upgrade.
 - [ ] **FND-07**: Probes, HTML fetches, previews, redirects, and webhooks use one tested outbound-target and TLS safety policy.
@@ -101,10 +101,10 @@ Every v1 requirement maps to exactly one roadmap phase.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FND-01 | Phase 1 | Pending |
+| FND-01 | Phase 1 | Complete |
 | FND-02 | Phase 1 | Pending |
-| FND-03 | Phase 1 | Pending |
-| FND-04 | Phase 1 | Pending |
+| FND-03 | Phase 1 | Complete |
+| FND-04 | Phase 1 | Complete |
 | FND-05 | Phase 1 | Pending |
 | FND-06 | Phase 1 | Pending |
 | FND-07 | Phase 1 | Pending |
@@ -144,6 +144,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | OPS-07 | Phase 6 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 41 total
 - Mapped to phases: 41
 - Unmapped: 0
