@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-07-25T07:27:54.799Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-07-25T07:35:30.598Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 8
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-07-25 — Phase 01 execution started
 
-Progress: [█░░░░░░░░░] 13%
+Progress: [███░░░░░░░] 25%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [█░░░░░░░░░] 13%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 6min | 2 tasks | 8 files |
+| Phase 01 P02 | 4min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase 6]: Treat discovery and Chromium previews as optional bounded work that cannot starve essential monitoring.
 - [Phase ?]: Only worker.main() owns database preparation, recovery, scheduler construction, signals, and scheduler startup.
 - [Phase ?]: Worker freshness is a server-derived, non-blocking dashboard condition distinct from browser/API disconnection.
+- [Phase ?]: Kept dashboard.app.app as the WSGI compatibility bridge while beacon.web.create_app owns explicit settings and service composition.
+- [Phase ?]: Metadata and preview queue persistence share one SQLite transaction so valid web edits never depend on worker freshness.
 
 ### Pending Todos
 
@@ -91,6 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-25T07:27:54.791Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-07-25T07:35:30.591Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None

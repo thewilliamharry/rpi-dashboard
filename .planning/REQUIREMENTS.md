@@ -8,7 +8,7 @@
 ### Foundation Integrity
 
 - [x] **FND-01**: Existing dashboard, service-management, discovery, preview, uptime, and event behavior is protected by compatibility tests before restructuring.
-- [ ] **FND-02**: Web delivery, configuration, persistence, monitoring, analytics, discovery, previews, and scheduling have explicit module boundaries.
+- [x] **FND-02**: Web delivery, configuration, persistence, monitoring, analytics, discovery, previews, and scheduling have explicit module boundaries.
 - [x] **FND-03**: Importing the web application starts no scheduler, browser, probe, or other background work.
 - [x] **FND-04**: The worker is the sole scheduler owner and uses durable persisted coordination for work shared with the web process.
 - [ ] **FND-05**: Database changes use versioned, transactional, idempotent migrations validated against representative existing databases.
@@ -102,7 +102,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | FND-01 | Phase 1 | Complete |
-| FND-02 | Phase 1 | Pending |
+| FND-02 | Phase 1 | Complete |
 | FND-03 | Phase 1 | Complete |
 | FND-04 | Phase 1 | Complete |
 | FND-05 | Phase 1 | Pending |
