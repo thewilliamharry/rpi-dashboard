@@ -1,6 +1,8 @@
 import time
 import unittest
 
+from dashboard.beacon import monitoring, previews
+
 from tests.helpers import cleanup_db, load_app
 
 
@@ -16,6 +18,13 @@ class UptimeIntegrationTests(unittest.TestCase):
 
     def tearDown(self):
         cleanup_db(self.db_path)
+
+    def test_extracted_monitoring_and_preview_modules_are_framework_free(self):
+        """Worker operations stay importable without the Flask compatibility app."""
+        self.assertFalse(hasattr(monitoring, 'Flask'))
+        self.assertFalse(hasattr(previews, 'Flask'))
+        self.assertTrue(callable(monitoring.collect_system_stats))
+        self.assertTrue(callable(previews.fetch_thumbnail))
 
     def _insert_service(self, probe_url):
         now = int(time.time())
