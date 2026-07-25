@@ -15,6 +15,13 @@ import urllib3
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, make_response, request, send_file
 
+try:
+    from .beacon import repositories as beacon_repositories
+    from .beacon import web as beacon_web
+except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
+    from beacon import repositories as beacon_repositories
+    from beacon import web as beacon_web
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(
@@ -1620,21 +1627,13 @@ def _check_scan_rate_limit(client_key):
 
 
 def _service_meta_row(conn, port):
-    row = conn.execute(
-        "SELECT m.port, COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
-        "COALESCE(m.critical, 0) AS critical, COALESCE(m.pinned_order, s.port) AS pinned_order, "
-        "COALESCE(m.tags, '') AS tags, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
-        "FROM services s LEFT JOIN service_meta m ON m.port = s.port WHERE s.port = ?",
-        (port,),
-    ).fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    d['url'] = _safe_service_url(d.get('url'), port)
-    d['path'] = _service_path_from_url(d['url'], port)
-    d['tags'] = _parse_tags(d.get('tags'))
-    d['critical'] = bool(d.get('critical'))
-    return d
+    return beacon_web.metadata_response(
+        conn,
+        port,
+        safe_url=_safe_service_url,
+        path_from_url=_service_path_from_url,
+        parse_tags=_parse_tags,
+    )
 
 
 def _ensure_runtime_started():
@@ -1878,16 +1877,12 @@ def api_service_meta(port):
     next_url = None
     with _db_lock:
         conn = get_db()
-        svc = conn.execute("SELECT port FROM services WHERE port=?", (port,)).fetchone()
-        if not svc:
+        if not beacon_repositories.service_exists(conn, port):
             conn.close()
             return jsonify({"error": "service not found"}), 404
 
-        current = conn.execute(
-            "SELECT display_name, url, critical, pinned_order, tags, healthy_statuses FROM service_meta WHERE port=?",
-            (port,),
-        ).fetchone()
-        current = dict(current) if current else {
+        current = beacon_repositories.get_service_metadata_values(conn, port)
+        current = current if current else {
             "display_name": "",
             "url": _default_service_url(port),
             "critical": 0,
@@ -1925,25 +1920,24 @@ def api_service_meta(port):
             conn.close()
             return jsonify({"error": str(exc)}), 400
 
-        conn.execute(
-            "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags, healthy_statuses) VALUES (?,?,?,?,?,?,?) "
-            "ON CONFLICT(port) DO UPDATE SET display_name=excluded.display_name, url=excluded.url, "
-            "critical=excluded.critical, pinned_order=excluded.pinned_order, tags=excluded.tags, "
-            "healthy_statuses=excluded.healthy_statuses",
-            (port, next_display_name, next_url, next_critical, next_pinned_order, next_tags, next_healthy_statuses),
-        )
-        conn.commit()
-        conn.close()
-
-    with _db_lock:
-        conn = get_db()
-        conn.execute(
-            "INSERT INTO preview_requests(port, requested_ts, status, error) VALUES(?,?,'queued',NULL) "
-            "ON CONFLICT(port) DO UPDATE SET requested_ts=excluded.requested_ts, status='queued', error=NULL",
-            (port, int(time.time())),
-        )
-        conn.commit()
-        row = _service_meta_row(conn, port)
+        try:
+            beacon_repositories.upsert_service_metadata(
+                conn,
+                port=port,
+                display_name=next_display_name,
+                url=next_url,
+                critical=next_critical,
+                pinned_order=next_pinned_order,
+                tags=next_tags,
+                healthy_statuses=next_healthy_statuses,
+                requested_ts=int(time.time()),
+            )
+            row = _service_meta_row(conn, port)
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+            conn.close()
+            return jsonify({'error': 'unable to save service metadata'}), 503
         conn.close()
 
     _record_event('meta_updated', port=port, details='service metadata updated')
