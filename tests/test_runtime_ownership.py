@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest import mock
 
+from dashboard.beacon import worker_main
 from tests.helpers import cleanup_db, load_app
 
 
@@ -42,6 +43,19 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('imported', result.stdout)
         self.assertFalse(sentinel.exists())
+
+    def test_worker_services_are_built_without_starting_worker_lifecycle(self):
+        """Composition is pure; lifecycle work is reserved for worker_main.main."""
+        with (
+            mock.patch.object(worker_main, 'prepare_database') as prepare,
+            mock.patch.object(worker_main, 'recover_worker_state') as recover,
+            mock.patch.object(worker_main, 'update_worker_heartbeat') as heartbeat,
+        ):
+            services = worker_main.build_worker_services()
+        self.assertIsNotNone(services.settings)
+        prepare.assert_not_called()
+        recover.assert_not_called()
+        heartbeat.assert_not_called()
 
     def test_stale_heartbeat_is_reported_without_unhealthy_web_process(self):
         now = 10_000
