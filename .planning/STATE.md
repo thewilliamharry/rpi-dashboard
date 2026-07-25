@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-07-25T07:35:30.598Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-07-25T07:43:37.231Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 8
-  completed_plans: 2
+  completed_plans: 3
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 3 of 8
+Plan: 4 of 8
 Status: Ready to execute
 Last activity: 2026-07-25 — Phase 01 execution started
 
-Progress: [███░░░░░░░] 25%
+Progress: [████░░░░░░] 38%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [███░░░░░░░] 25%
 |------|----------|-------|-------|
 | Phase 01 P01 | 6min | 2 tasks | 8 files |
 | Phase 01 P02 | 4min | 2 tasks | 8 files |
+| Phase 01 P03 | 20min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Worker freshness is a server-derived, non-blocking dashboard condition distinct from browser/API disconnection.
 - [Phase ?]: Kept dashboard.app.app as the WSGI compatibility bridge while beacon.web.create_app owns explicit settings and service composition.
 - [Phase ?]: Metadata and preview queue persistence share one SQLite transaction so valid web edits never depend on worker freshness.
+- [Phase ?]: Kept dashboard.app as the compatibility edge while worker services receive named operation collaborators.
+- [Phase ?]: Gate scheduled work on explicit database preparation before recovery, heartbeat, signals, or scheduler start.
 
 ### Pending Todos
 
@@ -94,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-25T07:35:30.591Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-07-25T07:43:37.223Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
