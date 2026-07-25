@@ -19,10 +19,14 @@ try:
     from .beacon.config import load_settings
     from .beacon import repositories as beacon_repositories
     from .beacon import web as beacon_web
+    from .beacon import monitoring as beacon_monitoring
+    from .beacon import previews as beacon_previews
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon.config import load_settings
     from beacon import repositories as beacon_repositories
     from beacon import web as beacon_web
+    from beacon import monitoring as beacon_monitoring
+    from beacon import previews as beacon_previews
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -604,7 +608,7 @@ def _status_is_healthy(status, healthy_statuses='200-399'):
     return any(start <= int(status) <= end for start, end in ranges)
 
 
-def _probe_http(url, timeout=2.5, allow_remote=False, healthy_statuses='200-399'):
+def _legacy_probe_http(url, timeout=2.5, allow_remote=False, healthy_statuses='200-399'):
     try:
         parsed = urlparse(url)
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
@@ -651,7 +655,7 @@ def _is_html_content_type(content_type):
     return ctype in ("text/html", "application/xhtml+xml")
 
 
-def _fetch_html_response(url, timeout=3, allow_remote=False):
+def _legacy_fetch_html_response(url, timeout=3, allow_remote=False):
     try:
         parsed = urlparse(url)
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
@@ -689,7 +693,7 @@ def _fetch_html_response(url, timeout=3, allow_remote=False):
         return False, "probe_error", None, url
 
 
-def _extract_title(resp, port):
+def _legacy_extract_title(resp, port):
     if not resp:
         return f":{port}"
     if not _is_html_content_type(resp.headers.get('Content-Type', '')):
@@ -726,7 +730,7 @@ def _extract_title(resp, port):
         return f":{port}"
 
 
-def _get_browser():
+def _legacy_get_browser():
     global _browser_playwright, _browser_instance
     with _browser_lock:
         if _browser_instance is not None and _browser_instance.is_connected():
@@ -759,7 +763,7 @@ def _get_browser():
         return _browser_instance
 
 
-def shutdown_browser():
+def _legacy_shutdown_browser():
     global _browser_playwright, _browser_instance
     with _browser_lock:
         if _browser_instance is not None:
@@ -776,7 +780,7 @@ def shutdown_browser():
         _browser_playwright = None
 
 
-def _insert_event(conn, *, ts, event_type, port=None, online=None, previous_online=None,
+def _legacy_insert_event(conn, *, ts, event_type, port=None, online=None, previous_online=None,
                   latency_ms=None, error_class=None, alert_status=None, details=None):
     conn.execute(
         "INSERT INTO events (ts, port, event_type, online, previous_online, latency_ms, error_class, alert_status, details) "
@@ -795,7 +799,7 @@ def _insert_event(conn, *, ts, event_type, port=None, online=None, previous_onli
     )
 
 
-def _record_event(event_type, port=None, online=None, previous_online=None,
+def _legacy_record_event(event_type, port=None, online=None, previous_online=None,
                   latency_ms=None, error_class=None, alert_status=None, details=None):
     now = int(time.time())
     with _db_lock:
@@ -816,7 +820,7 @@ def _record_event(event_type, port=None, online=None, previous_online=None,
         conn.close()
 
 
-def _should_send_alert(port, online, now):
+def _legacy_should_send_alert(port, online, now):
     with _db_lock:
         conn = get_db()
         row = conn.execute(
@@ -830,7 +834,7 @@ def _should_send_alert(port, online, now):
     return (now - int(row['ts'])) >= ALERT_COOLDOWN_SECONDS
 
 
-def _send_transition_alert(*, now, port, previous_online, online, title, display_name,
+def _legacy_send_transition_alert(*, now, port, previous_online, online, title, display_name,
                            url, critical, latency_ms, error_class):
     if not ALERT_WEBHOOK_URL:
         return
@@ -890,7 +894,7 @@ def _send_transition_alert(*, now, port, previous_online, online, title, display
         )
 
 
-def _handle_state_transition(*, port, previous_online, online, title, display_name,
+def _legacy_handle_state_transition(*, port, previous_online, online, title, display_name,
                              url, critical, latency_ms, error_class):
     now = int(time.time())
     msg = "service recovered" if online else "service went down"
@@ -922,7 +926,7 @@ def _thumb_error(exc):
     return f"{exc.__class__.__name__}: {text}"[:240]
 
 
-def _screenshot_service(port, target_url=None):
+def _legacy_screenshot_service(port, target_url=None):
     """Capture a service screenshot using Chromium. Returns (bytes, mime, error)."""
     _screenshot_sem.acquire()
     try:
@@ -981,7 +985,7 @@ def _screenshot_service(port, target_url=None):
     return None, None, "screenshot failed"
 
 
-def fetch_thumbnail(port, service_url=None):
+def _legacy_fetch_thumbnail(port, service_url=None):
     """Capture a page thumbnail with Playwright. Returns (bytes, mime, source, error)."""
     try:
         base_url = _normalize_service_url(service_url, port) if service_url else _default_service_url(port)
@@ -1007,7 +1011,7 @@ def fetch_thumbnail(port, service_url=None):
     return None, None, None, screenshot_error or "screenshot failed"
 
 
-def _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None):
+def _legacy_store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None):
     ts = ts or int(time.time())
     if thumb_data and thumb_source == 'screenshot':
         conn.execute(
@@ -1023,7 +1027,7 @@ def _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, th
         )
 
 
-def _refresh_service_preview(port, service_url):
+def _legacy_refresh_service_preview(port, service_url):
     warnings = []
     next_title = None
     thumb_data = None
@@ -1055,7 +1059,7 @@ def _refresh_service_preview(port, service_url):
     return next_title, thumb_data, thumb_mime, thumb_source, thumb_error, ('; '.join(warnings) if warnings else None)
 
 
-def _uptime_summary(checks, now):
+def _legacy_uptime_summary(checks, now):
     """Return time-weighted 7-day uptime and hourly availability buckets.
 
     A sample before the window establishes boundary state. Time before the first
@@ -1116,15 +1120,15 @@ def _uptime_summary(checks, now):
     return uptime, buckets
 
 
-def _build_uptime_buckets(checks, now):
+def _legacy_build_uptime_buckets(checks, now):
     return _uptime_summary(checks, now)[1]
 
 
-def _calc_uptime_pct(checks, now=None):
+def _legacy_calc_uptime_pct(checks, now=None):
     return _uptime_summary(checks, int(time.time()) if now is None else now)[0]
 
 
-def collect_system_stats(now=None, persist_history=None):
+def _legacy_collect_system_stats(now=None, persist_history=None):
     now = int(time.time()) if now is None else int(now)
     cpu = psutil.cpu_percent(interval=None)
     ram = psutil.virtual_memory()
@@ -1174,7 +1178,7 @@ def collect_system_stats(now=None, persist_history=None):
     return sample
 
 
-def cleanup_history(now=None):
+def _legacy_cleanup_history(now=None):
     now = int(time.time()) if now is None else int(now)
     with _db_lock:
         conn = get_db()
@@ -1186,7 +1190,7 @@ def cleanup_history(now=None):
         conn.close()
 
 
-def do_discovery(source='scheduled'):
+def _legacy_do_discovery(source='scheduled'):
     scan_started = time.monotonic()
     timings = {}
     discovered = {}
@@ -1390,7 +1394,7 @@ def do_discovery(source='scheduled'):
         return False
 
 
-def run_discovery(source='scheduled'):
+def _legacy_run_discovery(source='scheduled'):
     """Run one discovery owner at a time across every scheduler entry point."""
     if not _scan_lock.acquire(blocking=False):
         return 'busy'
@@ -1400,7 +1404,7 @@ def run_discovery(source='scheduled'):
         _scan_lock.release()
 
 
-def do_uptime_check(only_down=False):
+def _legacy_do_uptime_check(only_down=False):
     if not _uptime_lock.acquire(blocking=False):
         return False
     now = int(time.time())
@@ -1499,6 +1503,132 @@ def do_uptime_check(only_down=False):
         return True
     finally:
         _uptime_lock.release()
+
+
+def _monitoring_operations():
+    """Bind compatibility globals at the edge; monitoring itself owns no Flask state."""
+    return beacon_monitoring.MonitoringOperations(
+        probe_http=_legacy_probe_http,
+        insert_event=_legacy_insert_event,
+        record_event=_legacy_record_event,
+        should_send_alert=_legacy_should_send_alert,
+        send_transition_alert=_legacy_send_transition_alert,
+        handle_state_transition=_legacy_handle_state_transition,
+        uptime_summary=_legacy_uptime_summary,
+        build_uptime_buckets=_legacy_build_uptime_buckets,
+        calc_uptime_pct=_legacy_calc_uptime_pct,
+        collect_system_stats=_legacy_collect_system_stats,
+        cleanup_history=_legacy_cleanup_history,
+        do_discovery=_legacy_do_discovery,
+        run_discovery=_legacy_run_discovery,
+        do_uptime_check=_legacy_do_uptime_check,
+    )
+
+
+def _preview_operations():
+    """Bind legacy browser storage details without importing them in worker modules."""
+    return beacon_previews.PreviewOperations(
+        fetch_html_response=_legacy_fetch_html_response,
+        extract_title=_legacy_extract_title,
+        get_browser=_legacy_get_browser,
+        shutdown_browser=_legacy_shutdown_browser,
+        screenshot_service=_legacy_screenshot_service,
+        fetch_thumbnail=_legacy_fetch_thumbnail,
+        store_thumbnail_result=_legacy_store_thumbnail_result,
+        refresh_service_preview=_legacy_refresh_service_preview,
+    )
+
+
+def _probe_http(url, timeout=2.5, allow_remote=False, healthy_statuses='200-399'):
+    return beacon_monitoring.probe_http(
+        _monitoring_operations(), url, timeout, allow_remote, healthy_statuses,
+    )
+
+
+def _fetch_html_response(url, timeout=3, allow_remote=False):
+    return beacon_previews.fetch_html_response(_preview_operations(), url, timeout, allow_remote)
+
+
+def _extract_title(response, port):
+    return beacon_previews.extract_title(_preview_operations(), response, port)
+
+
+def _get_browser():
+    return beacon_previews.get_browser(_preview_operations())
+
+
+def shutdown_browser():
+    return beacon_previews.shutdown_browser(_preview_operations())
+
+
+def _insert_event(conn, **kwargs):
+    return beacon_monitoring.insert_event(_monitoring_operations(), conn, **kwargs)
+
+
+def _record_event(*args, **kwargs):
+    return beacon_monitoring.record_event(_monitoring_operations(), *args, **kwargs)
+
+
+def _should_send_alert(port, online, now):
+    return beacon_monitoring.should_send_alert(_monitoring_operations(), port, online, now)
+
+
+def _send_transition_alert(**kwargs):
+    return beacon_monitoring.send_transition_alert(_monitoring_operations(), **kwargs)
+
+
+def _handle_state_transition(**kwargs):
+    return beacon_monitoring.handle_state_transition(_monitoring_operations(), **kwargs)
+
+
+def _screenshot_service(port, target_url=None):
+    return beacon_previews.screenshot_service(_preview_operations(), port, target_url)
+
+
+def fetch_thumbnail(port, service_url=None):
+    return beacon_previews.fetch_thumbnail(_preview_operations(), port, service_url)
+
+
+def _store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None):
+    return beacon_previews.store_thumbnail_result(
+        _preview_operations(), conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts,
+    )
+
+
+def _refresh_service_preview(port, service_url):
+    return beacon_previews.refresh_service_preview(_preview_operations(), port, service_url)
+
+
+def _uptime_summary(checks, now):
+    return beacon_monitoring.uptime_summary(_monitoring_operations(), checks, now)
+
+
+def _build_uptime_buckets(checks, now):
+    return beacon_monitoring.build_uptime_buckets(_monitoring_operations(), checks, now)
+
+
+def _calc_uptime_pct(checks, now=None):
+    return beacon_monitoring.calc_uptime_pct(_monitoring_operations(), checks, now)
+
+
+def collect_system_stats(now=None, persist_history=None):
+    return beacon_monitoring.collect_system_stats(_monitoring_operations(), now, persist_history)
+
+
+def cleanup_history(now=None):
+    return beacon_monitoring.cleanup_history(_monitoring_operations(), now)
+
+
+def do_discovery(source='scheduled'):
+    return beacon_monitoring.do_discovery(_monitoring_operations(), source)
+
+
+def run_discovery(source='scheduled'):
+    return beacon_monitoring.run_discovery(_monitoring_operations(), source)
+
+
+def do_uptime_check(only_down=False):
+    return beacon_monitoring.do_uptime_check(_monitoring_operations(), only_down)
 
 
 def queue_discovery_request(client_key):
