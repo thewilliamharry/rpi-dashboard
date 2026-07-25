@@ -21,6 +21,11 @@ FIXTURES = {
         'preview_requests',
     },
 }
+EXPECTED_FINGERPRINTS = {
+    'initial-2026-04.db': '4330feaa6a22043681d7d55fec900b3279fec9302f68e41417df29653c7cf906',
+    'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
+    'runtime-queues-2026-07.db': '791e5c1d380fb38b62e8c284349affb248acfaf5dbbd0e93a07b929b2ef59c91',
+}
 
 
 class InventoryTests(unittest.TestCase):
@@ -57,6 +62,7 @@ class InventoryTests(unittest.TestCase):
             first = collect_inventory(path)
             second = collect_inventory(path)
             self.assertEqual(first['schema_fingerprint'], second['schema_fingerprint'])
+            self.assertEqual(first['schema_fingerprint'], EXPECTED_FINGERPRINTS[filename])
             self.assertEqual(
                 expected_tables,
                 expected_tables.intersection({table['name'] for table in first['tables']}),
