@@ -19,6 +19,7 @@ RUN groupadd --gid 10001 beacon && \
     mkdir -p /data /tmp && chown -R beacon:beacon /data /app
 
 COPY --chown=beacon:beacon app.py worker.py runtime_smoke.py index.html app.js style.css ./
+COPY --chown=beacon:beacon beacon/ ./beacon/
 
 USER 10001:10001
 EXPOSE 8080

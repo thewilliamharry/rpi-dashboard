@@ -16,9 +16,11 @@ from bs4 import BeautifulSoup
 from flask import Flask, jsonify, make_response, request, send_file
 
 try:
+    from .beacon.config import load_settings
     from .beacon import repositories as beacon_repositories
     from .beacon import web as beacon_web
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
+    from beacon.config import load_settings
     from beacon import repositories as beacon_repositories
     from beacon import web as beacon_web
 
@@ -2076,6 +2078,12 @@ def prometheus_metrics():
         '# TYPE beacon_services_total gauge', f'beacon_services_total {total}',
     ]
     return '\n'.join(lines) + '\n', 200, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
+
+
+# Gunicorn keeps importing ``app:app`` while composition moves behind the
+# factory.  The legacy object is passed only to preserve decorators and test
+# monkeypatch seams during the staged extraction.
+app = beacon_web.create_app(load_settings(), legacy_app=app)
 
 
 if __name__ == "__main__":
