@@ -93,6 +93,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
         sys.modules.pop('dashboard.worker', None)
         worker = importlib.import_module('dashboard.worker')
         started = []
+        lifecycle = []
 
         class FakeScheduler:
             def start(self):
@@ -101,21 +102,26 @@ class RuntimeOwnershipTests(unittest.TestCase):
             def shutdown(self, wait=False):
                 started.append('shutdown')
 
+        services = mock.Mock()
+        services.settings = mock.Mock()
+        services.prepare_database.side_effect = lambda _settings: lifecycle.append('prepare')
+        services.recover_worker_state.side_effect = lambda: lifecycle.append('recover')
+        services.update_worker_heartbeat.side_effect = lambda: lifecycle.append('heartbeat')
+        services.collect_system_stats.side_effect = lambda: lifecycle.append('metrics')
+        services.shutdown_browser.side_effect = lambda: lifecycle.append('shutdown')
+
+        worker_main._worker_started = False
+        worker_main.scheduler = None
         with (
-            mock.patch.object(worker.beacon, 'init_db') as init_db,
-            mock.patch.object(worker.beacon, 'recover_worker_state') as recover,
-            mock.patch.object(worker.beacon, 'update_worker_heartbeat') as heartbeat,
-            mock.patch.object(worker.beacon, 'collect_system_stats') as sample_metrics,
-            mock.patch.object(worker, 'build_scheduler', return_value=FakeScheduler()),
-            mock.patch.object(worker.signal, 'signal') as register_signal,
+            mock.patch.object(worker_main, 'build_worker_services', return_value=services),
+            mock.patch.object(worker_main, 'build_scheduler', return_value=FakeScheduler()) as build_scheduler,
+            mock.patch.object(worker_main.signal, 'signal') as register_signal,
         ):
             worker.main()
             worker.main()
 
-        self.assertEqual(init_db.call_count, 1)
-        self.assertEqual(recover.call_count, 1)
-        self.assertEqual(heartbeat.call_count, 1)
-        self.assertEqual(sample_metrics.call_count, 1)
+        self.assertEqual(lifecycle[:4], ['prepare', 'recover', 'heartbeat', 'metrics'])
+        self.assertEqual(build_scheduler.call_count, 1)
         self.assertEqual(started, ['start'])
         self.assertEqual(register_signal.call_count, 2)
 

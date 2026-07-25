@@ -4,6 +4,25 @@ from contextlib import contextmanager
 import sqlite3
 
 
+def prepare_database(settings):
+    """Run the existing schema initializer only at an explicit worker boundary.
+
+    The compatibility application remains the temporary home of the version-one
+    schema definition.  Importing it is side-effect free; initialization is not.
+    """
+    try:
+        from .. import app as compatibility_app
+    except ImportError:  # ``python worker.py`` from the dashboard directory.
+        import app as compatibility_app
+
+    original_path = compatibility_app.DB_PATH
+    try:
+        compatibility_app.DB_PATH = _db_path(settings)
+        compatibility_app.init_db()
+    finally:
+        compatibility_app.DB_PATH = original_path
+
+
 def _db_path(settings_or_path):
     return getattr(settings_or_path, 'db_path', settings_or_path)
 
