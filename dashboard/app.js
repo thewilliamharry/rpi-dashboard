@@ -7,6 +7,7 @@ let editingService = null;
 let modalReturnFocus = null;
 let lastStatsSample = null;
 let pollFailures = 0;
+let workerWasStale = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -72,6 +73,36 @@ function setConnectionState(disconnected) {
   document.body.classList.toggle('disconnected', disconnected);
 }
 
+function feedbackRegion() {
+  let region = $('dashboard-feedback');
+  if (!region) {
+    region = Object.assign(document.createElement('div'), {id: 'dashboard-feedback', className: 'dashboard-feedback'});
+    region.setAttribute('role', 'status');
+    region.setAttribute('aria-live', 'polite');
+    document.body.appendChild(region);
+  }
+  return region;
+}
+
+function updateWorkerWarning(stale) {
+  let warning = $('worker-warning');
+  if (!warning) {
+    warning = Object.assign(document.createElement('div'), {
+      id: 'worker-warning',
+      className: 'worker-warning',
+      textContent: 'Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.',
+    });
+    warning.setAttribute('role', 'status');
+    warning.setAttribute('aria-live', 'polite');
+    $('connection-banner').insertAdjacentElement('afterend', warning);
+  }
+  warning.hidden = !stale;
+  if (workerWasStale && !stale) {
+    feedbackRegion().textContent = 'Monitoring resumed. The outage was recorded in Events.';
+  }
+  workerWasStale = stale;
+}
+
 function markPollSuccess() {
   pollFailures = 0;
 }
@@ -110,7 +141,8 @@ function updateScanStatus(data) {
   const pip = $('scan-pip');
   pip.className = 'scan-pip';
   const workerReady = Boolean(data.worker_ready);
-  setConnectionState(!workerReady || pollFailures >= 2);
+  setConnectionState(false);
+  updateWorkerWarning(Boolean(data.worker_stale));
   if (data.scanning || data.stage === 'queued') {
     pip.classList.add('scanning');
     const pct = Math.round(Number(data.progress || 0) * 100);
@@ -122,7 +154,7 @@ function updateScanStatus(data) {
   } else {
     $('scan-label').textContent = 'worker unavailable';
   }
-  document.querySelector('.btn-scan').disabled = Boolean(data.scanning || data.stage === 'queued');
+  document.querySelector('.btn-scan').disabled = Boolean(data.scanning);
 }
 
 function serviceHref(service) {
@@ -233,6 +265,16 @@ function updateServices(services) {
   $('svc-count-label').textContent = `${online}/${services.length} online`;
 }
 
+function monitoringGapDuration(event) {
+  try {
+    const details = JSON.parse(event.details || '{}');
+    const seconds = Math.max(0, Number(details.end_ts) - Number(details.start_ts));
+    return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  } catch (_) {
+    return 'an unknown duration';
+  }
+}
+
 function renderEvents(events) {
   const visible = events.filter((event) => EVENT_TYPES_VISIBLE.has(event.event_type)).slice(0, 20);
   const panel = $('events-panel');
@@ -245,8 +287,8 @@ function renderEvents(events) {
     const left = document.createElement('div');
     left.className = 'evt-left';
     left.append(
-      Object.assign(document.createElement('span'), {className: 'evt-title', textContent: event.event_type === 'state_change' ? `${event.service_name} ${event.online ? 'recovered' : 'went down'}` : event.event_type.replaceAll('_', ' ')}),
-      Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: event.details || event.error_class || ''}),
+      Object.assign(document.createElement('span'), {className: 'evt-title', textContent: event.event_type === 'state_change' ? `${event.service_name} ${event.online ? 'recovered' : 'went down'}` : event.event_type === 'monitoring_gap' ? 'Monitoring gap recorded' : event.event_type.replaceAll('_', ' ')}),
+      Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: event.event_type === 'monitoring_gap' ? `Worker unavailable for ${monitoringGapDuration(event)}.` : event.details || event.error_class || ''}),
     );
     row.append(left, Object.assign(document.createElement('span'), {className: 'evt-time', textContent: fmtAgo(event.ts)}));
     panel.appendChild(row);

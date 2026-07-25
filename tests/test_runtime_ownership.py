@@ -75,8 +75,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertEqual(details, {'start_ts': start, 'end_ts': recovered_at})
 
     def test_worker_main_is_the_only_startup_path_and_is_idempotent(self):
-        sys.modules.pop('worker', None)
-        worker = importlib.import_module('worker')
+        sys.modules.pop('dashboard.worker', None)
+        worker = importlib.import_module('dashboard.worker')
         started = []
 
         class FakeScheduler:
@@ -90,6 +90,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
             mock.patch.object(worker.beacon, 'init_db') as init_db,
             mock.patch.object(worker.beacon, 'recover_worker_state') as recover,
             mock.patch.object(worker.beacon, 'update_worker_heartbeat') as heartbeat,
+            mock.patch.object(worker.beacon, 'collect_system_stats') as sample_metrics,
             mock.patch.object(worker, 'build_scheduler', return_value=FakeScheduler()),
             mock.patch.object(worker.signal, 'signal') as register_signal,
         ):
@@ -99,8 +100,22 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertEqual(init_db.call_count, 1)
         self.assertEqual(recover.call_count, 1)
         self.assertEqual(heartbeat.call_count, 1)
+        self.assertEqual(sample_metrics.call_count, 1)
         self.assertEqual(started, ['start'])
         self.assertEqual(register_signal.call_count, 2)
+
+    def test_dashboard_keeps_connection_and_worker_warning_states_separate(self):
+        script = Path('dashboard/app.js').read_text(encoding='utf-8')
+        styles = Path('dashboard/style.css').read_text(encoding='utf-8')
+        self.assertIn("setConnectionState(false);", script)
+        self.assertIn("updateWorkerWarning(Boolean(data.worker_stale));", script)
+        self.assertIn(
+            'Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.',
+            script,
+        )
+        self.assertIn('Monitoring resumed. The outage was recorded in Events.', script)
+        self.assertIn("'monitoring_gap'", script)
+        self.assertIn('.worker-warning', styles)
 
 
 if __name__ == '__main__':

@@ -63,6 +63,18 @@ html.light body { font-family: var(--font-sans); font-weight: 300; }
   font-size: 10px; letter-spacing: .06em;
 }
 .connection-banner[hidden] { display: none; }
+.worker-warning {
+  position: sticky; top: 48px; z-index: 98;
+  padding: 8px 20px; text-align: center;
+  color: var(--accent2); background: var(--bg3);
+  border-bottom: 1px solid var(--accent2);
+  font-size: 12px; line-height: 1.5;
+}
+.worker-warning[hidden] { display: none; }
+.dashboard-feedback {
+  position: fixed; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
 
 /* grid overlay */
 .grid-overlay {

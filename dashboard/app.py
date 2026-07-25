@@ -333,10 +333,30 @@ def update_worker_heartbeat(now=None):
         _set_runtime_state('worker_heartbeat', {'ts': now}, now=now)
 
 
-def recover_worker_state():
+def recover_worker_state(now=None):
     """Requeue work interrupted by a worker/container restart."""
+    now = int(time.time()) if now is None else int(now)
     with _db_lock:
         conn = get_db()
+        heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
+        heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
+        try:
+            heartbeat_ts = int(heartbeat_ts) if heartbeat_ts is not None else None
+        except (TypeError, ValueError):
+            heartbeat_ts = None
+        if heartbeat_ts is not None and now - heartbeat_ts > WORKER_READY_SECONDS:
+            details = json.dumps({'start_ts': heartbeat_ts, 'end_ts': now}, separators=(',', ':'))
+            recorded = conn.execute(
+                "SELECT 1 FROM events WHERE event_type='monitoring_gap' AND details=? LIMIT 1",
+                (details,),
+            ).fetchone()
+            if not recorded:
+                _insert_event(
+                    conn,
+                    ts=now,
+                    event_type='monitoring_gap',
+                    details=details,
+                )
         conn.execute("UPDATE scan_requests SET status='queued', started_ts=NULL WHERE status='running'")
         conn.execute("UPDATE preview_requests SET status='queued' WHERE status='running'")
         state = _read_scan_state(conn)
@@ -1989,8 +2009,18 @@ def api_scan_status():
         queued = conn.execute("SELECT COUNT(*) AS n FROM scan_requests WHERE status='queued'").fetchone()['n']
         conn.close()
     heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
+    try:
+        heartbeat_ts = int(heartbeat_ts) if heartbeat_ts is not None else None
+    except (TypeError, ValueError):
+        heartbeat_ts = None
+    heartbeat_age_seconds = max(0, now - heartbeat_ts) if heartbeat_ts is not None else None
+    worker_stale = heartbeat_age_seconds is None or heartbeat_age_seconds > WORKER_READY_SECONDS
     state['worker_heartbeat'] = heartbeat_ts
-    state['worker_ready'] = bool(heartbeat_ts and now - int(heartbeat_ts) <= WORKER_READY_SECONDS)
+    state['worker_ready'] = not worker_stale
+    state['worker_stale'] = worker_stale
+    state['worker_heartbeat_ts'] = heartbeat_ts
+    state['worker_heartbeat_age_seconds'] = heartbeat_age_seconds
+    state['recovery_required'] = worker_stale
     state['queued_requests'] = int(queued)
     state['found'] = state['current_found'] if state.get('scanning') else state['last_completed_found']
     return jsonify(state)
@@ -2054,10 +2084,6 @@ def prometheus_metrics():
     return '\n'.join(lines) + '\n', 200, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
 
 
-if os.environ.get('DISABLE_BACKGROUND', '0') != '1':
-    _ensure_runtime_started()
-
-
 if __name__ == "__main__":
-    _ensure_runtime_started()
+    init_db()
     app.run(host="0.0.0.0", port=8080)
