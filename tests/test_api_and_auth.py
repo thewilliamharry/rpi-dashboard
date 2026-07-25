@@ -1,5 +1,6 @@
 import time
 import unittest
+import inspect
 
 from tests.helpers import cleanup_db, load_app
 
@@ -222,6 +223,37 @@ class ApiAndAuthTests(unittest.TestCase):
             g = self.client.get('/api/service-meta/8080')
             self.assertEqual(g.status_code, 200)
             self.assertEqual(g.get_json()['path'], expected)
+
+    def test_repository_metadata_upsert_is_transactional_and_flask_free(self):
+        """The web adapter owns validation while the repository owns SQL only."""
+        from dashboard.beacon import db, repositories
+
+        self._insert_service()
+        with db.write_transaction(self.appmod.DB_PATH) as conn:
+            repositories.upsert_service_metadata(
+                conn,
+                port=8080,
+                display_name='Repository Demo',
+                url='http://127.0.0.1:8080/repository',
+                critical=True,
+                pinned_order=3,
+                tags='core,repository',
+                healthy_statuses='200-399',
+                requested_ts=1234,
+            )
+
+        with db.read_transaction(self.appmod.DB_PATH) as conn:
+            metadata = repositories.get_service_metadata(conn, 8080)
+            preview = conn.execute(
+                "SELECT requested_ts, status FROM preview_requests WHERE port=?", (8080,)
+            ).fetchone()
+
+        self.assertEqual(metadata['display_name'], 'Repository Demo')
+        self.assertEqual(metadata['url'], 'http://127.0.0.1:8080/repository')
+        self.assertEqual(dict(preview), {'requested_ts': 1234, 'status': 'queued'})
+        source = inspect.getsource(repositories)
+        self.assertNotIn('from flask', source.lower())
+        self.assertNotIn('import flask', source.lower())
 
     def test_service_meta_path_merge_rules(self):
         self._insert_service(url='http://127.0.0.1:8080/root')
