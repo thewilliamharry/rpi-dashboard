@@ -68,7 +68,7 @@ class BackupRecoveryTests(unittest.TestCase):
             self.assertEqual(len(result.schema_fingerprint), 64)
             self.assertFalse((database.parent / 'recovery-required.json').exists())
             with sqlite3.connect(database) as conn:
-                self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Example service')
+                self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
                 self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
 
     def test_restoring_same_catalog_twice_preserves_representative_rows(self):
