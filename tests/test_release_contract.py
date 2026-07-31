@@ -260,8 +260,9 @@ class ReleaseContractTests(unittest.TestCase):
                 title='BlueMap', display_name='', url='http://127.0.0.1:8100',
                 critical=0, latency_ms=4.2, error_class=None,
             )
-        self.assertEqual(post.call_args.kwargs['timeout'], 4)
-        self.assertNotIn('verify', post.call_args.kwargs)
+        self.assertEqual(post.call_args.kwargs['timeout'], (3.0, 4.0))
+        self.assertTrue(post.call_args.kwargs['verify'])
+        self.assertFalse(post.call_args.kwargs['allow_redirects'])
 
     def test_metrics_collection_is_not_blocked_by_preview_capture(self):
         entered = threading.Event()

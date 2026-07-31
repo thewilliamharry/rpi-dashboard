@@ -1,5 +1,6 @@
 import time
 import unittest
+from types import SimpleNamespace
 
 from tests.helpers import cleanup_db, load_app
 
@@ -59,6 +60,43 @@ class SecurityAndScanningTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(error_class, 'redirect_offhost')
         self.assertEqual(resp.status_code, 302)
+
+    def test_metadata_mutation_runs_policy_before_persistence(self):
+        now = int(time.time())
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO services(port,title,first_seen,last_seen,is_online) VALUES(?,?,?,?,?)',
+                (8100, 'Policy target', now - 1, now, 1),
+            )
+            conn.commit()
+            conn.close()
+
+        calls = []
+
+        class BlockedPolicy:
+            def plan(self, url, purpose, **_kwargs):
+                calls.append((url, purpose))
+                raise self.appmod.OutboundPolicyError('target_not_allowed')
+
+        original = self.appmod._outbound_policy
+        self.appmod._outbound_policy = lambda: BlockedPolicy()
+        try:
+            response = self.appmod.app.test_client().put(
+                '/api/service-meta/8100',
+                json={'url': 'http://127.0.0.1:8100'},
+                headers={'X-Beacon-UI': '1'},
+            )
+        finally:
+            self.appmod._outbound_policy = original
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'policy_error')
+        self.assertEqual(len(calls), 1)
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            self.assertIsNone(conn.execute('SELECT 1 FROM service_meta WHERE port=8100').fetchone())
+            conn.close()
 
     def test_discovery_finally_clears_scanning_state_after_error(self):
         original_range = self.appmod.range if hasattr(self.appmod, 'range') else None
