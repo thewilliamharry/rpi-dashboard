@@ -21,6 +21,7 @@ try:
     from .beacon import web as beacon_web
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
+    from .beacon import queues as beacon_queues
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon.config import load_settings
@@ -28,6 +29,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import web as beacon_web
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
+    from beacon import queues as beacon_queues
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 
 logging.basicConfig(
@@ -1507,56 +1509,22 @@ def do_uptime_check(only_down=False):
 
 
 def queue_discovery_request(client_key):
-    now = int(time.time())
-    with _db_lock:
-        conn = get_db()
-        active = conn.execute(
-            "SELECT id FROM scan_requests WHERE status IN ('queued','running') ORDER BY id LIMIT 1"
-        ).fetchone()
-        scan_state = _read_scan_state(conn)
-        if active or scan_state.get('scanning'):
-            conn.close()
-            return None
-        cur = conn.execute(
-            "INSERT INTO scan_requests(requested_ts, requested_by, status) VALUES(?,?,'queued')",
-            (now, str(client_key)[:120]),
-        )
-        request_id = cur.lastrowid
-        conn.commit()
-        conn.close()
+    request = beacon_queues.enqueue_scan(DB_PATH, client_key)
     _update_scan_state(stage='queued', scanning=False, progress=0.0, current_found=0, last_error=None)
-    return request_id
+    return request.request_id
 
 
-def process_scan_requests():
-    with _db_lock:
-        conn = get_db()
-        row = conn.execute(
-            "SELECT id FROM scan_requests WHERE status='queued' ORDER BY requested_ts, id LIMIT 1"
-        ).fetchone()
-        if not row:
-            conn.close()
-            return False
-        request_id = int(row['id'])
-        now = int(time.time())
-        conn.execute(
-            "UPDATE scan_requests SET status='running', started_ts=? WHERE id=? AND status='queued'",
-            (now, request_id),
-        )
-        conn.commit()
-        conn.close()
+def process_scan_requests(worker_id=None):
+    worker_id = worker_id or 'compat-worker'
+    claim = beacon_queues.claim_scan(DB_PATH, worker_id)
+    if not claim:
+        return False
+    request_id = claim.request_id
 
     try:
         outcome = run_discovery(source=f'manual:{request_id}')
         if outcome == 'busy':
-            with _db_lock:
-                conn = get_db()
-                conn.execute(
-                    "UPDATE scan_requests SET status='queued', started_ts=NULL WHERE id=?",
-                    (request_id,),
-                )
-                conn.commit()
-                conn.close()
+            beacon_queues.requeue_scan(DB_PATH, request_id, worker_id)
             return False
         state = _read_scan_state()
         status = 'failed' if outcome == 'failed' or state.get('last_error') else 'completed'
@@ -1564,14 +1532,13 @@ def process_scan_requests():
     except Exception as exc:
         status, error = 'failed', str(exc)[:240]
 
-    with _db_lock:
-        conn = get_db()
-        conn.execute(
-            "UPDATE scan_requests SET status=?, completed_ts=?, error=? WHERE id=?",
-            (status, int(time.time()), error, request_id),
-        )
-        conn.commit()
-        conn.close()
+    try:
+        if status == 'completed':
+            beacon_queues.finish_scan(DB_PATH, request_id, worker_id)
+        else:
+            beacon_queues.fail_scan(DB_PATH, request_id, worker_id, error or 'scan failed')
+    except beacon_queues.LeaseLost:
+        return False
     return True
 
 
@@ -2015,6 +1982,9 @@ def api_scan_status():
         state = _read_scan_state(conn)
         heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
         queued = conn.execute("SELECT COUNT(*) AS n FROM scan_requests WHERE status='queued'").fetchone()['n']
+        latest_request = conn.execute(
+            "SELECT id, status, deadline_ts, error FROM scan_requests ORDER BY id DESC LIMIT 1"
+        ).fetchone()
         conn.close()
     heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
     try:
@@ -2030,6 +2000,11 @@ def api_scan_status():
     state['worker_heartbeat_age_seconds'] = heartbeat_age_seconds
     state['recovery_required'] = worker_stale
     state['queued_requests'] = int(queued)
+    if latest_request:
+        state['latest_request_id'] = int(latest_request['id'])
+        state['latest_request_status'] = latest_request['status']
+        state['latest_request_deadline_ts'] = latest_request['deadline_ts']
+        state['latest_request_error_class'] = latest_request['error']
     state['found'] = state['current_found'] if state.get('scanning') else state['last_completed_found']
     return jsonify(state)
 
@@ -2041,10 +2016,15 @@ def api_trigger_scan():
     if not allowed:
         return jsonify({"started": False, "reason": "rate_limited", "retry_after": retry_after}), 429
 
-    request_id = queue_discovery_request(client_key)
-    if request_id is not None:
-        return jsonify({"queued": True, "request_id": request_id}), 202
-    return jsonify({"queued": False, "reason": "already_queued_or_running"}), 409
+    queued = beacon_queues.enqueue_scan(DB_PATH, client_key)
+    _update_scan_state(stage='queued', scanning=False, progress=0.0, current_found=0, last_error=None)
+    return jsonify({
+        "queued": True,
+        "request_id": queued.request_id,
+        "status": queued.status,
+        "coalesced": queued.coalesced,
+        "deadline_ts": queued.deadline_ts,
+    }), 202
 
 
 @app.route('/healthz')

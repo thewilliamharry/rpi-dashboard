@@ -33,6 +33,7 @@ class DurableQueueTests(unittest.TestCase):
         self.assertEqual(len(claimed), 1)
         first = claimed[0]
 
+        queues.recover_queues(self.db_path, now=1_003)
         successor = queues.claim_scan(self.db_path, 'worker-c', now=1_003, lease_seconds=30)
         self.assertEqual(successor.request_id, request.request_id)
         with self.assertRaises(queues.LeaseLost):

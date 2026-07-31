@@ -104,6 +104,10 @@ def sample_metrics(services):
     services.collect_system_stats()
 
 
+def process_scans(services):
+    return services.process_scan_requests(services.worker_id)
+
+
 def scheduled_discovery(services):
     state = services.read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
@@ -171,7 +175,7 @@ def build_scheduler(services):
         executor='probes', id='uptime_down', misfire_grace_time=30,
     )
     built_scheduler.add_job(
-        services.process_scan_requests, 'interval', seconds=2,
+        process_scans, 'interval', args=(services,), seconds=2,
         executor='probes', id='scan_requests', misfire_grace_time=10,
     )
     built_scheduler.add_job(

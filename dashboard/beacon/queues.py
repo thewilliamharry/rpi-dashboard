@@ -33,6 +33,21 @@ class WorkerLease:
     lease_until: int
 
 
+@dataclass(frozen=True)
+class QueueRequest:
+    """A durable scan or preview row returned by enqueue/claim operations."""
+
+    request_id: int
+    status: str
+    requested_ts: int
+    deadline_ts: int
+    lease_owner: str | None = None
+    lease_until: int | None = None
+    port: int | None = None
+    revision: int | None = None
+    coalesced: bool = False
+
+
 def _connect(db_path):
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -155,6 +170,211 @@ def release_worker_lease(db_path, worker_id, *, now=None):
         if not owner or owner.get('worker_id') != worker_id:
             raise LeaseLost('worker lease was lost')
         conn.execute('DELETE FROM runtime_state WHERE key=?', (WORKER_OWNER_KEY,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _queue_request(row, *, coalesced=False):
+    return QueueRequest(
+        request_id=int(row['id']), status=str(row['status']),
+        requested_ts=int(row['requested_ts']), deadline_ts=int(row['deadline_ts']),
+        lease_owner=row['lease_owner'], lease_until=row['lease_until'],
+        port=row['port'] if 'port' in row.keys() else None,
+        revision=row['revision'] if 'revision' in row.keys() else None,
+        coalesced=coalesced,
+    )
+
+
+def expire_scan_requests(db_path, *, now=None):
+    """Persist terminal expiry for stale scan work; terminal rows stay untouched."""
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        updated = conn.execute(
+            "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, "
+            "lease_owner=NULL, lease_until=NULL, error='expired' "
+            "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
+            (now, now, now),
+        ).rowcount
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def enqueue_scan(db_path, requested_by, *, now=None):
+    """Persist one 15-minute manual scan, coalescing a still-queued request."""
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, error='expired' "
+            "WHERE status='queued' AND deadline_ts <= ?",
+            (now, now, now),
+        )
+        row = conn.execute(
+            "SELECT id, status, requested_ts, deadline_ts, lease_owner, lease_until "
+            "FROM scan_requests WHERE status='queued' AND deadline_ts > ? "
+            "ORDER BY requested_ts, id LIMIT 1",
+            (now,),
+        ).fetchone()
+        if row:
+            conn.commit()
+            return _queue_request(row, coalesced=True)
+        cur = conn.execute(
+            "INSERT INTO scan_requests(requested_ts, requested_by, deadline_ts, status, attempt_count) "
+            "VALUES(?,?,?,'queued',0)",
+            (now, str(requested_by)[:120], now + 900),
+        )
+        row = conn.execute(
+            "SELECT id, status, requested_ts, deadline_ts, lease_owner, lease_until "
+            "FROM scan_requests WHERE id=?", (cur.lastrowid,),
+        ).fetchone()
+        conn.commit()
+        return _queue_request(row)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def claim_scan(db_path, worker_id, *, now=None, lease_seconds=30):
+    """Claim one non-expired queued scan using a conditional write transaction."""
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, error='expired' "
+            "WHERE status='queued' AND deadline_ts <= ?", (now, now, now),
+        )
+        row = conn.execute(
+            "SELECT id FROM scan_requests WHERE status='queued' AND deadline_ts > ? "
+            "ORDER BY requested_ts, id LIMIT 1", (now,),
+        ).fetchone()
+        if not row:
+            conn.commit()
+            return None
+        request_id = int(row['id'])
+        changed = conn.execute(
+            "UPDATE scan_requests SET status='running', started_ts=?, lease_owner=?, lease_until=?, "
+            "attempt_count=attempt_count + 1, error=NULL "
+            "WHERE id=? AND status='queued' AND deadline_ts > ?",
+            (now, str(worker_id), now + int(lease_seconds), request_id, now),
+        ).rowcount
+        if not changed:
+            conn.commit()
+            return None
+        claimed = conn.execute(
+            "SELECT id, status, requested_ts, deadline_ts, lease_owner, lease_until "
+            "FROM scan_requests WHERE id=?", (request_id,),
+        ).fetchone()
+        conn.commit()
+        return _queue_request(claimed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def renew_scan_lease(db_path, request_id, worker_id, *, now=None, lease_seconds=30):
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        changed = conn.execute(
+            "UPDATE scan_requests SET lease_until=? WHERE id=? AND status='running' "
+            "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
+            (now + int(lease_seconds), request_id, str(worker_id), now, now),
+        ).rowcount
+        if not changed:
+            raise LeaseLost('scan lease was lost')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _finish_scan(db_path, request_id, worker_id, *, status, error=None, result=None, now=None):
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        changed = conn.execute(
+            "UPDATE scan_requests SET status=?, completed_ts=?, terminal_ts=?, error=?, result=?, "
+            "lease_owner=NULL, lease_until=NULL WHERE id=? AND status='running' "
+            "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
+            (status, now, now, error, result, request_id, str(worker_id), now, now),
+        ).rowcount
+        if not changed:
+            raise LeaseLost('scan lease was lost')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def finish_scan(db_path, request_id, worker_id, *, result=None, now=None):
+    _finish_scan(db_path, request_id, worker_id, status='completed', result=result, now=now)
+
+
+def fail_scan(db_path, request_id, worker_id, error, *, now=None):
+    _finish_scan(db_path, request_id, worker_id, status='failed', error=str(error)[:240], now=now)
+
+
+def requeue_scan(db_path, request_id, worker_id, *, now=None):
+    """Return a still-owned scan to queued when local discovery is busy."""
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        changed = conn.execute(
+            "UPDATE scan_requests SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL "
+            "WHERE id=? AND status='running' AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
+            (request_id, str(worker_id), now, now),
+        ).rowcount
+        if not changed:
+            raise LeaseLost('scan lease was lost')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def recover_queues(db_path, *, now=None):
+    """Recover only lease-expired still-relevant work after a worker restart."""
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, "
+            "lease_owner=NULL, lease_until=NULL, error='expired' "
+            "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
+            (now, now, now),
+        )
+        conn.execute(
+            "UPDATE scan_requests SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL "
+            "WHERE status='running' AND lease_until <= ? AND deadline_ts > ?",
+            (now, now),
+        )
         conn.commit()
     except Exception:
         conn.rollback()
