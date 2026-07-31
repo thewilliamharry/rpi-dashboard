@@ -5,9 +5,19 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from shutil import copy2
+from unittest import mock
 from pathlib import Path
 
+from dashboard.beacon.config import Settings
 from dashboard.beacon.inventory import InventoryError, classify_schema, collect_inventory
+from dashboard.beacon.migrations import (
+    MIGRATIONS,
+    Migration,
+    MigrationPreparationError,
+    UnsupportedSchemaError,
+    run_migrations,
+)
 
 
 FIXTURE_DIR = Path(__file__).parent / 'fixtures' / 'legacy'
@@ -27,6 +37,96 @@ EXPECTED_FINGERPRINTS = {
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
     'runtime-queues-2026-07.db': '791e5c1d380fb38b62e8c284349affb248acfaf5dbbd0e93a07b929b2ef59c91',
 }
+
+
+class MigrationTests(unittest.TestCase):
+    """The migration floor must retain legacy data while becoming current once."""
+
+    def _copied_fixture(self, directory, filename):
+        target = Path(directory) / filename
+        copy2(FIXTURE_DIR / filename, target)
+        return target
+
+    def test_support_floor_covers_history_and_confirmed_operator_evidence(self):
+        manifest = json.loads((FIXTURE_DIR / 'support-floor.json').read_text(encoding='utf-8'))
+        supported = {entry['fingerprint']: entry for entry in manifest['supported_schemas']}
+        expected = set(EXPECTED_FINGERPRINTS.values()) | {
+            json.loads((OPERATOR_FIXTURE_DIR / 'production.json').read_text())['schema_fingerprint'],
+        }
+        self.assertEqual(set(supported), expected)
+        for entry in supported.values():
+            self.assertIn('fixture', entry)
+            self.assertIn('source', entry)
+            self.assertIn('minimum_schema_version', entry)
+            self.assertEqual(entry['target_version'], MIGRATIONS[-1].version)
+
+    def test_each_supported_fixture_upgrades_once_preserving_representative_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for filename in (*FIXTURES, 'operator/production.db'):
+                source_name = filename.replace('/', '-')
+                source = FIXTURE_DIR / filename
+                target = Path(directory) / source_name
+                copy2(source, target)
+                with sqlite3.connect(target) as before_conn:
+                    service_rows = before_conn.execute('SELECT COUNT(*) FROM services').fetchone()[0]
+                    event_rows = (
+                        before_conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+                        if 'events' in {row[0] for row in before_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                        else 0
+                    )
+                result = run_migrations(Settings(db_path=str(target)))
+                self.assertTrue(result.applied_versions)
+                with sqlite3.connect(target) as conn:
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM services').fetchone()[0], service_rows)
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM events').fetchone()[0], event_rows)
+                    self.assertEqual(
+                        conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
+                        MIGRATIONS[-1].version,
+                    )
+
+    def test_current_rerun_is_a_no_op_without_a_new_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            settings = Settings(db_path=str(target))
+            run_migrations(settings)
+            before_bytes = target.read_bytes()
+            backups_before = list((target.parent / 'backups').glob('*.db'))
+            result = run_migrations(settings)
+            self.assertEqual(result.applied_versions, ())
+            self.assertEqual(target.read_bytes(), before_bytes)
+            self.assertEqual(list((target.parent / 'backups').glob('*.db')), backups_before)
+
+    def test_unknown_fingerprint_fails_before_backup_or_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'unknown.db'
+            with sqlite3.connect(target) as conn:
+                conn.execute('CREATE TABLE unknown_shape (id INTEGER PRIMARY KEY)')
+            before = target.read_bytes()
+            with self.assertRaises(UnsupportedSchemaError):
+                run_migrations(Settings(db_path=str(target)))
+            self.assertEqual(target.read_bytes(), before)
+            self.assertFalse((target.parent / 'backups').exists())
+
+    def test_failed_migration_rolls_back_and_keeps_redacted_recovery_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            before = target.read_bytes()
+
+            def fail_after_write(conn):
+                conn.execute('CREATE TABLE migration_should_rollback (id INTEGER)')
+                raise RuntimeError('sensitive implementation detail')
+
+            broken = Migration(1, 'forced_failure', True, fail_after_write)
+            with mock.patch('dashboard.beacon.migrations.MIGRATIONS', (broken,)):
+                with self.assertRaises(MigrationPreparationError):
+                    run_migrations(Settings(db_path=str(target)))
+
+            self.assertEqual(target.read_bytes(), before)
+            marker = json.loads((target.parent / 'recovery-required.json').read_text())
+            self.assertEqual(marker['failed_target_version'], 1)
+            self.assertEqual(marker['reason_class'], 'RuntimeError')
+            self.assertNotIn('sensitive implementation detail', json.dumps(marker))
+            self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
 
 
 class InventoryTests(unittest.TestCase):
