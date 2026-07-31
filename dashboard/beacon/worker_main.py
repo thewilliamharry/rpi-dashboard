@@ -108,6 +108,10 @@ def process_scans(services):
     return services.process_scan_requests(services.worker_id)
 
 
+def process_previews(services):
+    return services.process_preview_requests(services.worker_id)
+
+
 def scheduled_discovery(services):
     state = services.read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
@@ -179,7 +183,7 @@ def build_scheduler(services):
         executor='probes', id='scan_requests', misfire_grace_time=10,
     )
     built_scheduler.add_job(
-        services.process_preview_requests, 'interval', seconds=2,
+        process_previews, 'interval', args=(services,), seconds=2,
         executor='screenshots', id='preview_requests', misfire_grace_time=10,
     )
     built_scheduler.add_job(

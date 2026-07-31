@@ -199,6 +199,7 @@ def update_worker_heartbeat(now=None):
 def recover_worker_state(now=None):
     """Requeue work interrupted by a worker/container restart."""
     now = int(time.time()) if now is None else int(now)
+    beacon_queues.recover_queues(DB_PATH, now=now)
     with _db_lock:
         conn = get_db()
         heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
@@ -220,8 +221,6 @@ def recover_worker_state(now=None):
                     event_type='monitoring_gap',
                     details=details,
                 )
-        conn.execute("UPDATE scan_requests SET status='queued', started_ts=NULL WHERE status='running'")
-        conn.execute("UPDATE preview_requests SET status='queued' WHERE status='running'")
         state = _read_scan_state(conn)
         queued = conn.execute("SELECT 1 FROM scan_requests WHERE status='queued' LIMIT 1").fetchone()
         state.update({
@@ -1232,11 +1231,7 @@ def _legacy_do_discovery(source='scheduled'):
                 continue
             with _db_lock:
                 conn = get_db()
-                conn.execute(
-                    "INSERT INTO preview_requests(port, requested_ts, status, error) VALUES(?,?,'queued',NULL) "
-                    "ON CONFLICT(port) DO UPDATE SET requested_ts=excluded.requested_ts, status='queued', error=NULL",
-                    (port, int(time.time())),
-                )
+                beacon_queues.enqueue_preview_in_transaction(conn, port, now=int(time.time()))
                 conn.commit()
                 conn.close()
             _update_scan_state(progress=round(0.68 + 0.30 * (idx + 1) / max(1, len(discovered_ports)), 3))
@@ -1345,11 +1340,7 @@ def _legacy_do_uptime_check(only_down=False):
                     conn, port, bool(service_plan and service_plan.tls.tls_unverified), now,
                 )
                 if online and not row['has_thumb']:
-                    conn.execute(
-                        "INSERT INTO preview_requests(port, requested_ts, status, error) VALUES(?,?,'queued',NULL) "
-                        "ON CONFLICT(port) DO UPDATE SET requested_ts=excluded.requested_ts, status='queued', error=NULL",
-                        (port, now),
-                    )
+                    beacon_queues.enqueue_preview_in_transaction(conn, port, now=now)
                 conn.commit()
                 conn.close()
 
@@ -1542,36 +1533,40 @@ def process_scan_requests(worker_id=None):
     return True
 
 
-def process_preview_requests():
+def process_preview_requests(worker_id=None):
+    worker_id = worker_id or 'compat-worker'
+    claim = beacon_queues.claim_preview(DB_PATH, worker_id)
+    if not claim:
+        return False
+    port = claim.port
     with _db_lock:
         conn = get_db()
         row = conn.execute(
-            "SELECT p.port, COALESCE(m.url, '') AS url FROM preview_requests p "
-            "LEFT JOIN service_meta m ON m.port=p.port WHERE p.status='queued' ORDER BY p.requested_ts LIMIT 1"
+            "SELECT COALESCE(url, '') AS url FROM service_meta WHERE port=?", (port,)
         ).fetchone()
-        if not row:
-            conn.close()
-            return False
-        port = int(row['port'])
-        url = _safe_service_url(row['url'], port)
-        conn.execute("UPDATE preview_requests SET status='running', error=NULL WHERE port=?", (port,))
-        conn.commit()
         conn.close()
+    url = _safe_service_url(row['url'] if row else '', port)
     started = time.monotonic()
     title, data, mime, source, thumb_error, warning = _refresh_service_preview(port, url)
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
     with _db_lock:
         conn = get_db()
-        if title:
-            conn.execute("UPDATE services SET title=? WHERE port=?", (title, port))
-        if data or thumb_error:
-            _store_thumbnail_result(conn, port, data, mime, source, thumb_error)
-        conn.execute(
-            "UPDATE preview_requests SET status=?, error=? WHERE port=?",
-            ('failed' if warning else 'completed', warning, port),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            beacon_queues.finish_preview_in_transaction(
+                conn, claim.request_id, worker_id, revision=claim.revision,
+                status='failed' if warning else 'completed', error=warning,
+            )
+            if title:
+                conn.execute("UPDATE services SET title=? WHERE port=?", (title, port))
+            if data or thumb_error:
+                _store_thumbnail_result(conn, port, data, mime, source, thumb_error)
+            conn.commit()
+        except beacon_queues.LeaseLost:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
     _record_event(
         'preview_complete', port=port, error_class=thumb_error,
         details=json.dumps({'total_ms': elapsed_ms, 'success': not bool(warning)}, separators=(',', ':')),
@@ -1902,7 +1897,7 @@ def api_service_meta(port):
             return jsonify({"error": str(exc)}), 400
 
         try:
-            beacon_repositories.upsert_service_metadata(
+            preview_request = beacon_repositories.upsert_service_metadata(
                 conn,
                 port=port,
                 display_name=next_display_name,
@@ -1925,6 +1920,9 @@ def api_service_meta(port):
     payload = dict(row or {})
     payload['refresh_warning'] = None
     payload['preview_queued'] = True
+    payload['preview_status'] = preview_request.status
+    payload['preview_revision'] = preview_request.revision
+    payload['preview_deadline_ts'] = preview_request.deadline_ts
     return jsonify(payload)
 
 
@@ -1981,12 +1979,15 @@ def api_scan_status():
         conn = get_db()
         state = _read_scan_state(conn)
         heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
+        owner = _get_runtime_state('worker_owner', {}, conn=conn)
         queued = conn.execute("SELECT COUNT(*) AS n FROM scan_requests WHERE status='queued'").fetchone()['n']
         latest_request = conn.execute(
             "SELECT id, status, deadline_ts, error FROM scan_requests ORDER BY id DESC LIMIT 1"
         ).fetchone()
         conn.close()
-    heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
+    heartbeat_ts = owner.get('heartbeat_ts') if isinstance(owner, dict) else None
+    if heartbeat_ts is None:
+        heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
     try:
         heartbeat_ts = int(heartbeat_ts) if heartbeat_ts is not None else None
     except (TypeError, ValueError):
@@ -1998,6 +1999,7 @@ def api_scan_status():
     state['worker_stale'] = worker_stale
     state['worker_heartbeat_ts'] = heartbeat_ts
     state['worker_heartbeat_age_seconds'] = heartbeat_age_seconds
+    state['worker_lease_until'] = owner.get('lease_until') if isinstance(owner, dict) else None
     state['recovery_required'] = worker_stale
     state['queued_requests'] = int(queued)
     if latest_request:

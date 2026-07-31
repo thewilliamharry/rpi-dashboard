@@ -217,6 +217,12 @@ def enqueue_scan(db_path, requested_by, *, now=None):
     try:
         conn.execute('BEGIN IMMEDIATE')
         conn.execute(
+            'UPDATE scan_requests SET deadline_ts=requested_ts + 900 WHERE deadline_ts IS NULL'
+        )
+        conn.execute(
+            'UPDATE preview_requests SET deadline_ts=requested_ts + 1800 WHERE deadline_ts IS NULL'
+        )
+        conn.execute(
             "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, error='expired' "
             "WHERE status='queued' AND deadline_ts <= ?",
             (now, now, now),
@@ -365,6 +371,12 @@ def recover_queues(db_path, *, now=None):
     try:
         conn.execute('BEGIN IMMEDIATE')
         conn.execute(
+            'UPDATE scan_requests SET deadline_ts=requested_ts + 900 WHERE deadline_ts IS NULL'
+        )
+        conn.execute(
+            'UPDATE preview_requests SET deadline_ts=requested_ts + 1800 WHERE deadline_ts IS NULL'
+        )
+        conn.execute(
             "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, "
             "lease_owner=NULL, lease_until=NULL, error='expired' "
             "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
@@ -372,10 +384,223 @@ def recover_queues(db_path, *, now=None):
         )
         conn.execute(
             "UPDATE scan_requests SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL "
-            "WHERE status='running' AND lease_until <= ? AND deadline_ts > ?",
+            "WHERE status='running' AND (lease_until IS NULL OR lease_until <= ?) AND deadline_ts > ?",
             (now, now),
         )
+        conn.execute(
+            "UPDATE preview_requests SET status='expired', terminal_ts=?, completed_ts=?, "
+            "lease_owner=NULL, lease_until=NULL, error='expired' "
+            "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
+            (now, now, now),
+        )
+        conn.execute("""
+            UPDATE preview_requests AS stale
+               SET status='superseded', terminal_ts=?, lease_owner=NULL, lease_until=NULL,
+                   error='superseded'
+             WHERE stale.status='running' AND (stale.lease_until IS NULL OR stale.lease_until <= ?)
+               AND EXISTS (
+                   SELECT 1 FROM preview_requests newer
+                    WHERE newer.port=stale.port AND newer.revision > stale.revision
+               )
+        """, (now, now))
+        conn.execute("""
+            UPDATE preview_requests AS current
+               SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL
+             WHERE current.status='running' AND (current.lease_until IS NULL OR current.lease_until <= ?)
+               AND current.deadline_ts > ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM preview_requests newer
+                    WHERE newer.port=current.port AND newer.revision > current.revision
+               )
+        """, (now, now))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _enqueue_preview_in_transaction(conn, port, *, now):
+    conn.execute(
+        "UPDATE preview_requests SET status='expired', terminal_ts=?, completed_ts=?, error='expired' "
+        "WHERE port=? AND status='queued' AND deadline_ts <= ?",
+        (now, now, port, now),
+    )
+    revision = conn.execute(
+        'SELECT COALESCE(MAX(revision), 0) + 1 AS revision FROM preview_requests WHERE port=?',
+        (port,),
+    ).fetchone()['revision']
+    conn.execute(
+        "UPDATE preview_requests SET status='superseded', terminal_ts=?, error='superseded' "
+        "WHERE port=? AND status='queued'",
+        (now, port),
+    )
+    cur = conn.execute(
+        "INSERT INTO preview_requests(port, requested_ts, deadline_ts, status, revision, attempt_count) "
+        "VALUES(?,?,?,'queued',?,0)",
+        (port, now, now + 1800, revision),
+    )
+    row = conn.execute(
+        "SELECT id, port, revision, status, requested_ts, deadline_ts, lease_owner, lease_until "
+        "FROM preview_requests WHERE id=?", (cur.lastrowid,),
+    ).fetchone()
+    return _queue_request(row)
+
+
+def enqueue_preview_in_transaction(conn, port, *, now=None):
+    """Add a latest preview revision inside a caller-owned metadata transaction."""
+    return _enqueue_preview_in_transaction(conn, int(port), now=_now(now))
+
+
+def enqueue_preview(db_path, port, *, now=None):
+    """Persist a 30-minute latest-revision preview request."""
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        request = _enqueue_preview_in_transaction(conn, int(port), now=now)
+        conn.commit()
+        return request
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def claim_preview(db_path, worker_id, *, now=None, lease_seconds=60):
+    """Claim the latest non-expired preview revision, if any."""
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            "UPDATE preview_requests SET status='expired', terminal_ts=?, completed_ts=?, error='expired' "
+            "WHERE status='queued' AND deadline_ts <= ?", (now, now, now),
+        )
+        row = conn.execute("""
+            SELECT p.id FROM preview_requests p
+             WHERE p.status='queued' AND p.deadline_ts > ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM preview_requests newer
+                    WHERE newer.port=p.port AND newer.revision > p.revision
+               )
+             ORDER BY p.requested_ts, p.id LIMIT 1
+        """, (now,)).fetchone()
+        if not row:
+            conn.commit()
+            return None
+        request_id = int(row['id'])
+        changed = conn.execute(
+            "UPDATE preview_requests SET status='running', started_ts=?, lease_owner=?, lease_until=?, "
+            "attempt_count=attempt_count + 1, error=NULL WHERE id=? AND status='queued' AND deadline_ts > ?",
+            (now, str(worker_id), now + int(lease_seconds), request_id, now),
+        ).rowcount
+        if not changed:
+            conn.commit()
+            return None
+        claimed = conn.execute(
+            "SELECT id, port, revision, status, requested_ts, deadline_ts, lease_owner, lease_until "
+            "FROM preview_requests WHERE id=?", (request_id,),
+        ).fetchone()
+        conn.commit()
+        return _queue_request(claimed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def renew_preview_lease(db_path, request_id, worker_id, *, revision, now=None, lease_seconds=60):
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        changed = conn.execute(
+            "UPDATE preview_requests SET lease_until=? WHERE id=? AND revision=? AND status='running' "
+            "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
+            (now + int(lease_seconds), request_id, revision, str(worker_id), now, now),
+        ).rowcount
+        if not changed:
+            raise LeaseLost('preview lease was lost')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def finish_preview_in_transaction(conn, request_id, worker_id, *, revision, status='completed', error=None, result=None, now=None):
+    """Finish only a current revision while the caller holds its write transaction."""
+    now = _now(now)
+    row = conn.execute(
+        'SELECT port FROM preview_requests WHERE id=? AND revision=?', (request_id, revision),
+    ).fetchone()
+    if not row:
+        raise LeaseLost('preview request no longer exists')
+    newer = conn.execute(
+        'SELECT 1 FROM preview_requests WHERE port=? AND revision > ? LIMIT 1',
+        (row['port'], revision),
+    ).fetchone()
+    if newer:
+        raise LeaseLost('preview revision was superseded')
+    changed = conn.execute(
+        "UPDATE preview_requests SET status=?, completed_ts=?, terminal_ts=?, error=?, result=?, "
+        "lease_owner=NULL, lease_until=NULL WHERE id=? AND revision=? AND status='running' "
+        "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
+        (status, now, now, error, result, request_id, revision, str(worker_id), now, now),
+    ).rowcount
+    if not changed:
+        raise LeaseLost('preview lease was lost')
+
+
+def finish_preview(db_path, request_id, worker_id, *, revision, result=None, now=None):
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        finish_preview_in_transaction(
+            conn, request_id, worker_id, revision=revision, result=result, now=now,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def fail_preview(db_path, request_id, worker_id, error, *, revision, now=None):
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        finish_preview_in_transaction(
+            conn, request_id, worker_id, revision=revision, status='failed',
+            error=str(error)[:240], now=now,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def expire_preview_requests(db_path, *, now=None):
+    now = _now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        changed = conn.execute(
+            "UPDATE preview_requests SET status='expired', terminal_ts=?, completed_ts=?, "
+            "lease_owner=NULL, lease_until=NULL, error='expired' "
+            "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
+            (now, now, now),
+        ).rowcount
+        conn.commit()
+        return changed
     except Exception:
         conn.rollback()
         raise

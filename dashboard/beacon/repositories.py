@@ -6,6 +6,8 @@ not own Flask request state, network clients, browsers, or connection lifetime.
 
 import json
 
+from .queues import enqueue_preview_in_transaction
+
 
 def get_service_metadata(conn, port):
     row = conn.execute(
@@ -47,11 +49,7 @@ def upsert_service_metadata(
         "healthy_statuses=excluded.healthy_statuses",
         (port, display_name, url, int(bool(critical)), pinned_order, tags, healthy_statuses),
     )
-    conn.execute(
-        "INSERT INTO preview_requests(port, requested_ts, status, error) VALUES(?,?,'queued',NULL) "
-        "ON CONFLICT(port) DO UPDATE SET requested_ts=excluded.requested_ts, status='queued', error=NULL",
-        (port, requested_ts),
-    )
+    return enqueue_preview_in_transaction(conn, port, now=requested_ts)
 
 
 def get_runtime_state(conn, key, default=None):

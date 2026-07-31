@@ -157,11 +157,12 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertTrue(status['worker_ready'])
 
     def test_worker_restart_requeues_interrupted_work(self):
+        now = int(time.time())
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute(
                 "INSERT INTO scan_requests(requested_ts,requested_by,status,started_ts) VALUES(?,?,?,?)",
-                (10, 'test', 'running', 11),
+                (now, 'test', 'running', now + 1),
             )
             self.appmod._set_runtime_state('scan_state', {'scanning': True, 'stage': 'probing'}, conn=conn)
             conn.commit()
