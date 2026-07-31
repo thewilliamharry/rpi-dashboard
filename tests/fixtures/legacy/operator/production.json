@@ -1,0 +1,791 @@
+{
+  "database_bytes": 4530176,
+  "format": "beacon-schema-inventory/v1",
+  "journal_mode": "wal",
+  "migration_versions": [
+    1
+  ],
+  "page": {
+    "freelist_count": 522,
+    "page_count": 1106,
+    "page_size": 4096
+  },
+  "schema_fingerprint": "6a7215ed74800ba1d4894563334304415c780135d295ced269c561c84b8b0c81",
+  "tables": [
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "ts",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "port",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 3,
+          "default": null,
+          "name": "event_type",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 4,
+          "default": null,
+          "name": "online",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 5,
+          "default": null,
+          "name": "previous_online",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 6,
+          "default": null,
+          "name": "latency_ms",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 7,
+          "default": null,
+          "name": "error_class",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 8,
+          "default": null,
+          "name": "alert_status",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 9,
+          "default": null,
+          "name": "details",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "port",
+            "ts"
+          ],
+          "name": "idx_events_port_ts",
+          "origin": "c",
+          "partial": false,
+          "unique": false
+        },
+        {
+          "columns": [
+            "ts"
+          ],
+          "name": "idx_events_ts",
+          "origin": "c",
+          "partial": false,
+          "unique": false
+        }
+      ],
+      "name": "events",
+      "row_count": 176,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE events (\n                id             INTEGER PRIMARY KEY AUTOINCREMENT,\n                ts             INTEGER NOT NULL,\n                port           INTEGER,\n                event_type     TEXT NOT NULL,\n                online         INTEGER,\n                previous_online INTEGER,\n                latency_ms     REAL,\n                error_class    TEXT,\n                alert_status   TEXT,\n                details        TEXT\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "port",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "requested_ts",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "default": "'queued'",
+          "name": "status",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "default": null,
+          "name": "error",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        }
+      ],
+      "indexes": [],
+      "name": "preview_requests",
+      "row_count": 6,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE preview_requests (\n                port          INTEGER PRIMARY KEY,\n                requested_ts  INTEGER NOT NULL,\n                status        TEXT NOT NULL DEFAULT 'queued',\n                error         TEXT\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "key",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "value",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "updated_ts",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "key"
+          ],
+          "name": "sqlite_autoindex_runtime_state_1",
+          "origin": "pk",
+          "partial": false,
+          "unique": true
+        }
+      ],
+      "name": "runtime_state",
+      "row_count": 2,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE runtime_state (\n                key         TEXT PRIMARY KEY,\n                value       TEXT NOT NULL,\n                updated_ts  INTEGER NOT NULL\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "client_key",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "ts",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "client_key",
+            "ts"
+          ],
+          "name": "idx_scan_rate_hits_client_ts",
+          "origin": "c",
+          "partial": false,
+          "unique": false
+        }
+      ],
+      "name": "scan_rate_hits",
+      "row_count": 0,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE scan_rate_hits (\n                id          INTEGER PRIMARY KEY AUTOINCREMENT,\n                client_key  TEXT NOT NULL,\n                ts          INTEGER NOT NULL\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "requested_ts",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "requested_by",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "default": "'queued'",
+          "name": "status",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 4,
+          "default": null,
+          "name": "started_ts",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 5,
+          "default": null,
+          "name": "completed_ts",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 6,
+          "default": null,
+          "name": "error",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "status",
+            "requested_ts"
+          ],
+          "name": "idx_scan_requests_status",
+          "origin": "c",
+          "partial": false,
+          "unique": false
+        }
+      ],
+      "name": "scan_requests",
+      "row_count": 2,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE scan_requests (\n                id            INTEGER PRIMARY KEY AUTOINCREMENT,\n                requested_ts  INTEGER NOT NULL,\n                requested_by  TEXT,\n                status        TEXT NOT NULL DEFAULT 'queued',\n                started_ts    INTEGER,\n                completed_ts  INTEGER,\n                error         TEXT\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "version",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "applied_ts",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "indexes": [],
+      "name": "schema_migrations",
+      "row_count": 1,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE schema_migrations (\n                version     INTEGER PRIMARY KEY,\n                applied_ts  INTEGER NOT NULL\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "ts",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "port",
+          "not_null": false,
+          "primary_key": 2,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "online",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 3,
+          "default": null,
+          "name": "latency_ms",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 4,
+          "default": null,
+          "name": "error_class",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "port"
+          ],
+          "name": "idx_checks_port",
+          "origin": "c",
+          "partial": false,
+          "unique": false
+        },
+        {
+          "columns": [
+            "ts"
+          ],
+          "name": "idx_checks_ts",
+          "origin": "c",
+          "partial": false,
+          "unique": false
+        },
+        {
+          "columns": [
+            "ts",
+            "port"
+          ],
+          "name": "sqlite_autoindex_service_checks_1",
+          "origin": "pk",
+          "partial": false,
+          "unique": true
+        }
+      ],
+      "name": "service_checks",
+      "row_count": 10000,
+      "row_count_capped": true,
+      "sql": "CREATE TABLE service_checks (\n                ts      INTEGER,\n                port    INTEGER,\n                online  INTEGER, latency_ms REAL, error_class TEXT,\n                PRIMARY KEY (ts, port)\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "port",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "display_name",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "url",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "default": "0",
+          "name": "critical",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 4,
+          "default": "0",
+          "name": "pinned_order",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 5,
+          "default": "''",
+          "name": "tags",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 6,
+          "default": "'200-399'",
+          "name": "healthy_statuses",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        }
+      ],
+      "indexes": [],
+      "name": "service_meta",
+      "row_count": 6,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE service_meta (\n                port          INTEGER PRIMARY KEY,\n                display_name  TEXT,\n                url           TEXT,\n                critical      INTEGER DEFAULT 0,\n                pinned_order  INTEGER DEFAULT 0,\n                tags          TEXT DEFAULT ''\n            , healthy_statuses TEXT DEFAULT '200-399')"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "port",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "title",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "first_seen",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 3,
+          "default": null,
+          "name": "last_seen",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 4,
+          "default": "1",
+          "name": "is_online",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 5,
+          "default": null,
+          "name": "thumb_data",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "BLOB"
+        },
+        {
+          "cid": 6,
+          "default": "'image/jpeg'",
+          "name": "thumb_mime",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 7,
+          "default": null,
+          "name": "thumb_ts",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 8,
+          "default": null,
+          "name": "last_latency_ms",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 9,
+          "default": null,
+          "name": "last_error",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 10,
+          "default": null,
+          "name": "thumb_source",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 11,
+          "default": null,
+          "name": "thumb_attempt_ts",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 12,
+          "default": null,
+          "name": "thumb_error",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 13,
+          "default": null,
+          "name": "state_since",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "indexes": [],
+      "name": "services",
+      "row_count": 6,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE services (\n                port        INTEGER PRIMARY KEY,\n                title       TEXT,\n                first_seen  INTEGER NOT NULL,\n                last_seen   INTEGER NOT NULL,\n                is_online   INTEGER DEFAULT 1\n            , thumb_data BLOB, thumb_mime TEXT DEFAULT 'image/jpeg', thumb_ts INTEGER, last_latency_ms REAL, last_error TEXT, thumb_source TEXT, thumb_attempt_ts INTEGER, thumb_error TEXT, state_since INTEGER)"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "ts",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "cpu",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "ram",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 3,
+          "default": null,
+          "name": "disk",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 4,
+          "default": null,
+          "name": "temp",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "ts"
+          ],
+          "name": "idx_stats_ts",
+          "origin": "c",
+          "partial": false,
+          "unique": false
+        }
+      ],
+      "name": "stats_history",
+      "row_count": 1502,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE stats_history (\n                ts      INTEGER PRIMARY KEY,\n                cpu     REAL,\n                ram     REAL,\n                disk    REAL,\n                temp    REAL\n            )"
+    },
+    {
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "default": null,
+          "name": "sample_ts",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "default": null,
+          "name": "cpu",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 3,
+          "default": null,
+          "name": "ram",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 4,
+          "default": null,
+          "name": "ram_used",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 5,
+          "default": null,
+          "name": "ram_available",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 6,
+          "default": null,
+          "name": "ram_used_strict",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 7,
+          "default": null,
+          "name": "ram_total",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 8,
+          "default": null,
+          "name": "disk",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 9,
+          "default": null,
+          "name": "disk_used",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 10,
+          "default": null,
+          "name": "disk_total",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 11,
+          "default": null,
+          "name": "temp",
+          "not_null": false,
+          "primary_key": 0,
+          "type": "REAL"
+        },
+        {
+          "cid": 12,
+          "default": null,
+          "name": "hostname",
+          "not_null": true,
+          "primary_key": 0,
+          "type": "TEXT"
+        }
+      ],
+      "indexes": [],
+      "name": "system_stats",
+      "row_count": 1,
+      "row_count_capped": false,
+      "sql": "CREATE TABLE system_stats (\n                id              INTEGER PRIMARY KEY CHECK (id = 1),\n                sample_ts       INTEGER NOT NULL,\n                cpu             REAL NOT NULL,\n                ram             REAL NOT NULL,\n                ram_used        INTEGER NOT NULL,\n                ram_available   INTEGER NOT NULL,\n                ram_used_strict INTEGER NOT NULL,\n                ram_total       INTEGER NOT NULL,\n                disk            REAL NOT NULL,\n                disk_used       INTEGER NOT NULL,\n                disk_total      INTEGER NOT NULL,\n                temp            REAL,\n                hostname        TEXT NOT NULL\n            )"
+    }
+  ],
+  "wal_bytes": 0
+}

@@ -11,6 +11,7 @@ from dashboard.beacon.inventory import InventoryError, classify_schema, collect_
 
 
 FIXTURE_DIR = Path(__file__).parent / 'fixtures' / 'legacy'
+OPERATOR_FIXTURE_DIR = FIXTURE_DIR / 'operator'
 FIXTURES = {
     'initial-2026-04.db': {'services', 'service_checks', 'stats_history'},
     'metadata-events-2026-04.db': {'services', 'service_meta', 'events'},
@@ -113,6 +114,28 @@ class InventoryTests(unittest.TestCase):
             )
         after = source.stat()
         self.assertEqual((before.st_size, before.st_mtime_ns), (after.st_size, after.st_mtime_ns))
+
+    def test_operator_fixture_matches_report_schema_without_operational_records(self):
+        report = json.loads(
+            (OPERATOR_FIXTURE_DIR / 'production.json').read_text(encoding='utf-8')
+        )
+        fixture = OPERATOR_FIXTURE_DIR / 'production.db'
+
+        with sqlite3.connect(fixture) as conn:
+            self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+            for table in report['tables']:
+                quoted_name = '"{}"'.format(table['name'].replace('"', '""'))
+                self.assertEqual(
+                    conn.execute('SELECT COUNT(*) FROM {}'.format(quoted_name)).fetchone()[0],
+                    0,
+                    table['name'],
+                )
+
+        fixture_report = collect_inventory(fixture)
+        self.assertEqual(
+            fixture_report['schema_fingerprint'], report['schema_fingerprint']
+        )
+        self.assertEqual(fixture_report['migration_versions'], [])
 
 
 if __name__ == '__main__':
