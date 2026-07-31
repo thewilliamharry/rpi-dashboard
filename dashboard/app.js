@@ -2,6 +2,7 @@
 
 const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated', 'monitoring_gap']);
 const UI_HEADERS = {'X-Beacon-UI': '1'};
+const WORKER_STALE_COPY = 'Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.';
 let servicesByPort = new Map();
 let editingService = null;
 let modalReturnFocus = null;
@@ -87,6 +88,7 @@ function feedbackRegion() {
 }
 
 function updateWorkerWarning(stale) {
+  $('worker-warning').textContent = WORKER_STALE_COPY;
   $('worker-warning').hidden = !stale;
   workerIsStale = stale;
   if (workerWasStale && !stale) {
@@ -228,6 +230,7 @@ function buildServiceCard(service) {
   if (service.tls_unverified) {
     const tls = Object.assign(document.createElement('span'), {className: 'svc-tls-unverified', textContent: 'TLS unverified'});
     tls.title = 'TLS certificate is not verified for this trusted local service.';
+    tls.setAttribute('aria-label', 'TLS certificate is not verified for this trusted local service.');
     actions.appendChild(tls);
   }
   const edit = Object.assign(document.createElement('button'), {className: 'svc-edit', type: 'button', textContent: 'Edit service'});
