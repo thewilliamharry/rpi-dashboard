@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from .config import load_settings
 from .inventory import InventoryError, classify_schema, collect_inventory
-from .migrations import LOCK_NAME, RECOVERY_MARKER, SUPPORT_FLOOR_PATH
+from .migrations import LOCK_NAME, MIGRATIONS, RECOVERY_MARKER, SUPPORT_FLOOR_PATH
 
 
 BACKUP_PREFIX = 'dashboard-'
@@ -72,6 +72,12 @@ def _is_catalog_name(catalog_id):
     return '-pre-v' in catalog_id and catalog_id.rsplit('-pre-v', 1)[1][:-3].isdigit()
 
 
+def _catalog_target_version(catalog_id):
+    if not _is_catalog_name(catalog_id):
+        raise RecoveryError('backup is not available')
+    return int(catalog_id.rsplit('-pre-v', 1)[1][:-3])
+
+
 def _regular_catalog_path(backup_dir, catalog_id):
     if not _is_catalog_name(catalog_id):
         raise RecoveryError('backup is not available')
@@ -95,16 +101,38 @@ def _regular_catalog_path(backup_dir, catalog_id):
     return candidate
 
 
-def _validate_supported_database(path):
+def _validated_migration_transition(conn, catalog_id):
+    """Accept only a known pre-version state written by the migration catalog."""
+    target_version = _catalog_target_version(catalog_id)
+    if target_version not in {migration.version for migration in MIGRATIONS}:
+        return False
+    table_names = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if target_version == 1:
+        return 'schema_migrations' not in table_names
+    if 'schema_migrations' not in table_names:
+        return False
+    versions = [
+        row[0] for row in conn.execute('SELECT version FROM schema_migrations ORDER BY version')
+    ]
+    return versions == list(range(1, target_version))
+
+
+def _validate_supported_database(path, catalog_id=None):
     try:
         with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as conn:
             integrity = conn.execute('PRAGMA integrity_check').fetchone()
             if not integrity or integrity[0] != 'ok':
                 raise RecoveryError('backup is not available')
+            catalog_transition = (
+                _validated_migration_transition(conn, catalog_id)
+                if catalog_id is not None else False
+            )
         fingerprint = classify_schema(collect_inventory(path))
     except (InventoryError, OSError, sqlite3.Error, ValueError) as exc:
         raise RecoveryError('backup is not available') from exc
-    if fingerprint not in _support_fingerprints():
+    if fingerprint not in _support_fingerprints() and not catalog_transition:
         raise RecoveryError('backup is not available')
     return fingerprint
 
@@ -114,7 +142,7 @@ def _record_for_catalog_id(backup_dir, catalog_id):
     return BackupRecord(
         catalog_id=catalog_id,
         backup_timestamp=_backup_timestamp(catalog_id),
-        schema_fingerprint=_validate_supported_database(path),
+        schema_fingerprint=_validate_supported_database(path, catalog_id),
     ), path
 
 
@@ -230,7 +258,7 @@ def restore_backup(
             raise RecoveryError('stop Beacon services before running recovery')
         _copy_and_fsync(source, staging)
         _fsync_directory(root)
-        if _validate_supported_database(staging) != record.schema_fingerprint:
+        if _validate_supported_database(staging, record.catalog_id) != record.schema_fingerprint:
             raise RecoveryError('restore did not complete')
         try:
             os.replace(staging, database)
@@ -238,7 +266,7 @@ def restore_backup(
         except OSError as exc:
             raise RecoveryError('restore did not complete') from exc
         try:
-            if _validate_supported_database(database) != record.schema_fingerprint:
+            if _validate_supported_database(database, record.catalog_id) != record.schema_fingerprint:
                 raise RecoveryError('restore did not complete')
         except RecoveryError:
             raise
