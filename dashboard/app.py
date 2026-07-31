@@ -128,186 +128,34 @@ def _table_columns(conn, table_name):
 
 
 def init_db():
+    """Compatibility entry point for the single migration preparation boundary."""
+    try:
+        from .beacon.db import prepare_database
+    except ImportError:  # ``python app.py`` from the dashboard directory.
+        from beacon.db import prepare_database
+
     with _db_lock:
+        result = prepare_database(DB_PATH)
+        # Preserve the established compatibility repair for records written by
+        # older web processes.  Schema/data upgrades themselves remain owned by
+        # the versioned migration runner above.
         conn = get_db()
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version     INTEGER PRIMARY KEY,
-                applied_ts  INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS stats_history (
-                ts      INTEGER PRIMARY KEY,
-                cpu     REAL,
-                ram     REAL,
-                disk    REAL,
-                temp    REAL
-            );
-
-            CREATE TABLE IF NOT EXISTS system_stats (
-                id              INTEGER PRIMARY KEY CHECK (id = 1),
-                sample_ts       INTEGER NOT NULL,
-                cpu             REAL NOT NULL,
-                ram             REAL NOT NULL,
-                ram_used        INTEGER NOT NULL,
-                ram_available   INTEGER NOT NULL,
-                ram_used_strict INTEGER NOT NULL,
-                ram_total       INTEGER NOT NULL,
-                disk            REAL NOT NULL,
-                disk_used       INTEGER NOT NULL,
-                disk_total      INTEGER NOT NULL,
-                temp            REAL,
-                hostname        TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS services (
-                port             INTEGER PRIMARY KEY,
-                title            TEXT,
-                first_seen       INTEGER NOT NULL,
-                last_seen        INTEGER NOT NULL,
-                is_online        INTEGER DEFAULT 1,
-                thumb_data       BLOB,
-                thumb_mime       TEXT DEFAULT 'image/jpeg',
-                thumb_ts         INTEGER,
-                thumb_source     TEXT,
-                thumb_attempt_ts INTEGER,
-                thumb_error      TEXT,
-                last_latency_ms  REAL,
-                last_error       TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS service_meta (
-                port          INTEGER PRIMARY KEY,
-                display_name  TEXT,
-                url           TEXT,
-                critical      INTEGER DEFAULT 0,
-                pinned_order  INTEGER DEFAULT 0,
-                tags          TEXT DEFAULT ''
-            );
-
-            CREATE TABLE IF NOT EXISTS service_checks (
-                ts          INTEGER,
-                port        INTEGER,
-                online      INTEGER,
-                latency_ms  REAL,
-                error_class TEXT,
-                PRIMARY KEY (ts, port)
-            );
-
-            CREATE TABLE IF NOT EXISTS events (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts             INTEGER NOT NULL,
-                port           INTEGER,
-                event_type     TEXT NOT NULL,
-                online         INTEGER,
-                previous_online INTEGER,
-                latency_ms     REAL,
-                error_class    TEXT,
-                alert_status   TEXT,
-                details        TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS runtime_state (
-                key         TEXT PRIMARY KEY,
-                value       TEXT NOT NULL,
-                updated_ts  INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS scan_requests (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                requested_ts  INTEGER NOT NULL,
-                requested_by  TEXT,
-                status        TEXT NOT NULL DEFAULT 'queued',
-                started_ts    INTEGER,
-                completed_ts  INTEGER,
-                error         TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS scan_rate_hits (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                client_key  TEXT NOT NULL,
-                ts          INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS preview_requests (
-                port          INTEGER PRIMARY KEY,
-                requested_ts  INTEGER NOT NULL,
-                status        TEXT NOT NULL DEFAULT 'queued',
-                error         TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_stats_ts        ON stats_history(ts);
-            CREATE INDEX IF NOT EXISTS idx_checks_ts       ON service_checks(ts);
-            CREATE INDEX IF NOT EXISTS idx_checks_port     ON service_checks(port);
-            CREATE INDEX IF NOT EXISTS idx_events_ts       ON events(ts);
-            CREATE INDEX IF NOT EXISTS idx_events_port_ts  ON events(port, ts);
-            CREATE INDEX IF NOT EXISTS idx_scan_requests_status ON scan_requests(status, requested_ts);
-            CREATE INDEX IF NOT EXISTS idx_scan_rate_hits_client_ts ON scan_rate_hits(client_key, ts);
-        """)
-
-        # Migration for older services table
-        svc_cols = _table_columns(conn, "services")
-        if 'thumb_data' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN thumb_data BLOB")
-        if 'thumb_mime' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN thumb_mime TEXT DEFAULT 'image/jpeg'")
-        if 'thumb_ts' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN thumb_ts INTEGER")
-        if 'thumb_source' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN thumb_source TEXT")
-        if 'thumb_attempt_ts' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN thumb_attempt_ts INTEGER")
-        if 'thumb_error' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN thumb_error TEXT")
-        if 'last_latency_ms' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN last_latency_ms REAL")
-        if 'last_error' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN last_error TEXT")
-        if 'state_since' not in svc_cols:
-            conn.execute("ALTER TABLE services ADD COLUMN state_since INTEGER")
-
-        meta_cols = _table_columns(conn, "service_meta")
-        if 'healthy_statuses' not in meta_cols:
-            conn.execute("ALTER TABLE service_meta ADD COLUMN healthy_statuses TEXT DEFAULT '200-399'")
-
-        conn.execute(
-            "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL "
-            "WHERE thumb_source='fallback'"
-        )
-
-        checks_cols = _table_columns(conn, "service_checks")
-        if 'latency_ms' not in checks_cols:
-            conn.execute("ALTER TABLE service_checks ADD COLUMN latency_ms REAL")
-        if 'error_class' not in checks_cols:
-            conn.execute("ALTER TABLE service_checks ADD COLUMN error_class TEXT")
-
-        # Ensure metadata exists for previously discovered services
-        conn.execute(
-            "INSERT OR IGNORE INTO service_meta (port, url, critical, pinned_order, tags, healthy_statuses) "
-            "SELECT port, 'http://127.0.0.1:' || port, 0, port, '', '200-399' FROM services"
-        )
-
-        # Initialize state_since once from the latest matching transition. Older
-        # binaries simply ignore this additive column.
-        conn.execute("""
-            UPDATE services
-               SET state_since = COALESCE(
-                   (SELECT MAX(e.ts) FROM events e
-                     WHERE e.port = services.port
-                       AND e.event_type = 'state_change'
-                       AND e.online = services.is_online),
-                   CASE WHEN services.is_online = 1 THEN services.first_seen ELSE services.last_seen END
-               )
-             WHERE state_since IS NULL
-        """)
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_ts) VALUES(1, ?)",
-            (int(time.time()),),
-        )
-
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("""
+                UPDATE services
+                   SET state_since = COALESCE(
+                       (SELECT MAX(e.ts) FROM events e
+                         WHERE e.port = services.port
+                           AND e.event_type = 'state_change'
+                           AND e.online = services.is_online),
+                       CASE WHEN services.is_online = 1 THEN services.first_seen ELSE services.last_seen END
+                   )
+                 WHERE state_since IS NULL
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        return result
 
 
 def _set_runtime_state(key, value, *, conn=None, now=None):

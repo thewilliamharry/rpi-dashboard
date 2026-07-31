@@ -225,7 +225,9 @@ def _is_empty_database(database):
 
 def run_migrations(settings, *, clock=time.time, lock_timeout_seconds=30):
     """Upgrade a supported database while holding the process-wide upgrade lock."""
-    database, _, lock_path, marker_path = _storage_paths(settings.db_path)
+    database, _, lock_path, marker_path = _storage_paths(
+        getattr(settings, 'db_path', settings)
+    )
     database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path.touch(mode=0o600, exist_ok=True)
     deadline = time.monotonic() + lock_timeout_seconds

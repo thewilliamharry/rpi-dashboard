@@ -123,6 +123,20 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaises(UnsupportedSchemaError):
                 prepare_database(Settings(db_path=str(target)))
 
+    def test_compatibility_initializer_uses_the_migration_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'unknown.db'
+            with sqlite3.connect(target) as conn:
+                conn.execute('CREATE TABLE unknown_shape (id INTEGER PRIMARY KEY)')
+            from dashboard import app as compatibility_app
+            original_path = compatibility_app.DB_PATH
+            try:
+                compatibility_app.DB_PATH = str(target)
+                with self.assertRaises(UnsupportedSchemaError):
+                    compatibility_app.init_db()
+            finally:
+                compatibility_app.DB_PATH = original_path
+
     def test_failed_migration_rolls_back_and_keeps_redacted_recovery_marker(self):
         with tempfile.TemporaryDirectory() as directory:
             target = self._copied_fixture(directory, 'initial-2026-04.db')
