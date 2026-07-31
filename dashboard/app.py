@@ -8,6 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from collections import defaultdict
+from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import psutil
@@ -22,6 +23,7 @@ try:
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
     from .beacon import queues as beacon_queues
+    from .beacon.migrations import RECOVERY_MARKER
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon.config import load_settings
@@ -30,6 +32,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
     from beacon import queues as beacon_queues
+    from beacon.migrations import RECOVERY_MARKER
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 
 logging.basicConfig(
@@ -2009,7 +2012,7 @@ def api_scan_status():
     state['worker_heartbeat_ts'] = heartbeat_ts
     state['worker_heartbeat_age_seconds'] = heartbeat_age_seconds
     state['worker_lease_until'] = owner.get('lease_until') if isinstance(owner, dict) else None
-    state['recovery_required'] = worker_stale
+    state['recovery_required'] = worker_stale or (Path(DB_PATH).parent / RECOVERY_MARKER).is_file()
     state['queued_requests'] = int(queued)
     if latest_request:
         state['latest_request_id'] = int(latest_request['id'])

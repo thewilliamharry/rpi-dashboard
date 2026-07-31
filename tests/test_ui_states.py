@@ -33,6 +33,8 @@ class UiStateTests(unittest.TestCase):
             self.html.index('id="recovery-warning"'),
         )
         self.assertIn('Monitoring resumed. The outage was recorded in Events.', self.js)
+        app = (ROOT / 'dashboard/app.py').read_text(encoding='utf-8')
+        self.assertIn("(Path(DB_PATH).parent / RECOVERY_MARKER).is_file()", app)
 
     def test_scan_and_preview_queue_copy_is_truthful_and_nonblocking(self):
         for copy in [
