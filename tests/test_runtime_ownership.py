@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from dashboard.beacon import worker_main
+from dashboard.beacon import queues
 from tests.helpers import cleanup_db, load_app
 
 
@@ -137,6 +138,38 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertIn('Monitoring resumed. The outage was recorded in Events.', script)
         self.assertIn("'monitoring_gap'", script)
         self.assertIn('.worker-warning', styles)
+
+    def test_worker_lease_is_atomic_and_stale_owners_cannot_renew(self):
+        """A persisted owner lease, rather than a process lock, owns scheduling."""
+        now = 10_000
+        first = queues.acquire_worker_lease(self.db_path, 'worker-a', now=now, lease_seconds=30)
+        self.assertEqual(first.worker_id, 'worker-a')
+
+        with self.assertRaises(queues.LeaseHeld):
+            queues.acquire_worker_lease(self.db_path, 'worker-b', now=now + 1, lease_seconds=30)
+
+        successor = queues.acquire_worker_lease(self.db_path, 'worker-b', now=now + 31, lease_seconds=30)
+        self.assertEqual(successor.worker_id, 'worker-b')
+        with self.assertRaises(queues.LeaseLost):
+            queues.renew_worker_lease(self.db_path, 'worker-a', now=now + 32, lease_seconds=30)
+
+    def test_lease_takeover_records_one_monitoring_gap(self):
+        started = 1_000
+        recovered = started + self.appmod.WORKER_READY_SECONDS + 9
+        queues.acquire_worker_lease(self.db_path, 'worker-a', now=started, lease_seconds=10)
+        queues.renew_worker_lease(self.db_path, 'worker-a', now=started, lease_seconds=10)
+
+        queues.acquire_worker_lease(self.db_path, 'worker-b', now=recovered, lease_seconds=10)
+        queues.acquire_worker_lease(self.db_path, 'worker-c', now=recovered + 11, lease_seconds=10)
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = conn.execute(
+                "SELECT details FROM events WHERE event_type='monitoring_gap'"
+            ).fetchall()
+            conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(json.loads(rows[0]['details']), {'start_ts': started, 'end_ts': recovered})
 
 
 if __name__ == '__main__':
