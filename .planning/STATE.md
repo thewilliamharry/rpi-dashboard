@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-07-PLAN.md
-last_updated: "2026-07-31T20:51:51.111Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-07-31T21:01:33.775Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 8
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-07-25 — Phase 01 execution started
 
-Progress: [██████░░░░] 63%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [██████░░░░] 63%
 | Phase 01 P03 | 20min | 2 tasks | 8 files |
 | Phase 01 P04 | 6min | 3 tasks | 10 files |
 | Phase 01 P07 | 16min | 3 tasks | 8 files |
+| Phase 01 P05 | 6min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Use verified SQLite online backups with Linux flock serialization and a redacted filesystem recovery marker; no browser restore action.
 - [Phase ?]: Outbound service targets use dedicated host/network allowlists, not inbound Host/Origin trust lists.
 - [Phase ?]: Trusted-LAN TLS is an immutable service-only posture; webhooks remain verified and redirect-free.
+- [Phase ?]: Recovery accepts opaque automatic-backup catalog IDs only; it never accepts a filesystem path.
+- [Phase ?]: Web waits only for data ownership initialization so compatible read surfaces remain available while worker recovery is paused.
 
 ### Pending Todos
 
@@ -103,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-31T20:51:51.104Z
-Stopped at: Completed 01-07-PLAN.md
+Last session: 2026-07-31T21:01:33.769Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None
