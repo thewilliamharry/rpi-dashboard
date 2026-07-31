@@ -109,7 +109,7 @@ console.log(JSON.stringify({
             'docker compose run --rm --no-deps recovery status',
             'The restore command refuses a fresh worker',
             'never accepts a backup path',
-            'restart worker only after deploying a migration-fixed or prior compatible image',
+            'Restart worker only after deploying a migration-fixed or prior compatible image',
         ]:
             self.assertIn(token, readme)
 

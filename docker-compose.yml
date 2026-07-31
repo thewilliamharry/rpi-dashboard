@@ -63,6 +63,14 @@ services:
       retries: 3
       start_period: 20s
 
+  recovery:
+    <<: *beacon-common
+    command: ["python", "-m", "beacon.recovery"]
+    restart: "no"
+    network_mode: none
+    mem_limit: 256m
+    pids_limit: 64
+
   web:
     <<: *beacon-common
     container_name: beacon-web
@@ -71,8 +79,8 @@ services:
     mem_limit: 256m
     pids_limit: 128
     depends_on:
-      worker:
-        condition: service_healthy
+      data-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200"]
       interval: 10s

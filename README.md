@@ -56,14 +56,33 @@ Service health defaults to HTTP 200–399. The editor accepts exceptional codes/
 
 ## Data and operations
 
-The named volume stores metrics, services, checks, events, runtime state, queued work, rate limits, and screenshots. Back it up before a release:
+The named volume stores metrics, services, checks, events, runtime state, queued work, rate limits, and screenshots. Beacon creates verified automatic pre-migration backups during supported schema upgrades.
 
-```bash
-docker compose stop
-docker run --rm -v rpi-dashboard_dashboard-data:/data -v "$PWD":/backup alpine \
-  tar czf /backup/beacon-data.tgz -C /data .
-docker compose start
-```
+### Failed-upgrade recovery
+
+If an upgrade reports that recovery is required, use this single supported offline procedure. Do not run recovery while web or worker could write `/data/dashboard.db`.
+
+1. Stop the writers:
+
+   ```bash
+   docker compose stop web worker
+   ```
+
+2. Inspect the safe recovery status:
+
+   ```bash
+   docker compose run --rm --no-deps recovery status
+   ```
+
+3. Restore the newest verified automatic backup:
+
+   ```bash
+   docker compose run --rm --no-deps recovery restore --latest
+   ```
+
+4. Confirm the command reports `"completed": true`, then start only the compatible web service to inspect the restored data. Restart worker only after deploying a migration-fixed or prior compatible image.
+
+The restore command refuses a fresh worker and never accepts a backup path. There is no browser restore action, backup deletion command, or migration-retry control.
 
 Record the running image, deploy, then observe two uptime cycles and one discovery. `--force-recreate` reruns the one-shot ownership migration, `--remove-orphans` removes containers from older Compose definitions, and `--wait` avoids smoke requests while Gunicorn is still starting:
 
@@ -79,7 +98,7 @@ docker compose logs -f worker web
 
 `data-init` should show `Exited (0)`, while `worker` and `web` should show `healthy`. If Docker reports that the kernel does not support memory-limit capabilities or that the memory cgroup is not mounted, Beacon can still run but the configured container memory limits are not enforced. Keep the limits in Compose and enable the host memory controller before relying on them as a hard boundary.
 
-For rollback, restore the previous Compose/image definition. Schema changes are additive, so the prior application can keep using the upgraded database. Restore the backup only if validation finds corrupted data.
+For rollback, restore the previous Compose/image definition. Schema changes are additive, so the prior application can keep using the upgraded database.
 
 Thumbnail diagnostics:
 
