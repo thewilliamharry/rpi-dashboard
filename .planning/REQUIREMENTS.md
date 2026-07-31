@@ -11,8 +11,8 @@
 - [x] **FND-02**: Web delivery, configuration, persistence, monitoring, analytics, discovery, previews, and scheduling have explicit module boundaries.
 - [x] **FND-03**: Importing the web application starts no scheduler, browser, probe, or other background work.
 - [x] **FND-04**: The worker is the sole scheduler owner and uses durable persisted coordination for work shared with the web process.
-- [ ] **FND-05**: Database changes use versioned, transactional, idempotent migrations validated against representative existing databases.
-- [ ] **FND-06**: The operator can create and verify a usable backup before a migration and recover existing Beacon data after a failed upgrade.
+- [x] **FND-05**: Database changes use versioned, transactional, idempotent migrations validated against representative existing databases.
+- [x] **FND-06**: The operator can create and verify a usable backup before a migration and recover existing Beacon data after a failed upgrade.
 - [ ] **FND-07**: Probes, HTML fetches, previews, redirects, and webhooks use one tested outbound-target and TLS safety policy.
 
 ### Telemetry and Retention
@@ -105,8 +105,8 @@ Every v1 requirement maps to exactly one roadmap phase.
 | FND-02 | Phase 1 | Complete |
 | FND-03 | Phase 1 | Complete |
 | FND-04 | Phase 1 | Complete |
-| FND-05 | Phase 1 | Pending |
-| FND-06 | Phase 1 | Pending |
+| FND-05 | Phase 1 | Complete |
+| FND-06 | Phase 1 | Complete |
 | FND-07 | Phase 1 | Pending |
 | TEL-01 | Phase 2 | Pending |
 | TEL-02 | Phase 2 | Pending |

@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-07-25T07:43:37.231Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-07-31T20:40:44.828Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 8
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 4 of 8
+Plan: 5 of 8
 Status: Ready to execute
 Last activity: 2026-07-25 — Phase 01 execution started
 
-Progress: [████░░░░░░] 38%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ Progress: [████░░░░░░] 38%
 | Phase 01 P01 | 6min | 2 tasks | 8 files |
 | Phase 01 P02 | 4min | 2 tasks | 8 files |
 | Phase 01 P03 | 20min | 2 tasks | 8 files |
+| Phase 01 P04 | 6min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Metadata and preview queue persistence share one SQLite transaction so valid web edits never depend on worker freshness.
 - [Phase ?]: Kept dashboard.app as the compatibility edge while worker services receive named operation collaborators.
 - [Phase ?]: Gate scheduled work on explicit database preparation before recovery, heartbeat, signals, or scheduler start.
+- [Phase ?]: Freeze migration support at the three history fixtures plus the operator-confirmed production fingerprint.
+- [Phase ?]: Use verified SQLite online backups with Linux flock serialization and a redacted filesystem recovery marker; no browser restore action.
 
 ### Pending Todos
 
@@ -97,6 +100,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-25T07:43:37.223Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-07-31T20:40:44.820Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
