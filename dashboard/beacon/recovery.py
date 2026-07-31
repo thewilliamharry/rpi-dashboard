@@ -256,10 +256,15 @@ def restore_backup(
             worker_ready_seconds=worker_ready_seconds,
         ):
             raise RecoveryError('stop Beacon services before running recovery')
-        _copy_and_fsync(source, staging)
-        _fsync_directory(root)
-        if _validate_supported_database(staging, record.catalog_id) != record.schema_fingerprint:
-            raise RecoveryError('restore did not complete')
+        try:
+            _copy_and_fsync(source, staging)
+            _fsync_directory(root)
+            if _validate_supported_database(staging, record.catalog_id) != record.schema_fingerprint:
+                raise RecoveryError('restore did not complete')
+        except RecoveryError:
+            raise
+        except OSError as exc:
+            raise RecoveryError('restore did not complete') from exc
         try:
             os.replace(staging, database)
             _fsync_directory(root)
