@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.helpers import cleanup_db, load_app
@@ -254,7 +255,17 @@ class ReleaseContractTests(unittest.TestCase):
     def test_alert_webhook_keeps_tls_verification_enabled(self):
         self.appmod.ALERT_WEBHOOK_URL = 'https://alerts.example.test/beacon'
         response = mock.Mock(status_code=204, text='')
-        with mock.patch.object(self.appmod.requests, 'post', return_value=response) as post:
+        strict_plan = SimpleNamespace(
+            url='https://alerts.example.test/beacon',
+            tls=SimpleNamespace(verify_certificate=True),
+            connect_timeout=3.0,
+            read_timeout=4.0,
+            redirect_budget=0,
+        )
+        policy = mock.Mock()
+        policy.plan.return_value = strict_plan
+        with mock.patch.object(self.appmod, '_outbound_policy', return_value=policy), \
+                mock.patch.object(self.appmod.requests, 'post', return_value=response) as post:
             self.appmod._send_transition_alert(
                 now=int(time.time()), port=8100, previous_online=0, online=1,
                 title='BlueMap', display_name='', url='http://127.0.0.1:8100',
@@ -263,6 +274,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs['timeout'], (3.0, 4.0))
         self.assertTrue(post.call_args.kwargs['verify'])
         self.assertFalse(post.call_args.kwargs['allow_redirects'])
+        self.assertEqual(policy.plan.call_args.args[1], self.appmod.OutboundPurpose.WEBHOOK)
 
     def test_metrics_collection_is_not_blocked_by_preview_capture(self):
         entered = threading.Event()

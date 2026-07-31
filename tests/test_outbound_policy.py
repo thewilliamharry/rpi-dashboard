@@ -1,4 +1,5 @@
 import socket
+import threading
 import unittest
 
 from dashboard.beacon.config import load_settings
@@ -129,3 +130,30 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertFalse(route_browser_request(BlockedPolicy(), blocked))
         self.assertTrue(blocked.aborted)
         self.assertFalse(blocked.continued)
+
+    def test_concurrent_service_and_webhook_plans_keep_tls_isolated(self):
+        def resolve(host, port, *_args, **_kwargs):
+            address = '8.8.8.8' if host == 'alerts.example.test' else '127.0.0.1'
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, port))]
+
+        policy = OutboundPolicy(self.settings, resolver=resolve)
+        barrier = threading.Barrier(2)
+        plans = {}
+
+        def create(name, url, purpose):
+            barrier.wait(timeout=1)
+            plans[name] = policy.plan(url, purpose)
+
+        workers = [
+            threading.Thread(target=create, args=('service', 'https://service.local/', OutboundPurpose.SERVICE_PROBE)),
+            threading.Thread(target=create, args=('webhook', 'https://alerts.example.test/beacon', OutboundPurpose.WEBHOOK)),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=1)
+
+        self.assertTrue(plans['service'].tls.tls_unverified)
+        self.assertFalse(plans['service'].tls.verify_certificate)
+        self.assertFalse(plans['webhook'].tls.tls_unverified)
+        self.assertTrue(plans['webhook'].tls.verify_certificate)

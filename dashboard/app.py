@@ -704,7 +704,12 @@ def _legacy_send_transition_alert(*, now, port, previous_online, online, title, 
     }
 
     try:
-        r = requests.post(ALERT_WEBHOOK_URL, json=payload, timeout=4)
+        r, _plan = _outbound_transport().request(
+            ALERT_WEBHOOK_URL,
+            OutboundPurpose.WEBHOOK,
+            method='POST',
+            json=payload,
+        )
         if 200 <= r.status_code < 300:
             _record_event(
                 "alert_sent",
@@ -725,9 +730,9 @@ def _legacy_send_transition_alert(*, now, port, previous_online, online, title, 
                 latency_ms=latency_ms,
                 error_class=error_class,
                 alert_status=f"http_{r.status_code}",
-                details=(r.text or "")[:200],
+                details='webhook delivery rejected',
             )
-    except Exception as exc:
+    except OutboundPolicyError as exc:
         _record_event(
             "alert_failed",
             port=port,
@@ -735,8 +740,19 @@ def _legacy_send_transition_alert(*, now, port, previous_online, online, title, 
             previous_online=previous_online,
             latency_ms=latency_ms,
             error_class=error_class,
-            alert_status="exception",
-            details=str(exc)[:200],
+            alert_status='policy_' + exc.reason,
+            details='webhook policy rejected',
+        )
+    except Exception:
+        _record_event(
+            "alert_failed",
+            port=port,
+            online=online,
+            previous_online=previous_online,
+            latency_ms=latency_ms,
+            error_class=error_class,
+            alert_status="delivery_error",
+            details='webhook delivery failed',
         )
 
 
@@ -1910,6 +1926,10 @@ def api_service_meta(port):
                 next_url = _service_url_with_path(base_url, payload.get('path'), port)
             else:
                 next_url = base_url
+            _outbound_policy().plan(next_url, OutboundPurpose.SERVICE_PROBE)
+        except OutboundPolicyError:
+            conn.close()
+            return jsonify({'error': 'policy_error'}), 400
         except ValueError as exc:
             conn.close()
             return jsonify({"error": str(exc)}), 400

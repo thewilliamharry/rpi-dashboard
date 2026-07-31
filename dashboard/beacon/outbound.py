@@ -79,7 +79,7 @@ class OutboundPolicy:
         if purpose in self.SERVICE_PURPOSES and redirect_count > 5:
             raise OutboundPolicyError('redirect_not_allowed')
 
-        parsed = self._parse(url)
+        parsed = self._parse(url, purpose)
         hostname = parsed.hostname.lower().rstrip('.')
         port = self._port(parsed)
         self._validate_target(parsed, hostname, port, purpose)
@@ -103,7 +103,7 @@ class OutboundPolicy:
         )
 
     @staticmethod
-    def _parse(url):
+    def _parse(url, purpose):
         try:
             parsed = urlparse(str(url).strip())
             # Accessing ``port`` is what makes urllib reject malformed ports.
@@ -116,7 +116,7 @@ class OutboundPolicy:
             raise OutboundPolicyError('target_not_allowed')
         if parsed.username is not None or parsed.password is not None:
             raise OutboundPolicyError('credentials_not_allowed')
-        if parsed.fragment:
+        if parsed.fragment and purpose is OutboundPurpose.WEBHOOK:
             raise OutboundPolicyError('target_not_allowed')
         return parsed
 

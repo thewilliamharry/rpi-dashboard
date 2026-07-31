@@ -1,6 +1,5 @@
 import time
 import unittest
-from types import SimpleNamespace
 
 from tests.helpers import cleanup_db, load_app
 
@@ -73,11 +72,12 @@ class SecurityAndScanningTests(unittest.TestCase):
             conn.close()
 
         calls = []
+        policy_error = self.appmod.OutboundPolicyError
 
         class BlockedPolicy:
             def plan(self, url, purpose, **_kwargs):
                 calls.append((url, purpose))
-                raise self.appmod.OutboundPolicyError('target_not_allowed')
+                raise policy_error('target_not_allowed')
 
         original = self.appmod._outbound_policy
         self.appmod._outbound_policy = lambda: BlockedPolicy()
