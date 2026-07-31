@@ -157,3 +157,20 @@ class BackupRecoveryTests(unittest.TestCase):
             self.assertTrue(json.loads(result.stdout)['completed'])
             with sqlite3.connect(database) as conn:
                 self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
+
+    def test_latest_verified_automatic_migration_backup_is_restoreable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / 'dashboard.db'
+            copy2(FIXTURE, database)
+            run_migrations(Settings(db_path=str(database)))
+            records = list_verified_backups(database.parent)
+            self.assertEqual(len(records), 3)
+            latest = records[-1]
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE services SET title='post-upgrade change'")
+
+            restore_backup(database.parent, latest.catalog_id)
+
+            with sqlite3.connect(database) as conn:
+                self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+                self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
