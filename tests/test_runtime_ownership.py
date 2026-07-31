@@ -171,6 +171,20 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(json.loads(rows[0]['details']), {'start_ts': started, 'end_ts': recovered})
 
+    def test_lease_contender_never_constructs_scheduler(self):
+        services = mock.Mock()
+        services.settings = mock.Mock(db_path=self.db_path)
+        services.acquire_worker_lease.side_effect = queues.LeaseHeld('owned elsewhere')
+        worker_main._worker_started = False
+        worker_main.scheduler = None
+        with (
+            mock.patch.object(worker_main, 'build_worker_services', return_value=services),
+            mock.patch.object(worker_main, 'build_scheduler') as build_scheduler,
+        ):
+            worker_main.main()
+        build_scheduler.assert_not_called()
+        services.shutdown_browser.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

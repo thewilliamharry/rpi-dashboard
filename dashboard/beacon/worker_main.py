@@ -1,17 +1,19 @@
 """Worker-only composition root for Beacon's scheduled operations."""
 
 import atexit
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import signal
 import threading
 import time
+from uuid import uuid4
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from .config import load_settings
 from .db import prepare_database
+from . import queues
 
 try:
     from .. import app as beacon
@@ -31,6 +33,9 @@ process_scan_requests = beacon.process_scan_requests
 process_preview_requests = beacon.process_preview_requests
 cleanup_history = beacon.cleanup_history
 shutdown_browser = beacon.shutdown_browser
+acquire_worker_lease = queues.acquire_worker_lease
+renew_worker_lease = queues.renew_worker_lease
+release_worker_lease = queues.release_worker_lease
 
 
 log = logging.getLogger('beacon.worker')
@@ -54,6 +59,10 @@ class WorkerServices:
     cleanup_history: object
     shutdown_browser: object
     clock: object
+    acquire_worker_lease: object
+    renew_worker_lease: object
+    release_worker_lease: object
+    worker_id: str | None = None
 
 
 def build_worker_services(settings=None):
@@ -73,11 +82,22 @@ def build_worker_services(settings=None):
         cleanup_history=cleanup_history,
         shutdown_browser=shutdown_browser,
         clock=time.time,
+        acquire_worker_lease=acquire_worker_lease,
+        renew_worker_lease=renew_worker_lease,
+        release_worker_lease=release_worker_lease,
     )
 
 
 def heartbeat(services):
+    if services.worker_id:
+        try:
+            services.renew_worker_lease(services.settings.db_path, services.worker_id)
+        except queues.LeaseLost:
+            log.error('Beacon worker lease lost; stopping stale scheduler')
+            stop_worker()
+            return False
     services.update_worker_heartbeat()
+    return True
 
 
 def sample_metrics(services):
@@ -104,11 +124,21 @@ scheduler = None
 _worker_started = False
 _worker_start_lock = threading.Lock()
 _active_services = None
+_active_worker_id = None
 
 
 def stop_worker(*_args):
+    global _active_worker_id
     if _active_services is not None:
         _active_services.shutdown_browser()
+        if _active_worker_id:
+            try:
+                _active_services.release_worker_lease(
+                    _active_services.settings.db_path, _active_worker_id,
+                )
+            except queues.LeaseLost:
+                pass
+            _active_worker_id = None
     if scheduler is not None:
         scheduler.shutdown(wait=False)
 
@@ -165,17 +195,28 @@ def build_scheduler(services):
 
 def main(settings=None):
     """Start worker-owned lifecycle in the required durable-state order."""
-    global scheduler, _worker_started, _active_services
+    global scheduler, _worker_started, _active_services, _active_worker_id
     with _worker_start_lock:
         if _worker_started:
             return
         services = build_worker_services(settings)
         services.prepare_database(services.settings)
+        worker_id = uuid4().hex
+        try:
+            services.acquire_worker_lease(services.settings.db_path, worker_id)
+        except queues.LeaseHeld:
+            log.info('Beacon worker lease is already owned; not starting scheduler')
+            return
+        if isinstance(services, WorkerServices):
+            services = replace(services, worker_id=worker_id)
         services.recover_worker_state()
         heartbeat(services)
+        if not _worker_started and isinstance(services, WorkerServices) and not services.worker_id:
+            return
         sample_metrics(services)
         scheduler = build_scheduler(services)
         _active_services = services
+        _active_worker_id = worker_id
         atexit.register(services.shutdown_browser)
         signal.signal(signal.SIGTERM, stop_worker)
         signal.signal(signal.SIGINT, stop_worker)

@@ -175,7 +175,7 @@ class MigrationTests(unittest.TestCase):
                 runner.join(timeout=10)
                 self.assertEqual(runner.exitcode, 0)
             results = sorted(result_queue.get(timeout=2) for _ in runners)
-            self.assertEqual(results, [(), (1, 2, 3)])
+            self.assertEqual(results, [(), (1, 2, 3, 4)])
             self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 3)
 
 

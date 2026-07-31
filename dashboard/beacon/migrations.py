@@ -142,10 +142,72 @@ def _migration_3_metadata_and_state(conn):
     """)
 
 
+def _migration_4_durable_work_queues(conn):
+    """Add durable lease/deadline state without discarding queued legacy work."""
+    for column in (
+        'deadline_ts INTEGER', 'lease_owner TEXT', 'lease_until INTEGER',
+        'attempt_count INTEGER NOT NULL DEFAULT 0', 'terminal_ts INTEGER',
+        'result TEXT',
+    ):
+        _add_column(conn, 'scan_requests', column)
+    conn.execute(
+        "UPDATE scan_requests SET deadline_ts=requested_ts + 900 WHERE deadline_ts IS NULL"
+    )
+
+    preview_columns = _column_names(conn, 'preview_requests')
+    if 'revision' not in preview_columns:
+        conn.execute('ALTER TABLE preview_requests RENAME TO preview_requests_legacy')
+        conn.execute("""
+            CREATE TABLE preview_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                port INTEGER NOT NULL,
+                requested_ts INTEGER NOT NULL,
+                deadline_ts INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                error TEXT,
+                revision INTEGER NOT NULL,
+                lease_owner TEXT,
+                lease_until INTEGER,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                started_ts INTEGER,
+                completed_ts INTEGER,
+                terminal_ts INTEGER,
+                result TEXT
+            )
+        """)
+        conn.execute("""
+            INSERT INTO preview_requests(
+                port, requested_ts, deadline_ts, status, error, revision
+            )
+            SELECT port, requested_ts, requested_ts + 1800, status, error, 1
+              FROM preview_requests_legacy
+        """)
+        conn.execute('DROP TABLE preview_requests_legacy')
+    else:
+        for column in (
+            'deadline_ts INTEGER', 'lease_owner TEXT', 'lease_until INTEGER',
+            'attempt_count INTEGER NOT NULL DEFAULT 0', 'started_ts INTEGER',
+            'completed_ts INTEGER', 'terminal_ts INTEGER', 'result TEXT',
+        ):
+            _add_column(conn, 'preview_requests', column)
+        conn.execute(
+            "UPDATE preview_requests SET deadline_ts=requested_ts + 1800 WHERE deadline_ts IS NULL"
+        )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_preview_requests_claim '
+        'ON preview_requests(status, deadline_ts, requested_ts)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_preview_requests_port_revision '
+        'ON preview_requests(port, revision DESC)'
+    )
+
+
 MIGRATIONS = (
     Migration(1, 'baseline_schema', True, _migration_1_baseline),
     Migration(2, 'service_diagnostics', True, _migration_2_service_diagnostics),
     Migration(3, 'metadata_and_state', True, _migration_3_metadata_and_state),
+    Migration(4, 'durable_work_queues', True, _migration_4_durable_work_queues),
 )
 
 
