@@ -86,6 +86,33 @@ console.log(JSON.stringify({
         ]:
             self.assertIn(token, compose)
 
+    def test_compose_recovery_is_isolated_and_web_starts_without_worker_health(self):
+        compose = pathlib.Path('docker-compose.yml').read_text(encoding='utf-8')
+        for token in [
+            'recovery:', 'command: ["python", "-m", "beacon.recovery"]',
+            'restart: "no"', 'network_mode: none', 'mem_limit: 256m',
+            'pids_limit: 64', 'user: "10001:10001"', 'read_only: true',
+            'cap_drop: [ALL]', 'no-new-privileges:true', 'dashboard-data:/data',
+        ]:
+            self.assertIn(token, compose)
+        web_block = compose.split('\n  web:\n', 1)[1].split('\nvolumes:', 1)[0]
+        self.assertIn('data-init:', web_block)
+        self.assertIn('condition: service_completed_successfully', web_block)
+        self.assertNotIn('worker:', web_block)
+
+    def test_readme_has_one_offline_recovery_command_and_safe_ordering(self):
+        readme = pathlib.Path('README.md').read_text(encoding='utf-8')
+        restore = 'docker compose run --rm --no-deps recovery restore --latest'
+        self.assertEqual(readme.count(restore), 1)
+        for token in [
+            'docker compose stop web worker',
+            'docker compose run --rm --no-deps recovery status',
+            'The restore command refuses a fresh worker',
+            'never accepts a backup path',
+            'restart worker only after deploying a migration-fixed or prior compatible image',
+        ]:
+            self.assertIn(token, readme)
+
 
 if __name__ == '__main__':
     unittest.main()

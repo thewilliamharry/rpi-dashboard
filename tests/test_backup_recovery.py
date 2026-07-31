@@ -1,6 +1,9 @@
 import json
 import fcntl
 import sqlite3
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,3 +140,20 @@ class BackupRecoveryTests(unittest.TestCase):
                 restore_backup(database.parent, 'dashboard-20260101T000000000000Z-forged-pre-v1.db')
             with self.assertRaises(RecoveryError):
                 restore_backup(database.parent, 'dashboard-20260101T000000000001Z-corrupt-pre-v1.db')
+
+    def test_recovery_cli_restores_latest_catalog_without_a_path_argument(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, _ = self._backup_from_fixture(directory)
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE services SET title='changed after backup'")
+            result = subprocess.run(
+                [sys.executable, '-m', 'beacon.recovery', 'restore', '--latest'],
+                env={**os.environ, 'PYTHONPATH': 'dashboard', 'DB_PATH': str(database)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(json.loads(result.stdout)['completed'])
+            with sqlite3.connect(database) as conn:
+                self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
