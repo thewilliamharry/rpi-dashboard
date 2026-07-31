@@ -218,8 +218,7 @@ def main(settings=None):
         if isinstance(services, WorkerServices):
             services = replace(services, worker_id=worker_id)
         services.recover_worker_state()
-        heartbeat(services)
-        if not _worker_started and isinstance(services, WorkerServices) and not services.worker_id:
+        if not heartbeat(services):
             return
         sample_metrics(services)
         scheduler = build_scheduler(services)
