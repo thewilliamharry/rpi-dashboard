@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 import ipaddress
 import socket
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 
 class OutboundPurpose(str, Enum):
@@ -230,3 +230,45 @@ class OutboundPolicy:
         host = f'[{hostname}]' if ':' in hostname else hostname
         netloc = host if port == default_port else f'{host}:{port}'
         return urlunparse((scheme, netloc, parsed.path or '/', '', parsed.query, ''))
+
+
+class OutboundTransport:
+    """Small redirect-owning transport which only sends pre-built plans.
+
+    ``requester`` receives ``(method, url, **kwargs)`` and is intentionally
+    injectable.  The production adapter supplies requests while tests can prove
+    a rejected target reaches no network callback.
+    """
+
+    def __init__(self, policy, *, requester):
+        self.policy = policy
+        self._requester = requester
+
+    def request(self, url, purpose, *, method='GET', **kwargs):
+        redirect_count = 0
+        candidate = url
+        while True:
+            try:
+                plan = self.policy.plan(candidate, purpose, redirect_count=redirect_count)
+            except OutboundPolicyError as exc:
+                if redirect_count:
+                    redirect_error = OutboundPolicyError('redirect_not_allowed')
+                    redirect_error.response = previous_response
+                    raise redirect_error from exc
+                raise
+            response = self._requester(
+                method,
+                plan.url,
+                timeout=(plan.connect_timeout, plan.read_timeout),
+                verify=plan.tls.verify_certificate,
+                allow_redirects=False,
+                **kwargs,
+            )
+            location = getattr(response, 'headers', {}).get('Location')
+            if not (300 <= response.status_code < 400 and location):
+                return response, plan
+            if plan.redirect_budget <= 0:
+                raise OutboundPolicyError('redirect_not_allowed')
+            redirect_count += 1
+            candidate = urljoin(plan.url, location)
+            previous_response = response

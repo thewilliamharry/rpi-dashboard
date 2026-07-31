@@ -72,6 +72,19 @@ def set_runtime_state(conn, key, value, updated_ts):
     )
 
 
+def set_service_tls_posture(conn, port, tls_unverified, updated_ts):
+    """Persist trust posture separately from service reachability fields."""
+    current = get_runtime_state(conn, 'service_tls_posture', {})
+    current = current if isinstance(current, dict) else {}
+    current[str(int(port))] = bool(tls_unverified)
+    set_runtime_state(conn, 'service_tls_posture', current, updated_ts)
+
+
+def get_service_tls_posture(conn, port):
+    current = get_runtime_state(conn, 'service_tls_posture', {})
+    return bool(current.get(str(int(port)), False)) if isinstance(current, dict) else False
+
+
 def get_events(conn, limit, since_ts=None):
     query = (
         "SELECT e.id, e.ts, e.port, e.event_type, e.online, e.previous_online, "

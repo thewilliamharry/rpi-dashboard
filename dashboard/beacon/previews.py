@@ -8,6 +8,8 @@ preview owner and persistence collaborators when a preview job actually runs.
 from dataclasses import dataclass
 from typing import Callable
 
+from .outbound import OutboundPolicyError, OutboundPurpose
+
 
 @dataclass(frozen=True)
 class PreviewOperations:
@@ -55,3 +57,14 @@ def store_thumbnail_result(operations, conn, port, thumb_data, thumb_mime, thumb
 
 def refresh_service_preview(operations, port, service_url):
     return operations.refresh_service_preview(port, service_url)
+
+
+def route_browser_request(policy, route):
+    """Gate every Chromium resource before its network continuation."""
+    try:
+        policy.plan(route.request.url, OutboundPurpose.BROWSER_PREVIEW)
+    except OutboundPolicyError:
+        route.abort('blockedbyclient')
+        return False
+    route.continue_()
+    return True

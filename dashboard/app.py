@@ -6,12 +6,12 @@ import socket
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from collections import defaultdict
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import psutil
 import requests
-import urllib3
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, make_response, request, send_file
 
@@ -21,14 +21,14 @@ try:
     from .beacon import web as beacon_web
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
+    from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon.config import load_settings
     from beacon import repositories as beacon_repositories
     from beacon import web as beacon_web
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 
 logging.basicConfig(
     level=logging.INFO,
@@ -456,36 +456,49 @@ def _status_is_healthy(status, healthy_statuses='200-399'):
     return any(start <= int(status) <= end for start, end in ranges)
 
 
-def _legacy_probe_http(url, timeout=2.5, allow_remote=False, healthy_statuses='200-399'):
-    try:
-        parsed = urlparse(url)
-        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-        url = _normalize_service_url(url, port)
-        _parse_healthy_statuses(healthy_statuses)
+def _outbound_policy():
+    """Build a fresh immutable policy so tests and config reloads never share TLS state."""
+    return OutboundPolicy(replace(load_settings(), alert_webhook_url=ALERT_WEBHOOK_URL))
 
+
+def _requests_request(method, url, **kwargs):
+    request_fn = getattr(requests, method.lower())
+    return request_fn(url, **kwargs)
+
+
+def _outbound_transport():
+    return OutboundTransport(_outbound_policy(), requester=_requests_request)
+
+
+def _safe_policy_error(error, *, redirect=False):
+    if redirect or error.reason == 'redirect_not_allowed':
+        return 'redirect_offhost'
+    return {
+        'scheme_not_allowed': 'invalid_target',
+        'credentials_not_allowed': 'invalid_target',
+        'port_not_allowed': 'invalid_target',
+        'target_not_allowed': 'invalid_target',
+        'resolved_address_not_allowed': 'invalid_target',
+        'resolution_failed': 'invalid_target',
+        'tls_required': 'invalid_target',
+    }.get(error.reason, 'policy_error')
+
+
+def _legacy_probe_http(url, timeout=2.5, allow_remote=False, healthy_statuses='200-399'):
+    start = None
+    try:
+        _parse_healthy_statuses(healthy_statuses)
         start = time.monotonic()
-        resp = requests.get(
-            url,
-            timeout=timeout,
-            verify=False,
-            allow_redirects=False,
+        resp, plan = _outbound_transport().request(
+            url, OutboundPurpose.SERVICE_PROBE,
         )
         latency_ms = round((time.monotonic() - start) * 1000, 1)
-
-        # Redirects are not followed; enforce loopback target when probing loopback.
-        if 300 <= resp.status_code < 400:
-            location = resp.headers.get('Location')
-            if location:
-                redirect_url = urljoin(url, location)
-                redirect_parsed = urlparse(redirect_url)
-                if redirect_parsed.username is not None or redirect_parsed.password is not None:
-                    return False, latency_ms, "redirect_userinfo", resp
-                if not _is_local_service_host(redirect_parsed.hostname):
-                    return False, latency_ms, "redirect_offhost", resp
-
         if not _status_is_healthy(resp.status_code, healthy_statuses):
             return False, latency_ms, f"http_{resp.status_code}", resp
         return True, latency_ms, None, resp
+    except OutboundPolicyError as exc:
+        latency_ms = round((time.monotonic() - start) * 1000, 1) if start is not None else None
+        return False, latency_ms, _safe_policy_error(exc), getattr(exc, 'response', None)
     except ValueError:
         return False, None, "invalid_target", None
     except requests.exceptions.Timeout:
@@ -505,30 +518,15 @@ def _is_html_content_type(content_type):
 
 def _legacy_fetch_html_response(url, timeout=3, allow_remote=False):
     try:
-        parsed = urlparse(url)
-        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-        url = _normalize_service_url(url, port)
-        final_url = url
-        resp = None
-        for _ in range(6):
-            current = urlparse(final_url)
-            current_port = current.port or (443 if current.scheme == 'https' else 80)
-            final_url = _normalize_service_url(final_url, current_port)
-            resp = requests.get(final_url, timeout=timeout, verify=False, allow_redirects=False)
-            if not (300 <= resp.status_code < 400) or not resp.headers.get('Location'):
-                break
-            candidate = urljoin(final_url, resp.headers['Location'])
-            candidate_parsed = urlparse(candidate)
-            if candidate_parsed.username is not None or candidate_parsed.password is not None:
-                return False, "redirect_userinfo", None, candidate
-            if not _is_local_service_host(candidate_parsed.hostname):
-                return False, "redirect_offhost", None, candidate
-            final_url = candidate
-        else:
-            return False, 'too_many_redirects', None, final_url
+        resp, plan = _outbound_transport().request(
+            url, OutboundPurpose.HTML_PREVIEW,
+        )
+        final_url = plan.url
         if not _is_html_content_type(resp.headers.get('Content-Type', '')):
             return False, "non_html", resp, final_url
         return True, None, resp, final_url
+    except OutboundPolicyError as exc:
+        return False, _safe_policy_error(exc), None, None
     except ValueError:
         return False, "invalid_target", None, url
     except requests.exceptions.Timeout:
@@ -779,6 +777,10 @@ def _legacy_screenshot_service(port, target_url=None):
     _screenshot_sem.acquire()
     try:
         navigate_url = _normalize_service_url(target_url, port) if target_url else _default_service_url(port)
+        initial_plan = _outbound_policy().plan(navigate_url, OutboundPurpose.BROWSER_PREVIEW)
+        navigate_url = initial_plan.url
+    except OutboundPolicyError:
+        return None, None, 'policy_error'
     except ValueError:
         navigate_url = _default_service_url(port)
     context = None
@@ -789,7 +791,11 @@ def _legacy_screenshot_service(port, target_url=None):
     try:
         browser = _get_browser()
         context_started = time.monotonic()
-        context = browser.new_context(viewport={'width': 1280, 'height': 800})
+        context = browser.new_context(
+            viewport={'width': 1280, 'height': 800},
+            ignore_https_errors=not initial_plan.tls.verify_certificate,
+        )
+        context.route('**/*', lambda route: beacon_previews.route_browser_request(_outbound_policy(), route))
         page = context.new_page()
         _preview_context.timings['context_ms'] = round((time.monotonic() - context_started) * 1000, 1)
         remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
@@ -1279,11 +1285,13 @@ def _legacy_do_uptime_check(only_down=False):
             previous_online = int(row['is_online'] or 0)
             try:
                 service_url = _normalize_service_url(row['url'], port)
+                service_plan = _outbound_policy().plan(service_url, OutboundPurpose.SERVICE_PROBE)
                 online, latency_ms, error_class, resp = _probe_http(
                     service_url, timeout=2.0, healthy_statuses=row['healthy_statuses'],
                 )
             except ValueError:
                 service_url = _default_service_url(port)
+                service_plan = None
                 online = False
                 latency_ms = None
                 error_class = 'invalid_url'
@@ -1314,6 +1322,9 @@ def _legacy_do_uptime_check(only_down=False):
                 conn.execute(
                     "INSERT OR REPLACE INTO service_checks (ts, port, online, latency_ms, error_class) VALUES (?,?,?,?,?)",
                     (now, port, online_int, latency_ms, error_class),
+                )
+                beacon_repositories.set_service_tls_posture(
+                    conn, port, bool(service_plan and service_plan.tls.tls_unverified), now,
                 )
                 if online and not row['has_thumb']:
                     conn.execute(
@@ -1759,6 +1770,8 @@ def api_services():
             ).fetchall()
             for row in all_checks:
                 checks_by_port[row['port']].append((row['ts'], row['online']))
+        tls_posture = beacon_repositories.get_runtime_state(conn, 'service_tls_posture', {})
+        tls_posture = tls_posture if isinstance(tls_posture, dict) else {}
 
         result = []
         for svc in services:
@@ -1782,6 +1795,7 @@ def api_services():
                 "tags": _parse_tags(svc['tags']),
                 "pinned_order": svc['pinned_order'],
                 "healthy_statuses": svc['healthy_statuses'],
+                "tls_unverified": bool(tls_posture.get(str(svc['port']), False)),
                 "uptime_pct": uptime_pct,
                 "uptime_buckets": uptime_buckets,
             })

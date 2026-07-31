@@ -8,6 +8,7 @@ from dashboard.beacon.outbound import (
     OutboundPolicyError,
     OutboundPurpose,
 )
+from dashboard.beacon.previews import route_browser_request
 
 
 def _resolver(*addresses):
@@ -99,3 +100,32 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertEqual([call[1] for call in calls], ['http://service.local/', 'http://service.local/next'])
         self.assertTrue(all(call[2]['allow_redirects'] is False for call in calls))
         self.assertTrue(all(call[2]['verify'] is False for call in calls))
+
+    def test_browser_route_validates_before_continue(self):
+        class Request:
+            url = 'http://service.local/app.js'
+
+        class Route:
+            request = Request()
+            continued = False
+            aborted = False
+
+            def continue_(self):
+                self.continued = True
+
+            def abort(self, _reason):
+                self.aborted = True
+
+        allowed = Route()
+        policy = OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1'))
+        self.assertTrue(route_browser_request(policy, allowed))
+        self.assertTrue(allowed.continued)
+
+        class BlockedPolicy:
+            def plan(self, *_args, **_kwargs):
+                raise OutboundPolicyError('target_not_allowed')
+
+        blocked = Route()
+        self.assertFalse(route_browser_request(BlockedPolicy(), blocked))
+        self.assertTrue(blocked.aborted)
+        self.assertFalse(blocked.continued)
