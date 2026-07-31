@@ -45,10 +45,10 @@ class UiStateTests(unittest.TestCase):
         ]:
             self.assertIn(copy, self.js)
         self.assertIn("data.stage === 'running'", self.js)
-        self.assertIn("data.latest_request_status === 'expired'", self.js)
+        self.assertIn("requestStatus === 'expired'", self.js)
 
     def test_metadata_outage_flow_preserves_focus_and_uses_safe_copy(self):
-        self.assertIn('Monitoring is paused. Your service details will be saved now; preview refresh will run after recovery.', self.js)
+        self.assertIn('Monitoring is paused. Your service details will be saved now; preview refresh will run after recovery.', self.html)
         self.assertIn('Service details saved. Preview refresh queued.', self.js)
         self.assertIn('Beacon could not use that destination. Review the service details and try again.', self.js)
         self.assertIn("$('meta-error').focus()", self.js)

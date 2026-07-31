@@ -1750,12 +1750,18 @@ def api_services():
                 checks_by_port[row['port']].append((row['ts'], row['online']))
         tls_posture = beacon_repositories.get_runtime_state(conn, 'service_tls_posture', {})
         tls_posture = tls_posture if isinstance(tls_posture, dict) else {}
+        preview_rows = conn.execute(
+            "SELECT port, status, deadline_ts, revision FROM preview_requests "
+            "WHERE id IN (SELECT MAX(id) FROM preview_requests GROUP BY port)"
+        ).fetchall()
+        previews_by_port = {row['port']: row for row in preview_rows}
 
         result = []
         for svc in services:
             checks = checks_by_port.get(svc['port'], [])
             uptime_pct, uptime_buckets = _uptime_summary(checks, now)
             effective_url = _safe_service_url(svc['url'], svc['port'])
+            preview = previews_by_port.get(svc['port'])
             result.append({
                 "port": svc['port'],
                 "title": svc['title'],
@@ -1774,6 +1780,9 @@ def api_services():
                 "pinned_order": svc['pinned_order'],
                 "healthy_statuses": svc['healthy_statuses'],
                 "tls_unverified": bool(tls_posture.get(str(svc['port']), False)),
+                "preview_status": preview['status'] if preview else None,
+                "preview_revision": preview['revision'] if preview else None,
+                "preview_deadline_ts": preview['deadline_ts'] if preview else None,
                 "uptime_pct": uptime_pct,
                 "uptime_buckets": uptime_buckets,
             })

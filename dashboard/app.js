@@ -1,6 +1,6 @@
 'use strict';
 
-const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated']);
+const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated', 'monitoring_gap']);
 const UI_HEADERS = {'X-Beacon-UI': '1'};
 let servicesByPort = new Map();
 let editingService = null;
@@ -8,6 +8,8 @@ let modalReturnFocus = null;
 let lastStatsSample = null;
 let pollFailures = 0;
 let workerWasStale = false;
+let workerIsStale = false;
+let scanSubmitting = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -85,18 +87,8 @@ function feedbackRegion() {
 }
 
 function updateWorkerWarning(stale) {
-  let warning = $('worker-warning');
-  if (!warning) {
-    warning = Object.assign(document.createElement('div'), {
-      id: 'worker-warning',
-      className: 'worker-warning',
-      textContent: 'Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.',
-    });
-    warning.setAttribute('role', 'status');
-    warning.setAttribute('aria-live', 'polite');
-    $('connection-banner').insertAdjacentElement('afterend', warning);
-  }
-  warning.hidden = !stale;
+  $('worker-warning').hidden = !stale;
+  workerIsStale = stale;
   if (workerWasStale && !stale) {
     feedbackRegion().textContent = 'Monitoring resumed. The outage was recorded in Events.';
   }
@@ -143,18 +135,25 @@ function updateScanStatus(data) {
   const workerReady = Boolean(data.worker_ready);
   setConnectionState(false);
   updateWorkerWarning(Boolean(data.worker_stale));
-  if (data.scanning || data.stage === 'queued') {
+  $('recovery-warning').hidden = !Boolean(data.recovery_required && !data.worker_stale);
+  const requestStatus = data.latest_request_status;
+  if (requestStatus === 'expired') {
+    $('scan-label').textContent = 'Scan request expired — it was not run. Scan again.';
+  } else if (data.stage === 'queued' || requestStatus === 'queued') {
+    pip.classList.add('scanning');
+    $('scan-label').textContent = 'Scan queued — runs when monitoring resumes';
+  } else if (data.scanning || data.stage === 'running') {
     pip.classList.add('scanning');
     const pct = Math.round(Number(data.progress || 0) * 100);
     const found = Number(data.current_found || 0);
-    $('scan-label').textContent = data.stage === 'queued' ? 'scan queued' : `${data.stage} ${pct}% · ${found} found`;
+    $('scan-label').textContent = `${data.stage} ${pct}% · ${found} found`;
   } else if (workerReady) {
     pip.classList.add('ready');
     $('scan-label').textContent = `${Number(data.last_completed_found || 0)} found · ${data.last_discovery ? fmtAgo(data.last_discovery) : 'pending scan'}`;
   } else {
     $('scan-label').textContent = 'worker unavailable';
   }
-  document.querySelector('.btn-scan').disabled = Boolean(data.scanning);
+  document.querySelector('.btn-scan').disabled = scanSubmitting || data.stage === 'running' || Boolean(data.scanning && data.stage !== 'queued');
 }
 
 function serviceHref(service) {
@@ -226,7 +225,12 @@ function buildServiceCard(service) {
   actions.className = 'svc-title-right';
   if (service.critical) actions.appendChild(Object.assign(document.createElement('span'), {className: 'svc-critical', textContent: 'critical'}));
   actions.appendChild(Object.assign(document.createElement('span'), {className: 'svc-port-badge', textContent: `:${service.port}`}));
-  const edit = Object.assign(document.createElement('button'), {className: 'svc-edit', type: 'button', textContent: 'edit'});
+  if (service.tls_unverified) {
+    const tls = Object.assign(document.createElement('span'), {className: 'svc-tls-unverified', textContent: 'TLS unverified'});
+    tls.title = 'TLS certificate is not verified for this trusted local service.';
+    actions.appendChild(tls);
+  }
+  const edit = Object.assign(document.createElement('button'), {className: 'svc-edit', type: 'button', textContent: 'Edit service'});
   edit.dataset.port = String(service.port);
   edit.addEventListener('click', () => openMetaEditor(service, edit));
   actions.appendChild(edit);
@@ -250,6 +254,13 @@ function buildServiceCard(service) {
   detail.append(detailLeft, uptime);
   meta.append(titleRow, statusRow, detail);
   if (service.tags?.length) meta.appendChild(Object.assign(document.createElement('div'), {className: 'svc-tags', textContent: service.tags.join(' · ')}));
+  const previewCopy = {
+    queued: 'Preview refresh queued',
+    running: 'Refreshing preview',
+    failed: 'Preview refresh failed — saved settings are unaffected',
+    expired: 'Preview refresh expired — save service details to request a new preview.',
+  }[service.preview_status];
+  if (previewCopy) meta.appendChild(Object.assign(document.createElement('div'), {className: 'svc-preview-status', textContent: previewCopy}));
   meta.appendChild(uptimeStrip(service.uptime_buckets));
   card.append(link, meta);
   return card;
@@ -259,7 +270,14 @@ function updateServices(services) {
   servicesByPort = new Map(services.map((service) => [Number(service.port), service]));
   const grid = $('services-grid');
   grid.replaceChildren();
-  if (!services.length) grid.appendChild(Object.assign(document.createElement('div'), {className: 'svc-empty', textContent: 'no HTTP services discovered'}));
+  if (!services.length) {
+    const empty = Object.assign(document.createElement('div'), {className: 'svc-empty'});
+    empty.append(
+      Object.assign(document.createElement('strong'), {textContent: 'No HTTP services discovered'}),
+      Object.assign(document.createElement('span'), {textContent: 'Run a scan to look for configured services.'}),
+    );
+    grid.appendChild(empty);
+  }
   else services.forEach((service) => grid.appendChild(buildServiceCard(service)));
   const online = services.filter((service) => service.is_online).length;
   $('svc-count-label').textContent = `${online}/${services.length} online`;
@@ -307,6 +325,7 @@ function openMetaEditor(service, returnFocus) {
   $('meta-url').value = service.url || '';
   $('meta-healthy-statuses').value = service.healthy_statuses || '200-399';
   $('meta-error').hidden = true;
+  $('meta-stale-warning').hidden = !workerIsStale;
   $('meta-modal').hidden = false;
   document.body.classList.add('modal-open');
   $('meta-display-name').focus();
@@ -340,12 +359,18 @@ async function submitMetaEditor(event) {
     const updated = await apiFetch(`/api/service-meta/${editingService.port}`, {
       method: 'PUT', headers: {...UI_HEADERS, 'Content-Type': 'application/json'}, body: JSON.stringify(payload),
     });
+    const merged = {...editingService, ...updated};
+    servicesByPort.set(Number(merged.port), merged);
+    updateServices([...servicesByPort.values()]);
+    const previewQueued = updated.preview_queued || Boolean(updated.refresh_warning);
+    feedbackRegion().textContent = previewQueued
+      ? 'Service details saved. Preview refresh queued.'
+      : 'Service details saved.';
     closeMetaEditor();
-    await loadServices();
-    if (updated.refresh_warning) console.warn(updated.refresh_warning);
   } catch (error) {
-    $('meta-error').textContent = error.message;
+    $('meta-error').textContent = 'Beacon could not use that destination. Review the service details and try again.';
     $('meta-error').hidden = false;
+    $('meta-error').focus();
   } finally {
     save.disabled = false;
   }
@@ -369,14 +394,16 @@ async function loadEvents() { try { renderEvents(await apiFetch('/api/events?lim
 
 async function triggerScan() {
   const button = document.querySelector('.btn-scan');
+  scanSubmitting = true;
   button.disabled = true;
   try {
     await apiFetch('/api/trigger-scan', {method: 'POST', headers: UI_HEADERS});
     await loadScan();
   } catch (error) {
-    $('scan-label').textContent = error.message;
+    $('scan-label').textContent = 'Scan request could not be queued. Try again.';
   } finally {
-    setTimeout(() => { button.disabled = false; }, 1500);
+    scanSubmitting = false;
+    await loadScan();
   }
 }
 

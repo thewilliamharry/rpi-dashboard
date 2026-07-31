@@ -26,7 +26,11 @@
     </div>
   </header>
 
-  <div class="connection-banner" id="connection-banner" role="alert" hidden>Beacon is disconnected. Displayed data may be stale.</div>
+  <div id="safety-warning-cluster" class="safety-warning-cluster" aria-label="Monitoring status">
+    <div class="connection-banner safety-warning" id="connection-banner" role="alert" hidden>Beacon is disconnected. Displayed data may be stale.</div>
+    <div class="worker-warning safety-warning" id="worker-warning" role="status" aria-live="polite" hidden>Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.</div>
+    <div class="recovery-warning safety-warning" id="recovery-warning" role="alert" hidden>Upgrade recovery is required. Monitoring is paused. Follow the documented recovery command before restarting Beacon.</div>
+  </div>
 
   <main class="page">
     <section aria-labelledby="system-heading">
@@ -71,7 +75,8 @@
           <label class="meta-field"><span class="meta-label">Base URL</span><input type="text" id="meta-url" placeholder="http://raspi.local:8100" autocomplete="off"><span class="meta-help">Must target this Pi or an approved alias.</span></label>
           <label class="meta-field"><span class="meta-label">Healthy HTTP statuses</span><input type="text" id="meta-healthy-statuses" placeholder="200-399" autocomplete="off"><span class="meta-help">Comma-separated codes or ranges.</span></label>
         </details>
-        <div class="meta-error" id="meta-error" hidden></div>
+        <div class="meta-stale-warning meta-error meta-warning" id="meta-stale-warning" hidden>Monitoring is paused. Your service details will be saved now; preview refresh will run after recovery.</div>
+        <div class="meta-error" id="meta-error" role="alert" tabindex="-1" hidden></div>
         <div class="meta-actions"><button type="button" class="meta-btn meta-btn-ghost" id="meta-cancel">Cancel</button><button type="submit" class="meta-btn meta-btn-primary" id="meta-save">Save</button></div>
       </form>
     </div>
