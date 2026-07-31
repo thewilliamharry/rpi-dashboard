@@ -5,22 +5,10 @@ import sqlite3
 
 
 def prepare_database(settings):
-    """Run the existing schema initializer only at an explicit worker boundary.
+    """Prepare persisted state before the worker starts any durable operation."""
+    from .migrations import run_migrations
 
-    The compatibility application remains the temporary home of the version-one
-    schema definition.  Importing it is side-effect free; initialization is not.
-    """
-    try:
-        from .. import app as compatibility_app
-    except ImportError:  # ``python worker.py`` from the dashboard directory.
-        import app as compatibility_app
-
-    original_path = compatibility_app.DB_PATH
-    try:
-        compatibility_app.DB_PATH = _db_path(settings)
-        compatibility_app.init_db()
-    finally:
-        compatibility_app.DB_PATH = original_path
+    return run_migrations(settings)
 
 
 def _db_path(settings_or_path):

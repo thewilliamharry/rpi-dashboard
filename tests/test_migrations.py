@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import sqlite3
 import subprocess
@@ -10,6 +11,7 @@ from unittest import mock
 from pathlib import Path
 
 from dashboard.beacon.config import Settings
+from dashboard.beacon.db import prepare_database
 from dashboard.beacon.inventory import InventoryError, classify_schema, collect_inventory
 from dashboard.beacon.migrations import (
     MIGRATIONS,
@@ -37,6 +39,12 @@ EXPECTED_FINGERPRINTS = {
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
     'runtime-queues-2026-07.db': '791e5c1d380fb38b62e8c284349affb248acfaf5dbbd0e93a07b929b2ef59c91',
 }
+
+
+def _run_migration_process(db_path, start_event, result_queue):
+    """Run in a separate process so flock exercises the production lock boundary."""
+    start_event.wait(timeout=5)
+    result_queue.put(run_migrations(Settings(db_path=db_path)).applied_versions)
 
 
 class MigrationTests(unittest.TestCase):
@@ -107,6 +115,14 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), before)
             self.assertFalse((target.parent / 'backups').exists())
 
+    def test_prepare_database_propagates_migration_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'unknown.db'
+            with sqlite3.connect(target) as conn:
+                conn.execute('CREATE TABLE unknown_shape (id INTEGER PRIMARY KEY)')
+            with self.assertRaises(UnsupportedSchemaError):
+                prepare_database(Settings(db_path=str(target)))
+
     def test_failed_migration_rolls_back_and_keeps_redacted_recovery_marker(self):
         with tempfile.TemporaryDirectory() as directory:
             target = self._copied_fixture(directory, 'initial-2026-04.db')
@@ -127,6 +143,26 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(marker['reason_class'], 'RuntimeError')
             self.assertNotIn('sensitive implementation detail', json.dumps(marker))
             self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
+
+    def test_concurrent_contender_observes_current_state_without_duplicate_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            context = multiprocessing.get_context('spawn')
+            start_event = context.Event()
+            result_queue = context.Queue()
+            runners = [
+                context.Process(target=_run_migration_process, args=(str(target), start_event, result_queue))
+                for _ in range(2)
+            ]
+            for runner in runners:
+                runner.start()
+            start_event.set()
+            for runner in runners:
+                runner.join(timeout=10)
+                self.assertEqual(runner.exitcode, 0)
+            results = sorted(result_queue.get(timeout=2) for _ in runners)
+            self.assertEqual(results, [(), (1, 2, 3)])
+            self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 3)
 
 
 class InventoryTests(unittest.TestCase):

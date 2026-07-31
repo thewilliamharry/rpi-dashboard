@@ -1,0 +1,33 @@
+{
+  "format": "beacon-migration-support-floor/v1",
+  "supported_schemas": [
+    {
+      "fingerprint": "4330feaa6a22043681d7d55fec900b3279fec9302f68e41417df29653c7cf906",
+      "fixture": "initial-2026-04.db",
+      "source": "repository history c2e0e80",
+      "minimum_schema_version": 0,
+      "target_version": 3
+    },
+    {
+      "fingerprint": "8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef",
+      "fixture": "metadata-events-2026-04.db",
+      "source": "repository history 5b3d420",
+      "minimum_schema_version": 0,
+      "target_version": 3
+    },
+    {
+      "fingerprint": "791e5c1d380fb38b62e8c284349affb248acfaf5dbbd0e93a07b929b2ef59c91",
+      "fixture": "runtime-queues-2026-07.db",
+      "source": "repository history 51a4393",
+      "minimum_schema_version": 1,
+      "target_version": 3
+    },
+    {
+      "fingerprint": "6a7215ed74800ba1d4894563334304415c780135d295ced269c561c84b8b0c81",
+      "fixture": "operator/production.db",
+      "source": "operator-confirmed production.json",
+      "minimum_schema_version": 1,
+      "target_version": 3
+    }
+  ]
+}
