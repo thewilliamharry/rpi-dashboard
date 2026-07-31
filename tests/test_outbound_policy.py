@@ -3,6 +3,7 @@ import unittest
 
 from dashboard.beacon.config import load_settings
 from dashboard.beacon.outbound import (
+    OutboundTransport,
     OutboundPolicy,
     OutboundPolicyError,
     OutboundPurpose,
@@ -76,3 +77,25 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, 'target_not_allowed')
         self.assertNotIn('secret.example.test', str(raised.exception))
 
+    def test_transport_disables_redirects_and_replans_every_hop(self):
+        calls = []
+
+        class Response:
+            def __init__(self, status_code, location=None):
+                self.status_code = status_code
+                self.headers = {'Location': location} if location else {}
+
+        def request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return Response(302, 'http://service.local/next') if len(calls) == 1 else Response(200)
+
+        transport = OutboundTransport(
+            OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+            requester=request,
+        )
+        response, plan = transport.request('http://service.local/', OutboundPurpose.SERVICE_PROBE)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plan.url, 'http://service.local/next')
+        self.assertEqual([call[1] for call in calls], ['http://service.local/', 'http://service.local/next'])
+        self.assertTrue(all(call[2]['allow_redirects'] is False for call in calls))
+        self.assertTrue(all(call[2]['verify'] is False for call in calls))
