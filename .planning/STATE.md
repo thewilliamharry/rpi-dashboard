@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-07-31T21:15:57.062Z"
+stopped_at: Completed 01-08-PLAN.md
+last_updated: "2026-07-31T21:30:53.014Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 8
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 7 of 8
+Plan: 8 of 8
 Status: Ready to execute
 Last activity: 2026-07-25 — Phase 01 execution started
 
-Progress: [█████████░] 88%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -65,6 +65,7 @@ Progress: [█████████░] 88%
 | Phase 01 P07 | 16min | 3 tasks | 8 files |
 | Phase 01 P05 | 6min | 2 tasks | 5 files |
 | Phase 01 P06 | 31min | 3 tasks | 9 files |
+| Phase 01-behavioral-safety-runtime-ownership P08 | 14min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Web waits only for data ownership initialization so compatible read surfaces remain available while worker recovery is paused.
 - [Phase ?]: SQLite runtime state is the authoritative worker-owner lease; process-local locks do not establish ownership.
 - [Phase ?]: Metadata persistence and latest preview enqueue share one transaction, and preview completion must match both its lease and current revision.
+- [Phase ?]: Safety warnings use one static cluster in connection, worker, recovery order.
+- [Phase ?]: TLS posture remains separate from availability and uptime in every service card.
 
 ### Pending Todos
 
@@ -109,6 +112,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-31T21:15:57.055Z
-Stopped at: Completed 01-06-PLAN.md
+Last session: 2026-07-31T21:30:53.008Z
+Stopped at: Completed 01-08-PLAN.md
 Resume file: None
