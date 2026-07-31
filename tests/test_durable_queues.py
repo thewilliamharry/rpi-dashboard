@@ -52,6 +52,49 @@ class DurableQueueTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ('expired', 1_901))
 
+    def test_metadata_save_enqueues_latest_preview_without_a_worker(self):
+        now = 1_000
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port, title, first_seen, last_seen, is_online) VALUES(?,?,?,?,?)",
+                (8080, 'Demo', now, now, 1),
+            )
+            conn.commit()
+            conn.close()
+
+        response = self.appmod.app.test_client().put(
+            '/api/service-meta/8080',
+            json={'display_name': 'Saved during outage', 'url': 'http://127.0.0.1:8080'},
+            headers={'X-Beacon-UI': '1'},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['preview_queued'])
+        self.assertEqual(payload['preview_revision'], 1)
+        self.assertIn('preview_deadline_ts', payload)
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                'SELECT status, revision, deadline_ts - requested_ts FROM preview_requests WHERE port=8080'
+            ).fetchone()
+        self.assertEqual(row, ('queued', 1, 1_800))
+
+    def test_newer_preview_supersedes_older_work_and_blocks_stale_finish(self):
+        first = queues.enqueue_preview(self.db_path, 8080, now=1_000)
+        claimed = queues.claim_preview(self.db_path, 'worker-a', now=1_001, lease_seconds=30)
+        second = queues.enqueue_preview(self.db_path, 8080, now=1_002)
+
+        self.assertEqual(second.revision, first.revision + 1)
+        with self.assertRaises(queues.LeaseLost):
+            queues.finish_preview(
+                self.db_path, claimed.request_id, 'worker-a', revision=claimed.revision,
+                now=1_003,
+            )
+
+        latest = queues.claim_preview(self.db_path, 'worker-b', now=1_003, lease_seconds=30)
+        self.assertEqual(latest.revision, second.revision)
+
 
 if __name__ == '__main__':
     unittest.main()
