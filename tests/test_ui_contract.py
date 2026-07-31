@@ -33,6 +33,16 @@ class UiContractTests(unittest.TestCase):
         for token in ['.events-panel', '.evt-row', '.svc-critical', '.svc-edit', '.svc-detail-row', '.meta-modal-window', '.meta-modal-backdrop[hidden]', '.meta-btn-primary', '.meta-error.meta-warning']:
             self.assertIn(token, css)
 
+    def test_phase_one_tls_and_safe_error_contracts_are_accessible(self):
+        js = pathlib.Path('dashboard/app.js').read_text(encoding='utf-8')
+        css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
+        self.assertIn("tls.setAttribute('aria-label', 'TLS certificate is not verified for this trusted local service.')", js)
+        self.assertIn("textContent: 'Edit service'", js)
+        self.assertIn("Beacon could not use that destination. Review the service details and try again.", js)
+        self.assertIn("$('meta-error').focus()", js)
+        self.assertIn('.svc-tls-unverified', css)
+        self.assertIn('.meta-btn { width: 100%; min-height: 44px;', css)
+
     def test_dark_mode_sparklines_have_visible_lines_and_fills(self):
         css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
         js = pathlib.Path('dashboard/app.js').read_text(encoding='utf-8')
