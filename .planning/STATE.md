@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-07-31T20:40:44.828Z"
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-07-31T20:51:51.111Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 8
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 5 of 8
 Status: Ready to execute
 Last activity: 2026-07-25 — Phase 01 execution started
 
-Progress: [█████░░░░░] 50%
+Progress: [██████░░░░] 63%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [█████░░░░░] 50%
 | Phase 01 P02 | 4min | 2 tasks | 8 files |
 | Phase 01 P03 | 20min | 2 tasks | 8 files |
 | Phase 01 P04 | 6min | 3 tasks | 10 files |
+| Phase 01 P07 | 16min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Gate scheduled work on explicit database preparation before recovery, heartbeat, signals, or scheduler start.
 - [Phase ?]: Freeze migration support at the three history fixtures plus the operator-confirmed production fingerprint.
 - [Phase ?]: Use verified SQLite online backups with Linux flock serialization and a redacted filesystem recovery marker; no browser restore action.
+- [Phase ?]: Outbound service targets use dedicated host/network allowlists, not inbound Host/Origin trust lists.
+- [Phase ?]: Trusted-LAN TLS is an immutable service-only posture; webhooks remain verified and redirect-free.
 
 ### Pending Todos
 
@@ -100,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-31T20:40:44.820Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-07-31T20:51:51.104Z
+Stopped at: Completed 01-07-PLAN.md
 Resume file: None
