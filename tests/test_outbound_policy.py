@@ -5,6 +5,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from playwright.sync_api import sync_playwright
+
 from dashboard.beacon.config import load_settings
 from dashboard.beacon.outbound import (
     OutboundTransport,
@@ -31,10 +33,16 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         if self.path == '/redirect':
             self.send_response(302)
             self.send_header('Location', '/final')
+            body = b''
+        elif self.path == '/page':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            body = b'<html><script src="/subresource.js"></script></html>'
         else:
             self.send_response(200)
+            body = b'ok'
         self.end_headers()
-        self.wfile.write(b'ok')
+        self.wfile.write(body)
 
     def log_message(self, *_args):
         return
@@ -306,6 +314,24 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertIn(b'200', response)
         self.assertEqual(origin.records[0]['host'], f'service.local:{origin.port}')
         self.assertEqual(proxy.active_relays, 0)
+
+    def test_chromium_main_frame_and_subresource_use_loopback_policy_proxy(self):
+        with _LocalOrigin() as origin, sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                with browser_proxy_context(
+                        browser,
+                        OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+                ) as context:
+                    page = context.new_page()
+                    page.goto(f'http://service.local:{origin.port}/page', wait_until='networkidle')
+            finally:
+                browser.close()
+
+        self.assertEqual(
+            [entry['path'] for entry in origin.records], ['/page', '/subresource.js'],
+        )
+        self.assertTrue(all(entry['host'] == f'service.local:{origin.port}' for entry in origin.records))
 
     def test_connect_tunnel_uses_pinned_address_and_preserves_browser_sni(self):
         with _LocalOrigin(tls=True) as origin, PolicyProxy(
