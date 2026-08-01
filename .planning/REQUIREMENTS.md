@@ -7,7 +7,7 @@
 
 ### Foundation Integrity
 
-- [ ] **FND-01**: Existing dashboard, service-management, discovery, preview, uptime, and event behavior is protected by compatibility tests before restructuring.
+- [x] **FND-01**: Existing dashboard, service-management, discovery, preview, uptime, and event behavior is protected by compatibility tests before restructuring.
 - [x] **FND-02**: Web delivery, configuration, persistence, monitoring, analytics, discovery, previews, and scheduling have explicit module boundaries.
 - [ ] **FND-03**: Importing the web application starts no scheduler, browser, probe, or other background work.
 - [x] **FND-04**: The worker is the sole scheduler owner and uses durable persisted coordination for work shared with the web process.
