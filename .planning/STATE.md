@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 01
-current_phase_name: behavioral-safety-runtime-ownership
-status: executing
-stopped_at: Completed 01-17-PLAN.md
-last_updated: "2026-08-01T09:10:39.203Z"
+current_phase_name: Behavioral Safety & Runtime Ownership
+status: needs_review
+stopped_at: Phase 1 re-verification found 2 blocking gaps (17/20)
+last_updated: "2026-08-01T09:24:10Z"
 last_activity: 2026-08-01
-last_activity_desc: Phase 01 execution started
+last_activity_desc: Phase 01 Wave 12 closed its planned gaps; re-verification found 2 new blocking gaps.
 progress:
-  total_phases: 1
-  completed_phases: 1
+  total_phases: 6
+  completed_phases: 0
   total_plans: 17
   completed_plans: 17
 ---
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-24)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 01 — behavioral-safety-runtime-ownership
+**Current focus:** Phase 01 — Behavioral Safety & Runtime Ownership
 
 ## Current Position
 
-Phase: 01 (behavioral-safety-runtime-ownership) — EXECUTING
-Plan: 4 of 17
-Status: Ready to execute
-Last activity: 2026-08-01 — Phase 01 execution started
+Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
+Plan: 17 of 17 executed
+Status: Needs review — 2 blocking safety gaps remain
+Last activity: 2026-08-01 — Wave 12 closed its planned gaps; re-verification found 2 new blocking gaps.
 
 Progress: [██████████] 100%
 
@@ -142,6 +142,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T09:10:39.196Z
-Stopped at: Completed 01-17-PLAN.md
-Resume file: None
+Last session: 2026-08-01T09:24:10Z
+Stopped at: Phase 1 re-verification found 2 blocking gaps (17/20)
+Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-VERIFICATION.md
