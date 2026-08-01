@@ -5,8 +5,30 @@ not own Flask request state, network clients, browsers, or connection lifetime.
 """
 
 import json
+import time
 
 from .queues import enqueue_preview_in_transaction
+
+
+class ThumbnailRepository:
+    """Own thumbnail result persistence while callers retain transaction scope."""
+
+    def store_thumbnail_result(
+        self, conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None,
+    ):
+        timestamp = int(time.time()) if ts is None else int(ts)
+        if thumb_data and thumb_source == 'screenshot':
+            conn.execute(
+                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=?, "
+                "thumb_attempt_ts=?, thumb_error=NULL WHERE port=?",
+                (thumb_data, thumb_mime, timestamp, thumb_source, timestamp, port),
+            )
+            return
+        conn.execute(
+            "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL, "
+            "thumb_attempt_ts=?, thumb_error=? WHERE port=?",
+            (timestamp, (thumb_error or 'screenshot failed')[:240], port),
+        )
 
 
 def get_service_metadata(conn, port):

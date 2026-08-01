@@ -7,9 +7,17 @@ preview owner and persistence collaborators when a preview job actually runs.
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 from .outbound import OutboundPolicyError, OutboundPurpose, PolicyProxy
+
+
+class ThumbnailResultRepository(Protocol):
+    """Named persistence boundary for preview completion results."""
+
+    def store_thumbnail_result(
+        self, conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -22,7 +30,7 @@ class PreviewOperations:
     shutdown_browser: Callable
     screenshot_service: Callable
     fetch_thumbnail: Callable
-    store_thumbnail_result: Callable
+    thumbnail_repository: ThumbnailResultRepository
     refresh_service_preview: Callable
 
 
@@ -51,7 +59,7 @@ def fetch_thumbnail(operations, port, service_url=None):
 
 
 def store_thumbnail_result(operations, conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None):
-    return operations.store_thumbnail_result(
+    return operations.thumbnail_repository.store_thumbnail_result(
         conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts,
     )
 

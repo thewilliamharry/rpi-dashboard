@@ -876,22 +876,6 @@ def _legacy_fetch_thumbnail(port, service_url=None):
     return None, None, None, screenshot_error or "screenshot failed"
 
 
-def _legacy_store_thumbnail_result(conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None):
-    ts = ts or int(time.time())
-    if thumb_data and thumb_source == 'screenshot':
-        conn.execute(
-            "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=?, "
-            "thumb_attempt_ts=?, thumb_error=NULL WHERE port=?",
-            (thumb_data, thumb_mime, ts, thumb_source, ts, port),
-        )
-    else:
-        conn.execute(
-            "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL, "
-            "thumb_attempt_ts=?, thumb_error=? WHERE port=?",
-            (ts, (thumb_error or 'screenshot failed')[:240], port),
-        )
-
-
 def _legacy_refresh_service_preview(port, service_url):
     warnings = []
     next_title = None
@@ -1396,7 +1380,7 @@ def _preview_operations():
         shutdown_browser=_legacy_shutdown_browser,
         screenshot_service=_legacy_screenshot_service,
         fetch_thumbnail=_legacy_fetch_thumbnail,
-        store_thumbnail_result=_legacy_store_thumbnail_result,
+        thumbnail_repository=beacon_repositories.ThumbnailRepository(),
         refresh_service_preview=_legacy_refresh_service_preview,
     )
 
