@@ -1,207 +1,202 @@
 ---
 phase: 01-behavioral-safety-runtime-ownership
-verified: 2026-07-31T21:42:08Z
+verified: 2026-08-01T07:27:40Z
 status: gaps_found
-score: 31/45 must-haves verified
-behavior_unverified: 9
+score: 17/20 must-haves verified
+behavior_unverified: 1
 overrides_applied: 0
+re_verification:
+  previous_status: gaps_found
+  previous_score: 31/45
+  gaps_closed:
+    - "FND-02 dependency direction and explicit preview repository ownership"
+    - "FND-04 scan lease renewal, claim-time recovery, deadline expiry, and fencing"
+    - "FND-06 WAL/SHM cleanup and all-writer maintenance exclusion"
+    - "FND-07 and OPS-05 selected-address enforcement for HTTP and Chromium"
+    - "Scalar JSON metadata rejection and malformed-integer Settings fallback"
+    - "Eight browser/UI behavior items previously present but unexercised"
+  gaps_remaining:
+    - "Recovery accepts a healthy database and can roll it back without a pre-existing recovery-required condition."
+    - "The preview proxy forwards unsafe HTTP methods from untrusted preview content to policy-allowed services."
+  regressions: []
 gaps:
-  - truth: "FND-02 edge resolution: web delivery, validated configuration, SQLite connections/transactions, and query ownership have explicit dependency direction with no import from beacon domain modules back into dashboard.app."
+  - truth: "Operator can recover Beacon data after a migration failure without the recovery command silently replacing a healthy current database."
     status: failed
-    reason: "The worker composition module imports the legacy dashboard.app module directly, and the preview module has no repository persistence wiring despite the declared key link."
-    artifacts:
-      - path: "dashboard/beacon/worker_main.py"
-        issue: "Lines 18-21 import dashboard.app/app; this is a beacon-domain-to-legacy-app dependency."
-      - path: "dashboard/beacon/previews.py"
-        issue: "No repositories import or persistence call exists, so the declared preview-to-repositories link is absent."
-    missing:
-      - "Inject monitoring/preview compatibility operations from the composition root without importing dashboard.app from beacon modules."
-      - "Wire preview persistence through an explicit repository dependency or revise the architecture with an accepted override."
-  - truth: "FND-06 idempotency resolution: restoring the same verified backup twice while services are stopped leaves the same readable schema/data and no partial target."
-    status: failed
-    reason: "restore_backup replaces dashboard.db only and treats a stale worker heartbeat as proof that writers are stopped. It neither handles dashboard.db-wal/dashboard.db-shm nor excludes the still-live web writer, so a reported restore can replay or lose concurrent writes."
+    reason: "restore_backup() selects any verified catalog record and replaces dashboard.db without requiring or validating recovery-required.json."
     artifacts:
       - path: "dashboard/beacon/recovery.py"
-        issue: "Lines 253-269 check only worker staleness and have no web-writer lease, WAL/SHM quiesce/removal, or post-replace sidecar handling."
+        issue: "restore_backup() at lines 266-328 writes a marker only after it has selected the backup; it never reads a pre-existing marker as authorization."
+      - path: "dashboard/beacon/recovery.py"
+        issue: "CLI restore --latest/--id at lines 342-367 reaches restore_backup() even when status reports recovery_required=false."
     missing:
-      - "Quiesce/checkpoint or safely remove the exact WAL/SHM sidecars under the upgrade lock, fsync durability boundaries, and regression-test a live WAL sidecar."
-      - "Prove all web and worker database writers are stopped or hold a shared maintenance lease before restore; add a concurrent web-metadata-write regression test."
-  - truth: "FND-04 durable coordination: valid manual discovery reaches a terminal queue result within its bounded request lifetime."
+      - "Require and validate the existing recovery marker before restore, binding its catalog ID to the requested restore (or make --latest use only that ID)."
+      - "Add a regression proving a healthy database is byte-for-byte unchanged and restore is refused when no recovery marker exists."
+  - truth: "Fetched Chromium previews are retrieval-only and cannot mutate an allowed service while enforcing the outbound policy."
     status: failed
-    reason: "A scan is claimed with the queue default 30-second lease, but discovery is configured for up to 180 seconds and process_scan_requests never calls renew_scan_lease. finish_scan then rejects the stale claim and leaves the row running until restart recovery."
-    artifacts:
-      - path: "dashboard/app.py"
-        issue: "Lines 1511-1535 run discovery and finish/fail the request without renewing its lease."
-      - path: "dashboard/beacon/queues.py"
-        issue: "claim_scan/finish_scan require an unexpired 30-second lease."
-    missing:
-      - "Renew the scan lease throughout discovery or align the lease with the full bounded operation and recover expired running rows promptly."
-      - "Add an integration test for discovery lasting longer than 30 seconds that reaches a terminal queue state."
-  - truth: "FND-07 edge resolution: service probes, HTML/title fetches, Chromium main/subresource requests, every redirect hop, and webhooks obtain a purpose-specific request plan from one outbound policy before network access."
-    status: failed
-    reason: "Plans validate DNS answers but the requests transport reconnects using plan.url's hostname and Chromium is allowed through route.continue_(). Neither connection is pinned to or checked against plan.resolved_addresses."
+    reason: "The loopback policy proxy forwards browser-supplied HTTP methods and bodies unchanged; a preview page can submit POST/PUT/PATCH/DELETE to any policy-approved origin."
     artifacts:
       - path: "dashboard/beacon/outbound.py"
-        issue: "Lines 259-266 pass hostname URL to requester and never consume resolved_addresses for connection binding."
+        issue: "_PolicyProxyHandler.handle() at lines 282-299 uses the supplied method in the forwarded request line and has no safe-method allowlist."
       - path: "dashboard/beacon/previews.py"
-        issue: "Lines 62-70 validate then call route.continue_(), letting Chromium perform an unverified later lookup."
+        issue: "route_browser_request() at lines 71-79 validates only URL policy and continues every browser request method."
     missing:
-      - "Use a transport/resolver hook that binds each socket to a currently validated address while preserving Host/SNI, and replace/mediate Chromium continuation accordingly."
-      - "Add rebinding tests that return an allowed policy lookup and a disallowed transport lookup."
-  - truth: "D-11 / OPS-05: every redirect candidate and every current A/AAAA result are revalidated before the next connection, including rebinding-style result changes."
-    status: failed
-    reason: "Replanning redirect URLs is present, but it validates only a pre-connection resolver result. The actual transport/browser resolver can return a different address after validation."
-    artifacts:
-      - path: "tests/test_outbound_policy.py"
-        issue: "Tests assert immutable plans and redirect replanning, but have no post-plan rebinding/socket-address test."
-    missing:
-      - "Prove per-connection selected-address enforcement for requests and Chromium in an automated rebinding regression test."
+      - "Allow only GET and HEAD for browser-preview traffic at both the route and plain-HTTP proxy boundary; reject other methods before opening an origin socket."
+      - "Add a real-browser/proxy regression proving a preview form or fetch POST to another allowed service never reaches that service."
 behavior_unverified_items:
-  - truth: "D-13: stale-worker warning leaves links, metadata editing, scans, previews, and theme controls usable."
-    test: "Make /api/scan-status report worker_stale=true and operate each listed control."
-    expected: "The warning is shown but every control remains usable; browser/API disconnect styling is not shown."
-    why_human: "The browser test exercises cards and theme controls, not this stale-worker transition with all controls."
-  - truth: "D-16: recovery removes the stale warning and announces the persisted monitoring-gap event without refresh."
-    test: "Transition /api/scan-status from stale to fresh in one loaded browser session."
-    expected: "The warning disappears once, feedback announces recovery, and the event is visible."
-    why_human: "Database recovery is tested and rendering branches exist, but no browser test exercises the transition."
-  - truth: "D-04: every deployed or retained operator database shape is represented by the confirmed support-floor inventory."
-    test: "Compare the current Pi's retained/deployed database inventory reports with tests/fixtures/legacy/operator and support_floor.json."
-    expected: "Every fingerprint is classified and has a matching sanitized fixture; unknown shapes are not upgraded."
-    why_human: "The repository cannot observe databases currently held by the operator."
-  - truth: "Safety UI has distinct connected, stale, recovery-required, blocked-destination, save-failure, preview-failure, and expiry states."
-    test: "Exercise each listed API/UI failure state in a browser."
-    expected: "Each has the specified distinct copy, warning treatment, and recovery guidance."
-    why_human: "Most states have source contracts only; the Playwright fixture does not traverse all error transitions."
-  - truth: "Stale/recovery presentation preserves readable data and keeps TLS posture independent from availability."
-    test: "Render stale and recovery states for online and offline TLS-unverified services."
-    expected: "Readable cards remain; TLS unverified never replaces ONLINE/OFFLINE."
-    why_human: "The browser test covers only an online TLS-unverified service without stale/recovery state."
-  - truth: "Long service names, tags, events, and safe errors remain readable at supported widths."
-    test: "Use long values in the metadata and event fixtures at desktop and 720px widths."
-    expected: "The documented truncation/wrapping occurs without obscuring controls or exposing destination data."
-    why_human: "No browser assertion uses long text or verifies the error presentation."
-  - truth: "D-12 renders the TLS-unverified badge for both online and offline eligible services."
-    test: "Render one online and one offline TLS-unverified service."
-    expected: "Both show the persistent non-interactive badge while retaining their own availability state."
-    why_human: "Automated browser coverage checks only the online case."
-  - truth: "D-13 through D-16 queue, metadata, expiry, and recovery interactions remain candid end to end."
-    test: "Queue a scan and preview while stale, expire each request, save metadata, then recover the worker."
-    expected: "The UI shows queued/running/expired/recovered outcomes without claiming work ran early."
-    why_human: "Current tests use isolated API/state fixtures rather than an end-to-end durable-worker transition."
-  - truth: "Warning copy wraps and narrow controls remain unobscured for all safety states."
-    test: "Inspect each safety banner and modal with long content at 720px."
-    expected: "Copy stays within the page inset and all actions remain visible and operable."
-    why_human: "The browser check verifies button height but not all warning/layout overflow cases."
+  - truth: "D-04: every current or retained operator Pi database is represented by the confirmed support-floor inventory."
+    test: "Run the documented read-only inventory command against every deployed/retained Pi database and compare fingerprints with dashboard/beacon/support_floor.json and tests/fixtures/legacy/operator."
+    expected: "Each fingerprint is classified by the support floor and has a corresponding sanitized fixture; any unknown shape is refused rather than upgraded."
+    why_human: "The repository contains only sanitized fixtures and cannot inspect databases currently retained by the operator."
+human_verification_count: 1
+human_verification:
+  - test: "Operator Pi database inventory"
+    expected: "All current/retained database fingerprints are represented in the support floor before an upgrade is attempted."
+    why_human: "External deployed/retained database inventory is unavailable to repository tests."
 ---
 
 # Phase 01: Behavioral Safety & Runtime Ownership Verification Report
 
 **Phase Goal:** The operator can safely continue using and upgrading Beacon while its web, worker, persistence, and outbound-access responsibilities are dependable and independently maintainable.
-**Verified:** 2026-07-31T21:42:08Z
+
+**Verified:** 2026-08-01T07:27:40Z
 **Status:** gaps_found
-**Re-verification:** No — initial verification
+**Re-verification:** Yes — after Plans 01-09 through 01-14
 
 ## Goal Achievement
 
-The phase goal is **not achieved**. The codebase contains substantive Phase 1 modules and broad regression coverage, but five must-have truths fail. Four are the code-review critical risks independently confirmed in source: restore can replay old WAL state, recovery can race a web writer, manual discovery can outlive its queue lease, and outbound validation does not bind the actual connection. A fifth failure is the promised dependency direction: a `beacon` module imports the legacy application directly.
+The five originally failed implementation truths are now substantively closed, and the prior nine UI behavior gaps are reduced to one honest operator-only database-inventory check. However, the goal is still **not achieved**: recovery is destructive when invoked on a healthy database, and a hostile page rendered for a preview can send state-changing requests to another policy-allowed service. Both are reproducible current-code safety failures, not missing test evidence alone.
 
 ### Roadmap Success Criteria
 
 | # | Success criterion | Status | Evidence |
 |---|---|---|---|
-| 1 | Existing dashboard/data behavior remains usable after restructuring/upgrading | ✓ VERIFIED | Compatibility, migration, queue, uptime, and UI tests pass; real API data flows from SQLite to the browser. |
-| 2 | Usable backup and recovery after migration failure | ✗ FAILED | Recovery has verified catalog/staging checks, but sidecars and live web writers can defeat the restored state. |
-| 3 | Web loading starts no background work; worker owns scheduled work without duplication | ✗ FAILED | Fresh default imports are side-effect-free and owner leasing blocks duplicate schedulers, but a valid manual scan can be stranded after its 30-second lease expires. |
-| 4 | Probes/previews/redirects/webhooks block unsafe targets/TLS safely | ✗ FAILED | Policy validates request plans, but requests and Chromium reconnect by hostname after validation, allowing DNS rebinding. |
+| 1 | Existing dashboard/data behavior remains usable after restructuring/upgrading | ✓ VERIFIED | Compatibility routes retain their API shapes and real SQLite/browser coverage exercises services, metadata, scans, previews, uptime, and events. The orchestrator's full run passed: 137 tests and 90 subtests. |
+| 2 | Operator can create a usable backup before an upgrade and recover Beacon data after a migration failure | ✗ FAILED | Verified backup, WAL/SHM lifecycle, writer exclusion, and repeat-restore mechanics exist; but recovery has no pre-existing recovery-required authorization and can roll a healthy database back. |
+| 3 | Web loading starts no background work; worker owns scheduled work without duplication | ✓ VERIFIED | Fresh-process isolation tests, injected worker composition, persisted owner lease, and scan lease heartbeat/recovery are present and exercised. |
+| 4 | Probes/previews/redirects/webhooks block unsafe targets/TLS safely and report safe failure | ✗ FAILED | Destination pinning and TLS/SNI preservation work, but preview content can use the proxy for unsafe mutations to an allowed target. |
 
-### Observable Must-Haves
+### Observable Truths
 
-| Plan | Truths checked | Result |
-|---|---|---|
-| 01-01 | Import ownership; stale-worker distinction; recovery gap; compatibility baseline | 2 verified; 2 present/behavior-unverified |
-| 01-02 | Dependency direction; compatibility adapter; metadata during outage; pure factory | 3 verified; 1 failed |
-| 01-03 | Flask-free domain operations; worker composition; no import-time scheduler/browser; compatibility behavior | 4 verified; declared preview→repository key link failed |
-| 01-04 | Support floor; migration idempotency; verified backups; retention; locking; failure gate | 6 verified; 1 present/behavior-unverified (current operator inventory) |
-| 01-05 | Offline restore path; catalog safety; repeat restore; migration/recovery lock; web while worker stopped | 4 verified; 1 failed |
-| 01-06 | Worker owner lease; expiry; atomic claims; coalescing; metadata revisions; durable gap recovery | 6 verified |
-| 01-07 | Unified outbound plans; TLS scope; redirects/DNS; OPS-05 matrix; immutable policy decisions | 2 verified; 3 failed |
-| 01-08 | Ten locked UI state truths | 4 verified; 6 present/behavior-unverified |
-
-**Score:** 31/45 truths verified (9 present, behavior-unverified)
-
-### Required Artifacts
-
-| Plan | Artifact status | Details |
-|---|---|---|
-| 01-01 | ✓ 4/4 substantive and wired | Runtime tests, app/worker composition, and dashboard stale-warning rendering exist. |
-| 01-02 | ⚠️ 5/5 substantive; boundary incomplete | Config/db/repository/web modules exist, but `worker_main.py` imports `dashboard.app` and bypasses the intended direction. |
-| 01-03 | ⚠️ 4/4 substantive; one link incomplete | Monitoring, previews, worker main, and shim exist; `previews.py` has no declared repository persistence dependency. |
-| 01-04 | ✓ 6 substantive file artifacts plus legacy fixtures | The artifact query cannot inspect the directory artifact itself (`EISDIR`); its fixtures and support-floor files were inspected directly. |
-| 01-05 | ✗ Recovery artifact is substantive but unsafe | Catalog validation/staging/lock code exists; WAL/SHM and live-web-writer protections are missing. |
-| 01-06 | ✗ Queue artifact is substantive but scan lifecycle is hollow | Lease API exists, but production scan processing never renews it. |
-| 01-07 | ✗ Outbound artifact is substantive but connection binding is missing | `resolved_addresses` is calculated yet unused by the actual requester/Chromium connection. |
-| 01-08 | ✓ 4/4 substantive and flowing | Browser fetches `/api/scan-status`, `/api/services`, and `/api/events`; Flask routes query SQLite and Playwright exercises zero/one/many data. |
-
-### Key Link Verification
-
-| Link | Status | Evidence |
-|---|---|---|
-| Worker → persisted heartbeat/recovery | ✓ WIRED | `worker_main.main()` acquires owner lease, recovers, heartbeats, then builds the scheduler. |
-| Browser → scan/services/events API → SQLite | ✓ FLOWING | `app.js` fetches the APIs; Flask handlers use persisted runtime/service/event data. |
-| Web → queues | ✓ WIRED | Metadata and scan mutation paths enqueue durable work. |
-| Worker → queues | ✓ WIRED, but behavior fails | Worker lease renewal is wired; scan-request lease renewal is not wired into discovery execution. |
-| Preview → repositories | ✗ NOT_WIRED | `dashboard/beacon/previews.py` contains no `repositories` reference or persistence call. |
-| Outbound policy → requests/Chromium | ✗ PARTIAL | Plan creation is wired; actual connection identity is not bound to the approved address. |
-| Recovery → catalog/staging/database | ✗ PARTIAL | Verified catalog/staging and `os.replace` are wired, but sidecar handling and writer exclusion are absent. |
-
-### Behavioral Spot-Checks
-
-| Behavior | Command | Result | Status |
+| # | Truth | Status | Evidence |
 |---|---|---|---|
-| Phase automated suite | `dashboard/.venv/bin/python -m pytest -q` | 100 passed, 4 subtests passed; one browser test could not bind a loopback port in the sandbox | ? ENVIRONMENT-LIMITED |
-| Real browser UI states | `dashboard/.venv/bin/python -m pytest -q tests/test_ui_states.py` | 6 passed outside the sandbox with a loopback-only ephemeral server | ✓ PASS |
-| Malformed scalar metadata JSON | Flask test client PUT of JSON string | 500 with `AttributeError: 'str' object has no attribute 'keys'` | ⚠️ WARNING |
-| Invalid deployment integer | `EXPIRE_DAYS=broken ... python -c 'import app'` | Import exits with `ValueError` at `dashboard/app.py:47` | ⚠️ WARNING |
+| 1 | Existing dashboard, metadata, scans, previews, uptime, and events retain usable compatibility behavior | ✓ VERIFIED | `tests/test_api_and_auth.py`, `test_uptime_integration.py`, `test_ui_safety_integration.py`, and the full suite use current routes and real SQLite. |
+| 2 | Recovery is safe only after a migration failure and preserves a healthy database otherwise | ✗ FAILED | Direct isolated probe changed a database title to `healthy-current`, called `restore_backup()` with no marker, and read back `Sample Service` from the old backup. |
+| 3 | Fresh web import starts no background work; one persisted worker owns scheduling and durable shared work | ✓ VERIFIED | `worker_main.run_worker()` acquires the durable owner before scheduler construction; fresh-import and ownership tests pass. |
+| 4 | Outbound probes, previews, redirects, and webhooks consistently enforce safe retrieval boundaries | ✗ FAILED | A loopback probe through `PolicyProxy` received the origin's `HTTP/1.0 501 Unsupported method ('POST')`, proving the proxy forwarded the preview POST to the allowed origin. |
+| 5 | FND-02 dependency direction and preview persistence ownership are explicit | ✓ VERIFIED | Package AST test rejects all absolute/relative legacy-app imports; `dashboard/worker.py` injects `WorkerOperations`; `previews.store_thumbnail_result()` delegates to `ThumbnailRepository`. |
+| 6 | FND-04 scans renew ownership, recover without restart, expire at deadline, and fence stale workers | ✓ VERIFIED | `process_scan_requests()` starts `ScanLeaseHeartbeat`; queue transitions condition on owner and unexpired lease; `test_durable_queues.py` covers long scan, takeover, recovery, and expiry. |
+| 7 | FND-06 restore quiesces WAL/SHM and excludes all managed web/worker connections | ✓ VERIFIED | `exclusive_database_maintenance()` holds an exclusive flock; `restore_backup()` orders upgrade then maintenance locks, performs zero-busy WAL checkpoint, deletes exact sidecars, fsyncs, and tests a concurrent metadata writer. |
+| 8 | FND-07 actual HTTP and Chromium sockets use an approved numeric destination while retaining Host/SNI identity | ✓ VERIFIED | `OutboundTransport._send_pinned()` pools by `selected_address`; `PolicyProxy._connect()` connects to it; tests prove Host, SNI, redirect replan, and rebinding behavior. |
+| 9 | OPS-05 covers outbound and mutation-request protections at the browser-preview boundary | ✗ FAILED | Tests cover Host/Origin/UI headers and rebinding, but no safe-method restriction or negative browser mutation test exists; source forwards the method/body. |
+| 10 | Scalar metadata JSON returns stable 4xx rather than raising | ✓ VERIFIED | `api_service_meta()` rejects non-object JSON at `dashboard/app.py:1836-1838`; tests send `[]`, strings, numbers, booleans, and null. |
+| 11 | Malformed integer environment values fall back safely and app import remains available | ✓ VERIFIED | `config._positive_int()` returns defaults on parse/range failure; `test_malformed_integer_environment_uses_settings_defaults_without_import_crash` exercises malformed deployment values. |
+| 12 | Stale monitoring leaves controls usable and stale-to-fresh recovery records the monitoring gap without reload | ✓ VERIFIED | `test_stale_to_fresh_page_persists_actions_and_records_recovery` operates theme/link/metadata/scan, observes durable rows, then observes banner removal and event rendering in one browser session. |
+| 13 | Connected, stale, recovery, blocked-save, preview-failed, expiry, online/offline, and TLS states are distinct across themes | ✓ VERIFIED | Playwright safety matrix covers these states at 360px and 1440px and toggles to light theme. |
+| 14 | TLS-unverified remains independent from online/offline, including stale/recovery presentation | ✓ VERIFIED | The safety matrix renders online and offline TLS-unverified cards while retaining their availability labels. |
+| 15 | Long names/tags/events/errors remain readable and controls reachable at supported widths | ✓ VERIFIED | Browser matrix supplies deliberately long values, asserts no horizontal overflow, containment, and 44px controls at narrow and wide widths. |
+| 16 | Queued/expired/recovered scan and preview behavior is truthful end to end | ✓ VERIFIED | The real Flask/SQLite/Chromium test queues work while stale, claims/completes it after recovery, expires an old request, and observes the candid UI states. |
+| 17 | Every current/retained operator database is represented in the support floor | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Fixtures and support-floor checks exist, but the repository cannot inspect the operator's actual retained/deployed databases. |
 
-The suite is useful but not sufficient evidence for the failed truths: `test_backup_recovery.py` does not retain a WAL sidecar, `test_outbound_policy.py` does not make a post-plan resolver/socket choice, and `test_module_boundaries.py` misses relative imports such as `from .. import app`.
+**Score:** 17/20 truths verified (1 present, behavior-unverified)
 
-### Requirements Coverage
+## Required Artifacts
 
-| Requirement | Status | Evidence |
-|---|---|---|
-| FND-01 | ✓ SATISFIED | Compatibility/migration/uptime/UI contracts cover route and persisted-data behavior; focused and full tests pass apart from sandbox port restriction. |
-| FND-02 | ✗ BLOCKED | `dashboard/beacon/worker_main.py:18-21` imports app directly; preview repository ownership link is missing; validated settings are bypassed by raw compatibility constants. |
-| FND-03 | ✓ SATISFIED | Fresh-process import test passes with no database created and app tail runs initialization only under `__main__`. |
-| FND-04 | ✗ BLOCKED | Durable owner leasing works, but scan work can exceed and lose its own lease, leaving a permanent `running` row. |
-| FND-05 | ✓ SATISFIED | Ordered migrations, support floor, unknown-shape rejection, rerun no-op, rollback, and lock contender tests pass. |
-| FND-06 | ✗ BLOCKED | Restore cannot ensure rollback correctness with SQLite sidecars or a live web writer. |
-| FND-07 | ✗ BLOCKED | Outbound requests/browser resources are validated before, but not at, the real network connection. |
-| OPS-05 | ✗ BLOCKED | DNS/rebinding protection is incomplete; metadata mutation also returns a 500 for a valid scalar JSON body rather than a safe validation response. |
+| Artifact | Expected | Status | Details |
+|---|---|---|---|
+| `dashboard/beacon/db.py` | Shared access/exclusive maintenance leases | ✓ VERIFIED | Substantive managed SQLite connection implementation; used by app, queues, and migration/recovery paths. |
+| `dashboard/beacon/recovery.py` | Sidecar-safe, writer-exclusive recovery | ⚠️ PARTIAL | WAL/SHM and writer-exclusion implementation is real and wired, but destructive entry is not guarded by a pre-existing recovery condition. |
+| `dashboard/beacon/queues.py` | Durable worker and scan ownership state machines | ✓ VERIFIED | Claims, renewal, deadline expiry, recovery, and fenced terminal updates are transactional and called by production scan handling. |
+| `dashboard/beacon/outbound.py` | Pinned policy transport and Chromium proxy | ⚠️ PARTIAL | Numeric destination enforcement is real; method policy is absent and resource cleanup has an unrepaired warning path. |
+| `dashboard/beacon/previews.py` + `repositories.py` | Explicit preview persistence boundary | ✓ VERIFIED | Preview operations require a thumbnail repository collaborator and delegate storage there. |
+| `dashboard/beacon/worker_main.py` + `dashboard/worker.py` | Package-independent runtime plus composition root | ✓ VERIFIED | Package module does not import legacy app; executable shim injects compatibility operations. |
+| `dashboard/beacon/config.py` | Validated immutable settings | ✓ VERIFIED | Positive-integer fallback supplies the app's startup constants. |
+| `dashboard/app.py` | Compatibility API and durable wiring | ✓ VERIFIED | Uses managed `connect_db`, Settings constants, queue heartbeat, repository collaborator, and outbound transport. |
+| `tests/test_ui_safety_integration.py` + `tests/test_ui_states.py` | Browser evidence for Phase 1 safety UI | ✓ VERIFIED | Real Flask/SQLite/Chromium stale-to-fresh flow plus deterministic two-theme state and overflow matrix. |
 
-### Anti-Patterns Found
+Artifact-query sanity checks reported all declared closure artifacts substantive and all declared links found for Plans 01-09 through 01-14. That is L1-L3 evidence only; the behavioral findings above override an artifact-only pass.
+
+## Key Link Verification
+
+| From | To | Via | Status | Details |
+|---|---|---|---|---|
+| `dashboard/worker.py` | `beacon.worker_main` | `WorkerOperations` injection / `run_worker()` | ✓ WIRED | Keeps the one allowed legacy dependency at executable composition root, outside the package. |
+| `dashboard/app.py` | `beacon.queues` | `process_scan_requests()` heartbeat / terminal update | ✓ WIRED | One owner token is used for claim, renewal, requeue, and finish/fail. |
+| `beacon.recovery` | `beacon.db` | upgrade lock then `exclusive_database_maintenance()` | ✓ WIRED | Excludes managed connections during WAL checkpoint/replacement. |
+| `beacon.recovery` | `dashboard.db-wal` / `dashboard.db-shm` | checkpoint, unlink, fsync | ✓ WIRED | Exact target sidecars are removed after a successful zero-busy checkpoint. |
+| `beacon.outbound` | numeric socket destination | urllib3 pools / proxy `_connect()` | ✓ WIRED | Uses `plan.selected_address`; Host/SNI stay on original authority. |
+| Chromium preview context | loopback `PolicyProxy` | `browser_proxy_context()` | ⚠️ UNSAFE | The proxy is used for main frame/subresources, but forwards state-changing methods. |
+| `app.js` | Flask/SQLite scan, service, event, metadata APIs | polling and mutation responses | ✓ FLOWING | UI integration test observes state changes from actual temporary SQLite rows. |
+
+## Data-Flow Trace
+
+| Artifact | Data variable | Source | Produces real data | Status |
+|---|---|---|---|---|
+| Dashboard safety UI | worker/queue/service/event state | Flask API → managed SQLite repositories | Yes; browser test uses copied production-schema fixture and reads/writes real rows | ✓ FLOWING |
+| Scan processing | claimed request / owner token | `scan_requests` transaction | Yes; claim and heartbeat updates persist and are re-read by UI/API | ✓ FLOWING |
+| Recovery | verified catalog backup → `dashboard.db` | catalog validation / copy / fsync | Yes, but lacks failure-state authorization | ⚠️ UNSAFE_ENTRY |
+| Browser previews | browser request → policy plan → selected address | loopback proxy / policy resolver | Yes; origin socket is pinned, but method/body is not constrained | ⚠️ UNSAFE_METHOD |
+
+## Behavioral Spot-Checks
+
+| Behavior | Command / evidence | Result | Status |
+|---|---|---|---|
+| Full Phase suite | Orchestrator run with loopback privileges | 137 passed, 90 subtests, exit 0 | ✓ PASS (evidence, not sufficient for uncovered paths) |
+| Build/config | Orchestrator run | compilation and `docker compose config -q` passed | ✓ PASS |
+| Healthy recovery refusal | isolated temporary-db direct call to `restore_backup()` without marker | output `Sample Service` after current title was changed to `healthy-current` | ✗ FAIL |
+| Preview safe-method boundary | loopback proxy probe sending `POST` to allowed origin | origin returned `HTTP/1.0 501 Unsupported method ('POST')`, which proves it received the forwarded request | ✗ FAIL |
+| HTTP/Chromium pinning, redirect, SNI, rebind | `tests/test_outbound_policy.py` local origin scenarios | full suite passed; source uses `selected_address` in both transports | ✓ PASS |
+| UI behavior closure | `test_ui_safety_integration.py` and `test_ui_states.py` | eight formerly unexercised UI items now have real browser coverage | ✓ PASS |
+
+## Requirements Coverage
+
+| Requirement | Description | Status | Evidence |
+|---|---|---|---|
+| FND-01 | Compatibility protection for existing dashboard/service/discovery/preview/uptime/event behavior | ✓ SATISFIED | Current API, SQLite, and browser compatibility tests cover retained routes and data flows. |
+| FND-02 | Explicit web/config/persistence/monitoring/discovery/preview/scheduling boundaries | ✓ SATISFIED | AST import audit, injected worker composition, explicit repository persistence, and managed connection seam establish the intended direction. |
+| FND-03 | Web import starts no background work | ✓ SATISFIED | Fresh subprocess tests cover no DB initialization, scheduler, browser, probe, signal, or network startup at import. |
+| FND-04 | Worker-only scheduling with durable persisted shared coordination | ✓ SATISFIED | Owner lease, claims, scan heartbeat, normal-poll recovery, deadlines, and fencing are code-wired and tested. |
+| FND-05 | Versioned transactional idempotent migrations against representative databases | ? NEEDS HUMAN | Fixtures, support floor, no-op/rollback, and migration tests pass; current/retained Pi database inventory remains unobservable here. |
+| FND-06 | Verified pre-upgrade backup and safe recovery after failed upgrade | ✗ BLOCKED | The restore mechanics are robust, but invocation can silently discard healthy current data without a recovery-required guard. |
+| FND-07 | One tested outbound-target and TLS policy for probes, previews, redirects, webhooks | ✗ BLOCKED | Purpose planning and destination pinning work; browser previews retain unauthorized mutation capability against allowed targets. |
+| OPS-05 | Automated coverage of outbound target/DNS/redirect/TLS/mutation protections | ✗ BLOCKED | Broad coverage exists, but the browser-preview unsafe-method path is neither prevented nor covered by a negative regression. |
+
+No Phase 1 requirement is orphaned: all eight map to Phase 1 plans. FND-06, FND-07, and OPS-05 must remain incomplete while the two safety gaps remain; FND-05 awaits the single operator inventory check.
+
+## Fresh Review Finding Disposition
+
+| Finding | Disposition | Requirement/goal impact | Exact evidence |
+|---|---|---|---|
+| CR-01: healthy database restore rollback | 🛑 BLOCKER — valid | Blocks FND-06 and roadmap criterion 2 | `restore_backup()` never reads a pre-existing marker; `restore --latest/--id` calls it directly. Direct temporary-db probe restored old title with no marker. |
+| CR-02: preview proxy forwards unsafe methods | 🛑 BLOCKER — valid | Blocks FND-07, OPS-05, and roadmap criterion 4 | Proxy forwards `${method}` and request body at `outbound.py:294-299`; route guard checks URL only. Loopback POST reached origin. |
+| WR-01: proxy slot/socket leak before relay | ⚠️ WARNING — valid | Does not itself falsify a current formal Phase 1 truth, but threatens preview availability after four pre-relay send failures; Phase 6 resilience work must not absorb it silently. | `_connect()` acquires a bounded semaphore; exceptions from `client.sendall`, header formatting, or `origin.sendall` go to `_reject()` before `_relay()` closes/releases origin. |
+| WR-02: metadata boolean/integer coercion | ⚠️ WARNING — valid | Does not block a named current requirement, but makes mutation input ambiguous and can alter critical alert behavior contrary to caller intent. | `int(bool(payload.get('critical')))` accepts e.g. non-empty `"false"`; `int(True)` accepts boolean `pinned_order`; current scalar test does not cover these field values. |
+
+## Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |---|---:|---|---|---|
-| `dashboard/beacon/recovery.py` | 237-285 | Main database replacement without WAL/SHM lifecycle | 🛑 BLOCKER | Restored data can be superseded by live WAL content. |
-| `dashboard/beacon/recovery.py` | 253-258 | Only worker-heartbeat check before restore | 🛑 BLOCKER | Live web metadata/queue/rate-limit writers are not excluded. |
-| `dashboard/app.py` | 1511-1535 | Discovery work without `renew_scan_lease()` | 🛑 BLOCKER | Long valid scan becomes permanently running. |
-| `dashboard/beacon/outbound.py` | 259-266 | Hostname connection after DNS plan | 🛑 BLOCKER | DNS rebinding can bypass the policy. |
-| `dashboard/beacon/previews.py` | 62-70 | `route.continue_()` after plan-only check | 🛑 BLOCKER | Chromium performs a later unverified DNS connection. |
-| `dashboard/app.py` | 1855-1858 | Assumes JSON body is a mapping | ⚠️ WARNING | Valid scalar JSON creates a 500. |
-| `dashboard/app.py` | 47-107 | Raw `int()` environment parsing bypasses Settings | ⚠️ WARNING | Invalid deployment configuration prevents app import/startup. |
+| `dashboard/beacon/recovery.py` | 266-328 | Destructive restore lacks failure-state authorization | 🛑 BLOCKER | A healthy current database can be silently replaced by an old backup. |
+| `dashboard/beacon/outbound.py` | 282-300 | Browser proxy forwards arbitrary method/body | 🛑 BLOCKER | Previewed content can mutate any policy-approved service. |
+| `dashboard/beacon/outbound.py` | 287-300, 400-445 | Semaphore/origin ownership transfers only inside `_relay()` | ⚠️ WARNING | Pre-relay failure can exhaust preview capacity. |
+| `dashboard/app.py` | 1865-1867 | Boolean/integer coercion rather than strict validation | ⚠️ WARNING | Ambiguous metadata can change criticality or sort order. |
 
-No unreferenced `TBD`, `FIXME`, or `XXX` marker was found in Phase 1 implementation/test files.
+No unreferenced `TBD`, `FIXME`, or `XXX` debt marker was found in Phase 1 implementation or test files. Matches for ordinary UI input `placeholder` attributes and the user-facing `backup is not available` error are not stubs.
 
-### Human Verification Required After Gap Closure
+## Human Verification Required
 
-The nine behavior-unverified items in frontmatter are genuine manual/browser/inventory checks, not substitutes for the automated blockers. Most importantly, the operator must compare the actual Pi's deployed/retained database fingerprints against the recorded support floor; the repository cannot establish that external fact.
+### 1. Current/retained Pi database inventory
 
-### Gaps Summary
+**Test:** Before upgrading a real Pi, execute the documented read-only inventory process for every deployed or retained database and compare results to the support-floor manifest and sanitized operator fixtures.
 
-Five failed must-haves block the phase. Repair the restore transaction first (writer exclusion plus WAL/SHM handling), then make discovery own a valid lease for its whole bounded duration, bind every outbound connection to validated DNS results, and remove the domain-to-legacy-app dependency. Add the missing negative regressions; current green tests do not exercise any of those four critical paths.
+**Expected:** Every fingerprint is represented; unknown schema shapes stop the upgrade rather than being migrated.
+
+**Why human:** Repository tests cannot see the operator's live and retained database files.
+
+## Gaps Summary and Next Action
+
+This is an **Escalation Gate**: do not advance Phase 1 or mark FND-06/FND-07/OPS-05 complete. First make recovery marker-gated and catalog-bound, then restrict preview traffic to safe methods at both enforcement seams and add negative tests for both findings. Address the two warnings in the same closure if feasible; after code repair, re-run focused recovery, outbound proxy/browser, metadata validation, and full Phase 1 verification. The Pi inventory remains a final operator action, not a code gap.
 
 ---
 
-_Verified: 2026-07-31T21:42:08Z_
+_Verified: 2026-08-01T07:27:40Z_
 _Verifier: the agent (gsd-verifier)_

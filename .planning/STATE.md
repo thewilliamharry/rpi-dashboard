@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
-status: verifying
-stopped_at: Completed 01-14-PLAN.md
-last_updated: "2026-08-01T07:15:00.172Z"
+status: needs_review
+stopped_at: Phase 1 re-verification found 2 blocking gaps (17/20)
+last_updated: "2026-08-01T07:30:17Z"
 last_activity: 2026-08-01
-last_activity_desc: Phase 01 execution started
+last_activity_desc: Phase 01 re-verification closed the original mechanics but found 2 blocking safety gaps.
 progress:
-  total_phases: 1
-  completed_phases: 1
+  total_phases: 6
+  completed_phases: 0
   total_plans: 14
   completed_plans: 14
 ---
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 
 ## Current Position
 
-Phase: 01 of 6 (Behavioral Safety & Runtime Ownership) — EXECUTING
+Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
 Plan: 14 of 14
-Status: Phase complete — ready for verification
-Last activity: 2026-08-01 — Phase 01 execution started
+Status: Needs review — 2 blocking safety gaps remain
+Last activity: 2026-08-01 — Phase 01 re-verification closed the original mechanics but found 2 blocking safety gaps.
 
 Progress: [██████████] 100%
 
@@ -134,6 +134,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T07:15:00.164Z
-Stopped at: Completed 01-14-PLAN.md
-Resume file: None
+Last session: 2026-08-01T07:30:17Z
+Stopped at: Phase 1 re-verification found 2 blocking gaps (17/20)
+Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-VERIFICATION.md
