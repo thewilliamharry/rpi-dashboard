@@ -14,6 +14,7 @@ import time
 from uuid import uuid4
 
 from .config import load_settings
+from .db import MaintenanceBusy, exclusive_database_maintenance, upgrade_lock_path
 from .inventory import InventoryError, classify_schema, collect_inventory
 from .migrations import LOCK_NAME, MIGRATIONS, RECOVERY_MARKER, SUPPORT_FLOOR_PATH
 
@@ -196,6 +197,14 @@ def _fsync_directory(directory):
         os.close(descriptor)
 
 
+def _fsync_file(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _copy_and_fsync(source, staging):
     with source.open('rb') as reader, staging.open('xb') as writer:
         while True:
@@ -205,6 +214,35 @@ def _copy_and_fsync(source, staging):
             writer.write(chunk)
         writer.flush()
         os.fsync(writer.fileno())
+
+
+def _checkpoint_and_remove_sidecars(database):
+    """Quiesce the current SQLite inode before it can be replaced."""
+    try:
+        with sqlite3.connect(database) as conn:
+            checkpoint = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+        if not checkpoint or checkpoint[0] != 0:
+            raise RecoveryError('restore did not complete')
+        _fsync_file(database)
+        for suffix in ('-wal', '-shm'):
+            Path(str(database) + suffix).unlink(missing_ok=True)
+        _fsync_directory(database.parent)
+    except RecoveryError:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise RecoveryError('restore did not complete') from exc
+
+
+def _write_recovery_marker(root):
+    marker = root / RECOVERY_MARKER
+    try:
+        with marker.open('w', encoding='utf-8') as handle:
+            json.dump({'restore_in_progress': True}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(root)
+    except OSError as exc:
+        raise RecoveryError('restore did not complete') from exc
 
 
 def _acquire_upgrade_lock(lock_path, timeout_seconds):
@@ -247,7 +285,7 @@ def restore_backup(
     if not database.is_file() or database.is_symlink():
         raise RecoveryError('recovery cannot verify that Beacon services are stopped')
 
-    lock_handle = _acquire_upgrade_lock(root / LOCK_NAME, lock_timeout_seconds)
+    lock_handle = _acquire_upgrade_lock(upgrade_lock_path(database), lock_timeout_seconds)
     staging = root / '{}{}.partial'.format(STAGING_PREFIX, uuid4().hex)
     try:
         if require_worker_stale and not _worker_is_stale(
@@ -257,26 +295,34 @@ def restore_backup(
         ):
             raise RecoveryError('stop Beacon services before running recovery')
         try:
-            _copy_and_fsync(source, staging)
-            _fsync_directory(root)
-            if _validate_supported_database(staging, record.catalog_id) != record.schema_fingerprint:
-                raise RecoveryError('restore did not complete')
-        except RecoveryError:
-            raise
-        except OSError as exc:
+            with exclusive_database_maintenance(database, lock_timeout_seconds):
+                _checkpoint_and_remove_sidecars(database)
+                try:
+                    _copy_and_fsync(source, staging)
+                    _fsync_directory(root)
+                    if _validate_supported_database(staging, record.catalog_id) != record.schema_fingerprint:
+                        raise RecoveryError('restore did not complete')
+                    _write_recovery_marker(root)
+                    os.replace(staging, database)
+                    _fsync_file(database)
+                    _fsync_directory(root)
+                except RecoveryError:
+                    raise
+                except (OSError, sqlite3.Error) as exc:
+                    raise RecoveryError('restore did not complete') from exc
+                try:
+                    if _validate_supported_database(database, record.catalog_id) != record.schema_fingerprint:
+                        raise RecoveryError('restore did not complete')
+                    if any(Path(str(database) + suffix).exists() for suffix in ('-wal', '-shm')):
+                        raise RecoveryError('restore did not complete')
+                except RecoveryError:
+                    raise
+                except (OSError, sqlite3.Error) as exc:
+                    raise RecoveryError('restore did not complete') from exc
+                (root / RECOVERY_MARKER).unlink(missing_ok=True)
+                _fsync_directory(root)
+        except MaintenanceBusy as exc:
             raise RecoveryError('restore did not complete') from exc
-        try:
-            os.replace(staging, database)
-            _fsync_directory(root)
-        except OSError as exc:
-            raise RecoveryError('restore did not complete') from exc
-        try:
-            if _validate_supported_database(database, record.catalog_id) != record.schema_fingerprint:
-                raise RecoveryError('restore did not complete')
-        except RecoveryError:
-            raise
-        (root / RECOVERY_MARKER).unlink(missing_ok=True)
-        _fsync_directory(root)
         return RestoreResult(
             catalog_id=record.catalog_id,
             backup_timestamp=record.backup_timestamp,

@@ -279,12 +279,51 @@ class BackupRecoveryTests(unittest.TestCase):
                 try:
                     reader.execute('BEGIN')
                     reader.execute('SELECT title FROM services').fetchone()
-                    original = database.read_bytes()
                     with self.assertRaisesRegex(RecoveryError, 'restore did not complete'):
                         restore_backup(database.parent, backup.name)
-                    self.assertEqual(database.read_bytes(), original)
+                    with sqlite3.connect(database) as conn:
+                        self.assertEqual(
+                            conn.execute('SELECT title FROM services').fetchone()[0],
+                            'newer-wal-state',
+                        )
+                    self.assertFalse(list(database.parent.glob('.dashboard.db.restore-*.partial')))
                 finally:
                     reader.close()
+
+    def test_restore_fsyncs_stage_sidecar_replacement_and_marker_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            recovery = __import__('dashboard.beacon.recovery', fromlist=['_fsync_directory'])
+            with mock.patch('dashboard.beacon.recovery.os.fsync', wraps=os.fsync) as sync, mock.patch(
+                'dashboard.beacon.recovery._fsync_directory',
+                wraps=recovery._fsync_directory,
+            ) as sync_directory:
+                restore_backup(database.parent, backup.name)
+
+            self.assertGreaterEqual(sync.call_count, 4)
+            self.assertGreaterEqual(sync_directory.call_count, 5)
+
+    def test_sidecar_cleanup_or_staging_failure_cannot_replace_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            original = database.read_bytes()
+            with mock.patch(
+                'dashboard.beacon.recovery._checkpoint_and_remove_sidecars',
+                side_effect=RecoveryError('restore did not complete'),
+            ), mock.patch('dashboard.beacon.recovery.os.replace') as replace:
+                with self.assertRaisesRegex(RecoveryError, 'restore did not complete'):
+                    restore_backup(database.parent, backup.name)
+            replace.assert_not_called()
+            self.assertEqual(database.read_bytes(), original)
+
+            with mock.patch(
+                'dashboard.beacon.recovery._copy_and_fsync',
+                side_effect=OSError('staging unavailable'),
+            ), mock.patch('dashboard.beacon.recovery.os.replace') as replace:
+                with self.assertRaisesRegex(RecoveryError, 'restore did not complete'):
+                    restore_backup(database.parent, backup.name)
+            replace.assert_not_called()
+            self.assertEqual(database.read_bytes(), original)
 
     def test_interruption_after_replace_leaves_verified_database_and_marker(self):
         with tempfile.TemporaryDirectory() as directory:
