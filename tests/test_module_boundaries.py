@@ -1,7 +1,39 @@
 import ast
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+
+def _legacy_app_imports(tree, module_name):
+    """Return every import form that makes a package module depend on app."""
+    package = module_name.rsplit('.', 1)[0]
+    findings = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name in {'app', 'dashboard.app'}:
+                    findings.append(imported.name)
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+
+        if node.level:
+            components = package.split('.')[:1 - node.level or None]
+            if node.module:
+                components.extend(node.module.split('.'))
+            imported_module = '.'.join(components)
+        else:
+            imported_module = node.module or ''
+        imported_names = {item.name for item in node.names}
+        if imported_module in {'app', 'dashboard.app'}:
+            findings.append(imported_module)
+        elif imported_module == 'dashboard' and 'app' in imported_names:
+            findings.append('dashboard.app')
+        elif not imported_module and node.level == 2 and 'app' in imported_names:
+            findings.append('dashboard.app')
+    return findings
 
 
 class ModuleBoundaryTests(unittest.TestCase):
@@ -20,11 +52,45 @@ class ModuleBoundaryTests(unittest.TestCase):
         package = Path('dashboard/beacon')
         for source_path in package.glob('*.py'):
             tree = ast.parse(source_path.read_text(encoding='utf-8'))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom):
-                    self.assertNotEqual(node.module, 'dashboard.app', source_path)
-                elif isinstance(node, ast.Import):
-                    self.assertNotIn('dashboard.app', [name.name for name in node.names], source_path)
+            module_name = f"dashboard.beacon.{source_path.stem}"
+            self.assertEqual(_legacy_app_imports(tree, module_name), [], source_path)
+
+    def test_ast_rule_rejects_absolute_aliased_and_relative_legacy_app_imports(self):
+        cases = (
+            'import dashboard.app',
+            'import dashboard.app as legacy_app',
+            'from dashboard import app',
+            'from dashboard import app as legacy_app',
+            'from dashboard.app import collect_system_stats',
+            'import app',
+            'from app import collect_system_stats',
+            'from .. import app',
+            'from .. import app as legacy_app',
+            'from ..app import collect_system_stats',
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                self.assertTrue(
+                    _legacy_app_imports(ast.parse(source), 'dashboard.beacon.worker_main'),
+                    source,
+                )
+
+    def test_package_worker_import_isolated_from_legacy_application(self):
+        project_root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [
+                sys.executable,
+                '-c',
+                'import sys; import dashboard.beacon.worker_main; '
+                'print("dashboard.app" in sys.modules or "app" in sys.modules)',
+            ],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'False')
 
     def test_settings_are_immutable_and_container_copies_package(self):
         from dashboard.beacon.config import load_settings
