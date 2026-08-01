@@ -30,16 +30,26 @@ class BackupRecoveryTests(unittest.TestCase):
         return database, backup
 
     def _write_recovery_marker(self, database, backup, *, target_version=1, **overrides):
+        catalog_id = backup.catalog_id if hasattr(backup, 'catalog_id') else backup.name
         payload = {
             'failed_target_version': target_version,
             'reason_class': 'MigrationPreparationError',
-            'backup_catalog_id': backup.name,
+            'backup_catalog_id': catalog_id,
             'timestamp': int(time.time()),
         }
         payload.update(overrides)
         (database.parent / 'recovery-required.json').write_text(
             json.dumps(payload),
             encoding='utf-8',
+        )
+
+    def _run_recovery_cli(self, database, *selector):
+        return subprocess.run(
+            [sys.executable, '-m', 'beacon.recovery', 'restore', *selector],
+            env={**os.environ, 'PYTHONPATH': 'dashboard', 'DB_PATH': str(database)},
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
     def test_online_backup_is_verified_and_complete(self):
@@ -88,7 +98,10 @@ class BackupRecoveryTests(unittest.TestCase):
             self.assertEqual(len(result.schema_fingerprint), 64)
             self.assertFalse((database.parent / 'recovery-required.json').exists())
             with sqlite3.connect(database) as conn:
-                self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
+                self.assertEqual(
+                    conn.execute('SELECT title FROM services').fetchone()[0],
+                    'Sample Service',
+                )
                 self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
 
     def test_restoring_same_catalog_twice_preserves_representative_rows(self):
@@ -164,22 +177,64 @@ class BackupRecoveryTests(unittest.TestCase):
             with self.assertRaises(RecoveryError):
                 restore_backup(database.parent, 'dashboard-20260101T000000000001Z-corrupt-pre-v1.db')
 
-    def test_recovery_cli_restores_latest_catalog_without_a_path_argument(self):
+    def test_recovery_cli_latest_restores_only_marker_bound_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
-            database, _ = self._backup_from_fixture(directory)
+            database, older = self._backup_from_fixture(directory)
+            newer = create_verified_backup(database, target_version=1)
             with sqlite3.connect(database) as conn:
                 conn.execute("UPDATE services SET title='changed after backup'")
-            result = subprocess.run(
-                [sys.executable, '-m', 'beacon.recovery', 'restore', '--latest'],
-                env={**os.environ, 'PYTHONPATH': 'dashboard', 'DB_PATH': str(database)},
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            self._write_recovery_marker(database, older)
+
+            result = self._run_recovery_cli(database, '--latest')
+
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(json.loads(result.stdout)['completed'])
+            self.assertEqual(json.loads(result.stdout)['catalog_id'], older.name)
+            self.assertNotEqual(older.name, newer.name)
             with sqlite3.connect(database) as conn:
                 self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
+
+    def test_recovery_cli_selectors_refuse_without_matching_authorization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, bound = self._backup_from_fixture(directory)
+            other = create_verified_backup(database, target_version=1)
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE services SET title='changed after backup'")
+            original = database.read_bytes()
+
+            for selector in (('--latest',), ('--id', bound.name), ('--id', other.name), ('--id', '../backup.db')):
+                with self.subTest(selector=selector):
+                    result = self._run_recovery_cli(database, *selector)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('recovery is not authorized', result.stderr)
+                    self.assertEqual(database.read_bytes(), original)
+
+            self._write_recovery_marker(database, bound, backup_catalog_id=None)
+            for selector in (('--latest',), ('--id', bound.name)):
+                with self.subTest(selector=selector, marker='null-id'):
+                    result = self._run_recovery_cli(database, *selector)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('recovery is not authorized', result.stderr)
+                    self.assertEqual(database.read_bytes(), original)
+
+    def test_recovery_cli_id_consumes_only_its_bound_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, bound = self._backup_from_fixture(directory)
+            other = create_verified_backup(database, target_version=1)
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE services SET title='changed after backup'")
+            self._write_recovery_marker(database, bound)
+
+            refused = self._run_recovery_cli(database, '--id', other.name)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('recovery is not authorized', refused.stderr)
+
+            restored = self._run_recovery_cli(database, '--id', bound.name)
+            self.assertEqual(restored.returncode, 0, restored.stderr)
+            restored_bytes = database.read_bytes()
+            repeated = self._run_recovery_cli(database, '--id', bound.name)
+            self.assertNotEqual(repeated.returncode, 0)
+            self.assertIn('recovery is not authorized', repeated.stderr)
+            self.assertEqual(database.read_bytes(), restored_bytes)
 
     def test_latest_verified_automatic_migration_backup_is_restoreable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,7 +253,10 @@ class BackupRecoveryTests(unittest.TestCase):
 
             with sqlite3.connect(database) as conn:
                 self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
-                self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
+                self.assertEqual(
+                    conn.execute('SELECT title FROM services').fetchone()[0],
+                    'post-upgrade change',
+                )
 
     def test_managed_connection_blocks_exclusive_maintenance_until_close(self):
         with tempfile.TemporaryDirectory() as directory:

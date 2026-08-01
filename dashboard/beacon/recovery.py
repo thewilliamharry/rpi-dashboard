@@ -451,6 +451,21 @@ def _data_dir_from_environment():
     return Path(load_settings().db_path).parent
 
 
+def _authorized_catalog_id_for_cli(data_dir, requested_catalog_id, *, now):
+    """Resolve a CLI selector through the same fail-closed recovery authorization."""
+    root = Path(data_dir)
+    authorization = _read_recovery_authorization(root, now=now)
+    if requested_catalog_id is not None and requested_catalog_id != authorization.backup_catalog_id:
+        raise RecoveryError('recovery is not authorized')
+    _authorized_recovery(
+        root,
+        root / 'dashboard.db',
+        authorization.backup_catalog_id,
+        now=now,
+    )
+    return authorization.backup_catalog_id
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Offline Beacon verified-backup recovery')
     subcommands = parser.add_subparsers(dest='command', required=True)
@@ -468,10 +483,11 @@ def main(argv=None):
         elif arguments.command == 'list':
             print(json.dumps([asdict(record) for record in list_verified_backups(data_dir)]))
         else:
-            records = list_verified_backups(data_dir)
-            catalog_id = records[-1].catalog_id if arguments.latest and records else arguments.catalog_id
-            if not catalog_id:
-                raise RecoveryError('backup is not available')
+            catalog_id = _authorized_catalog_id_for_cli(
+                data_dir,
+                arguments.catalog_id,
+                now=time.time,
+            )
             print(json.dumps(asdict(restore_backup(data_dir, catalog_id)), sort_keys=True))
     except RecoveryError as exc:
         print(str(exc), file=sys.stderr)
