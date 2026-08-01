@@ -45,20 +45,21 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-DB_PATH = os.environ.get("DB_PATH", "/data/dashboard.db")
-EXPIRE_DAYS = int(os.environ.get("EXPIRE_DAYS", 7))
+SETTINGS = load_settings()
+DB_PATH = SETTINGS.db_path
+EXPIRE_DAYS = SETTINGS.expire_days
 THUMB_MAX_BYTES = 2 * 1024 * 1024
-THUMB_REFRESH_DAYS = int(os.environ.get("THUMB_REFRESH_DAYS", 1))
+THUMB_REFRESH_DAYS = SETTINGS.thumb_refresh_days
 PREVIEW_SETTLE_MS = 5_000
 PREVIEW_BROWSER_BUDGET_MS = 27_000
 UPTIME_WINDOW_SECONDS = 7 * 86400
 UPTIME_BUCKETS = 168
 CHECK_RETENTION_SECONDS = UPTIME_WINDOW_SECONDS + 86400
-METRIC_SAMPLE_SECONDS = int(os.environ.get("METRIC_SAMPLE_SECONDS", 5))
-METRIC_HISTORY_SECONDS = int(os.environ.get("METRIC_HISTORY_SECONDS", 60))
-WORKER_READY_SECONDS = int(os.environ.get("WORKER_READY_SECONDS", 20))
-DISCOVERY_TIMEOUT_SECONDS = int(os.environ.get("DISCOVERY_TIMEOUT_SECONDS", 180))
-ENABLE_PROMETHEUS = os.environ.get("ENABLE_PROMETHEUS", "0") in ("1", "true", "TRUE", "yes", "on")
+METRIC_SAMPLE_SECONDS = SETTINGS.metric_sample_seconds
+METRIC_HISTORY_SECONDS = SETTINGS.metric_history_seconds
+WORKER_READY_SECONDS = SETTINGS.worker_ready_seconds
+DISCOVERY_TIMEOUT_SECONDS = SETTINGS.discovery_timeout_seconds
+ENABLE_PROMETHEUS = SETTINGS.enable_prometheus
 
 DEFAULT_TRUSTED_HOSTS = (
     "raspi.local,raspi,localhost,127.0.0.1,::1,"
@@ -80,34 +81,15 @@ def _parse_trusted_hosts(value):
     return hosts, networks
 
 
-TRUSTED_HOSTS, TRUSTED_HOST_NETWORKS = _parse_trusted_hosts(
-    os.environ.get("TRUSTED_HOSTS", DEFAULT_TRUSTED_HOSTS)
-)
-LOCAL_SERVICE_HOSTS = TRUSTED_HOSTS | {
-    item.strip().lower().strip('[]')
-    for item in os.environ.get("LOCAL_SERVICE_HOSTS", "").split(',')
-    if item.strip()
-}
-try:
-    LOCAL_SERVICE_HOSTS.add(socket.gethostname().lower())
-except Exception:
-    pass
-
-EXTRA_SCAN_PORTS = set()
-for _port_text in os.environ.get("EXTRA_SCAN_PORTS", "8100").split(','):
-    try:
-        _extra_port = int(_port_text.strip())
-        if 1 <= _extra_port <= 65535:
-            EXTRA_SCAN_PORTS.add(_extra_port)
-    except (TypeError, ValueError):
-        pass
-
-TRIGGER_SCAN_RATE_LIMIT = int(os.environ.get("TRIGGER_SCAN_RATE_LIMIT", 4))
-TRIGGER_SCAN_WINDOW_SECONDS = int(os.environ.get("TRIGGER_SCAN_WINDOW_SECONDS", 60))
-
-ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
-ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_SECONDS", 300))
-ALERT_ONLY_CRITICAL = os.environ.get("ALERT_ONLY_CRITICAL", "0") in ("1", "true", "TRUE", "yes", "on")
+TRUSTED_HOSTS = set(SETTINGS.trusted_hosts)
+TRUSTED_HOST_NETWORKS = set(SETTINGS.trusted_host_networks)
+LOCAL_SERVICE_HOSTS = set(SETTINGS.local_service_hosts)
+EXTRA_SCAN_PORTS = set(SETTINGS.extra_scan_ports)
+TRIGGER_SCAN_RATE_LIMIT = SETTINGS.trigger_scan_rate_limit
+TRIGGER_SCAN_WINDOW_SECONDS = SETTINGS.trigger_scan_window_seconds
+ALERT_WEBHOOK_URL = SETTINGS.alert_webhook_url
+ALERT_COOLDOWN_SECONDS = SETTINGS.alert_cooldown_seconds
+ALERT_ONLY_CRITICAL = SETTINGS.alert_only_critical
 
 _db_lock = threading.Lock()
 _scan_lock = threading.Lock()
@@ -1851,11 +1833,16 @@ def api_service_meta(port):
             return jsonify({"error": "service not found"}), 404
         return jsonify(row)
 
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'metadata payload must be an object'}), 400
     allowed_fields = {'display_name', 'url', 'path', 'critical', 'pinned_order', 'tags', 'healthy_statuses'}
     unknown = [k for k in payload.keys() if k not in allowed_fields]
     if unknown:
         return jsonify({"error": f"unknown fields: {', '.join(unknown)}"}), 400
+    for field in {'display_name', 'url', 'path', 'tags', 'healthy_statuses'}:
+        if field in payload and not isinstance(payload[field], str):
+            return jsonify({'error': f'{field} must be a string'}), 400
 
     next_url = None
     with _db_lock:
