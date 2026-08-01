@@ -11,7 +11,7 @@ from unittest import mock
 from pathlib import Path
 
 from dashboard.beacon.config import Settings
-from dashboard.beacon.db import prepare_database
+from dashboard.beacon.db import connect_db, prepare_database
 from dashboard.beacon.inventory import InventoryError, classify_schema, collect_inventory
 from dashboard.beacon.migrations import (
     MIGRATIONS,
@@ -177,6 +177,30 @@ class MigrationTests(unittest.TestCase):
             results = sorted(result_queue.get(timeout=2) for _ in runners)
             self.assertEqual(results, [(), (1, 2, 3, 4)])
             self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 3)
+
+    def test_ordinary_access_blocks_migration_before_any_backup_or_marker_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'production.db'
+            copy2(OPERATOR_FIXTURE_DIR / 'production.db', target)
+            before = target.read_bytes()
+            access = connect_db(target)
+            try:
+                with self.assertRaisesRegex(MigrationPreparationError, 'maintenance'):
+                    run_migrations(Settings(db_path=str(target)), lock_timeout_seconds=0)
+            finally:
+                access.close()
+
+            self.assertEqual(target.read_bytes(), before)
+            self.assertFalse((target.parent / 'backups').exists())
+            self.assertFalse((target.parent / 'recovery-required.json').exists())
+            self.assertFalse((target.parent / 'production.db-wal').exists())
+            self.assertFalse((target.parent / 'production.db-shm').exists())
+
+    def test_migration_source_declares_upgrade_then_maintenance_lock_order(self):
+        source = Path('dashboard/beacon/migrations.py').read_text(encoding='utf-8')
+        upgrade = source.index('fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX')
+        maintenance = source.index('exclusive_database_maintenance')
+        self.assertLess(upgrade, maintenance)
 
 
 class InventoryTests(unittest.TestCase):
