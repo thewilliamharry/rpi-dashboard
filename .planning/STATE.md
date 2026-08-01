@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-12-PLAN.md
-last_updated: "2026-08-01T06:45:56.352Z"
+stopped_at: Completed 01-13-PLAN.md
+last_updated: "2026-08-01T06:59:49.435Z"
 last_activity: 2026-08-01
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 14
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 13 of 14
+Plan: 14 of 14
 Status: Ready to execute
 Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [█████████░] 86%
+Progress: [█████████░] 93%
 
 ## Performance Metrics
 
@@ -70,6 +70,7 @@ Progress: [█████████░] 86%
 | Phase 01 P10 | 21min | 2 tasks | 4 files |
 | Phase 01 P11 | 3min | 2 tasks | 3 files |
 | Phase 01 P12 | 14min | 3 tasks | 8 files |
+| Phase 01 P13 | 9min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Pinned outbound sockets to the approved numeric address while preserving original Host, TLS SNI, and certificate hostname identity.
 - [Phase ?]: Each Chromium preview context owns a short-lived loopback policy proxy; route callbacks are early gates, not socket enforcement.
 - [Phase ?]: Trusted-LAN service TLS remains service-only and unverified; strict pinned webhooks remain verified and redirect-free.
+- [Phase ?]: Only dashboard/worker.py imports the legacy dashboard.app edge and injects WorkerOperations into the package runtime.
+- [Phase ?]: Preview completion persists through ThumbnailRepository while previews.py exposes only a named protocol.
+- [Phase ?]: dashboard.app reads its runtime integer constants from one validated Settings instance and rejects malformed metadata before processing.
 
 ### Pending Todos
 
@@ -127,6 +131,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T06:45:56.344Z
-Stopped at: Completed 01-12-PLAN.md
+Last session: 2026-08-01T06:59:49.428Z
+Stopped at: Completed 01-13-PLAN.md
 Resume file: None
