@@ -162,6 +162,61 @@ class DurableQueueTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ('expired', 1_901))
 
+    def test_claim_recovers_expired_running_scan_and_takes_it_over_same_poll(self):
+        request = queues.enqueue_scan(self.db_path, 'operator', now=0)
+        first = queues.claim_scan(self.db_path, 'worker-a', now=0, lease_seconds=30)
+
+        successor = queues.claim_scan(self.db_path, 'worker-b', now=31, lease_seconds=30)
+
+        self.assertEqual(successor.request_id, request.request_id)
+        self.assertNotEqual(successor.lease_owner, first.lease_owner)
+        self.assertEqual(successor.status, 'running')
+
+    def test_claim_expires_past_deadline_running_scan_instead_of_reclaiming_it(self):
+        request = queues.enqueue_scan(self.db_path, 'operator', now=0)
+        queues.claim_scan(self.db_path, 'worker-a', now=0, lease_seconds=30)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('UPDATE scan_requests SET deadline_ts=31 WHERE id=?', (request.request_id,))
+            conn.commit()
+
+        self.assertIsNone(queues.claim_scan(self.db_path, 'worker-b', now=31, lease_seconds=30))
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                'SELECT status, terminal_ts, lease_owner, lease_until FROM scan_requests WHERE id=?',
+                (request.request_id,),
+            ).fetchone()
+        self.assertEqual(row, ('expired', 31, None, None))
+
+    def test_scan_takeover_fencing_allows_only_current_token_terminal_write(self):
+        queues.enqueue_scan(self.db_path, 'operator', now=0)
+        first = queues.claim_scan(self.db_path, 'worker-a', now=0, lease_seconds=30)
+        successor = queues.claim_scan(self.db_path, 'worker-b', now=31, lease_seconds=30)
+
+        for operation in (
+            lambda: queues.renew_scan_lease(
+                self.db_path, first.request_id, first.lease_owner, now=31, lease_seconds=30,
+            ),
+            lambda: queues.finish_scan(
+                self.db_path, first.request_id, first.lease_owner, now=31,
+            ),
+            lambda: queues.fail_scan(
+                self.db_path, first.request_id, first.lease_owner, 'late', now=31,
+            ),
+        ):
+            with self.assertRaises(queues.LeaseLost):
+                operation()
+
+        queues.finish_scan(self.db_path, successor.request_id, successor.lease_owner, now=32)
+        with self.assertRaises(queues.LeaseLost):
+            queues.fail_scan(
+                self.db_path, successor.request_id, successor.lease_owner, 'late', now=32,
+            )
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute('SELECT status, error FROM scan_requests').fetchone()
+        self.assertEqual(row, ('completed', None))
+
     def test_metadata_save_enqueues_latest_preview_without_a_worker(self):
         now = 1_000
         with self.appmod._db_lock:
