@@ -24,8 +24,9 @@ TLS_FIXTURES = Path(__file__).with_name('fixtures') / 'tls'
 class _RecordingHandler(BaseHTTPRequestHandler):
     records = []
 
-    def do_GET(self):
+    def _record(self):
         type(self).records.append({
+            'method': self.command,
             'path': self.path,
             'host': self.headers.get('Host'),
             'client': self.client_address,
@@ -34,6 +35,10 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header('Location', '/final')
             body = b''
+        elif self.path == '/page' and self.server.page_body is not None:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            body = self.server.page_body
         elif self.path == '/page':
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
@@ -44,14 +49,25 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    do_GET = _record
+    do_HEAD = _record
+    do_POST = _record
+    do_PUT = _record
+    do_PATCH = _record
+    do_DELETE = _record
+    do_OPTIONS = _record
+    do_TRACE = _record
+
     def log_message(self, *_args):
         return
 
 
 class _LocalOrigin:
-    def __init__(self, *, tls=False, sni_values=None):
-        _RecordingHandler.records = []
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), _RecordingHandler)
+    def __init__(self, *, tls=False, sni_values=None, page_body=None):
+        self._records = []
+        handler = type('_LocalRecordingHandler', (_RecordingHandler,), {'records': self._records})
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        self.server.page_body = page_body
         self.sni_values = sni_values if sni_values is not None else []
         if tls:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -69,7 +85,7 @@ class _LocalOrigin:
 
     @property
     def records(self):
-        return list(_RecordingHandler.records)
+        return list(self._records)
 
     def __enter__(self):
         self.thread.start()
@@ -174,6 +190,7 @@ class OutboundPolicyTests(unittest.TestCase):
     def test_browser_route_validates_before_continue(self):
         class Request:
             url = 'http://service.local/app.js'
+            method = 'GET'
 
         class Route:
             request = Request()
@@ -199,6 +216,48 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertFalse(route_browser_request(BlockedPolicy(), blocked))
         self.assertTrue(blocked.aborted)
         self.assertFalse(blocked.continued)
+
+    def test_route_rejects_every_non_retrieval_method_before_policy_planning(self):
+        class Policy:
+            calls = []
+
+            def plan(self, *args):
+                self.calls.append(args)
+
+        class Request:
+            url = 'http://service.local/app.js'
+
+        class Route:
+            continued = False
+            aborted = False
+
+            def __init__(self, method):
+                self.request = Request()
+                if method is not None:
+                    self.request.method = method
+
+            def continue_(self):
+                self.continued = True
+
+            def abort(self, _reason):
+                self.aborted = True
+
+        policy = Policy()
+        for method in ('GET', 'HEAD'):
+            with self.subTest(method=method):
+                route = Route(method)
+                self.assertTrue(route_browser_request(policy, route))
+                self.assertTrue(route.continued)
+                self.assertFalse(route.aborted)
+
+        calls_before_rejections = len(policy.calls)
+        for method in ('POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'pOsT', 'UNKNOWN', None):
+            with self.subTest(method=method):
+                route = Route(method)
+                self.assertFalse(route_browser_request(policy, route))
+                self.assertTrue(route.aborted)
+                self.assertFalse(route.continued)
+        self.assertEqual(len(policy.calls), calls_before_rejections)
 
     def test_concurrent_service_and_webhook_plans_keep_tls_isolated(self):
         def resolve(host, port, *_args, **_kwargs):
@@ -314,6 +373,59 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertIn(b'200', response)
         self.assertEqual(origin.records[0]['host'], f'service.local:{origin.port}')
         self.assertEqual(proxy.active_relays, 0)
+
+    def test_proxy_rejects_unsafe_methods_before_planning_or_opening_an_origin(self):
+        class Policy:
+            calls = []
+
+            def plan(self, *_args):
+                self.calls.append(_args)
+                raise AssertionError('unsafe request must not be planned')
+
+        with PolicyProxy(Policy()) as proxy:
+            for method in ('POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'UNKNOWN'):
+                with self.subTest(method=method), socket.create_connection(proxy.address, timeout=1) as client:
+                    client.sendall(
+                        f'{method} http://service.local:8123/mutate HTTP/1.1\r\n'
+                        'Host: service.local:8123\r\nContent-Length: 7\r\nConnection: close\r\n\r\nmutated'.encode(),
+                    )
+                    response = client.recv(4096)
+                    self.assertIn(b'405 Method Not Allowed', response)
+                    self.assertIn(b'Allow: GET, HEAD', response)
+
+        self.assertEqual(Policy.calls, [])
+
+    def test_hostile_chromium_preview_cannot_mutate_second_allowed_origin(self):
+        with _LocalOrigin() as preview_origin, _LocalOrigin() as mutation_origin, _LocalOrigin(tls=True) as tls_origin, sync_playwright() as playwright:
+            hostile_page = (
+                '<html><body><img src="/subresource.js"><iframe name="mutation-target"></iframe>'
+                f'<form action="http://service.local:{mutation_origin.port}/form" method="POST" target="mutation-target">'
+                '<input name="unsafe" value="1"></form><script>'
+                'document.forms[0].submit();'
+                f'for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {{ fetch("http://service.local:{mutation_origin.port}/fetch", {{method}}).catch(() => {{}}); }}'
+                f'fetch("https://service.local:{tls_origin.port}/unsafe", {{method: "POST"}}).catch(() => {{}});'
+                '</script></body></html>'
+            ).encode()
+            preview_origin.server.page_body = hostile_page
+            policy = OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1'))
+            browser = playwright.chromium.launch()
+            try:
+                with browser_proxy_context(
+                        browser,
+                        policy,
+                        ignore_https_errors=True,
+                ) as context:
+                    context.route('**/*', lambda route: route_browser_request(
+                        policy, route,
+                    ))
+                    page = context.new_page()
+                    page.goto(f'http://service.local:{preview_origin.port}/page', wait_until='networkidle')
+            finally:
+                browser.close()
+
+        self.assertIn('/subresource.js', [entry['path'] for entry in preview_origin.records])
+        self.assertEqual(mutation_origin.records, [])
+        self.assertEqual(tls_origin.records, [])
 
     def test_chromium_main_frame_and_subresource_use_loopback_policy_proxy(self):
         with _LocalOrigin() as origin, sync_playwright() as playwright:
