@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 01
-current_phase_name: Behavioral Safety & Runtime Ownership
-status: ready_to_execute
-stopped_at: Phase 1 gap-closure plans 01-15 through 01-17 verified and ready to execute
-last_updated: "2026-08-01T07:54:31Z"
+current_phase_name: behavioral-safety-runtime-ownership
+status: executing
+stopped_at: Completed 01-15-PLAN.md
+last_updated: "2026-08-01T08:56:20.920Z"
 last_activity: 2026-08-01
-last_activity_desc: Phase 01 gap-closure plans 01-15 through 01-17 verified and ready to execute.
+last_activity_desc: Phase 01 execution started
 progress:
-  total_phases: 6
+  total_phases: 1
   completed_phases: 0
   total_plans: 17
-  completed_plans: 14
+  completed_plans: 15
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-24)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 01 — Behavioral Safety & Runtime Ownership
+**Current focus:** Phase 01 — behavioral-safety-runtime-ownership
 
 ## Current Position
 
-Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
-Plan: 14 of 17 executed; 3 verified gap-closure plans ready
+Phase: 01 (behavioral-safety-runtime-ownership) — EXECUTING
+Plan: 2 of 17
 Status: Ready to execute
-Last activity: 2026-08-01 — Phase 01 gap-closure plans 01-15 through 01-17 verified and ready to execute.
+Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [████████░░] 82%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -72,6 +72,7 @@ Progress: [████████░░] 82%
 | Phase 01 P12 | 14min | 3 tasks | 8 files |
 | Phase 01 P13 | 9min | 3 tasks | 8 files |
 | Phase 01 P14 | 12m | 2 tasks | 4 files |
+| Phase 01 P15 | 19m | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -115,6 +116,7 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: dashboard.app reads its runtime integer constants from one validated Settings instance and rejects malformed metadata before processing.
 - [Phase ?]: Recovery-required and stale-worker warnings remain independently visible in the locked safety-warning cluster.
 - [Phase ?]: Narrow dashboard actions use 44px touch targets while scan status text truncates rather than overflowing.
+- [Phase ?]: CLI restore selectors resolve only through the validated marker-bound catalog ID.
 
 ### Pending Todos
 
@@ -134,6 +136,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T07:54:31Z
-Stopped at: Phase 1 gap-closure plans 01-15 through 01-17 verified and ready to execute
-Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-15-PLAN.md
+Last session: 2026-08-01T08:56:20.912Z
+Stopped at: Completed 01-15-PLAN.md
+Resume file: None
