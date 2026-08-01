@@ -1843,6 +1843,18 @@ def api_service_meta(port):
     for field in {'display_name', 'url', 'path', 'tags', 'healthy_statuses'}:
         if field in payload and not isinstance(payload[field], str):
             return jsonify({'error': f'{field} must be a string'}), 400
+    if 'critical' in payload and type(payload['critical']) is not bool:
+        return jsonify({'error': 'critical must be a boolean'}), 400
+    if (
+        'pinned_order' in payload
+        and (
+            type(payload['pinned_order']) is not int
+            or not 0 <= payload['pinned_order'] <= 65535
+        )
+    ):
+        return jsonify({
+            'error': 'pinned_order must be an integer between 0 and 65535',
+        }), 400
 
     next_url = None
     with _db_lock:
@@ -1862,12 +1874,8 @@ def api_service_meta(port):
         }
 
         next_display_name = current['display_name'] if 'display_name' not in payload else (payload.get('display_name') or '').strip()
-        next_critical = int(bool(current['critical'])) if 'critical' not in payload else int(bool(payload.get('critical')))
-        try:
-            next_pinned_order = int(current['pinned_order']) if 'pinned_order' not in payload else int(payload.get('pinned_order'))
-        except (TypeError, ValueError):
-            conn.close()
-            return jsonify({"error": "pinned_order must be an integer"}), 400
+        next_critical = int(bool(current['critical'])) if 'critical' not in payload else int(payload['critical'])
+        next_pinned_order = current['pinned_order'] if 'pinned_order' not in payload else payload['pinned_order']
         next_tags = current['tags'] if 'tags' not in payload else _tags_to_db(payload.get('tags'))
         try:
             _, next_healthy_statuses = _parse_healthy_statuses(
