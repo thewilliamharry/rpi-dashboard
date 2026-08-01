@@ -19,13 +19,12 @@ class SecurityAndScanningTests(unittest.TestCase):
         cleanup_db(self.db_path)
 
     def test_probe_blocks_offhost_redirect_for_loopback_mode(self):
-        original_get = self.appmod.requests.get
+        class Transport:
+            def request(self, *_args, **_kwargs):
+                return FakeResponse(status_code=302, headers={'Location': 'http://example.com/'}), None
 
-        def fake_get(url, timeout, verify, allow_redirects):
-            _ = (url, timeout, verify, allow_redirects)
-            return FakeResponse(status_code=302, headers={'Location': 'http://example.com/'})
-
-        self.appmod.requests.get = fake_get
+        original_transport = self.appmod._outbound_transport
+        self.appmod._outbound_transport = lambda: Transport()
         try:
             ok, latency, error_class, _ = self.appmod._probe_http(
                 'http://127.0.0.1:3001',
@@ -33,20 +32,19 @@ class SecurityAndScanningTests(unittest.TestCase):
                 allow_remote=False,
             )
         finally:
-            self.appmod.requests.get = original_get
+            self.appmod._outbound_transport = original_transport
 
         self.assertFalse(ok)
         self.assertIsNotNone(latency)
         self.assertEqual(error_class, 'redirect_offhost')
 
     def test_probe_rejects_offhost_redirect_even_with_legacy_flag(self):
-        original_get = self.appmod.requests.get
+        class Transport:
+            def request(self, *_args, **_kwargs):
+                return FakeResponse(status_code=302, headers={'Location': 'http://example.com/'}), None
 
-        def fake_get(url, timeout, verify, allow_redirects):
-            _ = (url, timeout, verify, allow_redirects)
-            return FakeResponse(status_code=302, headers={'Location': 'http://example.com/'})
-
-        self.appmod.requests.get = fake_get
+        original_transport = self.appmod._outbound_transport
+        self.appmod._outbound_transport = lambda: Transport()
         try:
             ok, _, error_class, resp = self.appmod._probe_http(
                 'http://127.0.0.1:3001',
@@ -54,11 +52,17 @@ class SecurityAndScanningTests(unittest.TestCase):
                 allow_remote=True,
             )
         finally:
-            self.appmod.requests.get = original_get
+            self.appmod._outbound_transport = original_transport
 
         self.assertFalse(ok)
         self.assertEqual(error_class, 'redirect_offhost')
         self.assertEqual(resp.status_code, 302)
+
+    def test_preview_errors_are_stable_and_do_not_reflect_destination_details(self):
+        error = self.appmod._thumb_error(RuntimeError('connect 192.168.1.45:8443 failed'))
+
+        self.assertEqual(error, 'preview_error')
+        self.assertNotIn('192.168.1.45', error)
 
     def test_metadata_mutation_runs_policy_before_persistence(self):
         now = int(time.time())

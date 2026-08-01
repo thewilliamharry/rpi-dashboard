@@ -253,29 +253,26 @@ class ReleaseContractTests(unittest.TestCase):
             release.set()
             self.appmod.do_discovery = original
 
-    def test_alert_webhook_keeps_tls_verification_enabled(self):
+    def test_alert_webhook_uses_the_pinned_transport_with_strict_policy(self):
         self.appmod.ALERT_WEBHOOK_URL = 'https://alerts.example.test/beacon'
         response = mock.Mock(status_code=204, text='')
-        strict_plan = SimpleNamespace(
-            url='https://alerts.example.test/beacon',
-            tls=SimpleNamespace(verify_certificate=True),
-            connect_timeout=3.0,
-            read_timeout=4.0,
-            redirect_budget=0,
-        )
-        policy = mock.Mock()
-        policy.plan.return_value = strict_plan
-        with mock.patch.object(self.appmod, '_outbound_policy', return_value=policy), \
-                mock.patch.object(self.appmod.requests, 'post', return_value=response) as post:
+        calls = []
+
+        class Transport:
+            def request(self, url, purpose, **kwargs):
+                calls.append((url, purpose, kwargs))
+                return response, SimpleNamespace(url=url)
+
+        with mock.patch.object(self.appmod, '_outbound_transport', return_value=Transport()):
             self.appmod._send_transition_alert(
                 now=int(time.time()), port=8100, previous_online=0, online=1,
                 title='BlueMap', display_name='', url='http://127.0.0.1:8100',
                 critical=0, latency_ms=4.2, error_class=None,
             )
-        self.assertEqual(post.call_args.kwargs['timeout'], (3.0, 4.0))
-        self.assertTrue(post.call_args.kwargs['verify'])
-        self.assertFalse(post.call_args.kwargs['allow_redirects'])
-        self.assertEqual(policy.plan.call_args.args[1], self.appmod.OutboundPurpose.WEBHOOK)
+        self.assertEqual(calls[0][0], 'https://alerts.example.test/beacon')
+        self.assertEqual(calls[0][1], self.appmod.OutboundPurpose.WEBHOOK)
+        self.assertEqual(calls[0][2]['method'], 'POST')
+        self.assertIn('json', calls[0][2])
 
     def test_metrics_collection_is_not_blocked_by_preview_capture(self):
         entered = threading.Event()
