@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Executing Phase 1 gap-closure plan 01-09
-last_updated: "2026-08-01T06:01:48.022Z"
+stopped_at: Completed 01-09-PLAN.md
+last_updated: "2026-08-01T06:08:27.764Z"
 last_activity: 2026-08-01
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 14
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 9 of 14
-Status: Executing Phase 01
+Plan: 10 of 14
+Status: Ready to execute
 Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██████░░░░] 64%
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P05 | 6min | 2 tasks | 5 files |
 | Phase 01 P06 | 31min | 3 tasks | 9 files |
 | Phase 01-behavioral-safety-runtime-ownership P08 | 14min | 2 tasks | 6 files |
+| Phase 01 P09 | 16min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Metadata persistence and latest preview enqueue share one transaction, and preview completion must match both its lease and current revision.
 - [Phase ?]: Safety warnings use one static cluster in connection, worker, recovery order.
 - [Phase ?]: TLS posture remains separate from availability and uptime in every service card.
+- [Phase ?]: Every ordinary Beacon SQLite connection keeps a shared sibling-lock lease until close.
+- [Phase ?]: Schema upgrades acquire the shared upgrade lock before exclusive database maintenance.
 
 ### Pending Todos
 
@@ -112,6 +115,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T05:57:17Z
-Stopped at: Phase 1 gap-closure plans 01-09 through 01-14 verified and ready to execute
-Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-09-PLAN.md
+Last session: 2026-08-01T06:08:27.756Z
+Stopped at: Completed 01-09-PLAN.md
+Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-10-PLAN.md
