@@ -8,6 +8,7 @@ import time
 
 
 MAINTENANCE_LOCK_NAME = '.beacon-maintenance.lock'
+UPGRADE_LOCK_NAME = '.beacon-upgrade.lock'
 
 
 class MaintenanceBusy(RuntimeError):
@@ -45,6 +46,11 @@ def _db_path(settings_or_path):
 def maintenance_lock_path(settings_or_path):
     """Return the sibling lock file independent of the database inode."""
     return Path(_db_path(settings_or_path)).parent / MAINTENANCE_LOCK_NAME
+
+
+def upgrade_lock_path(settings_or_path):
+    """Return the shared first lock for upgrade and recovery operations."""
+    return Path(_db_path(settings_or_path)).parent / UPGRADE_LOCK_NAME
 
 
 def _acquire_lock(lock_path, mode, timeout_seconds):

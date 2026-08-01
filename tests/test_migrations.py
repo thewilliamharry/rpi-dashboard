@@ -198,8 +198,9 @@ class MigrationTests(unittest.TestCase):
 
     def test_migration_source_declares_upgrade_then_maintenance_lock_order(self):
         source = Path('dashboard/beacon/migrations.py').read_text(encoding='utf-8')
-        upgrade = source.index('fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX')
-        maintenance = source.index('exclusive_database_maintenance')
+        migration_body = source[source.index('def run_migrations'):]
+        upgrade = migration_body.index('fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX')
+        maintenance = migration_body.index('exclusive_database_maintenance')
         self.assertLess(upgrade, maintenance)
 
 

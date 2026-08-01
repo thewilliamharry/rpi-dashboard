@@ -11,11 +11,17 @@ import time
 from typing import Callable
 from uuid import uuid4
 
+from .db import (
+    MaintenanceBusy,
+    UPGRADE_LOCK_NAME,
+    exclusive_database_maintenance,
+    upgrade_lock_path,
+)
 from .inventory import collect_inventory, classify_schema
 
 
 BACKUP_RETENTION = 3
-LOCK_NAME = '.beacon-upgrade.lock'
+LOCK_NAME = UPGRADE_LOCK_NAME
 RECOVERY_MARKER = 'recovery-required.json'
 SUPPORT_FLOOR_PATH = Path(__file__).with_name('support_floor.json')
 
@@ -287,9 +293,10 @@ def _is_empty_database(database):
 
 def run_migrations(settings, *, clock=time.time, lock_timeout_seconds=30):
     """Upgrade a supported database while holding the process-wide upgrade lock."""
-    database, _, lock_path, marker_path = _storage_paths(
+    database, _, _, marker_path = _storage_paths(
         getattr(settings, 'db_path', settings)
     )
+    lock_path = upgrade_lock_path(database)
     database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path.touch(mode=0o600, exist_ok=True)
     deadline = time.monotonic() + lock_timeout_seconds
@@ -303,55 +310,60 @@ def run_migrations(settings, *, clock=time.time, lock_timeout_seconds=30):
                     raise MigrationPreparationError('migration lock timeout')
                 time.sleep(0.05)
         try:
-            new_database = _is_empty_database(database)
-            if new_database:
-                sqlite3.connect(database).close()
-                version = 0
-            else:
-                version = _recorded_version(database)
-                if version < MIGRATIONS[-1].version:
-                    fingerprint = classify_schema(collect_inventory(database))
-                    floor_entry = _support_floor().get(fingerprint)
-                    if not floor_entry:
-                        raise UnsupportedSchemaError('unsupported Beacon database schema')
-                    # Sanitized fixtures intentionally contain no operational migration
-                    # rows.  The evidence-backed floor supplies the compatible starting
-                    # point only after an exact structural fingerprint match.
-                    version = max(version, floor_entry['minimum_schema_version'])
-            pending = tuple(migration for migration in MIGRATIONS if migration.version > version)
-            if not pending:
-                marker_path.unlink(missing_ok=True)
-                return MigrationResult((), ())
-            applied = []
-            backups = []
-            for migration in pending:
-                backup = None
-                try:
-                    if migration.schema_changing and not new_database:
-                        backup = create_verified_backup(database, target_version=migration.version, clock=clock)
-                        backups.append(backup)
-                    with sqlite3.connect(database, timeout=30) as conn:
-                        conn.execute('PRAGMA foreign_keys=ON')
-                        conn.execute('BEGIN IMMEDIATE')
-                        migration.apply(conn)
-                        conn.execute(
-                            'INSERT INTO schema_migrations(version, applied_ts) VALUES(?, ?)',
-                            (migration.version, int(clock())),
+            # Every operation which can inspect, create, alter, back up, or mark the
+            # database runs only after the fixed upgrade -> maintenance lock order.
+            with exclusive_database_maintenance(database, lock_timeout_seconds):
+                new_database = _is_empty_database(database)
+                if new_database:
+                    sqlite3.connect(database).close()
+                    version = 0
+                else:
+                    version = _recorded_version(database)
+                    if version < MIGRATIONS[-1].version:
+                        fingerprint = classify_schema(collect_inventory(database))
+                        floor_entry = _support_floor().get(fingerprint)
+                        if not floor_entry:
+                            raise UnsupportedSchemaError('unsupported Beacon database schema')
+                        # Sanitized fixtures intentionally contain no operational migration
+                        # rows.  The evidence-backed floor supplies the compatible starting
+                        # point only after an exact structural fingerprint match.
+                        version = max(version, floor_entry['minimum_schema_version'])
+                pending = tuple(migration for migration in MIGRATIONS if migration.version > version)
+                if not pending:
+                    marker_path.unlink(missing_ok=True)
+                    return MigrationResult((), ())
+                applied = []
+                backups = []
+                for migration in pending:
+                    backup = None
+                    try:
+                        if migration.schema_changing and not new_database:
+                            backup = create_verified_backup(database, target_version=migration.version, clock=clock)
+                            backups.append(backup)
+                        with sqlite3.connect(database, timeout=30) as conn:
+                            conn.execute('PRAGMA foreign_keys=ON')
+                            conn.execute('BEGIN IMMEDIATE')
+                            migration.apply(conn)
+                            conn.execute(
+                                'INSERT INTO schema_migrations(version, applied_ts) VALUES(?, ?)',
+                                (migration.version, int(clock())),
+                            )
+                            conn.commit()
+                        applied.append(migration.version)
+                        new_database = False
+                    except Exception as exc:
+                        _write_recovery_marker(
+                            marker_path,
+                            target_version=migration.version,
+                            reason_class=type(exc).__name__,
+                            backup=backup,
                         )
-                        conn.commit()
-                    applied.append(migration.version)
-                    new_database = False
-                except Exception as exc:
-                    _write_recovery_marker(
-                        marker_path,
-                        target_version=migration.version,
-                        reason_class=type(exc).__name__,
-                        backup=backup,
-                    )
-                    if isinstance(exc, (UnsupportedSchemaError, MigrationPreparationError)):
-                        raise
-                    raise MigrationPreparationError('migration preparation failed') from exc
-            marker_path.unlink(missing_ok=True)
-            return MigrationResult(tuple(applied), tuple(backups))
+                        if isinstance(exc, (UnsupportedSchemaError, MigrationPreparationError)):
+                            raise
+                        raise MigrationPreparationError('migration preparation failed') from exc
+                marker_path.unlink(missing_ok=True)
+                return MigrationResult(tuple(applied), tuple(backups))
+        except MaintenanceBusy as exc:
+            raise MigrationPreparationError('migration maintenance lock timeout') from exc
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
