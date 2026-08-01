@@ -58,6 +58,17 @@ class RuntimeOwnershipTests(unittest.TestCase):
         recover.assert_not_called()
         heartbeat.assert_not_called()
 
+    def test_worker_shim_constructs_and_injects_legacy_operations(self):
+        """Only the executable shim may join compatibility code to the package."""
+        sys.modules.pop('dashboard.worker', None)
+        worker = importlib.import_module('dashboard.worker')
+
+        operations = worker.build_worker_operations()
+
+        self.assertIs(operations.recover_worker_state, worker.beacon.recover_worker_state)
+        self.assertIs(operations.process_preview_requests, worker.beacon.process_preview_requests)
+        self.assertIs(operations.acquire_worker_lease, queues.acquire_worker_lease)
+
     def test_stale_heartbeat_is_reported_without_unhealthy_web_process(self):
         now = 10_000
         self.appmod.update_worker_heartbeat(now=now - self.appmod.WORKER_READY_SECONDS - 1)
