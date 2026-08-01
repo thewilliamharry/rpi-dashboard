@@ -1,6 +1,7 @@
+import inspect
+import json
 import time
 import unittest
-import inspect
 
 from tests.helpers import cleanup_db, load_app
 
@@ -223,6 +224,33 @@ class ApiAndAuthTests(unittest.TestCase):
             g = self.client.get('/api/service-meta/8080')
             self.assertEqual(g.status_code, 200)
             self.assertEqual(g.get_json()['path'], expected)
+
+    def test_service_metadata_rejects_scalar_json_and_invalid_string_fields(self):
+        self._insert_service()
+        for body in ([], 'text', 7, 1.5, True, None):
+            with self.subTest(body=body):
+                response = self.client.put(
+                    '/api/service-meta/8080',
+                    data=json.dumps(body),
+                    content_type='application/json',
+                    headers=self.ui_headers,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.is_json)
+                self.assertIn('error', response.get_json())
+
+        invalid_values = ([], {}, 7, True, None)
+        for field in ('display_name', 'url', 'path', 'tags', 'healthy_statuses'):
+            for value in invalid_values:
+                with self.subTest(field=field, value=value):
+                    response = self.client.put(
+                        '/api/service-meta/8080',
+                        json={field: value},
+                        headers=self.ui_headers,
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertTrue(response.is_json)
+                    self.assertIn('error', response.get_json())
 
     def test_repository_metadata_upsert_is_transactional_and_flask_free(self):
         """The web adapter owns validation while the repository owns SQL only."""

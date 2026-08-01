@@ -45,6 +45,51 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertIn('imported', result.stdout)
         self.assertFalse(sentinel.exists())
 
+    def test_malformed_integer_environment_uses_settings_defaults_without_import_crash(self):
+        project_root = Path(__file__).resolve().parents[1]
+        defaults = {
+            'EXPIRE_DAYS': 7,
+            'THUMB_REFRESH_DAYS': 1,
+            'METRIC_SAMPLE_SECONDS': 5,
+            'METRIC_HISTORY_SECONDS': 60,
+            'WORKER_READY_SECONDS': 20,
+            'DISCOVERY_TIMEOUT_SECONDS': 180,
+            'TRIGGER_SCAN_RATE_LIMIT': 4,
+            'TRIGGER_SCAN_WINDOW_SECONDS': 60,
+            'ALERT_COOLDOWN_SECONDS': 300,
+        }
+        for key, default in defaults.items():
+            for value in ('not-an-int', '', '0', '-1'):
+                with self.subTest(key=key, value=value):
+                    env = os.environ.copy()
+                    env.update({'PYTHONPATH': str(project_root / 'dashboard'), key: value})
+                    result = subprocess.run(
+                        [sys.executable, '-c', f'import app; print(app.{key})'],
+                        cwd=project_root,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn('Traceback', result.stderr)
+                    self.assertEqual(result.stdout.strip(), str(default))
+
+        for key in defaults:
+            with self.subTest(key=key, value='42'):
+                env = os.environ.copy()
+                env.update({'PYTHONPATH': str(project_root / 'dashboard'), key: '42'})
+                result = subprocess.run(
+                    [sys.executable, '-c', f'import app; print(app.{key})'],
+                    cwd=project_root,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), '42')
+
     def test_worker_services_are_built_without_starting_worker_lifecycle(self):
         """Composition is pure; lifecycle work is reserved for worker_main.main."""
         operations = mock.Mock()
