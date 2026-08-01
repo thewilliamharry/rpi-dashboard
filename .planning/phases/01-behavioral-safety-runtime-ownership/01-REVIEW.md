@@ -1,10 +1,9 @@
 ---
 phase: 01-behavioral-safety-runtime-ownership
-reviewed: 2026-08-01T07:22:28Z
+reviewed: 2026-08-01T09:17:32Z
 depth: standard
 files_reviewed: 29
 files_reviewed_list:
-  - README.md
   - dashboard/app.js
   - dashboard/app.py
   - dashboard/beacon/config.py
@@ -34,62 +33,59 @@ files_reviewed_list:
   - tests/test_ui_safety_integration.py
   - tests/test_ui_states.py
 findings:
-  critical: 2
-  warning: 2
+  critical: 1
+  warning: 1
   info: 0
-  total: 4
+  total: 2
 status: issues_found
 ---
 
 # Phase 01: Code Review Report
 
-**Reviewed:** 2026-08-01T07:22:28Z
+**Reviewed:** 2026-08-01T09:17:32Z
 **Depth:** standard
 **Files Reviewed:** 29
 **Status:** issues_found
 
 ## Summary
 
-The gap closures do address the previously reported mechanics: normal Beacon connections use the maintenance lease, scan work renews its lease, the worker package no longer imports the legacy app edge, malformed scalar metadata is rejected, and the requests transport pins a selected numeric address. However, recovery remains capable of destructive rollback outside a recovery state, and the Chromium proxy allows preview content to issue state-changing requests to every policy-approved LAN service. The existing tests do not exercise either boundary.
+Reviewed the Phase 1 application, worker, persistence/recovery, outbound-policy, browser-preview, UI, TLS fixture, and test changes. Marker validation and queue terminal transitions are carefully guarded, and the metadata endpoint rejects non-exact JSON primitive types. However, the browser-preview egress boundary is still bypassable through an encrypted tunnel, and worker ownership is not released for ordinary scheduler exits or failures after acquisition.
 
 ## Critical Issues
 
-### CR-01: Recovery command can silently roll a healthy database back to an old snapshot
+### CR-01: BLOCKER — HTTPS browser tunnels bypass GET/HEAD-only enforcement
 
-**File:** `/Users/william/Documents/devproj/rpi-dashboard/dashboard/beacon/recovery.py:266`
+**File:** `dashboard/beacon/outbound.py:293`
+**Issue:** `CONNECT` is unconditionally accepted and then handed to the bidirectional opaque relay at lines 297–303 and 448–480. A hostile HTTPS preview can open a `wss://` WebSocket (the upgrade begins as an allowed `GET`) and send arbitrary state-changing WebSocket frames after the tunnel is established. Neither `route_browser_request()` nor the proxy can inspect or block those frames, so the claimed GET/HEAD-only browser boundary does not hold for allowed HTTPS services.
 
-**Issue:** `restore_backup()` accepts any catalog entry and overwrites `dashboard.db` even when `recovery-required.json` is absent. The CLI exposes this through both `restore --latest` and `restore --id` (lines 347-363). Thus an accidental or automated invocation against a healthy deployment replaces current services, metadata, monitoring history, and queues with an older pre-migration backup. The function writes and later removes a marker (lines 305 and 322), but never requires a pre-existing failure marker before the destructive operation.
-
-**Fix:** Require and validate the existing recovery marker before selecting/copying a backup; ensure its catalog ID matches the requested backup (or make `--latest` resolve only the marker's catalog ID). Return a safe refusal when recovery is not required, and add a test that a healthy database is byte-for-byte unchanged when restore is invoked without the marker.
-
-### CR-02: Preview pages can use the browser proxy to mutate other allowed services
-
-**File:** `/Users/william/Documents/devproj/rpi-dashboard/dashboard/beacon/outbound.py:294`
-
-**Issue:** The proxy accepts the browser-supplied HTTP method, then forwards it and the request body unchanged to any `BROWSER_PREVIEW` target (lines 294-299). `route_browser_request()` only validates URL policy and then continues every method (lines 71-79 in `previews.py`). A compromised or hostile page being screenshotted can therefore use a form, fetch, or navigation to send `POST`, `PUT`, `PATCH`, or `DELETE` requests to other configured/LAN-approved services. The product requirement limits outbound fetching and mutation boundaries; a screenshot needs safe retrieval, not the authority to cause state changes on monitored services.
-
-**Fix:** Reject non-safe browser requests before they reach the proxy, e.g. permit only `GET` and `HEAD` in `route_browser_request` and return a 405 from the plain-HTTP proxy for other methods. For HTTPS CONNECT tunnels, enforce the same method policy in the Playwright route callback before allowing the tunnel. Add browser tests proving an HTML form/fetch POST to a second allowed origin never reaches that origin.
+**Fix:** Treat WebSockets and other long-lived upgraded/tunnel protocols as disallowed in the preview context. For example, disable JavaScript for untrusted preview pages if static rendering is acceptable, or add a Chromium/CDP request policy that rejects WebSocket creation before `CONNECT` is opened; retain a proxy-side restriction that only permits the narrowly required HTTPS navigation flow. Add an integration test where an HTTPS preview page attempts `new WebSocket(...)` and verify the target receives no mutation frame.
 
 ## Warnings
 
-### WR-01: Proxy connection slots leak when forwarding fails before relay setup
+### WR-01: WARNING — Worker lease is leaked on normal scheduler exit and startup failures
 
-**File:** `/Users/william/Documents/devproj/rpi-dashboard/dashboard/beacon/outbound.py:294`
+**File:** `dashboard/beacon/worker_main.py:210-235`
+**Issue:** The worker acquires its durable lease at line 211, but the `finally` block only shuts down Chromium. It does not release the lease. Any exception after acquisition (for example recovery, initial metrics, scheduler construction, or signal setup) and any scheduler exit not routed through `stop_worker()` leaves `worker_owner` valid until it expires. A replacement process started in that interval refuses to schedule monitoring, unnecessarily extending an outage.
 
-**Issue:** `_connect()` acquires one of four semaphore slots and returns an open origin socket (lines 400-411). In both the CONNECT branch and ordinary HTTP branch, an exception from `client.sendall()`, `_format_headers()`, or `origin.sendall()` is caught by `handle()` (line 300) before `_relay()` is entered. Only `_relay()` closes the origin and releases the slot (lines 439-445). Four client disconnects or refused writes at that point permanently exhaust the per-preview proxy until the process restarts, preventing all later previews.
+**Fix:** Put lease release in the `finally` block immediately around the post-acquisition lifecycle, guarded by a `lease_acquired` flag and swallowing only `LeaseLost`. Also clear the active-worker globals there so a controlled in-process restart is possible.
 
-**Fix:** Make `_connect()` a context-managed resource or close/release `origin` in `handle()` whenever ownership has not moved to `_relay()`. Add failure-injection tests for each send path asserting `active_relays == 0` and that all four slots remain reusable.
-
-### WR-02: Metadata booleans are coerced instead of validated
-
-**File:** `/Users/william/Documents/devproj/rpi-dashboard/dashboard/app.py:1864`
-
-**Issue:** The endpoint validates string fields but never validates `critical`; it stores `int(bool(payload.get('critical')))`. Consequently JSON such as `{"critical": "false"}`, `{"critical": []}`, or `{"critical": 2}` is accepted and coerced, with the non-empty string and non-zero number incorrectly making a service critical. `pinned_order` similarly accepts JSON booleans because `int(True)` is valid (line 1867). This leaves the mutation contract ambiguous and can alter alert behaviour contrary to the caller's request.
-
-**Fix:** Require `type(payload['critical']) is bool` when present, and reject booleans explicitly before parsing `pinned_order` (then apply an appropriate integer range). Extend `test_service_metadata_rejects_scalar_json_and_invalid_string_fields` with invalid `critical` and `pinned_order` values.
+```python
+lease_acquired = False
+try:
+    services.acquire_worker_lease(services.settings.db_path, worker_id)
+    lease_acquired = True
+    # recovery, initial jobs, and scheduler lifecycle
+finally:
+    services.shutdown_browser()
+    if lease_acquired:
+        try:
+            services.release_worker_lease(services.settings.db_path, worker_id)
+        except queues.LeaseLost:
+            pass
+```
 
 ---
 
-_Reviewed: 2026-08-01T07:22:28Z_
+_Reviewed: 2026-08-01T09:17:32Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_
