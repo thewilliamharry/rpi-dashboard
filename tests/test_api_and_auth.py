@@ -252,6 +252,99 @@ class ApiAndAuthTests(unittest.TestCase):
                     self.assertTrue(response.is_json)
                     self.assertIn('error', response.get_json())
 
+    def _metadata_durable_snapshot(self, port=8080):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            metadata = conn.execute(
+                "SELECT * FROM service_meta WHERE port=?", (port,)
+            ).fetchall()
+            previews = conn.execute(
+                "SELECT * FROM preview_requests WHERE port=? ORDER BY id", (port,)
+            ).fetchall()
+            events = conn.execute(
+                "SELECT * FROM events WHERE port=? ORDER BY id", (port,)
+            ).fetchall()
+            conn.close()
+        return {
+            'metadata': [dict(row) for row in metadata],
+            'previews': [dict(row) for row in previews],
+            'events': [dict(row) for row in events],
+        }
+
+    def test_service_metadata_rejects_critical_and_pinned_order_without_side_effects(self):
+        self._insert_service()
+        baseline = self.client.put(
+            '/api/service-meta/8080',
+            json={'display_name': 'Baseline Demo', 'critical': False, 'pinned_order': 17},
+            headers=self.ui_headers,
+        )
+        self.assertEqual(baseline.status_code, 200)
+        baseline_metadata = self.client.get('/api/service-meta/8080').get_json()
+
+        invalid_cases = [
+            ('critical', None, 'critical must be a boolean'),
+            ('critical', 'true', 'critical must be a boolean'),
+            ('critical', 'false', 'critical must be a boolean'),
+            ('critical', 0, 'critical must be a boolean'),
+            ('critical', 1, 'critical must be a boolean'),
+            ('critical', 1.5, 'critical must be a boolean'),
+            ('critical', [], 'critical must be a boolean'),
+            ('critical', {}, 'critical must be a boolean'),
+            ('pinned_order', None, 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', True, 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', False, 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', '17', 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', 17.0, 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', 17.5, 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', [], 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', {}, 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', -1, 'pinned_order must be an integer between 0 and 65535'),
+            ('pinned_order', 65536, 'pinned_order must be an integer between 0 and 65535'),
+        ]
+        for field, value, expected_error in invalid_cases:
+            with self.subTest(field=field, value=value):
+                before = self._metadata_durable_snapshot()
+                response = self.client.put(
+                    '/api/service-meta/8080',
+                    json={field: value},
+                    headers=self.ui_headers,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json(), {'error': expected_error})
+                self.assertEqual(self._metadata_durable_snapshot(), before)
+                self.assertEqual(
+                    self.client.get('/api/service-meta/8080').get_json(),
+                    baseline_metadata,
+                )
+
+        for critical, expected in ((True, True), (False, False)):
+            with self.subTest(critical=critical):
+                response = self.client.put(
+                    '/api/service-meta/8080',
+                    json={'critical': critical},
+                    headers=self.ui_headers,
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertIs(response.get_json()['critical'], expected)
+
+        for pinned_order in (0, 65535):
+            with self.subTest(pinned_order=pinned_order):
+                response = self.client.put(
+                    '/api/service-meta/8080',
+                    json={'pinned_order': pinned_order},
+                    headers=self.ui_headers,
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()['pinned_order'], pinned_order)
+
+        response = self.client.put(
+            '/api/service-meta/8080',
+            json={'display_name': 'Pinned Order Retained'},
+            headers=self.ui_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['pinned_order'], 65535)
+
     def test_repository_metadata_upsert_is_transactional_and_flask_free(self):
         """The web adapter owns validation while the repository owns SQL only."""
         from dashboard.beacon import db, repositories
