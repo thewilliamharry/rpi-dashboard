@@ -19,6 +19,14 @@ from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.util import Timeout
 
 
+RETRIEVAL_METHODS = frozenset({'GET', 'HEAD'})
+
+
+def is_retrieval_method(method):
+    """Return whether an untrusted browser method is safe to retrieve with."""
+    return isinstance(method, str) and method.upper() in RETRIEVAL_METHODS
+
+
 class OutboundPurpose(str, Enum):
     SERVICE_PROBE = 'service_probe'
     HTML_PREVIEW = 'html_preview'
@@ -291,6 +299,10 @@ class _PolicyProxyHandler(socketserver.BaseRequestHandler):
                 self.server.proxy._relay(client, origin)
                 return
 
+            if not is_retrieval_method(method):
+                self._method_not_allowed(client)
+                return
+
             plan = self.server.proxy.policy.plan(target, OutboundPurpose.BROWSER_PREVIEW)
             origin = self.server.proxy._connect(plan)
             first_line = f'{method} {plan.path_query} {version}\r\n'.encode('ascii')
@@ -341,6 +353,16 @@ class _PolicyProxyHandler(socketserver.BaseRequestHandler):
     def _reject(client):
         try:
             client.sendall(b'HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+        except OSError:
+            pass
+
+    @staticmethod
+    def _method_not_allowed(client):
+        try:
+            client.sendall(
+                b'HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\n'
+                b'Connection: close\r\nContent-Length: 0\r\n\r\n',
+            )
         except OSError:
             pass
 

@@ -9,7 +9,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from .outbound import OutboundPolicyError, OutboundPurpose, PolicyProxy
+from .outbound import (
+    OutboundPolicyError,
+    OutboundPurpose,
+    PolicyProxy,
+    is_retrieval_method,
+)
 
 
 class ThumbnailResultRepository(Protocol):
@@ -70,6 +75,9 @@ def refresh_service_preview(operations, port, service_url):
 
 def route_browser_request(policy, route):
     """Gate every Chromium resource before its network continuation."""
+    if not is_retrieval_method(getattr(route.request, 'method', None)):
+        route.abort('blockedbyclient')
+        return False
     try:
         policy.plan(route.request.url, OutboundPurpose.BROWSER_PREVIEW)
     except OutboundPolicyError:
