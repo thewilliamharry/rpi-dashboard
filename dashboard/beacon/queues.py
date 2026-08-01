@@ -313,16 +313,35 @@ def enqueue_scan(db_path, requested_by, *, now=None):
         conn.close()
 
 
+def _recover_expired_scan_leases_in_transaction(conn, *, now):
+    """Requeue live abandoned scans and terminally expire stale requests.
+
+    The caller holds the queue's short write transaction so recovery and a
+    successor claim cannot be interleaved by another worker.
+    """
+    conn.execute(
+        'UPDATE scan_requests SET deadline_ts=requested_ts + 900 WHERE deadline_ts IS NULL'
+    )
+    conn.execute(
+        "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, "
+        "lease_owner=NULL, lease_until=NULL, error='expired' "
+        "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
+        (now, now, now),
+    )
+    conn.execute(
+        "UPDATE scan_requests SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL "
+        "WHERE status='running' AND (lease_until IS NULL OR lease_until <= ?) AND deadline_ts > ?",
+        (now, now),
+    )
+
+
 def claim_scan(db_path, worker_id, *, now=None, lease_seconds=30):
     """Claim one non-expired queued scan using a conditional write transaction."""
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        conn.execute(
-            "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, error='expired' "
-            "WHERE status='queued' AND deadline_ts <= ?", (now, now, now),
-        )
+        _recover_expired_scan_leases_in_transaction(conn, now=now)
         row = conn.execute(
             "SELECT id FROM scan_requests WHERE status='queued' AND deadline_ts > ? "
             "ORDER BY requested_ts, id LIMIT 1", (now,),
@@ -430,22 +449,9 @@ def recover_queues(db_path, *, now=None):
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        conn.execute(
-            'UPDATE scan_requests SET deadline_ts=requested_ts + 900 WHERE deadline_ts IS NULL'
-        )
+        _recover_expired_scan_leases_in_transaction(conn, now=now)
         conn.execute(
             'UPDATE preview_requests SET deadline_ts=requested_ts + 1800 WHERE deadline_ts IS NULL'
-        )
-        conn.execute(
-            "UPDATE scan_requests SET status='expired', terminal_ts=?, completed_ts=?, "
-            "lease_owner=NULL, lease_until=NULL, error='expired' "
-            "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
-            (now, now, now),
-        )
-        conn.execute(
-            "UPDATE scan_requests SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL "
-            "WHERE status='running' AND (lease_until IS NULL OR lease_until <= ?) AND deadline_ts > ?",
-            (now, now),
         )
         conn.execute(
             "UPDATE preview_requests SET status='expired', terminal_ts=?, completed_ts=?, "
