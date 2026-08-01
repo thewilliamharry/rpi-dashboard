@@ -781,16 +781,17 @@ def _legacy_handle_state_transition(*, port, previous_online, online, title, dis
 
 
 def _thumb_error(exc):
-    text = str(exc).strip() or exc.__class__.__name__
-    return f"{exc.__class__.__name__}: {text}"[:240]
+    _ = exc
+    return 'preview_error'
 
 
 def _legacy_screenshot_service(port, target_url=None):
     """Capture a service screenshot using Chromium. Returns (bytes, mime, error)."""
     _screenshot_sem.acquire()
+    policy = _outbound_policy()
     try:
         navigate_url = _normalize_service_url(target_url, port) if target_url else _default_service_url(port)
-        initial_plan = _outbound_policy().plan(navigate_url, OutboundPurpose.BROWSER_PREVIEW)
+        initial_plan = policy.plan(navigate_url, OutboundPurpose.BROWSER_PREVIEW)
         navigate_url = initial_plan.url
     except OutboundPolicyError:
         return None, None, 'policy_error'
@@ -804,7 +805,6 @@ def _legacy_screenshot_service(port, target_url=None):
     try:
         browser = _get_browser()
         context_started = time.monotonic()
-        policy = _outbound_policy()
         with beacon_previews.browser_proxy_context(
                 browser,
                 policy,
@@ -843,7 +843,7 @@ def _legacy_screenshot_service(port, target_url=None):
             log.warning("Screenshot for port %d too large (%d bytes)", port, len(data))
             return None, None, f"screenshot too large ({len(data)} bytes)"
     except Exception as exc:
-        log.warning("Screenshot failed for port %d: %s", port, exc)
+        log.warning("Screenshot failed for port %d (%s)", port, exc.__class__.__name__)
         return None, None, _thumb_error(exc)
     finally:
         _screenshot_sem.release()

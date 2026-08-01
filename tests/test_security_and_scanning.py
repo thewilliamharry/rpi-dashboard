@@ -19,9 +19,13 @@ class SecurityAndScanningTests(unittest.TestCase):
         cleanup_db(self.db_path)
 
     def test_probe_blocks_offhost_redirect_for_loopback_mode(self):
+        policy_error = self.appmod.OutboundPolicyError
+
         class Transport:
             def request(self, *_args, **_kwargs):
-                return FakeResponse(status_code=302, headers={'Location': 'http://example.com/'}), None
+                error = policy_error('redirect_not_allowed')
+                error.response = FakeResponse(status_code=302, headers={'Location': 'http://example.com/'})
+                raise error
 
         original_transport = self.appmod._outbound_transport
         self.appmod._outbound_transport = lambda: Transport()
@@ -39,9 +43,13 @@ class SecurityAndScanningTests(unittest.TestCase):
         self.assertEqual(error_class, 'redirect_offhost')
 
     def test_probe_rejects_offhost_redirect_even_with_legacy_flag(self):
+        policy_error = self.appmod.OutboundPolicyError
+
         class Transport:
             def request(self, *_args, **_kwargs):
-                return FakeResponse(status_code=302, headers={'Location': 'http://example.com/'}), None
+                error = policy_error('redirect_not_allowed')
+                error.response = FakeResponse(status_code=302, headers={'Location': 'http://example.com/'})
+                raise error
 
         original_transport = self.appmod._outbound_transport
         self.appmod._outbound_transport = lambda: Transport()
