@@ -5,10 +5,11 @@ start Chromium.  The worker composition root supplies the one process-local
 preview owner and persistence collaborators when a preview job actually runs.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable
 
-from .outbound import OutboundPolicyError, OutboundPurpose
+from .outbound import OutboundPolicyError, OutboundPurpose, PolicyProxy
 
 
 @dataclass(frozen=True)
@@ -68,3 +69,14 @@ def route_browser_request(policy, route):
         return False
     route.continue_()
     return True
+
+
+@contextmanager
+def browser_proxy_context(browser, policy, **context_options):
+    """Create one Chromium context with a short-lived enforcing proxy."""
+    with PolicyProxy(policy) as proxy:
+        context = browser.new_context(proxy={'server': proxy.url}, **context_options)
+        try:
+            yield context
+        finally:
+            context.close()

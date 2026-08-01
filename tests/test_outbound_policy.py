@@ -363,4 +363,4 @@ class OutboundPolicyTests(unittest.TestCase):
             self.assertIsInstance(context, Context)
 
         self.assertEqual(calls[-1], 'close')
-        self.assertEqual(calls[0]['proxy']['server'].split(':')[0], 'http://127.0.0.1')
+        self.assertTrue(calls[0]['proxy']['server'].startswith('http://127.0.0.1:'))

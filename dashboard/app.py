@@ -804,50 +804,48 @@ def _legacy_screenshot_service(port, target_url=None):
     try:
         browser = _get_browser()
         context_started = time.monotonic()
-        context = browser.new_context(
-            viewport={'width': 1280, 'height': 800},
-            ignore_https_errors=not initial_plan.tls.verify_certificate,
-        )
-        context.route('**/*', lambda route: beacon_previews.route_browser_request(_outbound_policy(), route))
-        page = context.new_page()
-        _preview_context.timings['context_ms'] = round((time.monotonic() - context_started) * 1000, 1)
-        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-        if remaining_ms <= 0:
-            return None, None, 'preview timeout'
-        navigation_started = time.monotonic()
-        page.goto(navigate_url, timeout=min(15_000, remaining_ms), wait_until='domcontentloaded')
-        _preview_context.timings['navigation_ms'] = round((time.monotonic() - navigation_started) * 1000, 1)
-        if not _is_localhost_url(page.url):
-            return None, None, 'redirect_offhost'
-        _preview_context.page_title = (page.title() or '').strip() or None
-        # HTML probing consumes up to three seconds before capture. The browser
-        # gets 27 seconds, including a five-second post-DOM rendering window,
-        # keeping the complete preview within an approximately 30-second cap.
-        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-        if remaining_ms <= PREVIEW_SETTLE_MS:
-            return None, None, 'preview timeout'
-        settle_started = time.monotonic()
-        page.wait_for_timeout(PREVIEW_SETTLE_MS)
-        _preview_context.timings['settle_ms'] = round((time.monotonic() - settle_started) * 1000, 1)
-        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-        if remaining_ms <= 0:
-            return None, None, 'preview timeout'
-        screenshot_started = time.monotonic()
-        data = page.screenshot(type='png', timeout=remaining_ms)
-        _preview_context.timings['screenshot_ms'] = round((time.monotonic() - screenshot_started) * 1000, 1)
-        if len(data) <= THUMB_MAX_BYTES:
-            return data, 'image/png', None
-        log.warning("Screenshot for port %d too large (%d bytes)", port, len(data))
-        return None, None, f"screenshot too large ({len(data)} bytes)"
+        policy = _outbound_policy()
+        with beacon_previews.browser_proxy_context(
+                browser,
+                policy,
+                viewport={'width': 1280, 'height': 800},
+                ignore_https_errors=not initial_plan.tls.verify_certificate,
+        ) as context:
+            context.route('**/*', lambda route: beacon_previews.route_browser_request(policy, route))
+            page = context.new_page()
+            _preview_context.timings['context_ms'] = round((time.monotonic() - context_started) * 1000, 1)
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if remaining_ms <= 0:
+                return None, None, 'preview timeout'
+            navigation_started = time.monotonic()
+            page.goto(navigate_url, timeout=min(15_000, remaining_ms), wait_until='domcontentloaded')
+            _preview_context.timings['navigation_ms'] = round((time.monotonic() - navigation_started) * 1000, 1)
+            if not _is_localhost_url(page.url):
+                return None, None, 'redirect_offhost'
+            _preview_context.page_title = (page.title() or '').strip() or None
+            # HTML probing consumes up to three seconds before capture. The browser
+            # gets 27 seconds, including a five-second post-DOM rendering window,
+            # keeping the complete preview within an approximately 30-second cap.
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if remaining_ms <= PREVIEW_SETTLE_MS:
+                return None, None, 'preview timeout'
+            settle_started = time.monotonic()
+            page.wait_for_timeout(PREVIEW_SETTLE_MS)
+            _preview_context.timings['settle_ms'] = round((time.monotonic() - settle_started) * 1000, 1)
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if remaining_ms <= 0:
+                return None, None, 'preview timeout'
+            screenshot_started = time.monotonic()
+            data = page.screenshot(type='png', timeout=remaining_ms)
+            _preview_context.timings['screenshot_ms'] = round((time.monotonic() - screenshot_started) * 1000, 1)
+            if len(data) <= THUMB_MAX_BYTES:
+                return data, 'image/png', None
+            log.warning("Screenshot for port %d too large (%d bytes)", port, len(data))
+            return None, None, f"screenshot too large ({len(data)} bytes)"
     except Exception as exc:
         log.warning("Screenshot failed for port %d: %s", port, exc)
         return None, None, _thumb_error(exc)
     finally:
-        if context is not None:
-            try:
-                context.close()
-            except Exception:
-                pass
         _screenshot_sem.release()
     return None, None, "screenshot failed"
 

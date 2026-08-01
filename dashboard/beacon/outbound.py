@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from enum import Enum
 import ipaddress
 import json
+import selectors
 import socket
+import socketserver
+import threading
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
@@ -258,6 +261,188 @@ class PinnedResponse:
     @property
     def text(self):
         return self.content.decode('utf-8', errors='replace')
+
+
+class _PolicyProxyServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, address, proxy):
+        self.proxy = proxy
+        super().__init__(address, _PolicyProxyHandler)
+
+
+class _PolicyProxyHandler(socketserver.BaseRequestHandler):
+    HEADER_LIMIT = 16 * 1024
+
+    def handle(self):
+        client = self.request
+        try:
+            header, remainder = self._read_header(client)
+            method, target, version, headers = self._parse_header(header)
+            if method == 'CONNECT':
+                plan = self.server.proxy.policy.plan(
+                    f'https://{target}/', OutboundPurpose.BROWSER_PREVIEW,
+                )
+                origin = self.server.proxy._connect(plan)
+                client.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                if remainder:
+                    origin.sendall(remainder)
+                self.server.proxy._relay(client, origin)
+                return
+
+            plan = self.server.proxy.policy.plan(target, OutboundPurpose.BROWSER_PREVIEW)
+            origin = self.server.proxy._connect(plan)
+            first_line = f'{method} {plan.path_query} {version}\r\n'.encode('ascii')
+            forwarded = self._format_headers(headers, plan.authority)
+            origin.sendall(first_line + forwarded + b'\r\n' + remainder)
+            self.server.proxy._relay(client, origin)
+        except (OutboundPolicyError, ValueError, OSError, UnicodeError):
+            self._reject(client)
+
+    def _read_header(self, client):
+        client.settimeout(self.server.proxy.idle_timeout)
+        data = bytearray()
+        while b'\r\n\r\n' not in data:
+            chunk = client.recv(min(4096, self.HEADER_LIMIT - len(data)))
+            if not chunk:
+                raise ValueError('incomplete_header')
+            data.extend(chunk)
+            if len(data) >= self.HEADER_LIMIT:
+                raise ValueError('header_too_large')
+        header, remainder = bytes(data).split(b'\r\n\r\n', 1)
+        return header, remainder
+
+    @staticmethod
+    def _parse_header(header):
+        lines = header.decode('iso-8859-1').split('\r\n')
+        method, target, version = lines[0].split(' ', 2)
+        if version not in {'HTTP/1.0', 'HTTP/1.1'}:
+            raise ValueError('invalid_version')
+        headers = []
+        for line in lines[1:]:
+            if not line or ':' not in line:
+                raise ValueError('invalid_header')
+            name, value = line.split(':', 1)
+            if not name or '\n' in value or '\r' in value:
+                raise ValueError('invalid_header')
+            headers.append((name, value.strip()))
+        return method.upper(), target, version, headers
+
+    @staticmethod
+    def _format_headers(headers, authority):
+        safe = [f'Host: {authority}\r\n', 'Connection: close\r\n']
+        for name, value in headers:
+            if name.lower() not in {'host', 'connection', 'proxy-connection'}:
+                safe.append(f'{name}: {value}\r\n')
+        return ''.join(safe).encode('iso-8859-1')
+
+    @staticmethod
+    def _reject(client):
+        try:
+            client.sendall(b'HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+        except OSError:
+            pass
+
+
+class PolicyProxy:
+    """Loopback-only browser proxy that pins every origin socket to a plan."""
+
+    def __init__(self, policy, *, max_connections=4, idle_timeout=4.0):
+        self.policy = policy
+        self.max_connections = max_connections
+        self.idle_timeout = idle_timeout
+        self._server = None
+        self._thread = None
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self._active_relays = 0
+        self._active_lock = threading.Lock()
+
+    @property
+    def address(self):
+        if self._server is None:
+            raise RuntimeError('proxy is not running')
+        return self._server.server_address
+
+    @property
+    def url(self):
+        host, port = self.address
+        return f'http://{host}:{port}'
+
+    @property
+    def active_relays(self):
+        with self._active_lock:
+            return self._active_relays
+
+    def start(self):
+        if self._server is not None:
+            return self
+        self._server = _PolicyProxyServer(('127.0.0.1', 0), self)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def close(self):
+        if self._server is None:
+            return
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=self.idle_timeout + 1)
+        self._server = None
+        self._thread = None
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *_args):
+        self.close()
+
+    def _connect(self, plan):
+        if not self._slots.acquire(blocking=False):
+            raise OSError('proxy_busy')
+        try:
+            origin = socket.create_connection(
+                (plan.selected_address, plan.port), timeout=plan.connect_timeout,
+            )
+            origin.settimeout(self.idle_timeout)
+            return origin
+        except Exception:
+            self._slots.release()
+            raise
+
+    def _relay(self, client, origin):
+        with self._active_lock:
+            self._active_relays += 1
+        try:
+            client.setblocking(False)
+            origin.setblocking(False)
+            selector = selectors.DefaultSelector()
+            selector.register(client, selectors.EVENT_READ, origin)
+            selector.register(origin, selectors.EVENT_READ, client)
+            try:
+                while selector.get_map():
+                    events = selector.select(self.idle_timeout)
+                    if not events:
+                        return
+                    for key, _mask in events:
+                        source = key.fileobj
+                        destination = key.data
+                        try:
+                            chunk = source.recv(64 * 1024)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            return
+                        destination.sendall(chunk)
+            finally:
+                selector.close()
+        finally:
+            try:
+                origin.close()
+            finally:
+                self._slots.release()
+                with self._active_lock:
+                    self._active_relays -= 1
 
 
 class OutboundTransport:
