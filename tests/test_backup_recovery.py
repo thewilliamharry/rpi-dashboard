@@ -5,14 +5,17 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from shutil import copy2
 from unittest import mock
 
 from dashboard.beacon.config import Settings
+from dashboard.beacon import db
 from dashboard.beacon.migrations import create_verified_backup, run_migrations
 from dashboard.beacon.recovery import RecoveryError, list_verified_backups, restore_backup
+from tests.helpers import cleanup_db, load_app
 
 
 FIXTURE = Path(__file__).parent / 'fixtures' / 'legacy' / 'initial-2026-04.db'
@@ -174,3 +177,66 @@ class BackupRecoveryTests(unittest.TestCase):
             with sqlite3.connect(database) as conn:
                 self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
                 self.assertEqual(conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service')
+
+    def test_managed_connection_blocks_exclusive_maintenance_until_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / 'dashboard.db'
+            connection = db.connect_db(database)
+            entered = []
+            try:
+                with self.assertRaises(db.MaintenanceBusy):
+                    with db.exclusive_database_maintenance(database, timeout_seconds=0):
+                        entered.append(True)
+                self.assertEqual(entered, [])
+            finally:
+                connection.close()
+
+            with db.exclusive_database_maintenance(database, timeout_seconds=0):
+                entered.append(True)
+            self.assertEqual(entered, [True])
+
+    def test_open_flask_metadata_transaction_excludes_maintenance(self):
+        appmod, database = load_app()
+        entered_write = threading.Event()
+        release_write = threading.Event()
+        original_upsert = appmod.beacon_repositories.upsert_service_metadata
+        try:
+            with appmod._db_lock:
+                conn = appmod.get_db()
+                conn.execute(
+                    "INSERT INTO services(port, title, first_seen, last_seen, is_online) VALUES(?,?,?,?,?)",
+                    (8080, 'Demo', 1, 1, 1),
+                )
+                conn.commit()
+                conn.close()
+
+            def blocked_upsert(*args, **kwargs):
+                entered_write.set()
+                self.assertTrue(release_write.wait(2))
+                return original_upsert(*args, **kwargs)
+
+            appmod.beacon_repositories.upsert_service_metadata = blocked_upsert
+            result = {}
+
+            def submit_metadata():
+                result['response'] = appmod.app.test_client().put(
+                    '/api/service-meta/8080',
+                    json={'display_name': 'Blocked write', 'url': 'http://127.0.0.1:8080'},
+                    headers={'X-Beacon-UI': '1'},
+                )
+
+            writer = threading.Thread(target=submit_metadata)
+            writer.start()
+            self.assertTrue(entered_write.wait(2))
+            with self.assertRaises(db.MaintenanceBusy):
+                with db.exclusive_database_maintenance(database, timeout_seconds=0):
+                    self.fail('maintenance entered while metadata was uncommitted')
+            release_write.set()
+            writer.join(timeout=2)
+            self.assertFalse(writer.is_alive())
+            self.assertEqual(result['response'].status_code, 200)
+            with db.exclusive_database_maintenance(database, timeout_seconds=0):
+                pass
+        finally:
+            appmod.beacon_repositories.upsert_service_metadata = original_upsert
+            cleanup_db(database)

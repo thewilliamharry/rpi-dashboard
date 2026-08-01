@@ -39,6 +39,17 @@ class ModuleBoundaryTests(unittest.TestCase):
         self.assertIn('beacon/', dockerfile)
         self.assertIn('"app:app"', dockerfile)
 
+    def test_sqlite_connection_entrypoints_use_the_managed_database_seam(self):
+        app_source = Path('dashboard/app.py').read_text(encoding='utf-8')
+        queue_source = Path('dashboard/beacon/queues.py').read_text(encoding='utf-8')
+        db_source = Path('dashboard/beacon/db.py').read_text(encoding='utf-8')
+
+        self.assertIn('connect_db', app_source)
+        self.assertIn('connect_db', queue_source)
+        self.assertNotIn('sqlite3.connect(', app_source)
+        self.assertNotIn('sqlite3.connect(', queue_source)
+        self.assertIn('exclusive_database_maintenance', db_source)
+
 
 if __name__ == '__main__':
     unittest.main()
