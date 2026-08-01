@@ -333,6 +333,24 @@ class OutboundPolicyTests(unittest.TestCase):
         )
         self.assertTrue(all(entry['host'] == f'service.local:{origin.port}' for entry in origin.records))
 
+    def test_chromium_connect_tunnel_preserves_original_sni_at_pinned_origin(self):
+        with _LocalOrigin(tls=True) as origin, sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                with browser_proxy_context(
+                        browser,
+                        OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+                        ignore_https_errors=True,
+                ) as context:
+                    page = context.new_page()
+                    page.goto(f'https://service.local:{origin.port}/secure', wait_until='networkidle')
+            finally:
+                browser.close()
+
+        self.assertGreaterEqual(len(origin.sni_values), 1)
+        self.assertTrue(all(value == 'service.local' for value in origin.sni_values))
+        self.assertEqual(origin.records[0]['host'], f'service.local:{origin.port}')
+
     def test_connect_tunnel_uses_pinned_address_and_preserves_browser_sni(self):
         with _LocalOrigin(tls=True) as origin, PolicyProxy(
                 OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
