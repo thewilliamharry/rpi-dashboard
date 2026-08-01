@@ -240,3 +240,79 @@ class BackupRecoveryTests(unittest.TestCase):
         finally:
             appmod.beacon_repositories.upsert_service_metadata = original_upsert
             cleanup_db(database)
+
+    def test_restore_discards_retained_wal_and_shm_before_replacement(self):
+        """A WAL captured after the backup must not replay over the replacement."""
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            wal = Path(str(database) + '-wal')
+            shm = Path(str(database) + '-shm')
+            retained_wal = database.parent / 'retained-wal'
+            retained_shm = database.parent / 'retained-shm'
+            with sqlite3.connect(database) as writer:
+                self.assertEqual(writer.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+                writer.execute("UPDATE services SET title='live-wal-state'")
+                writer.commit()
+                copy2(wal, retained_wal)
+                copy2(shm, retained_shm)
+            copy2(retained_wal, wal)
+            copy2(retained_shm, shm)
+
+            restore_backup(database.parent, backup.name)
+
+            self.assertFalse(wal.exists())
+            self.assertFalse(shm.exists())
+            with sqlite3.connect(database) as conn:
+                self.assertEqual(
+                    conn.execute('SELECT title FROM services').fetchone()[0],
+                    'Sample Service',
+                )
+
+    def test_restore_refuses_busy_wal_checkpoint_before_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            with sqlite3.connect(database) as writer:
+                writer.execute('PRAGMA journal_mode=WAL')
+                writer.execute("UPDATE services SET title='newer-wal-state'")
+                writer.commit()
+                reader = sqlite3.connect(database)
+                try:
+                    reader.execute('BEGIN')
+                    reader.execute('SELECT title FROM services').fetchone()
+                    original = database.read_bytes()
+                    with self.assertRaisesRegex(RecoveryError, 'restore did not complete'):
+                        restore_backup(database.parent, backup.name)
+                    self.assertEqual(database.read_bytes(), original)
+                finally:
+                    reader.close()
+
+    def test_interruption_after_replace_leaves_verified_database_and_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            marker = database.parent / 'recovery-required.json'
+            marker.write_text('{}', encoding='utf-8')
+            original_validate = __import__(
+                'dashboard.beacon.recovery', fromlist=['_validate_supported_database'],
+            )._validate_supported_database
+            calls = []
+
+            def interrupt_after_replacement(path, catalog_id=None):
+                calls.append(Path(path))
+                if Path(path) == database and len(calls) > 1:
+                    raise OSError('interrupted after replacement')
+                return original_validate(path, catalog_id)
+
+            with mock.patch(
+                'dashboard.beacon.recovery._validate_supported_database',
+                side_effect=interrupt_after_replacement,
+            ):
+                with self.assertRaisesRegex(RecoveryError, 'restore did not complete'):
+                    restore_backup(database.parent, backup.name)
+
+            with sqlite3.connect(database) as conn:
+                self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+                self.assertEqual(
+                    conn.execute('SELECT title FROM services').fetchone()[0],
+                    'Sample Service',
+                )
+            self.assertTrue(marker.exists())
