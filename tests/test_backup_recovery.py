@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from shutil import copy2
@@ -27,6 +28,19 @@ class BackupRecoveryTests(unittest.TestCase):
         copy2(Path(__file__).parent / 'fixtures' / 'legacy' / filename, database)
         backup = create_verified_backup(database, target_version=1)
         return database, backup
+
+    def _write_recovery_marker(self, database, backup, *, target_version=1, **overrides):
+        payload = {
+            'failed_target_version': target_version,
+            'reason_class': 'MigrationPreparationError',
+            'backup_catalog_id': backup.name,
+            'timestamp': int(time.time()),
+        }
+        payload.update(overrides)
+        (database.parent / 'recovery-required.json').write_text(
+            json.dumps(payload),
+            encoding='utf-8',
+        )
 
     def test_online_backup_is_verified_and_complete(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -62,7 +76,7 @@ class BackupRecoveryTests(unittest.TestCase):
             database, backup = self._backup_from_fixture(directory)
             with sqlite3.connect(database) as conn:
                 conn.execute("UPDATE services SET title='changed after backup'")
-            (database.parent / 'recovery-required.json').write_text('{}', encoding='utf-8')
+            self._write_recovery_marker(database, backup)
 
             records = list_verified_backups(database.parent)
             self.assertEqual([record.catalog_id for record in records], [backup.name])
@@ -86,9 +100,13 @@ class BackupRecoveryTests(unittest.TestCase):
                 ).fetchone()[0]
                 for table in ('services', 'service_meta', 'events')
             }
+            self._write_recovery_marker(database, backup)
             first = restore_backup(database.parent, backup.name)
-            second = restore_backup(database.parent, backup.name)
-            self.assertEqual(first.catalog_id, second.catalog_id)
+            restored = database.read_bytes()
+            with self.assertRaisesRegex(RecoveryError, 'recovery is not authorized'):
+                restore_backup(database.parent, backup.name)
+            self.assertEqual(database.read_bytes(), restored)
+            self.assertEqual(first.catalog_id, backup.name)
             with sqlite3.connect(database) as conn:
                 self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
                 self.assertEqual(
@@ -103,6 +121,7 @@ class BackupRecoveryTests(unittest.TestCase):
             with sqlite3.connect(database) as conn:
                 conn.execute("UPDATE services SET title='live database'")
             original = database.read_bytes()
+            self._write_recovery_marker(database, backup)
 
             with mock.patch('dashboard.beacon.recovery.os.replace', side_effect=OSError('interrupted')):
                 with self.assertRaisesRegex(RecoveryError, 'restore did not complete'):
@@ -114,6 +133,7 @@ class BackupRecoveryTests(unittest.TestCase):
     def test_restore_rejects_live_worker_lock_and_unsafe_catalog_entries(self):
         with tempfile.TemporaryDirectory() as directory:
             database, backup = self._backup_from_fixture(directory)
+            self._write_recovery_marker(database, backup)
             with sqlite3.connect(database) as conn:
                 conn.execute(
                     'CREATE TABLE runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ts INTEGER NOT NULL)'
@@ -172,7 +192,9 @@ class BackupRecoveryTests(unittest.TestCase):
             with sqlite3.connect(database) as conn:
                 conn.execute("UPDATE services SET title='post-upgrade change'")
 
-            restore_backup(database.parent, latest.catalog_id)
+            self._write_recovery_marker(database, latest, target_version=3)
+            with self.assertRaisesRegex(RecoveryError, 'recovery is not authorized'):
+                restore_backup(database.parent, latest.catalog_id)
 
             with sqlite3.connect(database) as conn:
                 self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
@@ -257,6 +279,7 @@ class BackupRecoveryTests(unittest.TestCase):
                 copy2(shm, retained_shm)
             copy2(retained_wal, wal)
             copy2(retained_shm, shm)
+            self._write_recovery_marker(database, backup)
 
             restore_backup(database.parent, backup.name)
 
@@ -271,6 +294,7 @@ class BackupRecoveryTests(unittest.TestCase):
     def test_restore_refuses_busy_wal_checkpoint_before_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             database, backup = self._backup_from_fixture(directory)
+            self._write_recovery_marker(database, backup)
             with sqlite3.connect(database) as writer:
                 writer.execute('PRAGMA journal_mode=WAL')
                 writer.execute("UPDATE services SET title='newer-wal-state'")
@@ -293,6 +317,7 @@ class BackupRecoveryTests(unittest.TestCase):
     def test_restore_fsyncs_stage_sidecar_replacement_and_marker_boundaries(self):
         with tempfile.TemporaryDirectory() as directory:
             database, backup = self._backup_from_fixture(directory)
+            self._write_recovery_marker(database, backup)
             recovery = __import__('dashboard.beacon.recovery', fromlist=['_fsync_directory'])
             with mock.patch('dashboard.beacon.recovery.os.fsync', wraps=os.fsync) as sync, mock.patch(
                 'dashboard.beacon.recovery._fsync_directory',
@@ -307,6 +332,7 @@ class BackupRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database, backup = self._backup_from_fixture(directory)
             original = database.read_bytes()
+            self._write_recovery_marker(database, backup)
             with mock.patch(
                 'dashboard.beacon.recovery._checkpoint_and_remove_sidecars',
                 side_effect=RecoveryError('restore did not complete'),
@@ -329,7 +355,7 @@ class BackupRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database, backup = self._backup_from_fixture(directory)
             marker = database.parent / 'recovery-required.json'
-            marker.write_text('{}', encoding='utf-8')
+            self._write_recovery_marker(database, backup)
             original_validate = __import__(
                 'dashboard.beacon.recovery', fromlist=['_validate_supported_database'],
             )._validate_supported_database
@@ -355,6 +381,74 @@ class BackupRecoveryTests(unittest.TestCase):
                     'Sample Service',
                 )
             self.assertTrue(marker.exists())
+
+            restore_backup(database.parent, backup.name)
+            self.assertFalse(marker.exists())
+
+    def test_restore_without_marker_refuses_before_database_or_sidecar_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            wal = Path(str(database) + '-wal')
+            shm = Path(str(database) + '-shm')
+            with sqlite3.connect(database) as conn:
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.execute("UPDATE services SET title='healthy current'")
+                conn.commit()
+            original = database.read_bytes()
+            original_wal = wal.read_bytes()
+            original_shm = shm.read_bytes()
+
+            with mock.patch(
+                'dashboard.beacon.recovery._checkpoint_and_remove_sidecars',
+            ) as checkpoint, mock.patch(
+                'dashboard.beacon.recovery._acquire_upgrade_lock',
+            ) as acquire_lock:
+                with self.assertRaisesRegex(RecoveryError, 'recovery is not authorized'):
+                    restore_backup(database.parent, backup.name)
+
+            checkpoint.assert_not_called()
+            acquire_lock.assert_not_called()
+            self.assertEqual(database.read_bytes(), original)
+            self.assertEqual(wal.read_bytes(), original_wal)
+            self.assertEqual(shm.read_bytes(), original_shm)
+            self.assertFalse((database.parent / 'recovery-required.json').exists())
+
+    def test_restore_rejects_invalid_marker_matrix_without_mutation(self):
+        invalid_payloads = (
+            {},
+            {'failed_target_version': True, 'reason_class': 'failure', 'backup_catalog_id': 'x', 'timestamp': 1},
+            {'failed_target_version': 1, 'reason_class': '', 'backup_catalog_id': 'x', 'timestamp': 1},
+            {'failed_target_version': 1, 'reason_class': 'failure', 'backup_catalog_id': None, 'timestamp': 1},
+            {'failed_target_version': 1, 'reason_class': 'failure', 'backup_catalog_id': 'x', 'timestamp': 0},
+            {'failed_target_version': 1, 'reason_class': 'failure', 'backup_catalog_id': 'x', 'timestamp': int(time.time()) + 60},
+            {'failed_target_version': 1, 'reason_class': 'failure', 'backup_catalog_id': 'x', 'timestamp': 1, 'extra': True},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            original = database.read_bytes()
+            marker = database.parent / 'recovery-required.json'
+            for payload in invalid_payloads:
+                with self.subTest(payload=payload):
+                    marker.write_text(json.dumps(payload), encoding='utf-8')
+                    with self.assertRaisesRegex(RecoveryError, 'recovery is not authorized'):
+                        restore_backup(database.parent, backup.name)
+                    self.assertEqual(database.read_bytes(), original)
+
+    def test_restore_requires_exact_marker_catalog_and_current_pre_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            other = create_verified_backup(database, target_version=1)
+            original = database.read_bytes()
+            self._write_recovery_marker(database, backup)
+            with self.assertRaisesRegex(RecoveryError, 'recovery is not authorized'):
+                restore_backup(database.parent, other.name)
+            self.assertEqual(database.read_bytes(), original)
+
+            with sqlite3.connect(database) as conn:
+                conn.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)')
+                conn.execute('INSERT INTO schema_migrations(version) VALUES(1)')
+            with self.assertRaisesRegex(RecoveryError, 'recovery is not authorized'):
+                restore_backup(database.parent, backup.name)
 
     def test_stale_worker_metadata_writer_blocks_restore_until_commit(self):
         """The maintenance lease, not heartbeat freshness, excludes web writes."""
