@@ -462,10 +462,28 @@ class BackupRecoveryTests(unittest.TestCase):
             copy2(FIXTURE, database)
             appmod.DB_PATH = str(database)
             backup = create_verified_backup(database, target_version=1)
-            held_backup = database.parent / 'held-pre-upgrade-backup.db'
-            copy2(backup, held_backup)
-            appmod.init_db()
-            copy2(held_backup, backup)
+            self._write_recovery_marker(database, backup, timestamp=1)
+            with sqlite3.connect(database) as conn:
+                conn.execute(
+                    'CREATE TABLE runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ts INTEGER NOT NULL)'
+                )
+                conn.execute(
+                    "CREATE TABLE service_meta (port INTEGER PRIMARY KEY, display_name TEXT, url TEXT, "
+                    "critical INTEGER DEFAULT 0, pinned_order INTEGER DEFAULT 0, tags TEXT DEFAULT '', "
+                    "healthy_statuses TEXT DEFAULT '200-399')"
+                )
+                conn.execute(
+                    "CREATE TABLE preview_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, port INTEGER NOT NULL, "
+                    "requested_ts INTEGER NOT NULL, deadline_ts INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'queued', "
+                    "error TEXT, revision INTEGER NOT NULL DEFAULT 1, lease_owner TEXT, lease_until INTEGER, "
+                    "attempt_count INTEGER NOT NULL DEFAULT 0, started_ts INTEGER, completed_ts INTEGER, "
+                    "terminal_ts INTEGER, result TEXT)"
+                )
+                conn.execute(
+                    'CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, '
+                    'port INTEGER, event_type TEXT NOT NULL, online INTEGER, previous_online INTEGER, '
+                    'latency_ms REAL, error_class TEXT, alert_status TEXT, details TEXT)'
+                )
             writer = None
             try:
                 appmod._set_runtime_state('worker_heartbeat', {'ts': 0}, now=0)

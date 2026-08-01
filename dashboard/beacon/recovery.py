@@ -29,6 +29,17 @@ class RecoveryError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RecoveryAuthorization:
+    """The one failed-migration backup that is permitted to replace the database."""
+
+    failed_target_version: int
+    reason_class: str
+    backup_catalog_id: str
+    timestamp: int
+    restore_in_progress: bool = False
+
+
+@dataclass(frozen=True)
 class BackupRecord:
     """Safe metadata for one verified automatic migration backup."""
 
@@ -147,6 +158,93 @@ def _record_for_catalog_id(backup_dir, catalog_id):
     ), path
 
 
+def _read_regular_marker(root):
+    """Read the migration marker without following a substituted filesystem entry."""
+    marker = root / RECOVERY_MARKER
+    try:
+        metadata = marker.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise RecoveryError('recovery is not authorized')
+        descriptor = os.open(marker, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    except (OSError, RecoveryError) as exc:
+        raise RecoveryError('recovery is not authorized') from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_ino != metadata.st_ino:
+            raise RecoveryError('recovery is not authorized')
+        with os.fdopen(descriptor, 'r', encoding='utf-8') as handle:
+            descriptor = None
+            return json.load(handle)
+    except (OSError, TypeError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RecoveryError('recovery is not authorized') from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _read_recovery_authorization(root, *, now):
+    """Return only a structurally valid marker created by a failed migration."""
+    payload = _read_regular_marker(root)
+    required_fields = {
+        'failed_target_version',
+        'reason_class',
+        'backup_catalog_id',
+        'timestamp',
+    }
+    allowed_fields = required_fields | {'restore_in_progress'}
+    valid_fields = set(payload) in (required_fields, allowed_fields) if isinstance(payload, dict) else False
+    if not valid_fields:
+        raise RecoveryError('recovery is not authorized')
+    target_version = payload['failed_target_version']
+    timestamp = payload['timestamp']
+    reason_class = payload['reason_class']
+    catalog_id = payload['backup_catalog_id']
+    restore_in_progress = payload.get('restore_in_progress', False)
+    if (
+        type(target_version) is not int
+        or target_version <= 0
+        or type(timestamp) is not int
+        or timestamp <= 0
+        or timestamp > int(now())
+        or not isinstance(reason_class, str)
+        or not reason_class
+        or not _is_catalog_name(catalog_id)
+        or type(restore_in_progress) is not bool
+    ):
+        raise RecoveryError('recovery is not authorized')
+    try:
+        if _catalog_target_version(catalog_id) != target_version:
+            raise RecoveryError('recovery is not authorized')
+    except RecoveryError as exc:
+        raise RecoveryError('recovery is not authorized') from exc
+    return RecoveryAuthorization(
+        failed_target_version=target_version,
+        reason_class=reason_class,
+        backup_catalog_id=catalog_id,
+        timestamp=timestamp,
+        restore_in_progress=restore_in_progress,
+    )
+
+
+def _authorization_matches_current_database(database, authorization):
+    try:
+        with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as conn:
+            return _validated_migration_transition(conn, authorization.backup_catalog_id)
+    except (OSError, sqlite3.Error, ValueError):
+        return False
+
+
+def _authorized_recovery(root, database, catalog_id, *, now):
+    authorization = _read_recovery_authorization(root, now=now)
+    if catalog_id != authorization.backup_catalog_id:
+        raise RecoveryError('recovery is not authorized')
+    if not database.is_file() or database.is_symlink():
+        raise RecoveryError('recovery cannot verify that Beacon services are stopped')
+    if not _authorization_matches_current_database(database, authorization):
+        raise RecoveryError('recovery is not authorized')
+    return authorization
+
+
 def list_verified_backups(data_dir):
     """Return only regular, integrity-checked, support-floor catalog entries."""
     backup_dir = Path(data_dir) / 'backups'
@@ -233,16 +331,28 @@ def _checkpoint_and_remove_sidecars(database):
         raise RecoveryError('restore did not complete') from exc
 
 
-def _write_recovery_marker(root):
+def _write_recovery_marker(root, authorization):
     marker = root / RECOVERY_MARKER
+    temporary = root / '.recovery-required-{}.partial'.format(uuid4().hex)
+    payload = {
+        'failed_target_version': authorization.failed_target_version,
+        'reason_class': authorization.reason_class,
+        'backup_catalog_id': authorization.backup_catalog_id,
+        'timestamp': authorization.timestamp,
+        'restore_in_progress': True,
+    }
     try:
-        with marker.open('w', encoding='utf-8') as handle:
-            json.dump({'restore_in_progress': True}, handle)
+        with temporary.open('x', encoding='utf-8') as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write('\n')
             handle.flush()
             os.fsync(handle.fileno())
+        os.replace(temporary, marker)
         _fsync_directory(root)
-    except OSError as exc:
+    except (OSError, TypeError) as exc:
         raise RecoveryError('restore did not complete') from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _acquire_upgrade_lock(lock_path, timeout_seconds):
@@ -281,9 +391,11 @@ def restore_backup(
             worker_ready_seconds = max(1, int(os.environ.get('WORKER_READY_SECONDS', '20')))
         except (TypeError, ValueError):
             worker_ready_seconds = 20
-    record, source = _record_for_catalog_id(backup_dir, catalog_id)
-    if not database.is_file() or database.is_symlink():
-        raise RecoveryError('recovery cannot verify that Beacon services are stopped')
+    authorization = _authorized_recovery(root, database, catalog_id, now=now)
+    try:
+        record, source = _record_for_catalog_id(backup_dir, authorization.backup_catalog_id)
+    except RecoveryError as exc:
+        raise RecoveryError('recovery is not authorized') from exc
 
     lock_handle = _acquire_upgrade_lock(upgrade_lock_path(database), lock_timeout_seconds)
     staging = root / '{}{}.partial'.format(STAGING_PREFIX, uuid4().hex)
@@ -302,7 +414,7 @@ def restore_backup(
                     _fsync_directory(root)
                     if _validate_supported_database(staging, record.catalog_id) != record.schema_fingerprint:
                         raise RecoveryError('restore did not complete')
-                    _write_recovery_marker(root)
+                    _write_recovery_marker(root, authorization)
                     os.replace(staging, database)
                     _fsync_file(database)
                     _fsync_directory(root)
