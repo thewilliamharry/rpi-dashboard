@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: behavioral-safety-runtime-ownership
 status: executing
-stopped_at: Completed 01-16-PLAN.md
-last_updated: "2026-08-01T09:04:54.806Z"
+stopped_at: Completed 01-17-PLAN.md
+last_updated: "2026-08-01T09:10:39.203Z"
 last_activity: 2026-08-01
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 17
-  completed_plans: 16
+  completed_plans: 17
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (behavioral-safety-runtime-ownership) — EXECUTING
-Plan: 3 of 17
+Plan: 4 of 17
 Status: Ready to execute
 Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [█████████░] 94%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -74,6 +74,7 @@ Progress: [█████████░] 94%
 | Phase 01 P14 | 12m | 2 tasks | 4 files |
 | Phase 01 P15 | 19m | 2 tasks | 2 files |
 | Phase 01 P16 | 12min | 2 tasks | 3 files |
+| Phase 01 P17 | 3min | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -120,6 +121,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: CLI restore selectors resolve only through the validated marker-bound catalog ID.
 - [Phase ?]: Browser previews are retrieval-only: only GET and HEAD may cross either the route gate or plain-proxy boundary.
 - [Phase ?]: An acquired origin remains handler-owned until transfer to _relay(), whose existing cleanup is the sole post-transfer owner.
+- [Phase ?]: Validate critical and pinned_order from raw JSON before database, outbound-policy, preview, or event work.
+- [Phase ?]: Keep omitted metadata values compatible while converting only validated JSON booleans to SQLite integers.
 
 ### Pending Todos
 
@@ -139,6 +142,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T09:04:54.797Z
-Stopped at: Completed 01-16-PLAN.md
+Last session: 2026-08-01T09:10:39.196Z
+Stopped at: Completed 01-17-PLAN.md
 Resume file: None

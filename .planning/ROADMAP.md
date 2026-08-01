@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Loading the web application does not start monitoring, browser, probe, or scheduler work; the worker visibly owns shared scheduled work without duplicate execution.
   4. Service probes, fetched previews, redirects, and webhooks consistently block disallowed targets or invalid TLS and report a safe, understandable failure.
 
-**Plans**: 16/17 plans executed
+**Plans**: 17/17 plans executed
 
 - [x] 01-01-PLAN.md
 - [x] 01-02-PLAN.md
@@ -52,7 +52,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] 01-14-PLAN.md — Gap closure: deterministic safety UI and durable-state evidence
 - [x] 01-15-PLAN.md — Gap closure: marker-authorized, catalog-bound recovery
 - [x] 01-16-PLAN.md — Gap closure: retrieval-only previews and proxy cleanup
-- [ ] 01-17-PLAN.md — Gap closure: exact metadata JSON typing
+- [x] 01-17-PLAN.md — Gap closure: exact metadata JSON typing
 
 **Wave 1**
 
@@ -190,7 +190,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Behavioral Safety & Runtime Ownership | 16/17 | In Progress|  |
+| 1. Behavioral Safety & Runtime Ownership | 17/17 | In Progress|  |
 | 2. Bounded Telemetry & Retention | 0/TBD | Not started | - |
 | 3. Advanced Current Diagnosis | 0/TBD | Not started | - |
 | 4. Historical Investigation | 0/TBD | Not started | - |
