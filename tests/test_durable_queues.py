@@ -39,6 +39,113 @@ class DurableQueueTests(unittest.TestCase):
         with self.assertRaises(queues.LeaseLost):
             queues.finish_scan(self.db_path, first.request_id, first.lease_owner, now=1_004)
 
+    def test_long_scan_heartbeat_renews_before_expiry_and_completes(self):
+        clock = {'now': 1_000}
+        events = []
+        heartbeats = []
+
+        class FakeHeartbeat:
+            def __init__(self, db_path, request_id, owner_token, **kwargs):
+                self.db_path = db_path
+                self.request_id = request_id
+                self.owner_token = owner_token
+                self.lost = False
+                heartbeats.append(self)
+
+            def start(self):
+                events.append('heartbeat-started')
+
+            def renew_at(self, now):
+                queues.renew_scan_lease(
+                    self.db_path, self.request_id, self.owner_token,
+                    now=now, lease_seconds=30,
+                )
+                events.append(('renewed', now))
+
+            def stop(self):
+                events.append('heartbeat-stopped')
+
+        def controlled_discovery(source):
+            self.assertEqual(events, ['heartbeat-started'])
+            for now in (1_020, 1_040, 1_060):
+                heartbeats[0].renew_at(now)
+            clock['now'] = 1_061
+            return 'completed'
+
+        self.appmod.run_discovery = controlled_discovery
+        self.assertTrue(self.appmod.process_scan_requests(
+            'worker-a', now_fn=lambda: clock['now'], lease_seconds=30,
+            heartbeat_factory=FakeHeartbeat,
+        ))
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                'SELECT status, completed_ts, lease_owner, lease_until FROM scan_requests'
+            ).fetchone()
+        self.assertEqual(row, ('completed', 1_061, None, None))
+        self.assertEqual(
+            events,
+            ['heartbeat-started', ('renewed', 1_020), ('renewed', 1_040),
+             ('renewed', 1_060), 'heartbeat-stopped'],
+        )
+
+    def test_lost_scan_heartbeat_suppresses_late_terminal_writes(self):
+        clock = {'now': 1_000}
+        terminal_calls = []
+
+        class FakeHeartbeat:
+            def __init__(self, db_path, request_id, owner_token, **kwargs):
+                self.db_path = db_path
+                self.request_id = request_id
+                self.owner_token = owner_token
+                self.lost = False
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+        heartbeat = None
+
+        def factory(*args, **kwargs):
+            nonlocal heartbeat
+            heartbeat = FakeHeartbeat(*args, **kwargs)
+            return heartbeat
+
+        def controlled_discovery(source):
+            clock['now'] = 1_031
+            successor = queues.claim_scan(
+                self.db_path, 'worker-b', now=clock['now'], lease_seconds=30,
+            )
+            self.assertIsNotNone(successor)
+            with self.assertRaises(queues.LeaseLost):
+                queues.renew_scan_lease(
+                    self.db_path, heartbeat.request_id, heartbeat.owner_token,
+                    now=clock['now'], lease_seconds=30,
+                )
+            heartbeat.lost = True
+            return 'completed'
+
+        self.appmod.run_discovery = controlled_discovery
+        original_finish = queues.finish_scan
+        original_fail = queues.fail_scan
+        try:
+            queues.finish_scan = lambda *args, **kwargs: terminal_calls.append('finish')
+            queues.fail_scan = lambda *args, **kwargs: terminal_calls.append('fail')
+            self.assertFalse(self.appmod.process_scan_requests(
+                'worker-a', now_fn=lambda: clock['now'], lease_seconds=30,
+                heartbeat_factory=factory,
+            ))
+        finally:
+            queues.finish_scan = original_finish
+            queues.fail_scan = original_fail
+
+        self.assertEqual(terminal_calls, [])
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute('SELECT status FROM scan_requests').fetchone()
+        self.assertEqual(row, ('running',))
+
     def test_recovery_expires_old_running_scans_without_replaying_them(self):
         request = queues.enqueue_scan(self.db_path, 'operator', now=1_000)
         queues.claim_scan(self.db_path, 'worker-a', now=1_001, lease_seconds=1)
