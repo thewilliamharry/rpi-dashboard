@@ -137,7 +137,7 @@ function updateScanStatus(data) {
   const workerReady = Boolean(data.worker_ready);
   setConnectionState(false);
   updateWorkerWarning(Boolean(data.worker_stale));
-  $('recovery-warning').hidden = !Boolean(data.recovery_required && !data.worker_stale);
+  $('recovery-warning').hidden = !Boolean(data.recovery_required);
   const requestStatus = data.latest_request_status;
   if (requestStatus === 'expired') {
     $('scan-label').textContent = 'Scan request expired — it was not run. Scan again.';

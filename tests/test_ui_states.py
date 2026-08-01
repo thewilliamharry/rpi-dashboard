@@ -160,6 +160,122 @@ class UiStateBrowserTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_safety_matrix_keeps_recovery_tls_errors_and_narrow_controls_distinct(self):
+        long_value = 'https://[fd00:beacon:very:long:trusted:local:service:address]:8100/' + ('path' * 28)
+        fixture = {
+            'worker_stale': True,
+            'recovery_required': True,
+            'latest_request_status': 'expired',
+            'disconnected': False,
+            'services': [
+                {
+                    **self._service(8100, online=True, tls=True),
+                    'display_name': 'online-' + ('unbroken-name-' * 18),
+                    'url': long_value,
+                    'tags': ['tag-' + ('unbroken-' * 24)],
+                    'preview_status': 'failed',
+                },
+                {
+                    **self._service(8101, online=False, tls=True),
+                    'display_name': 'offline-' + ('unbroken-name-' * 18),
+                    'url': long_value,
+                    'last_error': 'blocked-' + ('detail-' * 32),
+                    'preview_status': 'expired',
+                },
+            ],
+            'events': [
+                {
+                    'event_type': 'monitoring_gap',
+                    'details': '{"start_ts":10,"end_ts":80}',
+                    'ts': 1_700_000_000,
+                    'online': None,
+                },
+            ],
+        }
+        page = self.browser.new_page(viewport={'width': 360, 'height': 800})
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if fixture['disconnected'] and path in {'/api/stats', '/api/scan-status'}:
+                route.abort()
+                return
+            if path == '/api/service-meta/8100' and route.request.method == 'PUT':
+                route.fulfill(status=400, json={'error': 'policy_error'})
+                return
+            payloads = {
+                '/api/stats': {'hostname': 'beacon', 'sample_ts': 1_700_000_000, 'cpu': 1, 'ram': 2, 'disk': 3, 'ram_used': 1, 'ram_total': 2, 'disk_used': 1, 'disk_total': 2, 'temp': 40},
+                '/api/history': [],
+                '/api/scan-status': {
+                    'worker_ready': not fixture['worker_stale'],
+                    'worker_stale': fixture['worker_stale'],
+                    'recovery_required': fixture['recovery_required'],
+                    'stage': 'idle', 'scanning': False, 'last_completed_found': 1,
+                    'last_discovery': 1_700_000_000,
+                    'latest_request_status': fixture['latest_request_status'],
+                },
+                '/api/services': fixture['services'],
+                '/api/events': fixture['events'],
+            }
+            route.fulfill(status=200, json=payloads.get(path, {}))
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            self.assertTrue(page.locator('#worker-warning').is_visible())
+            self.assertTrue(page.locator('#recovery-warning').is_visible())
+            self.assertIn('Scan request expired', page.locator('#scan-label').text_content())
+            self.assertIn('ONLINE', page.locator('.svc-card').first.locator('.svc-status-row').text_content())
+            self.assertIn('OFFLINE', page.locator('.svc-card').nth(1).locator('.svc-status-row').text_content())
+            self.assertEqual(page.locator('.svc-tls-unverified').count(), 2)
+            self.assertIn('Preview refresh failed', page.locator('.svc-card').first.text_content())
+            self.assertIn('Preview refresh expired', page.locator('.svc-card').nth(1).text_content())
+
+            page.locator('.svc-edit').first.click()
+            page.locator('#meta-form').evaluate('(form) => form.requestSubmit()')
+            self.assertTrue(page.locator('#meta-error').is_visible())
+            self.assertIn('Beacon could not use that destination', page.locator('#meta-error').text_content())
+            self.assertEqual(page.locator('#meta-error').evaluate('(node) => document.activeElement === node'), True)
+            for selector in ['#meta-save', '#meta-cancel']:
+                self.assertGreaterEqual(page.locator(selector).bounding_box()['height'], 44)
+            page.locator('#meta-cancel').click()
+
+            for selector in ['.btn-scan', '#toggle', '.svc-edit']:
+                box = page.locator(selector).first.bounding_box()
+                self.assertGreaterEqual(box['height'], 44, selector)
+                self.assertGreaterEqual(box['width'], 44, selector)
+            self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 360)
+            for card in page.locator('.svc-card').all():
+                card_box = card.bounding_box()
+                for child in card.locator('.svc-title, .svc-tags, .svc-error, .svc-preview-status').all():
+                    box = child.bounding_box()
+                    self.assertGreaterEqual(box['x'], card_box['x'] - 1)
+                    self.assertLessEqual(box['x'] + box['width'], card_box['x'] + card_box['width'] + 1)
+
+            page.locator('#toggle').click()
+            self.assertTrue(page.locator('html').evaluate('(node) => node.classList.contains("light")'))
+            self.assertTrue(page.locator('#worker-warning').is_visible())
+            self.assertTrue(page.locator('#recovery-warning').is_visible())
+            self.assertEqual(page.locator('.svc-tls-unverified').count(), 2)
+
+            fixture['worker_stale'] = False
+            fixture['recovery_required'] = False
+            page.locator('#worker-warning').wait_for(state='hidden', timeout=8_000)
+            self.assertFalse(page.locator('#recovery-warning').is_visible())
+            self.assertEqual(
+                page.locator('#dashboard-feedback').text_content(),
+                'Monitoring resumed. The outage was recorded in Events.',
+            )
+
+            fixture['disconnected'] = True
+            page.locator('#connection-banner').wait_for(state='visible', timeout=8_000)
+            self.assertIn('Beacon is disconnected', page.locator('#connection-banner').text_content())
+
+            page.set_viewport_size({'width': 1440, 'height': 900})
+            self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 1440)
+            self.assertIn('Monitoring gap recorded', page.locator('#events-panel').text_content())
+        finally:
+            page.close()
+
 
 if __name__ == '__main__':
     unittest.main()

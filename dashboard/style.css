@@ -943,19 +943,25 @@ html.light .evt-meta_updated .evt-title {
 ═══════════════════════════════════════════════════════ */
 @media (max-width: 720px) {
   .topbar {
-    padding: 0 20px;
+    min-height: 56px;
+    height: auto;
+    padding: 6px 20px;
   }
   html:not(.light) .topbar::after {
     left: 20px;
     right: 20px;
   }
 
-  .tb-left { gap: 10px; min-width: 0; }
-  .tb-right { gap: 8px; flex-shrink: 0; }
+  .tb-left { gap: 10px; min-width: 0; flex: 1; overflow: hidden; }
+  .tb-right { gap: 0; flex-shrink: 0; }
+  .tb-sep { display: none; }
   .tb-host { font-size: 15px; letter-spacing: 0.12em; }
   .tb-meta { font-size: 9px; }
-  .scan-status { white-space: nowrap; }
-  .btn-scan { padding: 4px 8px; }
+  .scan-status { min-width: 0; white-space: nowrap; }
+  #scan-label { overflow: hidden; text-overflow: ellipsis; }
+  .btn-scan { min-width: 44px; min-height: 44px; padding: 4px 8px; }
+  .theme-toggle { width: 44px; height: 44px; border-radius: 22px; }
+  html.light .toggle-pip { transform: translateX(24px); }
 
   .page {
     padding: 20px 20px 48px;
@@ -981,6 +987,7 @@ html.light .evt-meta_updated .evt-title {
   .svc-title-right { gap: 6px; }
   .svc-port-badge { padding: 1px 4px; }
   .svc-critical, .svc-edit { font-size: 8px; }
+  .svc-edit { min-width: 44px; min-height: 44px; }
   .evt-row { padding: 10px 8px; }
   .evt-sub { font-size: 9px; }
   .meta-modal-backdrop { padding: 14px; }
