@@ -47,16 +47,13 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
     def test_worker_services_are_built_without_starting_worker_lifecycle(self):
         """Composition is pure; lifecycle work is reserved for worker_main.main."""
-        with (
-            mock.patch.object(worker_main, 'prepare_database') as prepare,
-            mock.patch.object(worker_main, 'recover_worker_state') as recover,
-            mock.patch.object(worker_main, 'update_worker_heartbeat') as heartbeat,
-        ):
-            services = worker_main.build_worker_services()
-        self.assertIsNotNone(services.settings)
-        prepare.assert_not_called()
-        recover.assert_not_called()
-        heartbeat.assert_not_called()
+        operations = mock.Mock()
+        settings = mock.Mock()
+        services = worker_main.build_worker_services(operations, settings)
+        self.assertIs(services.settings, settings)
+        operations.prepare_database.assert_not_called()
+        operations.recover_worker_state.assert_not_called()
+        operations.update_worker_heartbeat.assert_not_called()
 
     def test_worker_shim_constructs_and_injects_legacy_operations(self):
         """Only the executable shim may join compatibility code to the package."""
@@ -192,7 +189,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
             mock.patch.object(worker_main, 'build_worker_services', return_value=services),
             mock.patch.object(worker_main, 'build_scheduler') as build_scheduler,
         ):
-            worker_main.main()
+            worker_main.run_worker(mock.Mock())
         build_scheduler.assert_not_called()
         services.shutdown_browser.assert_not_called()
 

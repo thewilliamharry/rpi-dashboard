@@ -12,30 +12,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from .config import load_settings
-from .db import prepare_database
 from . import queues
-
-try:
-    from .. import app as beacon
-except ImportError:  # ``python worker.py`` from the dashboard directory.
-    import app as beacon
-
-
-# Compatibility operations are bound here, not invoked here.  Keeping these
-# seams named makes worker composition independently testable.
-recover_worker_state = beacon.recover_worker_state
-update_worker_heartbeat = beacon.update_worker_heartbeat
-collect_system_stats = beacon.collect_system_stats
-read_scan_state = beacon._read_scan_state
-run_discovery = beacon.run_discovery
-do_uptime_check = beacon.do_uptime_check
-process_scan_requests = beacon.process_scan_requests
-process_preview_requests = beacon.process_preview_requests
-cleanup_history = beacon.cleanup_history
-shutdown_browser = beacon.shutdown_browser
-acquire_worker_lease = queues.acquire_worker_lease
-renew_worker_lease = queues.renew_worker_lease
-release_worker_lease = queues.release_worker_lease
 
 
 log = logging.getLogger('beacon.worker')
@@ -43,8 +20,28 @@ logging.getLogger('apscheduler').setLevel(logging.WARNING)
 
 
 @dataclass(frozen=True)
+class WorkerOperations:
+    """Runtime operations explicitly supplied by an executable composition root."""
+
+    prepare_database: object
+    recover_worker_state: object
+    update_worker_heartbeat: object
+    collect_system_stats: object
+    read_scan_state: object
+    run_discovery: object
+    do_uptime_check: object
+    process_scan_requests: object
+    process_preview_requests: object
+    cleanup_history: object
+    shutdown_browser: object
+    acquire_worker_lease: object
+    renew_worker_lease: object
+    release_worker_lease: object
+
+
+@dataclass(frozen=True)
 class WorkerServices:
-    """All dependencies owned by the worker composition root."""
+    """Bound settings and operations used by the package-owned scheduler."""
 
     settings: object
     prepare_database: object
@@ -65,26 +62,26 @@ class WorkerServices:
     worker_id: str | None = None
 
 
-def build_worker_services(settings=None):
-    """Assemble dependencies without touching SQLite, scheduler, or Chromium."""
+def build_worker_services(operations, settings=None):
+    """Bind settings without touching SQLite, scheduler, or Chromium."""
     settings = settings or load_settings()
     return WorkerServices(
         settings=settings,
-        prepare_database=prepare_database,
-        recover_worker_state=recover_worker_state,
-        update_worker_heartbeat=update_worker_heartbeat,
-        collect_system_stats=collect_system_stats,
-        read_scan_state=read_scan_state,
-        run_discovery=run_discovery,
-        do_uptime_check=do_uptime_check,
-        process_scan_requests=process_scan_requests,
-        process_preview_requests=process_preview_requests,
-        cleanup_history=cleanup_history,
-        shutdown_browser=shutdown_browser,
+        prepare_database=operations.prepare_database,
+        recover_worker_state=operations.recover_worker_state,
+        update_worker_heartbeat=operations.update_worker_heartbeat,
+        collect_system_stats=operations.collect_system_stats,
+        read_scan_state=operations.read_scan_state,
+        run_discovery=operations.run_discovery,
+        do_uptime_check=operations.do_uptime_check,
+        process_scan_requests=operations.process_scan_requests,
+        process_preview_requests=operations.process_preview_requests,
+        cleanup_history=operations.cleanup_history,
+        shutdown_browser=operations.shutdown_browser,
         clock=time.time,
-        acquire_worker_lease=acquire_worker_lease,
-        renew_worker_lease=renew_worker_lease,
-        release_worker_lease=release_worker_lease,
+        acquire_worker_lease=operations.acquire_worker_lease,
+        renew_worker_lease=operations.renew_worker_lease,
+        release_worker_lease=operations.release_worker_lease,
     )
 
 
@@ -201,13 +198,13 @@ def build_scheduler(services):
     return built_scheduler
 
 
-def main(settings=None):
+def run_worker(operations, settings=None):
     """Start worker-owned lifecycle in the required durable-state order."""
     global scheduler, _worker_started, _active_services, _active_worker_id
     with _worker_start_lock:
         if _worker_started:
             return
-        services = build_worker_services(settings)
+        services = build_worker_services(operations, settings)
         services.prepare_database(services.settings)
         worker_id = uuid4().hex
         try:
