@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: behavioral-safety-runtime-ownership
 status: executing
-stopped_at: Completed 01-15-PLAN.md
-last_updated: "2026-08-01T08:56:20.920Z"
+stopped_at: Completed 01-16-PLAN.md
+last_updated: "2026-08-01T09:04:54.806Z"
 last_activity: 2026-08-01
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 17
-  completed_plans: 15
+  completed_plans: 16
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (behavioral-safety-runtime-ownership) — EXECUTING
-Plan: 2 of 17
+Plan: 3 of 17
 Status: Ready to execute
 Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [█████████░] 88%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -73,6 +73,7 @@ Progress: [█████████░] 88%
 | Phase 01 P13 | 9min | 3 tasks | 8 files |
 | Phase 01 P14 | 12m | 2 tasks | 4 files |
 | Phase 01 P15 | 19m | 2 tasks | 2 files |
+| Phase 01 P16 | 12min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -117,6 +118,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Recovery-required and stale-worker warnings remain independently visible in the locked safety-warning cluster.
 - [Phase ?]: Narrow dashboard actions use 44px touch targets while scan status text truncates rather than overflowing.
 - [Phase ?]: CLI restore selectors resolve only through the validated marker-bound catalog ID.
+- [Phase ?]: Browser previews are retrieval-only: only GET and HEAD may cross either the route gate or plain-proxy boundary.
+- [Phase ?]: An acquired origin remains handler-owned until transfer to _relay(), whose existing cleanup is the sole post-transfer owner.
 
 ### Pending Todos
 
@@ -136,6 +139,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T08:56:20.912Z
-Stopped at: Completed 01-15-PLAN.md
+Last session: 2026-08-01T09:04:54.797Z
+Stopped at: Completed 01-16-PLAN.md
 Resume file: None
