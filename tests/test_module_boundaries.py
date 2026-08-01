@@ -116,6 +116,18 @@ class ModuleBoundaryTests(unittest.TestCase):
         self.assertNotIn('sqlite3.connect(', queue_source)
         self.assertIn('exclusive_database_maintenance', db_source)
 
+    def test_thumbnail_sql_stays_in_the_repository_boundary(self):
+        repository_source = Path('dashboard/beacon/repositories.py').read_text(encoding='utf-8')
+        preview_source = Path('dashboard/beacon/previews.py').read_text(encoding='utf-8')
+        app_source = Path('dashboard/app.py').read_text(encoding='utf-8')
+
+        self.assertIn('UPDATE services SET thumb_data=', repository_source)
+        self.assertIn('ThumbnailResultRepository', preview_source)
+        self.assertIn('thumbnail_repository', preview_source)
+        self.assertNotIn('UPDATE services SET thumb_data=', preview_source)
+        self.assertNotIn('UPDATE services SET thumb_data=', app_source)
+        self.assertNotIn('_legacy_store_thumbnail_result', app_source)
+
 
 if __name__ == '__main__':
     unittest.main()

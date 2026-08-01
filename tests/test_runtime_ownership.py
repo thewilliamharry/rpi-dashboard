@@ -66,6 +66,46 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertIs(operations.process_preview_requests, worker.beacon.process_preview_requests)
         self.assertIs(operations.acquire_worker_lease, queues.acquire_worker_lease)
 
+    def test_thumbnail_repository_persists_success_and_failure_for_api_reads(self):
+        from dashboard.beacon.repositories import ThumbnailRepository
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO services (port, title, first_seen, last_seen, is_online, last_latency_ms, last_error) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (8080, 'Preview service', 1, 1, 1, 1.0, None),
+            )
+            repository = ThumbnailRepository()
+            repository.store_thumbnail_result(
+                conn, 8080, None, None, None, 'x' * 300, ts=111,
+            )
+            failed = conn.execute(
+                "SELECT thumb_data, thumb_mime, thumb_ts, thumb_source, thumb_attempt_ts, thumb_error "
+                "FROM services WHERE port=8080"
+            ).fetchone()
+            repository.store_thumbnail_result(
+                conn, 8080, b'png-bytes', 'image/png', 'screenshot', None, ts=222,
+            )
+            succeeded = conn.execute(
+                "SELECT thumb_data, thumb_mime, thumb_ts, thumb_source, thumb_attempt_ts, thumb_error "
+                "FROM services WHERE port=8080"
+            ).fetchone()
+            conn.commit()
+            conn.close()
+
+        self.assertEqual(
+            tuple(failed),
+            (None, 'image/jpeg', None, None, 111, 'x' * 240),
+        )
+        self.assertEqual(
+            tuple(succeeded),
+            (b'png-bytes', 'image/png', 222, 'screenshot', 222, None),
+        )
+        thumbnail = self.client.get('/api/thumbnail/8080')
+        self.assertEqual(thumbnail.status_code, 200)
+        self.assertEqual(thumbnail.data, b'png-bytes')
+
     def test_stale_heartbeat_is_reported_without_unhealthy_web_process(self):
         now = 10_000
         self.appmod.update_worker_heartbeat(now=now - self.appmod.WORKER_READY_SECONDS - 1)
