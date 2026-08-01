@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 3
+open_count: 4
 waived_count: 0
 fixed_count: 0
-total_count: 3
-last_updated: 2026-07-31T21:01:33.357Z
+total_count: 4
+last_updated: 2026-08-01T06:46:19.283Z
 ---
 
 # Broken Windows Ledger
@@ -18,6 +18,7 @@ last_updated: 2026-07-31T21:01:33.357Z
 | 1 | 01 | deviation | dashboard/app.py |  | Compatibility adapter required direct outbound-policy integration until staged extraction completes. | open |  | 2026-07-31T20:51:51.317Z |  |
 | 2 | 01 | deviation | dashboard/beacon/recovery.py |  | Verified intermediate automatic migration backups require catalog transition validation for restore --latest. | open |  | 2026-07-31T21:01:33.290Z |  |
 | 3 | 01 | deviation | dashboard/beacon/recovery.py |  | Staging I/O errors are redacted as fixed recovery failures. | open |  | 2026-07-31T21:01:33.357Z |  |
+| 4 | 01 | deviation | tests/test_outbound_policy.py |  | Added real Chromium main-frame, subresource, and CONNECT/SNI tests as required browser-boundary evidence. | open |  | 2026-08-01T06:46:19.283Z |  |
 
 ````json
 [
@@ -55,6 +56,18 @@ last_updated: 2026-07-31T21:01:33.357Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-07-31T21:01:33.357Z",
+    "resolved_at": null
+  },
+  {
+    "id": 4,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "tests/test_outbound_policy.py",
+    "line": null,
+    "description": "Added real Chromium main-frame, subresource, and CONNECT/SNI tests as required browser-boundary evidence.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-01T06:46:19.283Z",
     "resolved_at": null
   }
 ]
