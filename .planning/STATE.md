@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-10-PLAN.md
-last_updated: "2026-08-01T06:22:29.074Z"
+stopped_at: Completed 01-11-PLAN.md
+last_updated: "2026-08-01T06:30:25.282Z"
 last_activity: 2026-08-01
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 14
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 11 of 14
+Plan: 12 of 14
 Status: Ready to execute
 Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [███████░░░] 71%
+Progress: [████████░░] 79%
 
 ## Performance Metrics
 
@@ -68,6 +68,7 @@ Progress: [███████░░░] 71%
 | Phase 01-behavioral-safety-runtime-ownership P08 | 14min | 2 tasks | 6 files |
 | Phase 01 P09 | 16min | 2 tasks | 7 files |
 | Phase 01 P10 | 21min | 2 tasks | 4 files |
+| Phase 01 P11 | 3min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Restore takes the upgrade lock followed by exclusive maintenance; a stale heartbeat never acts as writer exclusion.
 - [Phase ?]: Restore writes an opaque recovery marker before replacement and clears it only after the verified, readable target is the only visible SQLite state.
 - [Phase ?]: The external deployed/retained inventory comparison is intentionally human-only and fail-closed for fingerprints absent from the sanitized support floor.
+- [Phase ?]: Every scan claim receives a new opaque owner token, which all renewal and terminal transitions must present.
+- [Phase ?]: Scan polling recovers expired leases and expires missed deadlines before selecting the next request in the same SQLite write transaction.
+- [Phase ?]: Discovery starts a bounded half-lease heartbeat and skips terminal writes after authority is lost.
 
 ### Pending Todos
 
@@ -119,6 +123,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T06:22:29.066Z
-Stopped at: Completed 01-10-PLAN.md
+Last session: 2026-08-01T06:30:25.273Z
+Stopped at: Completed 01-11-PLAN.md
 Resume file: None
