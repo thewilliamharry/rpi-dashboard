@@ -1,6 +1,9 @@
 import socket
+import ssl
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from dashboard.beacon.config import load_settings
 from dashboard.beacon.outbound import (
@@ -10,6 +13,63 @@ from dashboard.beacon.outbound import (
     OutboundPurpose,
 )
 from dashboard.beacon.previews import route_browser_request
+
+
+TLS_FIXTURES = Path(__file__).with_name('fixtures') / 'tls'
+
+
+class _RecordingHandler(BaseHTTPRequestHandler):
+    records = []
+
+    def do_GET(self):
+        type(self).records.append({
+            'path': self.path,
+            'host': self.headers.get('Host'),
+            'client': self.client_address,
+        })
+        if self.path == '/redirect':
+            self.send_response(302)
+            self.send_header('Location', '/final')
+        else:
+            self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'ok')
+
+    def log_message(self, *_args):
+        return
+
+
+class _LocalOrigin:
+    def __init__(self, *, tls=False, sni_values=None):
+        _RecordingHandler.records = []
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), _RecordingHandler)
+        self.sni_values = sni_values if sni_values is not None else []
+        if tls:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(
+                TLS_FIXTURES / 'beacon-test-cert.pem',
+                TLS_FIXTURES / 'beacon-test-key.pem',
+            )
+            context.set_servername_callback(lambda _sock, name, _ctx: self.sni_values.append(name))
+            self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def port(self):
+        return self.server.server_port
+
+    @property
+    def records(self):
+        return list(_RecordingHandler.records)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
 
 
 def _resolver(*addresses):
@@ -157,3 +217,76 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertFalse(plans['service'].tls.verify_certificate)
         self.assertFalse(plans['webhook'].tls.tls_unverified)
         self.assertTrue(plans['webhook'].tls.verify_certificate)
+
+    def test_socket_destination_and_host_header_are_pinned(self):
+        with _LocalOrigin() as origin:
+            policy = OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1'))
+            transport = OutboundTransport(policy)
+
+            response, plan = transport.request(
+                f'http://service.local:{origin.port}/resource',
+                OutboundPurpose.SERVICE_PROBE,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plan.selected_address, '127.0.0.1')
+        self.assertEqual(origin.records[0]['host'], f'service.local:{origin.port}')
+        self.assertEqual(origin.records[0]['client'][0], '127.0.0.1')
+
+    def test_https_pins_socket_but_preserves_sni_and_certificate_hostname(self):
+        with _LocalOrigin(tls=True) as origin:
+            settings = load_settings({
+                'SERVICE_TARGET_HOSTS': 'service.local,127.0.0.1,::1',
+                'SERVICE_TARGET_NETWORKS': '127.0.0.0/8,::1/128',
+                'ALERT_WEBHOOK_URL': f'https://alerts.example.test:{origin.port}/beacon',
+            })
+            policy = OutboundPolicy(settings, resolver=_resolver('127.0.0.1'))
+            policy._webhook_address_allowed = lambda _address: True
+            transport = OutboundTransport(
+                policy,
+                ca_certs=str(TLS_FIXTURES / 'beacon-test-cert.pem'),
+            )
+
+            response, plan = transport.request(
+                f'https://alerts.example.test:{origin.port}/beacon', OutboundPurpose.WEBHOOK,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plan.selected_address, '127.0.0.1')
+        self.assertEqual(origin.records[0]['host'], f'alerts.example.test:{origin.port}')
+        self.assertEqual(origin.sni_values, ['alerts.example.test'])
+
+    def test_redirect_hop_replans_before_opening_its_selected_socket(self):
+        calls = []
+
+        def resolve(host, port, *_args, **_kwargs):
+            calls.append((host, port))
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', port))]
+
+        with _LocalOrigin() as origin:
+            transport = OutboundTransport(OutboundPolicy(self.settings, resolver=resolve))
+            response, _plan = transport.request(
+                f'http://service.local:{origin.port}/redirect', OutboundPurpose.SERVICE_PROBE,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [('service.local', origin.port), ('service.local', origin.port)])
+        self.assertEqual([entry['path'] for entry in origin.records], ['/redirect', '/final'])
+
+    def test_rebinding_after_planning_never_resolves_or_connects_by_hostname(self):
+        calls = []
+
+        def resolve(host, port, *_args, **_kwargs):
+            calls.append((host, port))
+            address = '127.0.0.1' if len(calls) == 1 else '203.0.113.8'
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, port))]
+
+        with _LocalOrigin() as origin:
+            response, plan = OutboundTransport(OutboundPolicy(self.settings, resolver=resolve)).request(
+                f'http://service.local:{origin.port}/', OutboundPurpose.SERVICE_PROBE,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plan.selected_address, '127.0.0.1')
+        self.assertEqual(calls, [('service.local', origin.port)])
+        self.assertEqual(len(origin.records), 1)
