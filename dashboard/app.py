@@ -463,13 +463,8 @@ def _outbound_policy():
     return OutboundPolicy(replace(load_settings(), alert_webhook_url=ALERT_WEBHOOK_URL))
 
 
-def _requests_request(method, url, **kwargs):
-    request_fn = getattr(requests, method.lower())
-    return request_fn(url, **kwargs)
-
-
 def _outbound_transport():
-    return OutboundTransport(_outbound_policy(), requester=_requests_request)
+    return OutboundTransport(_outbound_policy())
 
 
 def _safe_policy_error(error, *, redirect=False):

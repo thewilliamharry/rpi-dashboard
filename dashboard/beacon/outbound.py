@@ -8,8 +8,12 @@ strict webhook delivery or concurrent requests.
 from dataclasses import dataclass
 from enum import Enum
 import ipaddress
+import json
 import socket
 from urllib.parse import urljoin, urlparse, urlunparse
+
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.util import Timeout
 
 
 class OutboundPurpose(str, Enum):
@@ -41,6 +45,8 @@ class RequestPlan:
     port: int
     path_query: str
     resolved_addresses: tuple[str, ...]
+    selected_address: str
+    authority: str
     purpose: OutboundPurpose
     redirect_budget: int
     connect_timeout: float
@@ -94,6 +100,8 @@ class OutboundPolicy:
             port=port,
             path_query=(parsed.path or '/') + (f'?{parsed.query}' if parsed.query else ''),
             resolved_addresses=addresses,
+            selected_address=addresses[0],
+            authority=self._authority(hostname, port, parsed.scheme),
             purpose=purpose,
             redirect_budget=0 if purpose is OutboundPurpose.WEBHOOK else 5 - redirect_count,
             connect_timeout=2.0 if purpose is OutboundPurpose.SERVICE_PROBE else 3.0,
@@ -231,6 +239,26 @@ class OutboundPolicy:
         netloc = host if port == default_port else f'{host}:{port}'
         return urlunparse((scheme, netloc, parsed.path or '/', '', parsed.query, ''))
 
+    @staticmethod
+    def _authority(hostname, port, scheme):
+        default_port = 443 if scheme.lower() == 'https' else 80
+        host = f'[{hostname}]' if ':' in hostname else hostname
+        return host if port == default_port else f'{host}:{port}'
+
+
+@dataclass
+class PinnedResponse:
+    """Small requests-compatible result with evidence of the opened address."""
+
+    status_code: int
+    headers: object
+    content: bytes
+    selected_address: str
+
+    @property
+    def text(self):
+        return self.content.decode('utf-8', errors='replace')
+
 
 class OutboundTransport:
     """Small redirect-owning transport which only sends pre-built plans.
@@ -240,9 +268,10 @@ class OutboundTransport:
     a rejected target reaches no network callback.
     """
 
-    def __init__(self, policy, *, requester):
+    def __init__(self, policy, *, requester=None, ca_certs=None):
         self.policy = policy
         self._requester = requester
+        self._ca_certs = ca_certs
 
     def request(self, url, purpose, *, method='GET', **kwargs):
         redirect_count = 0
@@ -256,14 +285,17 @@ class OutboundTransport:
                     redirect_error.response = previous_response
                     raise redirect_error from exc
                 raise
-            response = self._requester(
-                method,
-                plan.url,
-                timeout=(plan.connect_timeout, plan.read_timeout),
-                verify=plan.tls.verify_certificate,
-                allow_redirects=False,
-                **kwargs,
-            )
+            if self._requester is not None:
+                response = self._requester(
+                    method,
+                    plan.url,
+                    timeout=(plan.connect_timeout, plan.read_timeout),
+                    verify=plan.tls.verify_certificate,
+                    allow_redirects=False,
+                    **kwargs,
+                )
+            else:
+                response = self._send_pinned(method, plan, **kwargs)
             location = getattr(response, 'headers', {}).get('Location')
             if not (300 <= response.status_code < 400 and location):
                 return response, plan
@@ -272,3 +304,58 @@ class OutboundTransport:
             redirect_count += 1
             candidate = urljoin(plan.url, location)
             previous_response = response
+
+    def _send_pinned(self, method, plan, **kwargs):
+        """Open exactly the validated numeric address, never the hostname.
+
+        The URL authority stays at the HTTP and TLS layers while the pool host
+        is the immutable numeric address selected by ``OutboundPolicy.plan``.
+        This prevents a resolver call in urllib3 from changing the socket
+        destination after policy approval.
+        """
+        headers = dict(kwargs.pop('headers', {}) or {})
+        headers['Host'] = plan.authority
+        body = kwargs.pop('data', None)
+        payload = kwargs.pop('json', None)
+        if payload is not None:
+            if body is not None:
+                raise ValueError('request body is ambiguous')
+            body = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+            headers.setdefault('Content-Type', 'application/json')
+        if kwargs:
+            raise ValueError('unsupported outbound request option')
+
+        timeout = Timeout(connect=plan.connect_timeout, read=plan.read_timeout)
+        common = {
+            'timeout': timeout,
+            'retries': False,
+            'headers': headers,
+        }
+        if plan.scheme == 'https':
+            pool = HTTPSConnectionPool(
+                plan.selected_address,
+                plan.port,
+                cert_reqs='CERT_REQUIRED' if plan.tls.verify_certificate else 'CERT_NONE',
+                assert_hostname=plan.hostname if plan.tls.verify_certificate else False,
+                server_hostname=plan.hostname,
+                ca_certs=self._ca_certs,
+                **common,
+            )
+        else:
+            pool = HTTPConnectionPool(plan.selected_address, plan.port, **common)
+        try:
+            response = pool.urlopen(
+                method.upper(),
+                plan.path_query,
+                body=body,
+                redirect=False,
+                preload_content=True,
+            )
+            return PinnedResponse(
+                status_code=response.status,
+                headers=response.headers,
+                content=response.data,
+                selected_address=plan.selected_address,
+            )
+        finally:
+            pool.close()

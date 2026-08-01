@@ -233,7 +233,7 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertEqual(origin.records[0]['host'], f'service.local:{origin.port}')
         self.assertEqual(origin.records[0]['client'][0], '127.0.0.1')
 
-    def test_https_pins_socket_but_preserves_sni_and_certificate_hostname(self):
+    def test_tls_sni_and_certificate_hostname_survive_pinned_socket(self):
         with _LocalOrigin(tls=True) as origin:
             settings = load_settings({
                 'SERVICE_TARGET_HOSTS': 'service.local,127.0.0.1,::1',
