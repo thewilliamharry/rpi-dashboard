@@ -285,6 +285,8 @@ class _PolicyProxyHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
         client = self.request
+        origin = None
+        relay_owns_origin = False
         try:
             header, remainder = self._read_header(client)
             method, target, version, headers = self._parse_header(header)
@@ -296,6 +298,7 @@ class _PolicyProxyHandler(socketserver.BaseRequestHandler):
                 client.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
                 if remainder:
                     origin.sendall(remainder)
+                relay_owns_origin = True
                 self.server.proxy._relay(client, origin)
                 return
 
@@ -308,8 +311,11 @@ class _PolicyProxyHandler(socketserver.BaseRequestHandler):
             first_line = f'{method} {plan.path_query} {version}\r\n'.encode('ascii')
             forwarded = self._format_headers(headers, plan.authority)
             origin.sendall(first_line + forwarded + b'\r\n' + remainder)
+            relay_owns_origin = True
             self.server.proxy._relay(client, origin)
         except (OutboundPolicyError, ValueError, OSError, UnicodeError):
+            if origin is not None and not relay_owns_origin:
+                self.server.proxy._close_unrelayed_origin(origin)
             self._reject(client)
 
     def _read_header(self, client):
@@ -431,6 +437,13 @@ class PolicyProxy:
         except Exception:
             self._slots.release()
             raise
+
+    def _close_unrelayed_origin(self, origin):
+        """Release an origin socket still owned by the request handler."""
+        try:
+            origin.close()
+        finally:
+            self._slots.release()
 
     def _relay(self, client, origin):
         with self._active_lock:
