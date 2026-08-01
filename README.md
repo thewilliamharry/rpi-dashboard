@@ -82,7 +82,19 @@ If an upgrade reports that recovery is required, use this single supported offli
 
 4. Confirm the command reports `"completed": true`, then start only the compatible web service to inspect the restored data. Restart worker only after deploying a migration-fixed or prior compatible image.
 
-The restore command refuses a fresh worker and never accepts a backup path. There is no browser restore action, backup deletion command, or migration-retry control.
+The restore command refuses a fresh worker and never accepts a backup path. There is no browser restore action, backup deletion command, or migration-retry control. In addition to stopping the Compose writers, recovery takes the upgrade lock followed by the exclusive database-maintenance barrier, so a managed web or worker SQLite connection cannot overlap the replacement. While that barrier is held, it proves the target WAL checkpoint is not busy, fsyncs durability boundaries, and removes only the exact dashboard.db-wal and dashboard.db-shm sidecars before installing the verified catalog backup.
+
+#### External operator verification: deployed and retained Pi databases
+
+This is a human-only, fail-closed compatibility check. Before an upgrade, run `beacon.inventory` read-only against every database currently deployed or retained on the Pi, compare each sanitized fingerprint with `tests/fixtures/legacy/operator/` and the packaged support floor, and stop the upgrade for an unknown fingerprint. The repository automation cannot establish the set of databases held outside the repository, and it must not copy an external database into this repository.
+
+For each local operator-owned database, save only the sanitized inventory report outside the checkout for comparison:
+
+```bash
+PYTHONPATH=dashboard dashboard/.venv/bin/python -m beacon.inventory \
+  --db /absolute/path/to/deployed/dashboard.db \
+  --output /tmp/beacon-inventory.json
+```
 
 Record the running image, deploy, then observe two uptime cycles and one discovery. `--force-recreate` reruns the one-shot ownership migration, `--remove-orphans` removes containers from older Compose definitions, and `--wait` avoids smoke requests while Gunicorn is still starting:
 
