@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-09-PLAN.md
-last_updated: "2026-08-01T06:08:27.764Z"
+stopped_at: Completed 01-10-PLAN.md
+last_updated: "2026-08-01T06:22:29.074Z"
 last_activity: 2026-08-01
 last_activity_desc: Phase 01 execution started
 progress:
-  total_phases: 6
+  total_phases: 1
   completed_phases: 0
   total_plans: 14
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 10 of 14
+Plan: 11 of 14
 Status: Ready to execute
 Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [██████░░░░] 64%
+Progress: [███████░░░] 71%
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ Progress: [██████░░░░] 64%
 | Phase 01 P06 | 31min | 3 tasks | 9 files |
 | Phase 01-behavioral-safety-runtime-ownership P08 | 14min | 2 tasks | 6 files |
 | Phase 01 P09 | 16min | 2 tasks | 7 files |
+| Phase 01 P10 | 21min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: TLS posture remains separate from availability and uptime in every service card.
 - [Phase ?]: Every ordinary Beacon SQLite connection keeps a shared sibling-lock lease until close.
 - [Phase ?]: Schema upgrades acquire the shared upgrade lock before exclusive database maintenance.
+- [Phase ?]: Restore takes the upgrade lock followed by exclusive maintenance; a stale heartbeat never acts as writer exclusion.
+- [Phase ?]: Restore writes an opaque recovery marker before replacement and clears it only after the verified, readable target is the only visible SQLite state.
+- [Phase ?]: The external deployed/retained inventory comparison is intentionally human-only and fail-closed for fingerprints absent from the sanitized support floor.
 
 ### Pending Todos
 
@@ -115,6 +119,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T06:08:27.756Z
-Stopped at: Completed 01-09-PLAN.md
-Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-10-PLAN.md
+Last session: 2026-08-01T06:22:29.066Z
+Stopped at: Completed 01-10-PLAN.md
+Resume file: None

@@ -12,7 +12,7 @@
 - [ ] **FND-03**: Importing the web application starts no scheduler, browser, probe, or other background work.
 - [ ] **FND-04**: The worker is the sole scheduler owner and uses durable persisted coordination for work shared with the web process.
 - [ ] **FND-05**: Database changes use versioned, transactional, idempotent migrations validated against representative existing databases.
-- [ ] **FND-06**: The operator can create and verify a usable backup before a migration and recover existing Beacon data after a failed upgrade.
+- [x] **FND-06**: The operator can create and verify a usable backup before a migration and recover existing Beacon data after a failed upgrade.
 - [ ] **FND-07**: Probes, HTML fetches, previews, redirects, and webhooks use one tested outbound-target and TLS safety policy.
 
 ### Telemetry and Retention
