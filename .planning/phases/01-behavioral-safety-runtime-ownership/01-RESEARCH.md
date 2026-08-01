@@ -346,22 +346,25 @@ while True:
 | A2 | A one-shot Compose recovery command, requiring web/worker to be stopped before restore, is the smallest clear recovery experience. | Common Pitfall 1 | The operator may prefer an in-dashboard flow or operational setup may need a different stop/restore sequence. |
 | A3 | Webhooks should reject redirects rather than follow a separately validated redirect chain. | Outbound policy | A valid webhook provider redirect could fail until explicitly supported. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Which legacy schemas are actually deployed?**
    - What we know: Git history proves initial (2026-04), metadata/events (2026-04), and queue/runtime-state (2026-07) shapes. [VERIFIED: repository]
    - What's unclear: There is no production database artifact or volume snapshot in the repository. [VERIFIED: repository]
    - Recommendation: Make the first executable task collect sanitized `sqlite_master`, `PRAGMA table_info`, migration rows, counts, database/WAL sizes, and backup/restore evidence; turn each observed shape into a migration fixture before choosing the support floor. [VERIFIED: repository]
+   - **RESOLVED:** Per D-04 and Plan 01-10, compatibility remains fail-closed until the operator inventories every current or retained Pi database and compares its sanitized fingerprint with the documented support floor. Gathering and comparing that external evidence remains a human execution and verification action; it has not been claimed complete by repository planning or automation.
 
 2. **How should trusted-LAN host configuration distinguish service aliases from resolved addresses?**
    - What we know: Current configuration permits named aliases and networks but normalizes any accepted service hostname to `127.0.0.1`, so it does not actually support a separately addressed LAN service. [VERIFIED: repository]
    - What's unclear: The intended operator configuration syntax and minimum necessary local-network ranges. [VERIFIED: repository]
    - Recommendation: Keep an explicit service-target allowlist/allow-network setting separate from webhook allowlisting; test all returned resolver addresses and avoid broad default expansion. [CITED: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html]
+   - **RESOLVED:** Plan 01-12 applies purpose-specific policy at every connection boundary, revalidates every current A/AAAA result for the configured alias, and rejects the connection when any newly returned address is disallowed.
 
 3. **What recovery command belongs in the delivered Docker Compose UX?**
    - What we know: `/data` is the only intended writable mount and current Compose blocks web startup on worker health. [VERIFIED: repository]
    - What's unclear: Whether the project wants a separate `recovery` service/profile or a command on the existing image. [VERIFIED: repository]
    - Recommendation: Plan one named, documented command and exercise it against a deliberately failed migration fixture before implementation is considered complete. [ASSUMED]
+   - **RESOLVED:** Plan 01-10 retains and hardens the single supported offline `restore --latest` recovery command, including exclusive maintenance and safe SQLite sidecar handling; no second recovery interface is planned.
 
 ## Environment Availability
 
