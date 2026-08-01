@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import time
+import threading
+import uuid
 
 from .db import connect_db
 from .migrations import RECOVERY_MARKER
@@ -46,6 +48,66 @@ class QueueRequest:
     port: int | None = None
     revision: int | None = None
     coalesced: bool = False
+
+
+class ScanLeaseHeartbeat:
+    """Renew one claimed scan lease until stopped or fenced by a successor.
+
+    The clock and wait collaborators keep the scheduling loop deterministic in
+    tests while production uses monotonic waiting and wall-clock SQLite times.
+    """
+
+    def __init__(
+        self, db_path, request_id, owner_token, *, lease_seconds=30, now=None,
+        monotonic=None, wait=None,
+    ):
+        self.db_path = db_path
+        self.request_id = int(request_id)
+        self.owner_token = str(owner_token)
+        self.lease_seconds = int(lease_seconds)
+        self.now = now or time.time
+        self.monotonic = monotonic or time.monotonic
+        self._stopped = threading.Event()
+        self.wait = wait or self._stopped.wait
+        self.interval_seconds = max(1.0, min(self.lease_seconds / 2, 10.0))
+        self.lost = False
+        self._thread = None
+
+    def renew_once(self, now=None):
+        """Renew once, recording loss of authority without leaking the token."""
+        if self.lost:
+            return False
+        try:
+            renew_scan_lease(
+                self.db_path, self.request_id, self.owner_token,
+                now=int(self.now() if now is None else now),
+                lease_seconds=self.lease_seconds,
+            )
+        except LeaseLost:
+            self.lost = True
+            return False
+        return True
+
+    def _run(self):
+        next_renewal = self.monotonic() + self.interval_seconds
+        while not self._stopped.is_set():
+            remaining = max(0.0, next_renewal - self.monotonic())
+            if self.wait(remaining) or self._stopped.is_set():
+                return
+            if not self.renew_once():
+                return
+            next_renewal += self.interval_seconds
+
+    def start(self):
+        self._thread = threading.Thread(
+            target=self._run, name='beacon-scan-lease-heartbeat', daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._stopped.set()
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(1.0, self.interval_seconds))
 
 
 def _connect(db_path):
@@ -269,11 +331,12 @@ def claim_scan(db_path, worker_id, *, now=None, lease_seconds=30):
             conn.commit()
             return None
         request_id = int(row['id'])
+        owner_token = f'{worker_id}:{uuid.uuid4().hex}'
         changed = conn.execute(
             "UPDATE scan_requests SET status='running', started_ts=?, lease_owner=?, lease_until=?, "
             "attempt_count=attempt_count + 1, error=NULL "
             "WHERE id=? AND status='queued' AND deadline_ts > ?",
-            (now, str(worker_id), now + int(lease_seconds), request_id, now),
+            (now, owner_token, now + int(lease_seconds), request_id, now),
         ).rowcount
         if not changed:
             conn.commit()

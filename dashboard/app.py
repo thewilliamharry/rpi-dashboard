@@ -1506,29 +1506,53 @@ def queue_discovery_request(client_key):
     return request.request_id
 
 
-def process_scan_requests(worker_id=None):
+def process_scan_requests(worker_id=None, *, now_fn=None, lease_seconds=30, heartbeat_factory=None):
     worker_id = worker_id or 'compat-worker'
-    claim = beacon_queues.claim_scan(DB_PATH, worker_id)
+    now_fn = now_fn or time.time
+    claim = beacon_queues.claim_scan(
+        DB_PATH, worker_id, now=int(now_fn()), lease_seconds=lease_seconds,
+    )
     if not claim:
         return False
     request_id = claim.request_id
+    owner_token = claim.lease_owner
+    heartbeat_factory = heartbeat_factory or beacon_queues.ScanLeaseHeartbeat
+    heartbeat = heartbeat_factory(
+        DB_PATH, request_id, owner_token, lease_seconds=lease_seconds, now=now_fn,
+    )
+    heartbeat.start()
 
     try:
         outcome = run_discovery(source=f'manual:{request_id}')
         if outcome == 'busy':
-            beacon_queues.requeue_scan(DB_PATH, request_id, worker_id)
+            if heartbeat.lost:
+                log.warning('scan lease lost before requeue for request %s', request_id)
+                return False
+            beacon_queues.requeue_scan(
+                DB_PATH, request_id, owner_token, now=int(now_fn()),
+            )
             return False
         state = _read_scan_state()
         status = 'failed' if outcome == 'failed' or state.get('last_error') else 'completed'
         error = state.get('last_error') if status == 'failed' else None
     except Exception as exc:
         status, error = 'failed', str(exc)[:240]
+    finally:
+        heartbeat.stop()
+
+    if heartbeat.lost:
+        log.warning('scan lease lost before terminal transition for request %s', request_id)
+        return False
 
     try:
         if status == 'completed':
-            beacon_queues.finish_scan(DB_PATH, request_id, worker_id)
+            beacon_queues.finish_scan(
+                DB_PATH, request_id, owner_token, now=int(now_fn()),
+            )
         else:
-            beacon_queues.fail_scan(DB_PATH, request_id, worker_id, error or 'scan failed')
+            beacon_queues.fail_scan(
+                DB_PATH, request_id, owner_token, error or 'scan failed', now=int(now_fn()),
+            )
     except beacon_queues.LeaseLost:
         return False
     return True

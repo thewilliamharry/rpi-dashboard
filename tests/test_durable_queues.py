@@ -43,6 +43,7 @@ class DurableQueueTests(unittest.TestCase):
         clock = {'now': 1_000}
         events = []
         heartbeats = []
+        queues.enqueue_scan(self.db_path, 'operator', now=clock['now'])
 
         class FakeHeartbeat:
             def __init__(self, db_path, request_id, owner_token, **kwargs):
@@ -89,9 +90,10 @@ class DurableQueueTests(unittest.TestCase):
              ('renewed', 1_060), 'heartbeat-stopped'],
         )
 
-    def test_lost_scan_heartbeat_suppresses_late_terminal_writes(self):
+    def test_lost_ownership_suppresses_late_terminal_writes(self):
         clock = {'now': 1_000}
         terminal_calls = []
+        queues.enqueue_scan(self.db_path, 'operator', now=clock['now'])
 
         class FakeHeartbeat:
             def __init__(self, db_path, request_id, owner_token, **kwargs):
@@ -115,6 +117,7 @@ class DurableQueueTests(unittest.TestCase):
 
         def controlled_discovery(source):
             clock['now'] = 1_031
+            queues.recover_queues(self.db_path, now=clock['now'])
             successor = queues.claim_scan(
                 self.db_path, 'worker-b', now=clock['now'], lease_seconds=30,
             )
