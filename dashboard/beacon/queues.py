@@ -8,9 +8,9 @@ owns a worker or queue row.
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import sqlite3
 import time
 
+from .db import connect_db
 from .migrations import RECOVERY_MARKER
 
 
@@ -49,10 +49,7 @@ class QueueRequest:
 
 
 def _connect(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA busy_timeout=30000')
-    return conn
+    return connect_db(db_path)
 
 
 def _now(now):

@@ -23,6 +23,7 @@ try:
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
     from .beacon import queues as beacon_queues
+    from .beacon.db import connect_db
     from .beacon.migrations import RECOVERY_MARKER
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
@@ -32,6 +33,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
     from beacon import queues as beacon_queues
+    from beacon.db import connect_db
     from beacon.migrations import RECOVERY_MARKER
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 
@@ -121,11 +123,7 @@ _bg_started = False
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    return connect_db(DB_PATH)
 
 
 def _table_columns(conn, table_name):
