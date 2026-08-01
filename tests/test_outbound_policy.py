@@ -11,8 +11,9 @@ from dashboard.beacon.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
     OutboundPurpose,
+    PolicyProxy,
 )
-from dashboard.beacon.previews import route_browser_request
+from dashboard.beacon.previews import browser_proxy_context, route_browser_request
 
 
 TLS_FIXTURES = Path(__file__).with_name('fixtures') / 'tls'
@@ -290,3 +291,76 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertEqual(plan.selected_address, '127.0.0.1')
         self.assertEqual(calls, [('service.local', origin.port)])
         self.assertEqual(len(origin.records), 1)
+
+    def test_chromium_proxy_absolute_request_pins_origin_and_preserves_host_header(self):
+        with _LocalOrigin() as origin, PolicyProxy(
+                OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+        ) as proxy:
+            with socket.create_connection(proxy.address, timeout=1) as client:
+                client.sendall(
+                    f'GET http://service.local:{origin.port}/main HTTP/1.1\r\n'
+                    f'Host: service.local:{origin.port}\r\nConnection: close\r\n\r\n'.encode(),
+                )
+                response = client.recv(4096)
+
+        self.assertIn(b'200', response)
+        self.assertEqual(origin.records[0]['host'], f'service.local:{origin.port}')
+        self.assertEqual(proxy.active_relays, 0)
+
+    def test_connect_tunnel_uses_pinned_address_and_preserves_browser_sni(self):
+        with _LocalOrigin(tls=True) as origin, PolicyProxy(
+                OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+        ) as proxy:
+            with socket.create_connection(proxy.address, timeout=1) as client:
+                client.sendall(f'CONNECT service.local:{origin.port} HTTP/1.1\r\nHost: service.local:{origin.port}\r\n\r\n'.encode())
+                self.assertIn(b'200', client.recv(4096))
+                tls = ssl.create_default_context()
+                tls.check_hostname = False
+                tls.verify_mode = ssl.CERT_NONE
+                with tls.wrap_socket(client, server_hostname='service.local') as tunneled:
+                    tunneled.sendall(b'GET /secure HTTP/1.1\r\nHost: service.local\r\nConnection: close\r\n\r\n')
+                    self.assertIn(b'200', tunneled.recv(4096))
+
+        self.assertEqual(origin.sni_values, ['service.local'])
+        self.assertEqual(proxy.active_relays, 0)
+
+    def test_proxy_rebinding_blocks_before_any_forbidden_origin_connection(self):
+        calls = []
+
+        def resolve(host, port, *_args, **_kwargs):
+            calls.append((host, port))
+            address = '127.0.0.1' if len(calls) == 1 else '203.0.113.8'
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, port))]
+
+        policy = OutboundPolicy(self.settings, resolver=resolve)
+        with _LocalOrigin() as origin:
+            policy.plan(f'http://service.local:{origin.port}/early', OutboundPurpose.BROWSER_PREVIEW)
+            with PolicyProxy(policy) as proxy, socket.create_connection(proxy.address, timeout=1) as client:
+                client.sendall(
+                    f'GET http://service.local:{origin.port}/blocked HTTP/1.1\r\n'
+                    f'Host: service.local:{origin.port}\r\nConnection: close\r\n\r\n'.encode(),
+                )
+                self.assertIn(b'403', client.recv(4096))
+
+        self.assertEqual(len(origin.records), 0)
+        self.assertEqual(proxy.active_relays, 0)
+
+    def test_browser_proxy_context_passes_only_loopback_proxy_and_closes_once(self):
+        calls = []
+
+        class Context:
+            def close(self):
+                calls.append('close')
+
+        class Browser:
+            def new_context(self, **kwargs):
+                calls.append(kwargs)
+                return Context()
+
+        with browser_proxy_context(
+                Browser(), OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+        ) as context:
+            self.assertIsInstance(context, Context)
+
+        self.assertEqual(calls[-1], 'close')
+        self.assertEqual(calls[0]['proxy']['server'].split(':')[0], 'http://127.0.0.1')
