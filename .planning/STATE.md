@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
 status: executing
-stopped_at: Completed 01-11-PLAN.md
-last_updated: "2026-08-01T06:30:25.282Z"
+stopped_at: Completed 01-12-PLAN.md
+last_updated: "2026-08-01T06:45:56.352Z"
 last_activity: 2026-08-01
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 14
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership) — EXECUTING
-Plan: 12 of 14
+Plan: 13 of 14
 Status: Ready to execute
 Last activity: 2026-08-01 — Phase 01 execution started
 
-Progress: [████████░░] 79%
+Progress: [█████████░] 86%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ Progress: [████████░░] 79%
 | Phase 01 P09 | 16min | 2 tasks | 7 files |
 | Phase 01 P10 | 21min | 2 tasks | 4 files |
 | Phase 01 P11 | 3min | 2 tasks | 3 files |
+| Phase 01 P12 | 14min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -104,6 +105,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Every scan claim receives a new opaque owner token, which all renewal and terminal transitions must present.
 - [Phase ?]: Scan polling recovers expired leases and expires missed deadlines before selecting the next request in the same SQLite write transaction.
 - [Phase ?]: Discovery starts a bounded half-lease heartbeat and skips terminal writes after authority is lost.
+- [Phase ?]: Pinned outbound sockets to the approved numeric address while preserving original Host, TLS SNI, and certificate hostname identity.
+- [Phase ?]: Each Chromium preview context owns a short-lived loopback policy proxy; route callbacks are early gates, not socket enforcement.
+- [Phase ?]: Trusted-LAN service TLS remains service-only and unverified; strict pinned webhooks remain verified and redirect-free.
 
 ### Pending Todos
 
@@ -123,6 +127,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T06:30:25.273Z
-Stopped at: Completed 01-11-PLAN.md
+Last session: 2026-08-01T06:45:56.344Z
+Stopped at: Completed 01-12-PLAN.md
 Resume file: None
