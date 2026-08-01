@@ -119,6 +119,12 @@ console.log(JSON.stringify({
             'docker compose run --rm --no-deps recovery status',
             'The restore command refuses a fresh worker',
             'never accepts a backup path',
+            'upgrade lock followed by the exclusive database-maintenance barrier',
+            'dashboard.db-wal and dashboard.db-shm',
+            'External operator verification: deployed and retained Pi databases',
+            'repository automation cannot establish the set of databases held outside the repository',
+            'stop the upgrade for an unknown fingerprint',
+            'tests/fixtures/legacy/operator/',
             'Restart worker only after deploying a migration-fixed or prior compatible image',
         ]:
             self.assertIn(token, readme)

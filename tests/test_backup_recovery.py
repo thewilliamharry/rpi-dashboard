@@ -355,3 +355,76 @@ class BackupRecoveryTests(unittest.TestCase):
                     'Sample Service',
                 )
             self.assertTrue(marker.exists())
+
+    def test_stale_worker_metadata_writer_blocks_restore_until_commit(self):
+        """The maintenance lease, not heartbeat freshness, excludes web writes."""
+        appmod, loaded_database = load_app()
+        entered_write = threading.Event()
+        release_write = threading.Event()
+        original_upsert = appmod.beacon_repositories.upsert_service_metadata
+        cleanup_db(loaded_database)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / 'dashboard.db'
+            copy2(FIXTURE, database)
+            appmod.DB_PATH = str(database)
+            backup = create_verified_backup(database, target_version=1)
+            held_backup = database.parent / 'held-pre-upgrade-backup.db'
+            copy2(backup, held_backup)
+            appmod.init_db()
+            copy2(held_backup, backup)
+            writer = None
+            try:
+                appmod._set_runtime_state('worker_heartbeat', {'ts': 0}, now=0)
+
+                def blocked_upsert(*args, **kwargs):
+                    entered_write.set()
+                    self.assertTrue(release_write.wait(2))
+                    return original_upsert(*args, **kwargs)
+
+                appmod.beacon_repositories.upsert_service_metadata = blocked_upsert
+                result = {}
+
+                def submit_metadata(name):
+                    result[name] = appmod.app.test_client().put(
+                        '/api/service-meta/8080',
+                        json={'display_name': name, 'url': 'http://127.0.0.1:8080'},
+                        headers={'X-Beacon-UI': '1'},
+                    )
+
+                writer = threading.Thread(target=submit_metadata, args=('Blocked write',))
+                writer.start()
+                self.assertTrue(entered_write.wait(2))
+                with mock.patch(
+                    'dashboard.beacon.recovery._checkpoint_and_remove_sidecars',
+                ) as checkpoint, mock.patch('dashboard.beacon.recovery.os.replace') as replace:
+                    with self.assertRaisesRegex(RecoveryError, 'restore did not complete'):
+                        restore_backup(
+                            database.parent,
+                            backup.name,
+                            now=lambda: 1_000_000,
+                            lock_timeout_seconds=0,
+                        )
+                checkpoint.assert_not_called()
+                replace.assert_not_called()
+
+                release_write.set()
+                writer.join(timeout=2)
+                self.assertFalse(writer.is_alive())
+                self.assertEqual(result['Blocked write'].status_code, 200)
+
+                restore_backup(database.parent, backup.name, now=lambda: 1_000_000)
+                appmod.init_db()
+                submit_metadata('Restored write')
+                self.assertEqual(result['Restored write'].status_code, 200)
+                with sqlite3.connect(database) as conn:
+                    self.assertEqual(
+                        conn.execute(
+                            'SELECT display_name FROM service_meta WHERE port=8080'
+                        ).fetchone()[0],
+                        'Restored write',
+                    )
+            finally:
+                release_write.set()
+                if writer is not None:
+                    writer.join(timeout=2)
+                appmod.beacon_repositories.upsert_service_metadata = original_upsert
