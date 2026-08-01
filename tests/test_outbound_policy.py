@@ -4,6 +4,8 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from playwright.sync_api import sync_playwright
 
@@ -14,6 +16,7 @@ from dashboard.beacon.outbound import (
     OutboundPolicyError,
     OutboundPurpose,
     PolicyProxy,
+    _PolicyProxyHandler,
 )
 from dashboard.beacon.previews import browser_proxy_context, route_browser_request
 
@@ -95,6 +98,43 @@ class _LocalOrigin:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+
+
+class _HandlerClient:
+    def __init__(self, request, *, fail_on_send=None):
+        self.request = request
+        self.fail_on_send = fail_on_send
+        self.sent = []
+
+    def settimeout(self, _timeout):
+        return None
+
+    def recv(self, _size):
+        if self.request is None:
+            return b''
+        request, self.request = self.request, None
+        return request
+
+    def sendall(self, data):
+        self.sent.append(data)
+        if self.fail_on_send == len(self.sent):
+            raise OSError('injected client send failure')
+
+
+class _FailingOrigin:
+    def __init__(self, *, fail_on_send=False):
+        self.fail_on_send = fail_on_send
+        self.closed = 0
+
+    def settimeout(self, _timeout):
+        return None
+
+    def sendall(self, _data):
+        if self.fail_on_send:
+            raise OSError('injected origin send failure')
+
+    def close(self):
+        self.closed += 1
 
 
 def _resolver(*addresses):
@@ -394,6 +434,81 @@ class OutboundPolicyTests(unittest.TestCase):
                     self.assertIn(b'Allow: GET, HEAD', response)
 
         self.assertEqual(Policy.calls, [])
+
+    @staticmethod
+    def _run_proxy_handler(proxy, request, origin, *, fail_on_client_send=None, format_headers=False):
+        client = _HandlerClient(request, fail_on_send=fail_on_client_send)
+        handler = object.__new__(_PolicyProxyHandler)
+        handler.request = client
+        handler.server = SimpleNamespace(proxy=proxy)
+        with patch('dashboard.beacon.outbound.socket.create_connection', return_value=origin):
+            if format_headers:
+                with patch.object(_PolicyProxyHandler, '_format_headers', side_effect=UnicodeError):
+                    handler.handle()
+            else:
+                handler.handle()
+
+    def test_pre_relay_failures_close_origin_and_release_each_slot_once(self):
+        proxy = PolicyProxy(
+            OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+            max_connections=1,
+        )
+        cases = [
+            (
+                b'CONNECT service.local:8123 HTTP/1.1\r\nHost: service.local:8123\r\n\r\n',
+                _FailingOrigin(),
+                {'fail_on_client_send': 1},
+            ),
+            (
+                b'CONNECT service.local:8123 HTTP/1.1\r\nHost: service.local:8123\r\n\r\nhello',
+                _FailingOrigin(fail_on_send=True),
+                {},
+            ),
+            (
+                b'GET http://service.local:8123/ HTTP/1.1\r\nHost: service.local:8123\r\n\r\n',
+                _FailingOrigin(),
+                {'format_headers': True},
+            ),
+            (
+                b'GET http://service.local:8123/ HTTP/1.1\r\nHost: service.local:8123\r\n\r\n',
+                _FailingOrigin(fail_on_send=True),
+                {},
+            ),
+        ]
+
+        for request, origin, options in cases:
+            with self.subTest(request=request.split(b' ', 1)[0], options=options):
+                self._run_proxy_handler(proxy, request, origin, **options)
+                self.assertEqual(origin.closed, 1)
+                self.assertEqual(proxy.active_relays, 0)
+                self.assertTrue(proxy._slots.acquire(blocking=False))
+                proxy._slots.release()
+
+    def test_repeated_pre_relay_failures_leave_capacity_for_a_real_proxy_get(self):
+        with _LocalOrigin() as origin, PolicyProxy(
+                OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+                max_connections=2,
+        ) as proxy:
+            failed_origins = []
+            request = (
+                f'CONNECT service.local:{origin.port} HTTP/1.1\r\n'
+                f'Host: service.local:{origin.port}\r\n\r\n'.encode()
+            )
+            for _ in range(proxy.max_connections + 1):
+                failed_origin = _FailingOrigin()
+                failed_origins.append(failed_origin)
+                self._run_proxy_handler(proxy, request, failed_origin, fail_on_client_send=1)
+
+            with socket.create_connection(proxy.address, timeout=1) as client:
+                client.sendall(
+                    f'GET http://service.local:{origin.port}/capacity HTTP/1.1\r\n'
+                    f'Host: service.local:{origin.port}\r\nConnection: close\r\n\r\n'.encode(),
+                )
+                response = client.recv(4096)
+
+        self.assertTrue(all(item.closed == 1 for item in failed_origins))
+        self.assertIn(b'200', response)
+        self.assertEqual(proxy.active_relays, 0)
 
     def test_hostile_chromium_preview_cannot_mutate_second_allowed_origin(self):
         with _LocalOrigin() as preview_origin, _LocalOrigin() as mutation_origin, _LocalOrigin(tls=True) as tls_origin, sync_playwright() as playwright:
