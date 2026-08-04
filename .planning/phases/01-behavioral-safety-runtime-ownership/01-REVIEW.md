@@ -1,6 +1,6 @@
 ---
 phase: 01-behavioral-safety-runtime-ownership
-reviewed: 2026-08-01T09:17:32Z
+reviewed: 2026-08-04T16:28:05Z
 depth: standard
 files_reviewed: 29
 files_reviewed_list:
@@ -34,58 +34,48 @@ files_reviewed_list:
   - tests/test_ui_states.py
 findings:
   critical: 1
-  warning: 1
+  warning: 0
   info: 0
-  total: 2
+  total: 1
 status: issues_found
 ---
 
 # Phase 01: Code Review Report
 
-**Reviewed:** 2026-08-01T09:17:32Z
+**Reviewed:** 2026-08-04T16:28:05Z
 **Depth:** standard
 **Files Reviewed:** 29
 **Status:** issues_found
 
 ## Summary
 
-Reviewed the Phase 1 application, worker, persistence/recovery, outbound-policy, browser-preview, UI, TLS fixture, and test changes. Marker validation and queue terminal transitions are carefully guarded, and the metadata endpoint rejects non-exact JSON primitive types. However, the browser-preview egress boundary is still bypassable through an encrypted tunnel, and worker ownership is not released for ordinary scheduler exits or failures after acquisition.
+Reviewed the Phase 1 application, worker, persistence/recovery, outbound-policy, browser-preview, UI, refreshed TLS fixture, and tests. The previous HTTPS/WSS mutation blocker is closed: Chromium now rejects non-GET/HEAD routes and closes every WebSocket before its handshake; the real-browser HTTPS/WSS test covers the opaque-frame attempt. The refreshed certificate is valid from 2026-08-04 through 2036-08-01 and has the required `alerts.example.test` SAN; strict pinned-SNI delivery passes.
+
+The prior ordinary-exit worker-release warning is also closed. However, durable worker ownership is still not a fencing condition for in-flight jobs, so a worker that has lost ownership can resume and commit after its successor acquires the worker lease.
 
 ## Critical Issues
 
-### CR-01: BLOCKER — HTTPS browser tunnels bypass GET/HEAD-only enforcement
+### CR-01: BLOCKER — A stale worker can commit a job after a successor owns the worker lease
 
-**File:** `dashboard/beacon/outbound.py:293`
-**Issue:** `CONNECT` is unconditionally accepted and then handed to the bidirectional opaque relay at lines 297–303 and 448–480. A hostile HTTPS preview can open a `wss://` WebSocket (the upgrade begins as an allowed `GET`) and send arbitrary state-changing WebSocket frames after the tunnel is established. Neither `route_browser_request()` nor the proxy can inspect or block those frames, so the claimed GET/HEAD-only browser boundary does not hold for allowed HTTPS services.
+**File:** `dashboard/app.py:1467-1516`, `dashboard/app.py:1519-1557`, `dashboard/beacon/queues.py:396-405`, `dashboard/beacon/queues.py:602-623`, `dashboard/beacon/worker_main.py:87-96`
+**Issue:** The worker lease is renewed only by `heartbeat()`. When renewal raises `LeaseLost`, it calls `scheduler.shutdown(wait=False)`, which does not cancel already-running scan or preview jobs. Those jobs are fenced solely by their own row leases: a scan uses a unique `lease_owner` token and a preview uses the worker ID. Neither terminal update verifies that `runtime_state.worker_owner` is still the same worker.
 
-**Fix:** Treat WebSockets and other long-lived upgraded/tunnel protocols as disallowed in the preview context. For example, disable JavaScript for untrusted preview pages if static rendering is acceptable, or add a Chromium/CDP request policy that rejects WebSocket creation before `CONNECT` is opened; retain a proxy-side restriction that only permits the narrowly required HTTPS navigation flow. Add an integration test where an HTTPS preview page attempts `new WebSocket(...)` and verify the target receives no mutation frame.
+Consequently, a paused Worker A can lose its 15-second worker lease, Worker B can acquire it, and Worker A can resume and complete a scan whose 60-second row lease is still valid. The same applies to preview persistence. An isolated reproduction with the submitted queue code produced `completed` for Worker A's scan after Worker B acquired the durable worker lease. This permits stale monitoring data and side effects after ownership transfer, and can also prevent the new worker from processing the still-leased row.
 
-## Warnings
-
-### WR-01: WARNING — Worker lease is leaked on normal scheduler exit and startup failures
-
-**File:** `dashboard/beacon/worker_main.py:210-235`
-**Issue:** The worker acquires its durable lease at line 211, but the `finally` block only shuts down Chromium. It does not release the lease. Any exception after acquisition (for example recovery, initial metrics, scheduler construction, or signal setup) and any scheduler exit not routed through `stop_worker()` leaves `worker_owner` valid until it expires. A replacement process started in that interval refuses to schedule monitoring, unnecessarily extending an outage.
-
-**Fix:** Put lease release in the `finally` block immediately around the post-acquisition lifecycle, guarded by a `lease_acquired` flag and swallowing only `LeaseLost`. Also clear the active-worker globals there so a controlled in-process restart is possible.
+**Fix:** Fence every worker-owned queue operation with the durable worker lease, not just the queue-row lease. Pass a worker ownership epoch/token into the job claim and require the matching current `worker_owner` in `renew_*`, `finish_*`, `fail_*`, and requeue updates. On `LeaseLost`, prevent new jobs and wait for/cancel active jobs before lifecycle finalization. Add an integration test that:
 
 ```python
-lease_acquired = False
-try:
-    services.acquire_worker_lease(services.settings.db_path, worker_id)
-    lease_acquired = True
-    # recovery, initial jobs, and scheduler lifecycle
-finally:
-    services.shutdown_browser()
-    if lease_acquired:
-        try:
-            services.release_worker_lease(services.settings.db_path, worker_id)
-        except queues.LeaseLost:
-            pass
+# Worker A has a long row lease but loses the shorter worker lease.
+claim = claim_scan(db_path, worker_a_id, lease_seconds=60, now=t0)
+acquire_worker_lease(db_path, worker_b_id, now=t0 + 16, lease_seconds=15)
+
+# Must fail: A is no longer the durable worker owner.
+with pytest.raises(LeaseLost):
+    finish_scan(db_path, claim.request_id, claim.lease_owner, now=t0 + 16)
 ```
 
 ---
 
-_Reviewed: 2026-08-01T09:17:32Z_
+_Reviewed: 2026-08-04T16:28:05Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_
