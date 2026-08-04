@@ -202,7 +202,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Behavioral Safety & Runtime Ownership | 20/20 | Pending verification |  |
+| 1. Behavioral Safety & Runtime Ownership | 20/20 | Needs review |  |
 | 2. Bounded Telemetry & Retention | 0/TBD | Not started | - |
 | 3. Advanced Current Diagnosis | 0/TBD | Not started | - |
 | 4. Historical Investigation | 0/TBD | Not started | - |

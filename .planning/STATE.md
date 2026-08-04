@@ -4,11 +4,11 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
-status: awaiting_verification
-stopped_at: Completed 01-20-PLAN.md
-last_updated: "2026-08-04T21:16:44.385Z"
+status: needs_review
+stopped_at: Phase 1 re-verification found 1 blocking gap (18/20)
+last_updated: "2026-08-04T21:31:21Z"
 last_activity: 2026-08-05
-last_activity_desc: Phase 01 execution started
+last_activity_desc: Wave 14 closed stale queue writes; re-verification found 1 broader stale-worker mutation blocker.
 progress:
   total_phases: 6
   completed_phases: 0
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
 Plan: 20 of 20 executed
-Status: Pending phase verification
-Last activity: 2026-08-04 — Plan 01-20 completed; Phase 01 awaits verification.
+Status: Needs review — 1 blocking stale-worker mutation gap remains
+Last activity: 2026-08-05 — Wave 14 passed; re-verification reproduced a broader FND-04 blocker.
 
 Progress: [██████████] 100%
 
@@ -148,6 +148,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-04T21:16:44.377Z
-Stopped at: Completed 01-20-PLAN.md
-Resume file: None
+Last session: 2026-08-04T21:31:21Z
+Stopped at: Phase 1 re-verification found 1 blocking gap (18/20)
+Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-VERIFICATION.md
