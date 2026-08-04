@@ -1,6 +1,5 @@
 """Worker-only composition root for Beacon's scheduled operations."""
 
-import atexit
 from dataclasses import dataclass, replace
 import logging
 import signal
@@ -133,17 +132,7 @@ _active_worker_id = None
 
 
 def stop_worker(*_args):
-    global _active_worker_id
-    if _active_services is not None:
-        _active_services.shutdown_browser()
-        if _active_worker_id:
-            try:
-                _active_services.release_worker_lease(
-                    _active_services.settings.db_path, _active_worker_id,
-                )
-            except queues.LeaseLost:
-                pass
-            _active_worker_id = None
+    """Request scheduler shutdown without transferring durable ownership early."""
     if scheduler is not None:
         scheduler.shutdown(wait=False)
 
@@ -198,6 +187,24 @@ def build_scheduler(services):
     return built_scheduler
 
 
+def _finalize_worker_lifecycle(services, worker_id):
+    """Release a completed worker lease and clear all process-local ownership state."""
+    global scheduler, _worker_started, _active_services, _active_worker_id
+    try:
+        try:
+            services.shutdown_browser()
+        finally:
+            try:
+                services.release_worker_lease(services.settings.db_path, worker_id)
+            except queues.LeaseLost:
+                pass
+    finally:
+        scheduler = None
+        _worker_started = False
+        _active_services = None
+        _active_worker_id = None
+
+
 def run_worker(operations, settings=None):
     """Start worker-owned lifecycle in the required durable-state order."""
     global scheduler, _worker_started, _active_services, _active_worker_id
@@ -212,24 +219,26 @@ def run_worker(operations, settings=None):
         except queues.LeaseHeld:
             log.info('Beacon worker lease is already owned; not starting scheduler')
             return
+        lease_acquired = True
         if isinstance(services, WorkerServices):
             services = replace(services, worker_id=worker_id)
-        services.recover_worker_state()
-        if not heartbeat(services):
-            return
-        sample_metrics(services)
-        scheduler = build_scheduler(services)
-        _active_services = services
-        _active_worker_id = worker_id
-        atexit.register(services.shutdown_browser)
-        signal.signal(signal.SIGTERM, stop_worker)
-        signal.signal(signal.SIGINT, stop_worker)
-        _worker_started = True
-
-    log.info('Beacon worker starting')
     try:
+        with _worker_start_lock:
+            services.recover_worker_state()
+            if not heartbeat(services):
+                return
+            sample_metrics(services)
+            scheduler = build_scheduler(services)
+            _active_services = services
+            _active_worker_id = worker_id
+            signal.signal(signal.SIGTERM, stop_worker)
+            signal.signal(signal.SIGINT, stop_worker)
+            _worker_started = True
+
+        log.info('Beacon worker starting')
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        services.shutdown_browser()
+        if lease_acquired:
+            _finalize_worker_lifecycle(services, worker_id)

@@ -245,7 +245,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertEqual(rows[0]['ts'], recovered_at)
         self.assertEqual(details, {'start_ts': start, 'end_ts': recovered_at})
 
-    def test_worker_main_is_the_only_startup_path_and_is_idempotent(self):
+    def test_worker_main_is_the_only_startup_path_and_normal_return_allows_replacement(self):
         sys.modules.pop('dashboard.worker', None)
         worker = importlib.import_module('dashboard.worker')
         started = []
@@ -277,9 +277,9 @@ class RuntimeOwnershipTests(unittest.TestCase):
             worker.main()
 
         self.assertEqual(lifecycle[:4], ['prepare', 'recover', 'heartbeat', 'metrics'])
-        self.assertEqual(build_scheduler.call_count, 1)
-        self.assertEqual(started, ['start'])
-        self.assertEqual(register_signal.call_count, 2)
+        self.assertEqual(build_scheduler.call_count, 2)
+        self.assertEqual(started, ['start', 'start'])
+        self.assertEqual(register_signal.call_count, 4)
 
     def test_dashboard_keeps_connection_and_worker_warning_states_separate(self):
         script = Path('dashboard/app.js').read_text(encoding='utf-8')
@@ -475,7 +475,11 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 calls.append(('scheduler_shutdown', wait))
 
         self._run_worker_with_scheduler(self._worker_operations(calls=calls), FakeScheduler())
-        self.assertEqual(calls, [('scheduler_shutdown', False)])
+        self.assertIn(('scheduler_shutdown', False), calls)
+        self.assertLess(
+            calls.index(('scheduler_shutdown', False)),
+            next(index for index, call in enumerate(calls) if call[0] == 'release'),
+        )
         self._assert_immediate_replacement('signal')
 
     def test_worker_lease_contender_leaves_process_state_untouched(self):
