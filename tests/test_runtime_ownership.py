@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -481,6 +482,71 @@ class RuntimeOwnershipTests(unittest.TestCase):
             next(index for index, call in enumerate(calls) if call[0] == 'release'),
         )
         self._assert_immediate_replacement('signal')
+
+    def test_lease_loss_drains_active_jobs_before_browser_cleanup(self):
+        """Loss revokes admission immediately but drains from the lifecycle thread."""
+        self._reset_worker_globals()
+        calls = []
+        preview_started = threading.Event()
+        allow_preview_exit = threading.Event()
+        admission = worker_main.WorkerAdmission()
+
+        def renew(_db_path, _worker_id, _owner_token):
+            raise queues.LeaseLost('lost')
+
+        def preview(_worker_id, _owner_token):
+            preview_started.set()
+            allow_preview_exit.wait(timeout=2)
+            calls.append(('preview_exit', None))
+
+        services = worker_main.WorkerServices(
+            settings=SimpleNamespace(db_path=self.db_path),
+            prepare_database=lambda _settings: None,
+            recover_worker_state=lambda: None,
+            update_worker_heartbeat=lambda: calls.append(('heartbeat', None)),
+            collect_system_stats=lambda: None,
+            read_scan_state=lambda: {},
+            run_discovery=lambda **_kwargs: None,
+            do_uptime_check=lambda **_kwargs: None,
+            process_scan_requests=lambda *_args: calls.append(('scan', None)),
+            process_preview_requests=preview,
+            cleanup_history=lambda: None,
+            shutdown_browser=lambda: calls.append(('browser_shutdown', None)),
+            clock=time.time,
+            acquire_worker_lease=lambda *_args: None,
+            renew_worker_lease=renew,
+            release_worker_lease=lambda *_args: calls.append(('release', None)),
+            worker_id='worker-a',
+            owner_token='epoch-a',
+            admission=admission,
+        )
+
+        class FakeScheduler:
+            def shutdown(self, wait=False):
+                calls.append(('scheduler_shutdown', wait))
+
+        worker_main.scheduler = FakeScheduler()
+        preview_thread = threading.Thread(target=worker_main.process_previews, args=(services,))
+        preview_thread.start()
+        self.assertTrue(preview_started.wait(timeout=1))
+        self.assertFalse(worker_main.heartbeat(services))
+        self.assertIn(('scheduler_shutdown', False), calls)
+        self.assertIsNone(worker_main.process_scans(services))
+        self.assertNotIn(('scan', None), calls)
+
+        finalizer = threading.Thread(
+            target=worker_main._finalize_worker_lifecycle,
+            args=(services, services.worker_id, services.owner_token),
+        )
+        finalizer.start()
+        self.assertNotIn(('browser_shutdown', None), calls)
+        allow_preview_exit.set()
+        preview_thread.join(timeout=1)
+        finalizer.join(timeout=1)
+        self.assertFalse(preview_thread.is_alive())
+        self.assertFalse(finalizer.is_alive())
+        self.assertLess(calls.index(('preview_exit', None)), calls.index(('browser_shutdown', None)))
+        self.assertLess(calls.index(('browser_shutdown', None)), calls.index(('release', None)))
 
     def test_worker_lease_contender_leaves_process_state_untouched(self):
         """A failed acquisition has no acquired-lifecycle cleanup to perform."""

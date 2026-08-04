@@ -260,6 +260,146 @@ class DurableQueueTests(unittest.TestCase):
         latest = queues.claim_preview(self.db_path, 'worker-b', now=1_003, lease_seconds=30)
         self.assertEqual(latest.revision, second.revision)
 
+    def _owner_takeover(self):
+        return queues.acquire_worker_lease(
+            self.db_path, 'worker-b', now=16, lease_seconds=15,
+        )
+
+    def _scan_snapshot(self, request_id):
+        with sqlite3.connect(self.db_path) as conn:
+            return conn.execute(
+                'SELECT status, started_ts, completed_ts, terminal_ts, lease_owner, '
+                'lease_until, attempt_count, error, result FROM scan_requests WHERE id=?',
+                (request_id,),
+            ).fetchone()
+
+    def test_stale_worker_takeover_rejects_every_scan_mutation_without_writes(self):
+        operations = (
+            lambda request, owner: queues.claim_scan(
+                self.db_path, owner.worker_id, worker_owner_token=owner.owner_token,
+                now=16, lease_seconds=60,
+            ),
+            lambda request, owner: queues.renew_scan_lease(
+                self.db_path, request.request_id, request.lease_owner,
+                worker_id=owner.worker_id, worker_owner_token=owner.owner_token,
+                now=16, lease_seconds=60,
+            ),
+            lambda request, owner: queues.requeue_scan(
+                self.db_path, request.request_id, request.lease_owner,
+                worker_id=owner.worker_id, worker_owner_token=owner.owner_token, now=16,
+            ),
+            lambda request, owner: queues.finish_scan(
+                self.db_path, request.request_id, request.lease_owner,
+                worker_id=owner.worker_id, worker_owner_token=owner.owner_token, now=16,
+            ),
+            lambda request, owner: queues.fail_scan(
+                self.db_path, request.request_id, request.lease_owner, 'late',
+                worker_id=owner.worker_id, worker_owner_token=owner.owner_token, now=16,
+            ),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                cleanup_db(self.db_path)
+                self.appmod, self.db_path = load_app()
+                owner_a = queues.acquire_worker_lease(
+                    self.db_path, 'worker-a', now=0, lease_seconds=15,
+                )
+                request = queues.enqueue_scan(self.db_path, 'operator', now=0)
+                claim = queues.claim_scan(
+                    self.db_path, owner_a.worker_id,
+                    worker_owner_token=owner_a.owner_token, now=0, lease_seconds=60,
+                )
+                self.assertEqual(claim.request_id, request.request_id)
+                self._owner_takeover()
+                snapshot = self._scan_snapshot(request.request_id)
+                with self.assertRaises(queues.LeaseLost):
+                    operation(claim, owner_a)
+                self.assertEqual(self._scan_snapshot(request.request_id), snapshot)
+
+    def test_worker_owner_epoch_rotates_for_same_id_and_rejects_earlier_epoch(self):
+        first = queues.acquire_worker_lease(
+            self.db_path, 'worker-a', now=0, lease_seconds=15,
+        )
+        second = queues.acquire_worker_lease(
+            self.db_path, 'worker-a', now=16, lease_seconds=15,
+        )
+        self.assertNotEqual(first.owner_token, second.owner_token)
+        queues.enqueue_scan(self.db_path, 'operator', now=16)
+        with self.assertRaises(queues.LeaseLost):
+            queues.claim_scan(
+                self.db_path, 'worker-a', worker_owner_token=first.owner_token,
+                now=16,
+            )
+        self.assertIsNotNone(queues.claim_scan(
+            self.db_path, 'worker-a', worker_owner_token=second.owner_token, now=16,
+        ))
+
+    def test_stale_worker_takeover_rejects_every_preview_result_write(self):
+        operations = ('claim', 'renew', 'finish', 'fail', 'transaction')
+        for operation in operations:
+            with self.subTest(operation=operation):
+                cleanup_db(self.db_path)
+                self.appmod, self.db_path = load_app()
+                owner_a = queues.acquire_worker_lease(
+                    self.db_path, 'worker-a', now=0, lease_seconds=15,
+                )
+                request = queues.enqueue_preview(self.db_path, 8080, now=0)
+                claim = queues.claim_preview(
+                    self.db_path, owner_a.worker_id,
+                    worker_owner_token=owner_a.owner_token, now=0, lease_seconds=60,
+                )
+                self.assertEqual(claim.request_id, request.request_id)
+                self._owner_takeover()
+                with sqlite3.connect(self.db_path) as conn:
+                    before = conn.execute(
+                        'SELECT status, completed_ts, terminal_ts, lease_owner, lease_until, '
+                        'attempt_count, error, result FROM preview_requests WHERE id=?',
+                        (request.request_id,),
+                    ).fetchone()
+                    if operation == 'claim':
+                        with self.assertRaises(queues.LeaseLost):
+                            queues.claim_preview(
+                                self.db_path, owner_a.worker_id,
+                                worker_owner_token=owner_a.owner_token, now=16,
+                            )
+                    elif operation == 'renew':
+                        with self.assertRaises(queues.LeaseLost):
+                            queues.renew_preview_lease(
+                                self.db_path, request.request_id, owner_a.worker_id,
+                                worker_owner_token=owner_a.owner_token,
+                                revision=claim.revision, now=16,
+                            )
+                    elif operation == 'finish':
+                        with self.assertRaises(queues.LeaseLost):
+                            queues.finish_preview(
+                                self.db_path, request.request_id, owner_a.worker_id,
+                                worker_owner_token=owner_a.owner_token,
+                                revision=claim.revision, now=16,
+                            )
+                    elif operation == 'fail':
+                        with self.assertRaises(queues.LeaseLost):
+                            queues.fail_preview(
+                                self.db_path, request.request_id, owner_a.worker_id, 'late',
+                                worker_owner_token=owner_a.owner_token,
+                                revision=claim.revision, now=16,
+                            )
+                    else:
+                        conn.row_factory = sqlite3.Row
+                        conn.execute('BEGIN IMMEDIATE')
+                        with self.assertRaises(queues.LeaseLost):
+                            queues.finish_preview_in_transaction(
+                                conn, request.request_id, owner_a.worker_id,
+                                worker_owner_token=owner_a.owner_token,
+                                revision=claim.revision, now=16,
+                            )
+                        conn.rollback()
+                    after = conn.execute(
+                        'SELECT status, completed_ts, terminal_ts, lease_owner, lease_until, '
+                        'attempt_count, error, result FROM preview_requests WHERE id=?',
+                        (request.request_id,),
+                    ).fetchone()
+                self.assertEqual(after, before)
+
 
 if __name__ == '__main__':
     unittest.main()
