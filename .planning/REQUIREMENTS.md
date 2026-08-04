@@ -13,7 +13,7 @@
 - [ ] **FND-04**: The worker is the sole scheduler owner and uses durable persisted coordination for work shared with the web process.
 - [ ] **FND-05**: Database changes use versioned, transactional, idempotent migrations validated against representative existing databases.
 - [ ] **FND-06**: The operator can create and verify a usable backup before a migration and recover existing Beacon data after a failed upgrade.
-- [x] **FND-07**: Probes, HTML fetches, previews, redirects, and webhooks use one tested outbound-target and TLS safety policy.
+- [ ] **FND-07**: Probes, HTML fetches, previews, redirects, and webhooks use one tested outbound-target and TLS safety policy.
 
 ### Telemetry and Retention
 
@@ -60,7 +60,7 @@
 - [ ] **OPS-02**: Preview work uses serialized browser ownership, bounded deadlines and retries, and a visible non-fatal degraded state.
 - [ ] **OPS-03**: Thumbnail storage and expiry remain bounded without placing large preview blobs in the primary telemetry path.
 - [ ] **OPS-04**: Automated tests cover migrations, restart recovery, concurrent web/worker database access, scheduler ownership, and failed background jobs.
-- [x] **OPS-05**: Automated tests cover outbound-target validation, DNS/redirect handling, TLS behavior, and mutation-request protections.
+- [ ] **OPS-05**: Automated tests cover outbound-target validation, DNS/redirect handling, TLS behavior, and mutation-request protections.
 - [ ] **OPS-06**: Both themes have UI-contract or visual-regression coverage for shared capabilities and important states.
 - [ ] **OPS-07**: A Raspberry Pi-class acceptance run verifies responsiveness, resource budgets, recovery, and sampling continuity under representative load.
 

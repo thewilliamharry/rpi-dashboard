@@ -4,11 +4,11 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
-status: executing
-stopped_at: Wave 13 execution and integration gate complete; verification pending
-last_updated: "2026-08-04T16:21:37Z"
+status: needs_review
+stopped_at: Phase 1 re-verification found 1 blocking gap (18/20)
+last_updated: "2026-08-04T16:34:43Z"
 last_activity: 2026-08-04
-last_activity_desc: Phase 01 Wave 13 execution complete; 155 tests and 158 subtests passed.
+last_activity_desc: Phase 01 Wave 13 closed its planned gaps; re-verification found 1 stale-worker fencing blocker.
 progress:
   total_phases: 6
   completed_phases: 0
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
 Plan: 19 of 19 executed
-Status: Verification pending
-Last activity: 2026-08-04 — Wave 13 execution complete; 155 tests and 158 subtests passed.
+Status: Needs review — 1 blocking stale-worker fencing gap remains
+Last activity: 2026-08-04 — Wave 13 closed its planned gaps; re-verification found 1 blocker.
 
 Progress: [██████████] 100%
 
@@ -145,6 +145,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-04T16:21:37Z
-Stopped at: Wave 13 execution and integration gate complete; verification pending
+Last session: 2026-08-04T16:34:43Z
+Stopped at: Phase 1 re-verification found 1 blocking gap (18/20)
 Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-VERIFICATION.md
