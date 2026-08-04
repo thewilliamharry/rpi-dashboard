@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 01
-current_phase_name: Behavioral Safety & Runtime Ownership
-status: ready_to_execute
-stopped_at: Phase 1 gap-closure plans 01-18 and 01-19 verified and ready to execute
-last_updated: "2026-08-01T10:06:53Z"
-last_activity: 2026-08-01
-last_activity_desc: Phase 01 gap-closure plans 01-18 and 01-19 verified and ready to execute.
+current_phase_name: behavioral-safety-runtime-ownership
+status: executing
+stopped_at: Completed 01-18-PLAN.md
+last_updated: "2026-08-04T15:55:41.196Z"
+last_activity: 2026-08-04
+last_activity_desc: Phase 01 execution started
 progress:
-  total_phases: 6
+  total_phases: 1
   completed_phases: 0
   total_plans: 19
-  completed_plans: 17
+  completed_plans: 18
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-24)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 01 — Behavioral Safety & Runtime Ownership
+**Current focus:** Phase 01 — behavioral-safety-runtime-ownership
 
 ## Current Position
 
-Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
-Plan: 17 of 19 executed; 2 verified gap-closure plans ready
+Phase: 01 (behavioral-safety-runtime-ownership) — EXECUTING
+Plan: 2 of 19
 Status: Ready to execute
-Last activity: 2026-08-01 — Phase 01 gap-closure plans 01-18 and 01-19 verified and ready to execute.
+Last activity: 2026-08-04 — Phase 01 execution started
 
-Progress: [█████████░] 89%
+Progress: [██████████] 95%
 
 ## Performance Metrics
 
@@ -75,6 +75,7 @@ Progress: [█████████░] 89%
 | Phase 01 P15 | 19m | 2 tasks | 2 files |
 | Phase 01 P16 | 12min | 2 tasks | 3 files |
 | Phase 01 P17 | 3min | 1 tasks | 2 files |
+| Phase 01 P18 | 12min | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -123,6 +124,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: An acquired origin remains handler-owned until transfer to _relay(), whose existing cleanup is the sole post-transfer owner.
 - [Phase ?]: Validate critical and pinned_order from raw JSON before database, outbound-policy, preview, or event work.
 - [Phase ?]: Keep omitted metadata values compatible while converting only validated JSON booleans to SQLite integers.
+- [Phase ?]: Every preview context registers HTTP and WebSocket gates before a page is exposed.
+- [Phase ?]: WSS is closed in Chromium before it can use the approved HTTPS CONNECT carrier as opaque duplex transport.
 
 ### Pending Todos
 
@@ -142,6 +145,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-01T10:06:53Z
-Stopped at: Phase 1 gap-closure plans 01-18 and 01-19 verified and ready to execute
-Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-18-PLAN.md
+Last session: 2026-08-04T15:55:41.188Z
+Stopped at: Completed 01-18-PLAN.md
+Resume file: 01-19-PLAN.md
