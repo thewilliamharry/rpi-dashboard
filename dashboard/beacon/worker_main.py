@@ -1,6 +1,7 @@
 """Worker-only composition root for Beacon's scheduled operations."""
 
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 import logging
 import signal
 import threading
@@ -38,6 +39,39 @@ class WorkerOperations:
     release_worker_lease: object
 
 
+class WorkerAdmission:
+    """Process-local cancellation and drain aid; SQLite remains authoritative."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._accepting = True
+        self._active = {'scan': 0, 'preview': 0}
+
+    @contextmanager
+    def admit(self, kind):
+        with self._condition:
+            if not self._accepting:
+                yield False
+                return
+            self._active[kind] += 1
+        try:
+            yield True
+        finally:
+            with self._condition:
+                self._active[kind] -= 1
+                self._condition.notify_all()
+
+    def close_admission(self):
+        with self._condition:
+            self._accepting = False
+            self._condition.notify_all()
+
+    def drain(self):
+        with self._condition:
+            while any(self._active.values()):
+                self._condition.wait()
+
+
 @dataclass(frozen=True)
 class WorkerServices:
     """Bound settings and operations used by the package-owned scheduler."""
@@ -59,6 +93,8 @@ class WorkerServices:
     renew_worker_lease: object
     release_worker_lease: object
     worker_id: str | None = None
+    owner_token: str | None = None
+    admission: WorkerAdmission = field(default_factory=WorkerAdmission)
 
 
 def build_worker_services(operations, settings=None):
@@ -85,11 +121,14 @@ def build_worker_services(operations, settings=None):
 
 
 def heartbeat(services):
-    if services.worker_id:
+    if services.worker_id and services.owner_token:
         try:
-            services.renew_worker_lease(services.settings.db_path, services.worker_id)
+            services.renew_worker_lease(
+                services.settings.db_path, services.worker_id, services.owner_token,
+            )
         except queues.LeaseLost:
             log.error('Beacon worker lease lost; stopping stale scheduler')
+            services.admission.close_admission()
             stop_worker()
             return False
     services.update_worker_heartbeat()
@@ -101,11 +140,17 @@ def sample_metrics(services):
 
 
 def process_scans(services):
-    return services.process_scan_requests(services.worker_id)
+    with services.admission.admit('scan') as admitted:
+        if not admitted:
+            return None
+        return services.process_scan_requests(services.worker_id, services.owner_token)
 
 
 def process_previews(services):
-    return services.process_preview_requests(services.worker_id)
+    with services.admission.admit('preview') as admitted:
+        if not admitted:
+            return None
+        return services.process_preview_requests(services.worker_id, services.owner_token)
 
 
 def scheduled_discovery(services):
@@ -187,15 +232,19 @@ def build_scheduler(services):
     return built_scheduler
 
 
-def _finalize_worker_lifecycle(services, worker_id):
+def _finalize_worker_lifecycle(services, worker_id, owner_token):
     """Release a completed worker lease and clear all process-local ownership state."""
     global scheduler, _worker_started, _active_services, _active_worker_id
     try:
+        services.admission.close_admission()
+        services.admission.drain()
         try:
             services.shutdown_browser()
         finally:
             try:
-                services.release_worker_lease(services.settings.db_path, worker_id)
+                services.release_worker_lease(
+                    services.settings.db_path, worker_id, owner_token,
+                )
             except queues.LeaseLost:
                 pass
     finally:
@@ -215,13 +264,15 @@ def run_worker(operations, settings=None):
         services.prepare_database(services.settings)
         worker_id = uuid4().hex
         try:
-            services.acquire_worker_lease(services.settings.db_path, worker_id)
+            lease = services.acquire_worker_lease(services.settings.db_path, worker_id)
         except queues.LeaseHeld:
             log.info('Beacon worker lease is already owned; not starting scheduler')
             return
         lease_acquired = True
         if isinstance(services, WorkerServices):
-            services = replace(services, worker_id=worker_id)
+            services = replace(
+                services, worker_id=lease.worker_id, owner_token=lease.owner_token,
+            )
     try:
         with _worker_start_lock:
             services.recover_worker_state()
@@ -241,4 +292,4 @@ def run_worker(operations, settings=None):
         pass
     finally:
         if lease_acquired:
-            _finalize_worker_lifecycle(services, worker_id)
+            _finalize_worker_lifecycle(services, worker_id, lease.owner_token)

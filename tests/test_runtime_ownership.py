@@ -43,13 +43,13 @@ class RuntimeOwnershipTests(unittest.TestCase):
             calls.append(('acquire', worker_id))
             return queues.acquire_worker_lease(db_path, worker_id)
 
-        def renew_worker_lease(db_path, worker_id):
+        def renew_worker_lease(db_path, worker_id, owner_token):
             calls.append(('renew', worker_id))
-            return queues.renew_worker_lease(db_path, worker_id)
+            return queues.renew_worker_lease(db_path, worker_id, owner_token)
 
-        def real_release_worker_lease(db_path, worker_id):
+        def real_release_worker_lease(db_path, worker_id, owner_token):
             calls.append(('release', worker_id))
-            return queues.release_worker_lease(db_path, worker_id)
+            return queues.release_worker_lease(db_path, worker_id, owner_token)
 
         return worker_main.WorkerOperations(
             prepare_database=lambda _settings: calls.append(('prepare', None)),
@@ -76,8 +76,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertIsNone(worker_main._active_services)
         self.assertIsNone(worker_main._active_worker_id)
         replacement_id = f'replacement-{name}'
-        queues.acquire_worker_lease(self.db_path, replacement_id)
-        queues.release_worker_lease(self.db_path, replacement_id)
+        lease = queues.acquire_worker_lease(self.db_path, replacement_id)
+        queues.release_worker_lease(self.db_path, replacement_id, lease.owner_token)
 
     def _run_worker_with_scheduler(self, operations, fake_scheduler, *, signal_side_effect=None):
         settings = SimpleNamespace(db_path=self.db_path)
@@ -307,13 +307,17 @@ class RuntimeOwnershipTests(unittest.TestCase):
         successor = queues.acquire_worker_lease(self.db_path, 'worker-b', now=now + 31, lease_seconds=30)
         self.assertEqual(successor.worker_id, 'worker-b')
         with self.assertRaises(queues.LeaseLost):
-            queues.renew_worker_lease(self.db_path, 'worker-a', now=now + 32, lease_seconds=30)
+            queues.renew_worker_lease(
+                self.db_path, 'worker-a', first.owner_token, now=now + 32, lease_seconds=30,
+            )
 
     def test_lease_takeover_records_one_monitoring_gap(self):
         started = 1_000
         recovered = started + self.appmod.WORKER_READY_SECONDS + 9
-        queues.acquire_worker_lease(self.db_path, 'worker-a', now=started, lease_seconds=10)
-        queues.renew_worker_lease(self.db_path, 'worker-a', now=started, lease_seconds=10)
+        first = queues.acquire_worker_lease(self.db_path, 'worker-a', now=started, lease_seconds=10)
+        queues.renew_worker_lease(
+            self.db_path, 'worker-a', first.owner_token, now=started, lease_seconds=10,
+        )
 
         queues.acquire_worker_lease(self.db_path, 'worker-b', now=recovered, lease_seconds=10)
         queues.acquire_worker_lease(self.db_path, 'worker-c', now=recovered + 11, lease_seconds=10)
@@ -420,14 +424,22 @@ class RuntimeOwnershipTests(unittest.TestCase):
         """An old worker cannot disturb a successor, but other release failures surface."""
         self._reset_worker_globals()
         acquired_worker_ids = []
+        acquired_leases = []
+        successor_lease = []
 
         def acquire_worker_lease(db_path, worker_id):
             acquired_worker_ids.append(worker_id)
-            return queues.acquire_worker_lease(db_path, worker_id)
+            lease = queues.acquire_worker_lease(db_path, worker_id)
+            acquired_leases.append(lease)
+            return lease
 
         def transfer_to_successor():
-            queues.release_worker_lease(self.db_path, acquired_worker_ids[0])
-            queues.acquire_worker_lease(self.db_path, 'seeded-successor')
+            queues.release_worker_lease(
+                self.db_path, acquired_worker_ids[0], acquired_leases[0].owner_token,
+            )
+            successor_lease.append(
+                queues.acquire_worker_lease(self.db_path, 'seeded-successor')
+            )
 
         class FakeScheduler:
             def start(self):
@@ -445,7 +457,9 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertIsNone(worker_main._active_worker_id)
         with self.assertRaises(queues.LeaseHeld):
             queues.acquire_worker_lease(self.db_path, 'different-replacement')
-        queues.release_worker_lease(self.db_path, 'seeded-successor')
+        queues.release_worker_lease(
+            self.db_path, 'seeded-successor', successor_lease[0].owner_token,
+        )
         self._assert_immediate_replacement('after-lost-owner')
 
         self._reset_worker_globals()
