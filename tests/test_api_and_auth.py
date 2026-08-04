@@ -44,6 +44,9 @@ class ApiAndAuthTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
+    def _worker_owner(self, worker_id='api-preview-worker'):
+        return self.appmod.beacon_queues.acquire_worker_lease(self.db_path, worker_id)
+
     def test_trigger_scan_requires_ui_header_and_queues(self):
         self.assertEqual(self.client.post('/api/trigger-scan').status_code, 403)
         r = self.client.post('/api/trigger-scan', headers=self.ui_headers)
@@ -423,7 +426,8 @@ class ApiAndAuthTests(unittest.TestCase):
 
         try:
             r = self.client.put('/api/service-meta/8080', json={'path': '/app?view=1'}, headers=self.ui_headers)
-            processed = self.appmod.process_preview_requests()
+            owner = self._worker_owner()
+            processed = self.appmod.process_preview_requests(owner.worker_id, owner.owner_token)
         finally:
             self.appmod._fetch_html_response = original_html_fetch
             self.appmod.fetch_thumbnail = original_thumb
@@ -520,7 +524,8 @@ class ApiAndAuthTests(unittest.TestCase):
 
         try:
             r = self.client.put('/api/service-meta/8080', json={'path': '/broken'}, headers=self.ui_headers)
-            processed = self.appmod.process_preview_requests()
+            owner = self._worker_owner()
+            processed = self.appmod.process_preview_requests(owner.worker_id, owner.owner_token)
         finally:
             self.appmod._fetch_html_response = original_html_fetch
             self.appmod.fetch_thumbnail = original_thumb

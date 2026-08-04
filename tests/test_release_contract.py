@@ -192,7 +192,8 @@ class ReleaseContractTests(unittest.TestCase):
 
         self.appmod.do_discovery = fake_discovery
         try:
-            self.assertTrue(self.appmod.process_scan_requests())
+            owner = self.appmod.beacon_queues.acquire_worker_lease(self.db_path, 'release-scan-worker')
+            self.assertTrue(self.appmod.process_scan_requests(owner.worker_id, owner.owner_token))
         finally:
             self.appmod.do_discovery = original
         with self.appmod._db_lock:
@@ -208,7 +209,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIsNotNone(request_id)
         self.assertTrue(self.appmod._scan_lock.acquire(blocking=False))
         try:
-            self.assertFalse(self.appmod.process_scan_requests())
+            owner = self.appmod.beacon_queues.acquire_worker_lease(self.db_path, 'release-scan-worker')
+            self.assertFalse(self.appmod.process_scan_requests(owner.worker_id, owner.owner_token))
         finally:
             self.appmod._scan_lock.release()
 

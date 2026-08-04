@@ -114,20 +114,27 @@ class UiSafetyIntegrationTests(unittest.TestCase):
 
             self.appmod.recover_worker_state(now=self.now)
             self.appmod.update_worker_heartbeat(now=self.now)
+            owner = self.appmod.beacon_queues.acquire_worker_lease(
+                self.appmod.DB_PATH, 'ui-recovery-worker', now=self.now,
+            )
             scan_claim = self.appmod.beacon_queues.claim_scan(
-                self.appmod.DB_PATH, 'ui-recovery-worker', now=self.now + 1,
+                self.appmod.DB_PATH, owner.worker_id,
+                worker_owner_token=owner.owner_token, now=self.now + 1,
             )
             self.assertIsNotNone(scan_claim)
             self.appmod.beacon_queues.finish_scan(
                 self.appmod.DB_PATH, scan_claim.request_id, scan_claim.lease_owner,
+                worker_id=owner.worker_id, worker_owner_token=owner.owner_token,
                 result='{}', now=self.now + 2,
             )
             preview_claim = self.appmod.beacon_queues.claim_preview(
-                self.appmod.DB_PATH, 'ui-recovery-worker', now=self.now + 1,
+                self.appmod.DB_PATH, owner.worker_id,
+                worker_owner_token=owner.owner_token, now=self.now + 1,
             )
             self.assertIsNotNone(preview_claim)
             self.appmod.beacon_queues.finish_preview(
-                self.appmod.DB_PATH, preview_claim.request_id, 'ui-recovery-worker',
+                self.appmod.DB_PATH, preview_claim.request_id, owner.worker_id,
+                worker_owner_token=owner.owner_token,
                 revision=preview_claim.revision, result='{}', now=self.now + 2,
             )
             self.appmod.beacon_queues.enqueue_scan(
