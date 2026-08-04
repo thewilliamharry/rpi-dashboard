@@ -4,16 +4,16 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: Behavioral Safety & Runtime Ownership
-status: ready_to_execute
-stopped_at: Phase 1 gap-closure plan 01-20 verified and ready to execute
-last_updated: "2026-08-04T17:17:25Z"
-last_activity: 2026-08-04
-last_activity_desc: Phase 01 Wave 14 gap-closure plan 01-20 passed independent and deterministic planning checks.
+status: awaiting_verification
+stopped_at: Completed 01-20-PLAN.md
+last_updated: "2026-08-04T21:16:44.385Z"
+last_activity: 2026-08-05
+last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 20
-  completed_plans: 19
+  completed_plans: 20
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
-Plan: 19 of 20 executed; 1 verified gap-closure plan ready
-Status: Ready to execute — Wave 14 closes the stale-worker fencing blocker
-Last activity: 2026-08-04 — Plan 01-20 passed independent and deterministic planning checks.
+Plan: 20 of 20 executed
+Status: Pending phase verification
+Last activity: 2026-08-04 — Plan 01-20 completed; Phase 01 awaits verification.
 
-Progress: [█████████░] 95%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -76,6 +76,7 @@ Progress: [█████████░] 95%
 | Phase 01 P16 | 12min | 2 tasks | 3 files |
 | Phase 01 P17 | 3min | 1 tasks | 2 files |
 | Phase 01 P18 | 12min | 1 tasks | 4 files |
+| Phase 01 P20 | 12min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -126,6 +127,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Keep omitted metadata values compatible while converting only validated JSON booleans to SQLite integers.
 - [Phase ?]: Every preview context registers HTTP and WebSocket gates before a page is exposed.
 - [Phase ?]: WSS is closed in Chromium before it can use the approved HTTPS CONNECT carrier as opaque duplex transport.
+- [Phase ?]: Every worker acquisition rotates an opaque owner epoch; worker IDs alone are never durable queue authority.
+- [Phase ?]: Lease loss closes local job admission before non-blocking scheduler shutdown, while the lifecycle thread drains work before Chromium cleanup.
 
 ### Pending Todos
 
@@ -145,6 +148,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-04T17:17:25Z
-Stopped at: Phase 1 gap-closure plan 01-20 verified and ready to execute
-Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-20-PLAN.md
+Last session: 2026-08-04T21:16:44.377Z
+Stopped at: Completed 01-20-PLAN.md
+Resume file: None
