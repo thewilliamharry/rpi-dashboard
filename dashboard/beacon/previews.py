@@ -87,11 +87,26 @@ def route_browser_request(policy, route):
     return True
 
 
+def block_browser_web_socket(web_socket_route):
+    """Close preview sockets before Chromium can open an opaque tunnel."""
+    close = getattr(web_socket_route, '_impl_obj', None)
+    if close is not None:
+        return close.close(code=1008, reason='preview policy')
+    web_socket_route.close(code=1008, reason='preview policy')
+
+
+def configure_browser_context_policy(context, policy):
+    """Install every retrieval-only transport gate before pages are exposed."""
+    context.route('**/*', lambda route: route_browser_request(policy, route))
+    context.route_web_socket('**/*', block_browser_web_socket)
+
+
 @contextmanager
 def browser_proxy_context(browser, policy, **context_options):
     """Create one Chromium context with a short-lived enforcing proxy."""
     with PolicyProxy(policy) as proxy:
         context = browser.new_context(proxy={'server': proxy.url}, **context_options)
+        configure_browser_context_policy(context, policy)
         try:
             yield context
         finally:

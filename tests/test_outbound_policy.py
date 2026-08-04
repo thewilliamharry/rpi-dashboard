@@ -697,6 +697,7 @@ class OutboundPolicyTests(unittest.TestCase):
                     page.goto(
                         f'https://service.local:{preview_origin.port}/page',
                         wait_until='domcontentloaded',
+                        timeout=5_000,
                     )
                     page.wait_for_function('window.previewJavaScriptRan === true')
                     self.assertTrue(preview_origin.server.records_event.wait(timeout=1))

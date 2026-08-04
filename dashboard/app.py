@@ -793,7 +793,6 @@ def _legacy_screenshot_service(port, target_url=None):
                 viewport={'width': 1280, 'height': 800},
                 ignore_https_errors=not initial_plan.tls.verify_certificate,
         ) as context:
-            context.route('**/*', lambda route: beacon_previews.route_browser_request(policy, route))
             page = context.new_page()
             _preview_context.timings['context_ms'] = round((time.monotonic() - context_started) * 1000, 1)
             remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
