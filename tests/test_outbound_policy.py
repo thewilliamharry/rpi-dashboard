@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import socket
 import ssl
 import threading
@@ -18,6 +20,7 @@ from dashboard.beacon.outbound import (
     PolicyProxy,
     _PolicyProxyHandler,
 )
+from dashboard.beacon import previews
 from dashboard.beacon.previews import browser_proxy_context, route_browser_request
 
 
@@ -28,6 +31,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
     records = []
 
     def _record(self):
+        self.server.records_event.set()
         type(self).records.append({
             'method': self.command,
             'path': self.path,
@@ -71,6 +75,7 @@ class _LocalOrigin:
         handler = type('_LocalRecordingHandler', (_RecordingHandler,), {'records': self._records})
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         self.server.page_body = page_body
+        self.server.records_event = threading.Event()
         self.sni_values = sni_values if sni_values is not None else []
         if tls:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -89,6 +94,100 @@ class _LocalOrigin:
     @property
     def records(self):
         return list(self._records)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+
+class _WebSocketMutationHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        key = self.headers.get('Sec-WebSocket-Key')
+        if self.path != '/mutate' or self.headers.get('Upgrade', '').lower() != 'websocket' or not key:
+            self.send_error(400)
+            return
+        self.server.handshakes.append({
+            'host': self.headers.get('Host'),
+            'path': self.path,
+        })
+        self.server.handshake_event.set()
+        accept = base64.b64encode(hashlib.sha1(
+            (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode(),
+        ).digest()).decode()
+        self.send_response(101, 'Switching Protocols')
+        self.send_header('Upgrade', 'websocket')
+        self.send_header('Connection', 'Upgrade')
+        self.send_header('Sec-WebSocket-Accept', accept)
+        self.end_headers()
+        self.wfile.flush()
+        self.connection.settimeout(1)
+        try:
+            payload = self._read_client_frame()
+        except (OSError, ValueError):
+            return
+        if payload is not None:
+            self.server.frames.append(payload)
+            self.server.frame_event.set()
+
+    def _read_client_frame(self):
+        header = self._read_exact(2)
+        if header is None:
+            return None
+        length = header[1] & 0x7f
+        if not header[1] & 0x80:
+            raise ValueError('client frame is not masked')
+        if length == 126:
+            length = int.from_bytes(self._read_exact(2), 'big')
+        elif length == 127:
+            length = int.from_bytes(self._read_exact(8), 'big')
+        mask = self._read_exact(4)
+        encoded = self._read_exact(length)
+        return bytes(value ^ mask[index % 4] for index, value in enumerate(encoded))
+
+    def _read_exact(self, length):
+        chunks = []
+        remaining = length
+        while remaining:
+            chunk = self.connection.recv(remaining)
+            if not chunk:
+                return None
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b''.join(chunks)
+
+    def log_message(self, *_args):
+        return
+
+
+class _LocalWebSocketOrigin:
+    def __init__(self):
+        self.handshakes = []
+        self.frames = []
+        self.handshake_event = threading.Event()
+        self.frame_event = threading.Event()
+        self.sni_values = []
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), _WebSocketMutationHandler)
+        self.server.handshakes = self.handshakes
+        self.server.frames = self.frames
+        self.server.handshake_event = self.handshake_event
+        self.server.frame_event = self.frame_event
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(
+            TLS_FIXTURES / 'beacon-test-cert.pem',
+            TLS_FIXTURES / 'beacon-test-key.pem',
+        )
+        context.set_servername_callback(lambda _sock, name, _ctx: self.sni_values.append(name))
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def port(self):
+        return self.server.server_port
 
     def __enter__(self):
         self.thread.start()
@@ -578,6 +677,40 @@ class OutboundPolicyTests(unittest.TestCase):
         self.assertTrue(all(value == 'service.local' for value in origin.sni_values))
         self.assertEqual(origin.records[0]['host'], f'service.local:{origin.port}')
 
+    def test_hostile_https_preview_cannot_open_wss_or_deliver_mutation_frame(self):
+        with _LocalOrigin(tls=True) as preview_origin, _LocalWebSocketOrigin() as mutation_origin, sync_playwright() as playwright:
+            preview_origin.server.page_body = (
+                '<html><body><img src="/subresource.js"><script>'
+                'window.previewJavaScriptRan = true;'
+                f'const socket = new WebSocket("wss://service.local:{mutation_origin.port}/mutate");'
+                'socket.addEventListener("open", () => socket.send("beacon-opaque-mutation"));'
+                '</script></body></html>'
+            ).encode()
+            browser = playwright.chromium.launch()
+            try:
+                with browser_proxy_context(
+                        browser,
+                        OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
+                        ignore_https_errors=True,
+                ) as context:
+                    page = context.new_page()
+                    page.goto(
+                        f'https://service.local:{preview_origin.port}/page',
+                        wait_until='domcontentloaded',
+                    )
+                    page.wait_for_function('window.previewJavaScriptRan === true')
+                    self.assertTrue(preview_origin.server.records_event.wait(timeout=1))
+                    self.assertFalse(mutation_origin.frame_event.wait(timeout=1))
+            finally:
+                browser.close()
+
+        self.assertEqual(mutation_origin.handshakes, [])
+        self.assertEqual(mutation_origin.frames, [])
+        self.assertEqual(mutation_origin.sni_values, [])
+        self.assertIn('/subresource.js', [entry['path'] for entry in preview_origin.records])
+        self.assertTrue(all(entry['host'] == f'service.local:{preview_origin.port}' for entry in preview_origin.records))
+        self.assertTrue(all(value == 'service.local' for value in preview_origin.sni_values))
+
     def test_connect_tunnel_uses_pinned_address_and_preserves_browser_sni(self):
         with _LocalOrigin(tls=True) as origin, PolicyProxy(
                 OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
@@ -620,6 +753,15 @@ class OutboundPolicyTests(unittest.TestCase):
         calls = []
 
         class Context:
+            def route(self, url, handler):
+                calls.append(('route', url, handler))
+
+            def route_web_socket(self, url, handler):
+                calls.append(('route_web_socket', url, handler))
+
+            def new_page(self):
+                calls.append('new_page')
+
             def close(self):
                 calls.append('close')
 
@@ -632,6 +774,29 @@ class OutboundPolicyTests(unittest.TestCase):
                 Browser(), OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
         ) as context:
             self.assertIsInstance(context, Context)
+            context.new_page()
 
         self.assertEqual(calls[-1], 'close')
         self.assertTrue(calls[0]['proxy']['server'].startswith('http://127.0.0.1:'))
+        self.assertEqual([call[0] for call in calls[1:3]], ['route', 'route_web_socket'])
+        self.assertEqual(calls[3], 'new_page')
+
+    def test_websocket_policy_close_never_connects_to_origin(self):
+        class WebSocketRoute:
+            connected = False
+            close_args = None
+
+            def connect_to_server(self):
+                self.connected = True
+
+            def close(self, **kwargs):
+                self.close_args = kwargs
+
+        web_socket_route = WebSocketRoute()
+        previews.block_browser_web_socket(web_socket_route)
+
+        self.assertFalse(web_socket_route.connected)
+        self.assertEqual(web_socket_route.close_args, {
+            'code': 1008,
+            'reason': 'preview policy',
+        })
