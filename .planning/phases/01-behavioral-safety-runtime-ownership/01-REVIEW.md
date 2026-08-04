@@ -1,37 +1,17 @@
 ---
 phase: 01-behavioral-safety-runtime-ownership
-reviewed: 2026-08-04T16:28:05Z
+reviewed: 2026-08-04T21:23:47Z
 depth: standard
-files_reviewed: 29
+files_reviewed: 8
 files_reviewed_list:
-  - dashboard/app.js
-  - dashboard/app.py
-  - dashboard/beacon/config.py
-  - dashboard/beacon/db.py
-  - dashboard/beacon/migrations.py
-  - dashboard/beacon/outbound.py
-  - dashboard/beacon/previews.py
   - dashboard/beacon/queues.py
-  - dashboard/beacon/recovery.py
-  - dashboard/beacon/repositories.py
+  - dashboard/app.py
   - dashboard/beacon/worker_main.py
-  - dashboard/index.html
-  - dashboard/style.css
-  - dashboard/worker.py
-  - tests/fixtures/tls/beacon-test-cert.pem
-  - tests/fixtures/tls/beacon-test-key.pem
-  - tests/test_api_and_auth.py
-  - tests/test_backup_recovery.py
   - tests/test_durable_queues.py
-  - tests/test_migrations.py
-  - tests/test_module_boundaries.py
-  - tests/test_outbound_policy.py
-  - tests/test_release_contract.py
   - tests/test_runtime_ownership.py
-  - tests/test_security_and_scanning.py
-  - tests/test_ui_contract.py
+  - tests/test_api_and_auth.py
+  - tests/test_release_contract.py
   - tests/test_ui_safety_integration.py
-  - tests/test_ui_states.py
 findings:
   critical: 1
   warning: 0
@@ -42,40 +22,50 @@ status: issues_found
 
 # Phase 01: Code Review Report
 
-**Reviewed:** 2026-08-04T16:28:05Z
+**Reviewed:** 2026-08-04T21:23:47Z
 **Depth:** standard
-**Files Reviewed:** 29
+**Files Reviewed:** 8
 **Status:** issues_found
 
 ## Summary
 
-Reviewed the Phase 1 application, worker, persistence/recovery, outbound-policy, browser-preview, UI, refreshed TLS fixture, and tests. The previous HTTPS/WSS mutation blocker is closed: Chromium now rejects non-GET/HEAD routes and closes every WebSocket before its handshake; the real-browser HTTPS/WSS test covers the opaque-frame attempt. The refreshed certificate is valid from 2026-08-04 through 2036-08-01 and has the required `alerts.example.test` SAN; strict pinned-SNI delivery passes.
+Reviewed the Wave 14 worker-epoch implementation, all changed integration tests, and the Plan 01-20 lifecycle contract. Queue claim, renewal, requeue, and terminal preview-result writes now perform their row/revision and durable-owner checks in one SQLite transaction. The focused durable-queue/runtime suite also passes (31 tests, 66 subtests).
 
-The prior ordinary-exit worker-release warning is also closed. However, durable worker ownership is still not a fencing condition for in-flight jobs, so a worker that has lost ownership can resume and commit after its successor acquires the worker lease.
+However, ownership fencing and admission closure stop at the two explicit queue processors. A worker that has lost its durable lease can still run already-submitted discovery, uptime, recovery, and worker-originated preview-enqueue work and commit shared monitoring data after its successor takes ownership. This leaves the phase's sole-active-worker invariant unachieved.
 
 ## Critical Issues
 
-### CR-01: BLOCKER — A stale worker can commit a job after a successor owns the worker lease
+### CR-01: BLOCKER — Lease loss does not fence other mutating scheduler jobs
 
-**File:** `dashboard/app.py:1467-1516`, `dashboard/app.py:1519-1557`, `dashboard/beacon/queues.py:396-405`, `dashboard/beacon/queues.py:602-623`, `dashboard/beacon/worker_main.py:87-96`
-**Issue:** The worker lease is renewed only by `heartbeat()`. When renewal raises `LeaseLost`, it calls `scheduler.shutdown(wait=False)`, which does not cancel already-running scan or preview jobs. Those jobs are fenced solely by their own row leases: a scan uses a unique `lease_owner` token and a preview uses the worker ID. Neither terminal update verifies that `runtime_state.worker_owner` is still the same worker.
+**File:** `dashboard/beacon/worker_main.py:138-169`, `dashboard/beacon/worker_main.py:205-225`, `dashboard/app.py:182-185`, `dashboard/app.py:1105-1176`, `dashboard/app.py:1191-1195`, `dashboard/app.py:1274-1304`
 
-Consequently, a paused Worker A can lose its 15-second worker lease, Worker B can acquire it, and Worker A can resume and complete a scan whose 60-second row lease is still valid. The same applies to preview persistence. An isolated reproduction with the submitted queue code produced `completed` for Worker A's scan after Worker B acquired the durable worker lease. This permits stale monitoring data and side effects after ownership transfer, and can also prevent the new worker from processing the still-leased row.
+**Issue:** `heartbeat()` closes `WorkerAdmission` only after losing the owner epoch, but that admission guard is used solely by `process_scans()` and `process_previews()` (lines 142-153). The scheduler invokes uptime probes and cleanup directly, and invokes both scheduled discovery variants without an admission guard (lines 205-225). None of `recover_worker_state`, `run_discovery`, or `do_uptime_check` receives the worker ID/epoch or validates it in the transactions that update `services`, `service_checks`, runtime state, or enqueue preview rows.
 
-**Fix:** Fence every worker-owned queue operation with the durable worker lease, not just the queue-row lease. Pass a worker ownership epoch/token into the job claim and require the matching current `worker_owner` in `renew_*`, `finish_*`, `fail_*`, and requeue updates. On `LeaseLost`, prevent new jobs and wait for/cancel active jobs before lifecycle finalization. Add an integration test that:
+`scheduler.shutdown(wait=False)` does not cancel submitted/running jobs. Therefore, Worker A can be in (or begin from an already-submitted job) `scheduled_discovery()` or `do_uptime_check()`, lose its 15-second durable lease, and then commit the writes at `app.py:1105-1176` or `1274-1304` after Worker B acquires the lease. Discovery also creates preview requests at `app.py:1193` without any owner proof. This is the same stale-worker mutation class Wave 14 was intended to eliminate, now affecting service health, checks, events/transitions, scan state, and preview queue state rather than only terminal queue rows.
+
+**Fix:** Carry `worker_id` and `owner_token` into every worker-only mutating operation. Guard all scheduler entries with the same admission/drain mechanism, and assert the epoch in the same `BEGIN IMMEDIATE` transaction as each worker-originated write. Web-originated metadata and scan enqueue paths may remain owner-free; worker-originated enqueue/recovery must use an owner-fenced variant. For example:
 
 ```python
-# Worker A has a long row lease but loses the shorter worker lease.
-claim = claim_scan(db_path, worker_a_id, lease_seconds=60, now=t0)
-acquire_worker_lease(db_path, worker_b_id, now=t0 + 16, lease_seconds=15)
+def scheduled_discovery(services):
+    with services.admission.admit('discovery') as admitted:
+        if not admitted:
+            return None
+        return services.run_discovery(
+            source='scheduled',
+            worker_id=services.worker_id,
+            worker_owner_token=services.owner_token,
+        )
 
-# Must fail: A is no longer the durable worker owner.
-with pytest.raises(LeaseLost):
-    finish_scan(db_path, claim.request_id, claim.lease_owner, now=t0 + 16)
+# Within every worker-owned BEGIN IMMEDIATE transaction:
+queues.assert_current_worker_owner(
+    conn, worker_id, worker_owner_token, now,
+)
 ```
+
+Add Worker A/Worker B takeover tests that hold scheduled discovery and uptime work across expiry, then assert that A cannot commit service/check/preview-enqueue changes and that finalization drains those jobs before releasing ownership.
 
 ---
 
-_Reviewed: 2026-08-04T16:28:05Z_
+_Reviewed: 2026-08-04T21:23:47Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_
