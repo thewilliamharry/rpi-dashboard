@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -21,8 +22,69 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.client = self.appmod.app.test_client()
 
     def tearDown(self):
+        self._reset_worker_globals()
         cleanup_db(self.db_path)
         self.tmpdir.cleanup()
+
+    def _reset_worker_globals(self):
+        worker_main.scheduler = None
+        worker_main._worker_started = False
+        worker_main._active_services = None
+        worker_main._active_worker_id = None
+
+    def _worker_operations(self, *, recover=None, update_heartbeat=None,
+                           collect_metrics=None, shutdown_browser=None,
+                           release_worker_lease=None, calls=None):
+        """Build worker collaborators that use this test's real SQLite lease."""
+        calls = calls if calls is not None else []
+
+        def acquire_worker_lease(db_path, worker_id):
+            calls.append(('acquire', worker_id))
+            return queues.acquire_worker_lease(db_path, worker_id)
+
+        def renew_worker_lease(db_path, worker_id):
+            calls.append(('renew', worker_id))
+            return queues.renew_worker_lease(db_path, worker_id)
+
+        def real_release_worker_lease(db_path, worker_id):
+            calls.append(('release', worker_id))
+            return queues.release_worker_lease(db_path, worker_id)
+
+        return worker_main.WorkerOperations(
+            prepare_database=lambda _settings: calls.append(('prepare', None)),
+            recover_worker_state=recover or (lambda: calls.append(('recover', None))),
+            update_worker_heartbeat=update_heartbeat or (
+                lambda: calls.append(('heartbeat', None))
+            ),
+            collect_system_stats=collect_metrics or (lambda: calls.append(('metrics', None))),
+            read_scan_state=lambda: {},
+            run_discovery=lambda **_kwargs: None,
+            do_uptime_check=lambda **_kwargs: None,
+            process_scan_requests=lambda _worker_id: None,
+            process_preview_requests=lambda _worker_id: None,
+            cleanup_history=lambda: None,
+            shutdown_browser=shutdown_browser or (lambda: calls.append(('shutdown_browser', None))),
+            acquire_worker_lease=acquire_worker_lease,
+            renew_worker_lease=renew_worker_lease,
+            release_worker_lease=release_worker_lease or real_release_worker_lease,
+        )
+
+    def _assert_immediate_replacement(self, name):
+        self.assertIsNone(worker_main.scheduler)
+        self.assertFalse(worker_main._worker_started)
+        self.assertIsNone(worker_main._active_services)
+        self.assertIsNone(worker_main._active_worker_id)
+        replacement_id = f'replacement-{name}'
+        queues.acquire_worker_lease(self.db_path, replacement_id)
+        queues.release_worker_lease(self.db_path, replacement_id)
+
+    def _run_worker_with_scheduler(self, operations, fake_scheduler, *, signal_side_effect=None):
+        settings = SimpleNamespace(db_path=self.db_path)
+        with (
+            mock.patch.object(worker_main, 'build_scheduler', return_value=fake_scheduler),
+            mock.patch.object(worker_main.signal, 'signal', side_effect=signal_side_effect),
+        ):
+            return worker_main.run_worker(operations, settings)
 
     def test_fresh_imports_do_not_start_runtime_or_create_database(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -277,6 +339,159 @@ class RuntimeOwnershipTests(unittest.TestCase):
             worker_main.run_worker(mock.Mock())
         build_scheduler.assert_not_called()
         services.shutdown_browser.assert_not_called()
+
+    def test_worker_releases_lease_and_allows_immediate_successor_after_terminal_paths(self):
+        """Every scheduler terminal result ends the matching durable ownership."""
+        terminal_cases = (
+            ('normal_return', None, None),
+            ('system_exit', SystemExit('stop'), None),
+            ('keyboard_interrupt', KeyboardInterrupt(), None),
+            ('scheduler_error', RuntimeError('scheduler failed'), RuntimeError),
+        )
+
+        for name, start_side_effect, expected_exception in terminal_cases:
+            with self.subTest(name=name):
+                self._reset_worker_globals()
+                calls = []
+
+                class FakeScheduler:
+                    def start(self):
+                        if start_side_effect:
+                            raise start_side_effect
+
+                    def shutdown(self, wait=False):
+                        calls.append(('scheduler_shutdown', wait))
+
+                operations = self._worker_operations(calls=calls)
+                if expected_exception:
+                    with self.assertRaises(expected_exception):
+                        self._run_worker_with_scheduler(operations, FakeScheduler())
+                else:
+                    self._run_worker_with_scheduler(operations, FakeScheduler())
+
+                self.assertEqual(len([call for call in calls if call[0] == 'release']), 1)
+                self._assert_immediate_replacement(name)
+
+    def test_worker_releases_lease_after_post_acquisition_startup_failures(self):
+        """No startup failure after acquisition may make a replacement wait for expiry."""
+        failure = RuntimeError('post-acquisition failure')
+        startup_cases = (
+            ('recovery', {'recover': mock.Mock(side_effect=failure)}, None),
+            ('initial_heartbeat', {'update_heartbeat': mock.Mock(side_effect=failure)}, None),
+            ('initial_metrics', {'collect_metrics': mock.Mock(side_effect=failure)}, None),
+            ('scheduler_build', {}, failure),
+            ('first_signal', {}, None),
+            ('second_signal', {}, None),
+            ('browser_shutdown', {'shutdown_browser': mock.Mock(side_effect=failure)}, None),
+        )
+
+        for name, operation_overrides, scheduler_build_error in startup_cases:
+            with self.subTest(name=name):
+                self._reset_worker_globals()
+                calls = []
+
+                class FakeScheduler:
+                    def start(self):
+                        return None
+
+                    def shutdown(self, wait=False):
+                        calls.append(('scheduler_shutdown', wait))
+
+                operations = self._worker_operations(calls=calls, **operation_overrides)
+                signal_side_effect = None
+                if name == 'first_signal':
+                    signal_side_effect = failure
+                elif name == 'second_signal':
+                    signal_side_effect = (None, failure)
+                with mock.patch.object(
+                    worker_main, 'build_scheduler',
+                    side_effect=scheduler_build_error or (lambda _services: FakeScheduler()),
+                ):
+                    with mock.patch.object(worker_main.signal, 'signal', side_effect=signal_side_effect):
+                        with self.assertRaises(RuntimeError):
+                            worker_main.run_worker(
+                                operations, SimpleNamespace(db_path=self.db_path),
+                            )
+
+                self._assert_immediate_replacement(name)
+
+    def test_worker_finalizer_suppresses_only_lease_lost_and_always_clears_globals(self):
+        """An old worker cannot disturb a successor, but other release failures surface."""
+        self._reset_worker_globals()
+        acquired_worker_ids = []
+
+        def acquire_worker_lease(db_path, worker_id):
+            acquired_worker_ids.append(worker_id)
+            return queues.acquire_worker_lease(db_path, worker_id)
+
+        def transfer_to_successor():
+            queues.release_worker_lease(self.db_path, acquired_worker_ids[0])
+            queues.acquire_worker_lease(self.db_path, 'seeded-successor')
+
+        class FakeScheduler:
+            def start(self):
+                return None
+
+            def shutdown(self, wait=False):
+                return None
+
+        operations = self._worker_operations(shutdown_browser=transfer_to_successor)
+        operations = worker_main.replace(operations, acquire_worker_lease=acquire_worker_lease)
+        self._run_worker_with_scheduler(operations, FakeScheduler())
+        self.assertIsNone(worker_main.scheduler)
+        self.assertFalse(worker_main._worker_started)
+        self.assertIsNone(worker_main._active_services)
+        self.assertIsNone(worker_main._active_worker_id)
+        with self.assertRaises(queues.LeaseHeld):
+            queues.acquire_worker_lease(self.db_path, 'different-replacement')
+        queues.release_worker_lease(self.db_path, 'seeded-successor')
+        self._assert_immediate_replacement('after-lost-owner')
+
+        self._reset_worker_globals()
+        release_error = RuntimeError('release failed')
+        failing_operations = self._worker_operations(
+            release_worker_lease=mock.Mock(side_effect=release_error),
+        )
+        with self.assertRaisesRegex(RuntimeError, 'release failed'):
+            self._run_worker_with_scheduler(failing_operations, FakeScheduler())
+        self.assertIsNone(worker_main.scheduler)
+        self.assertFalse(worker_main._worker_started)
+        self.assertIsNone(worker_main._active_services)
+        self.assertIsNone(worker_main._active_worker_id)
+
+    def test_stop_worker_defers_release_until_scheduler_unwinds(self):
+        """Signals request scheduler shutdown; only lifecycle unwinding releases ownership."""
+        self._reset_worker_globals()
+        calls = []
+        test_case = self
+
+        class FakeScheduler:
+            def start(self):
+                worker_main.stop_worker()
+                with test_case.assertRaises(queues.LeaseHeld):
+                    queues.acquire_worker_lease(test_case.db_path, 'signal-replacement')
+
+            def shutdown(self, wait=False):
+                calls.append(('scheduler_shutdown', wait))
+
+        self._run_worker_with_scheduler(self._worker_operations(calls=calls), FakeScheduler())
+        self.assertEqual(calls, [('scheduler_shutdown', False)])
+        self._assert_immediate_replacement('signal')
+
+    def test_worker_lease_contender_leaves_process_state_untouched(self):
+        """A failed acquisition has no acquired-lifecycle cleanup to perform."""
+        self._reset_worker_globals()
+        queues.acquire_worker_lease(self.db_path, 'already-owned')
+        calls = []
+        operations = self._worker_operations(calls=calls)
+        with mock.patch.object(worker_main, 'build_scheduler') as build_scheduler:
+            worker_main.run_worker(operations, SimpleNamespace(db_path=self.db_path))
+        build_scheduler.assert_not_called()
+        self.assertEqual(calls, [('prepare', None), ('acquire', mock.ANY)])
+        self.assertIsNone(worker_main.scheduler)
+        self.assertFalse(worker_main._worker_started)
+        self.assertIsNone(worker_main._active_services)
+        self.assertIsNone(worker_main._active_worker_id)
 
 
 if __name__ == '__main__':
