@@ -93,7 +93,7 @@ None - plan executed exactly as written.
 
 - `dashboard/.venv/bin/python -m pytest -q tests/test_runtime_ownership.py -k "worker and (release or lifecycle or terminal or successor or lease_contender)" -x` — passed (5 tests, 11 subtests).
 - `dashboard/.venv/bin/python -m pytest -q tests/test_runtime_ownership.py` — passed (17 tests, 56 subtests).
-- `dashboard/.venv/bin/python -m pytest -q` — escalated rerun reached 73% without a reported failure but returned no terminal result; the orchestrator must run the authoritative combined-wave suite.
+- `uv run --project dashboard python -m pytest -q` — passed in the authoritative combined Wave 13 gate (155 tests, 158 subtests).
 
 ## Self-Check: PASSED
 
