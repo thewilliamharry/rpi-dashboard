@@ -13,6 +13,11 @@ class DurableQueueTests(unittest.TestCase):
     def tearDown(self):
         cleanup_db(self.db_path)
 
+    def _acquire_owner(self, worker_id, now, lease_seconds=15):
+        return queues.acquire_worker_lease(
+            self.db_path, worker_id, now=now, lease_seconds=lease_seconds,
+        )
+
     def test_scan_submissions_coalesce_with_a_fifteen_minute_deadline(self):
         first = queues.enqueue_scan(self.db_path, 'operator-a', now=1_000)
         second = queues.enqueue_scan(self.db_path, 'operator-b', now=1_001)
@@ -22,34 +27,41 @@ class DurableQueueTests(unittest.TestCase):
         self.assertEqual(second.request_id, first.request_id)
         self.assertEqual(first.deadline_ts, 1_900)
 
-    def test_competing_workers_claim_one_scan_and_stale_owner_cannot_finish(self):
+    def test_owner_claims_one_scan_and_stale_row_owner_cannot_finish(self):
         request = queues.enqueue_scan(self.db_path, 'operator', now=1_000)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            claims = list(executor.map(
-                lambda worker: queues.claim_scan(self.db_path, worker, now=1_001, lease_seconds=1),
-                ('worker-a', 'worker-b'),
-            ))
-        claimed = [claim for claim in claims if claim]
-        self.assertEqual(len(claimed), 1)
-        first = claimed[0]
+        owner_a = self._acquire_owner('worker-a', 1_001, lease_seconds=1)
+        first = queues.claim_scan(
+            self.db_path, 'worker-a', worker_owner_token=owner_a.owner_token,
+            now=1_001, lease_seconds=1,
+        )
 
         queues.recover_queues(self.db_path, now=1_003)
-        successor = queues.claim_scan(self.db_path, 'worker-c', now=1_003, lease_seconds=30)
+        owner_c = self._acquire_owner('worker-c', 1_003, lease_seconds=30)
+        successor = queues.claim_scan(
+            self.db_path, 'worker-c', worker_owner_token=owner_c.owner_token,
+            now=1_003, lease_seconds=30,
+        )
         self.assertEqual(successor.request_id, request.request_id)
         with self.assertRaises(queues.LeaseLost):
-            queues.finish_scan(self.db_path, first.request_id, first.lease_owner, now=1_004)
+            queues.finish_scan(
+                self.db_path, first.request_id, first.lease_owner, worker_id='worker-a',
+                worker_owner_token=owner_a.owner_token, now=1_004,
+            )
 
     def test_long_scan_heartbeat_renews_before_expiry_and_completes(self):
         clock = {'now': 1_000}
         events = []
         heartbeats = []
         queues.enqueue_scan(self.db_path, 'operator', now=clock['now'])
+        owner = self._acquire_owner('worker-a', clock['now'], lease_seconds=30)
 
         class FakeHeartbeat:
-            def __init__(self, db_path, request_id, owner_token, **kwargs):
+            def __init__(self, db_path, request_id, owner_token, worker_id, worker_owner_token, **kwargs):
                 self.db_path = db_path
                 self.request_id = request_id
                 self.owner_token = owner_token
+                self.worker_id = worker_id
+                self.worker_owner_token = worker_owner_token
                 self.lost = False
                 heartbeats.append(self)
 
@@ -59,6 +71,11 @@ class DurableQueueTests(unittest.TestCase):
             def renew_at(self, now):
                 queues.renew_scan_lease(
                     self.db_path, self.request_id, self.owner_token,
+                    worker_id=self.worker_id, worker_owner_token=self.worker_owner_token,
+                    now=now, lease_seconds=30,
+                )
+                queues.renew_worker_lease(
+                    self.db_path, self.worker_id, self.worker_owner_token,
                     now=now, lease_seconds=30,
                 )
                 events.append(('renewed', now))
@@ -75,7 +92,7 @@ class DurableQueueTests(unittest.TestCase):
 
         self.appmod.run_discovery = controlled_discovery
         self.assertTrue(self.appmod.process_scan_requests(
-            'worker-a', now_fn=lambda: clock['now'], lease_seconds=30,
+            'worker-a', owner.owner_token, now_fn=lambda: clock['now'], lease_seconds=30,
             heartbeat_factory=FakeHeartbeat,
         ))
 
@@ -94,9 +111,10 @@ class DurableQueueTests(unittest.TestCase):
         clock = {'now': 1_000}
         terminal_calls = []
         queues.enqueue_scan(self.db_path, 'operator', now=clock['now'])
+        owner_a = self._acquire_owner('worker-a', clock['now'], lease_seconds=30)
 
         class FakeHeartbeat:
-            def __init__(self, db_path, request_id, owner_token, **kwargs):
+            def __init__(self, db_path, request_id, owner_token, worker_id, worker_owner_token, **kwargs):
                 self.db_path = db_path
                 self.request_id = request_id
                 self.owner_token = owner_token
@@ -119,12 +137,15 @@ class DurableQueueTests(unittest.TestCase):
             clock['now'] = 1_031
             queues.recover_queues(self.db_path, now=clock['now'])
             successor = queues.claim_scan(
-                self.db_path, 'worker-b', now=clock['now'], lease_seconds=30,
+                self.db_path, 'worker-b',
+                worker_owner_token=self._acquire_owner('worker-b', clock['now']).owner_token,
+                now=clock['now'], lease_seconds=30,
             )
             self.assertIsNotNone(successor)
             with self.assertRaises(queues.LeaseLost):
                 queues.renew_scan_lease(
                     self.db_path, heartbeat.request_id, heartbeat.owner_token,
+                    worker_id='worker-a', worker_owner_token=owner_a.owner_token,
                     now=clock['now'], lease_seconds=30,
                 )
             heartbeat.lost = True
@@ -137,7 +158,7 @@ class DurableQueueTests(unittest.TestCase):
             queues.finish_scan = lambda *args, **kwargs: terminal_calls.append('finish')
             queues.fail_scan = lambda *args, **kwargs: terminal_calls.append('fail')
             self.assertFalse(self.appmod.process_scan_requests(
-                'worker-a', now_fn=lambda: clock['now'], lease_seconds=30,
+                'worker-a', owner_a.owner_token, now_fn=lambda: clock['now'], lease_seconds=30,
                 heartbeat_factory=factory,
             ))
         finally:
@@ -151,7 +172,11 @@ class DurableQueueTests(unittest.TestCase):
 
     def test_recovery_expires_old_running_scans_without_replaying_them(self):
         request = queues.enqueue_scan(self.db_path, 'operator', now=1_000)
-        queues.claim_scan(self.db_path, 'worker-a', now=1_001, lease_seconds=1)
+        owner = self._acquire_owner('worker-a', 1_001, lease_seconds=1)
+        queues.claim_scan(
+            self.db_path, 'worker-a', worker_owner_token=owner.owner_token,
+            now=1_001, lease_seconds=1,
+        )
 
         queues.recover_queues(self.db_path, now=1_901)
 
@@ -164,9 +189,17 @@ class DurableQueueTests(unittest.TestCase):
 
     def test_claim_recovers_expired_running_scan_and_takes_it_over_same_poll(self):
         request = queues.enqueue_scan(self.db_path, 'operator', now=0)
-        first = queues.claim_scan(self.db_path, 'worker-a', now=0, lease_seconds=30)
+        owner_a = self._acquire_owner('worker-a', 0, lease_seconds=30)
+        first = queues.claim_scan(
+            self.db_path, 'worker-a', worker_owner_token=owner_a.owner_token,
+            now=0, lease_seconds=30,
+        )
 
-        successor = queues.claim_scan(self.db_path, 'worker-b', now=31, lease_seconds=30)
+        owner_b = self._acquire_owner('worker-b', 31, lease_seconds=30)
+        successor = queues.claim_scan(
+            self.db_path, 'worker-b', worker_owner_token=owner_b.owner_token,
+            now=31, lease_seconds=30,
+        )
 
         self.assertEqual(successor.request_id, request.request_id)
         self.assertNotEqual(successor.lease_owner, first.lease_owner)
@@ -174,12 +207,20 @@ class DurableQueueTests(unittest.TestCase):
 
     def test_claim_expires_past_deadline_running_scan_instead_of_reclaiming_it(self):
         request = queues.enqueue_scan(self.db_path, 'operator', now=0)
-        queues.claim_scan(self.db_path, 'worker-a', now=0, lease_seconds=30)
+        owner = self._acquire_owner('worker-a', 0, lease_seconds=30)
+        queues.claim_scan(
+            self.db_path, 'worker-a', worker_owner_token=owner.owner_token,
+            now=0, lease_seconds=30,
+        )
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('UPDATE scan_requests SET deadline_ts=31 WHERE id=?', (request.request_id,))
             conn.commit()
 
-        self.assertIsNone(queues.claim_scan(self.db_path, 'worker-b', now=31, lease_seconds=30))
+        owner_b = self._acquire_owner('worker-b', 31, lease_seconds=30)
+        self.assertIsNone(queues.claim_scan(
+            self.db_path, 'worker-b', worker_owner_token=owner_b.owner_token,
+            now=31, lease_seconds=30,
+        ))
 
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute(
@@ -190,27 +231,29 @@ class DurableQueueTests(unittest.TestCase):
 
     def test_scan_takeover_fencing_allows_only_current_token_terminal_write(self):
         queues.enqueue_scan(self.db_path, 'operator', now=0)
-        first = queues.claim_scan(self.db_path, 'worker-a', now=0, lease_seconds=30)
-        successor = queues.claim_scan(self.db_path, 'worker-b', now=31, lease_seconds=30)
+        owner_a = self._acquire_owner('worker-a', 0, lease_seconds=30)
+        first = queues.claim_scan(self.db_path, 'worker-a', worker_owner_token=owner_a.owner_token, now=0, lease_seconds=30)
+        owner_b = self._acquire_owner('worker-b', 31, lease_seconds=30)
+        successor = queues.claim_scan(self.db_path, 'worker-b', worker_owner_token=owner_b.owner_token, now=31, lease_seconds=30)
 
         for operation in (
             lambda: queues.renew_scan_lease(
-                self.db_path, first.request_id, first.lease_owner, now=31, lease_seconds=30,
+                self.db_path, first.request_id, first.lease_owner, worker_id='worker-a', worker_owner_token=owner_a.owner_token, now=31, lease_seconds=30,
             ),
             lambda: queues.finish_scan(
-                self.db_path, first.request_id, first.lease_owner, now=31,
+                self.db_path, first.request_id, first.lease_owner, worker_id='worker-a', worker_owner_token=owner_a.owner_token, now=31,
             ),
             lambda: queues.fail_scan(
-                self.db_path, first.request_id, first.lease_owner, 'late', now=31,
+                self.db_path, first.request_id, first.lease_owner, 'late', worker_id='worker-a', worker_owner_token=owner_a.owner_token, now=31,
             ),
         ):
             with self.assertRaises(queues.LeaseLost):
                 operation()
 
-        queues.finish_scan(self.db_path, successor.request_id, successor.lease_owner, now=32)
+        queues.finish_scan(self.db_path, successor.request_id, successor.lease_owner, worker_id='worker-b', worker_owner_token=owner_b.owner_token, now=32)
         with self.assertRaises(queues.LeaseLost):
             queues.fail_scan(
-                self.db_path, successor.request_id, successor.lease_owner, 'late', now=32,
+                self.db_path, successor.request_id, successor.lease_owner, 'late', worker_id='worker-b', worker_owner_token=owner_b.owner_token, now=32,
             )
 
         with sqlite3.connect(self.db_path) as conn:
@@ -247,17 +290,20 @@ class DurableQueueTests(unittest.TestCase):
 
     def test_newer_preview_supersedes_older_work_and_blocks_stale_finish(self):
         first = queues.enqueue_preview(self.db_path, 8080, now=1_000)
-        claimed = queues.claim_preview(self.db_path, 'worker-a', now=1_001, lease_seconds=30)
+        owner_a = self._acquire_owner('worker-a', 1_001, lease_seconds=30)
+        claimed = queues.claim_preview(self.db_path, 'worker-a', worker_owner_token=owner_a.owner_token, now=1_001, lease_seconds=30)
         second = queues.enqueue_preview(self.db_path, 8080, now=1_002)
 
         self.assertEqual(second.revision, first.revision + 1)
         with self.assertRaises(queues.LeaseLost):
             queues.finish_preview(
-                self.db_path, claimed.request_id, 'worker-a', revision=claimed.revision,
+                self.db_path, claimed.request_id, 'worker-a', worker_owner_token=owner_a.owner_token, revision=claimed.revision,
                 now=1_003,
             )
 
-        latest = queues.claim_preview(self.db_path, 'worker-b', now=1_003, lease_seconds=30)
+        queues.release_worker_lease(self.db_path, 'worker-a', owner_a.owner_token, now=1_003)
+        owner_b = self._acquire_owner('worker-b', 1_003, lease_seconds=30)
+        latest = queues.claim_preview(self.db_path, 'worker-b', worker_owner_token=owner_b.owner_token, now=1_003, lease_seconds=30)
         self.assertEqual(latest.revision, second.revision)
 
     def _owner_takeover(self):
@@ -393,11 +439,11 @@ class DurableQueueTests(unittest.TestCase):
                                 revision=claim.revision, now=16,
                             )
                         conn.rollback()
-                    after = conn.execute(
+                    after = tuple(conn.execute(
                         'SELECT status, completed_ts, terminal_ts, lease_owner, lease_until, '
                         'attempt_count, error, result FROM preview_requests WHERE id=?',
                         (request.request_id,),
-                    ).fetchone()
+                    ).fetchone())
                 self.assertEqual(after, before)
 
 

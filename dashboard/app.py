@@ -1464,19 +1464,23 @@ def queue_discovery_request(client_key):
     return request.request_id
 
 
-def process_scan_requests(worker_id=None, *, now_fn=None, lease_seconds=30, heartbeat_factory=None):
-    worker_id = worker_id or 'compat-worker'
+def process_scan_requests(worker_id, worker_owner_token, *, now_fn=None, lease_seconds=30, heartbeat_factory=None):
     now_fn = now_fn or time.time
-    claim = beacon_queues.claim_scan(
-        DB_PATH, worker_id, now=int(now_fn()), lease_seconds=lease_seconds,
-    )
+    try:
+        claim = beacon_queues.claim_scan(
+            DB_PATH, worker_id, worker_owner_token=worker_owner_token,
+            now=int(now_fn()), lease_seconds=lease_seconds,
+        )
+    except beacon_queues.LeaseLost:
+        return False
     if not claim:
         return False
     request_id = claim.request_id
     owner_token = claim.lease_owner
     heartbeat_factory = heartbeat_factory or beacon_queues.ScanLeaseHeartbeat
     heartbeat = heartbeat_factory(
-        DB_PATH, request_id, owner_token, lease_seconds=lease_seconds, now=now_fn,
+        DB_PATH, request_id, owner_token, worker_id, worker_owner_token,
+        lease_seconds=lease_seconds, now=now_fn,
     )
     heartbeat.start()
 
@@ -1487,7 +1491,8 @@ def process_scan_requests(worker_id=None, *, now_fn=None, lease_seconds=30, hear
                 log.warning('scan lease lost before requeue for request %s', request_id)
                 return False
             beacon_queues.requeue_scan(
-                DB_PATH, request_id, owner_token, now=int(now_fn()),
+                DB_PATH, request_id, owner_token, worker_id=worker_id,
+                worker_owner_token=worker_owner_token, now=int(now_fn()),
             )
             return False
         state = _read_scan_state()
@@ -1505,20 +1510,26 @@ def process_scan_requests(worker_id=None, *, now_fn=None, lease_seconds=30, hear
     try:
         if status == 'completed':
             beacon_queues.finish_scan(
-                DB_PATH, request_id, owner_token, now=int(now_fn()),
+                DB_PATH, request_id, owner_token, worker_id=worker_id,
+                worker_owner_token=worker_owner_token, now=int(now_fn()),
             )
         else:
             beacon_queues.fail_scan(
-                DB_PATH, request_id, owner_token, error or 'scan failed', now=int(now_fn()),
+                DB_PATH, request_id, owner_token, error or 'scan failed', worker_id=worker_id,
+                worker_owner_token=worker_owner_token, now=int(now_fn()),
             )
     except beacon_queues.LeaseLost:
         return False
     return True
 
 
-def process_preview_requests(worker_id=None):
-    worker_id = worker_id or 'compat-worker'
-    claim = beacon_queues.claim_preview(DB_PATH, worker_id)
+def process_preview_requests(worker_id, worker_owner_token):
+    try:
+        claim = beacon_queues.claim_preview(
+            DB_PATH, worker_id, worker_owner_token=worker_owner_token,
+        )
+    except beacon_queues.LeaseLost:
+        return False
     if not claim:
         return False
     port = claim.port
@@ -1537,23 +1548,28 @@ def process_preview_requests(worker_id=None):
         try:
             conn.execute('BEGIN IMMEDIATE')
             beacon_queues.finish_preview_in_transaction(
-                conn, claim.request_id, worker_id, revision=claim.revision,
+                conn, claim.request_id, worker_id, worker_owner_token=worker_owner_token,
+                revision=claim.revision,
                 status='failed' if warning else 'completed', error=warning,
             )
             if title:
                 conn.execute("UPDATE services SET title=? WHERE port=?", (title, port))
             if data or thumb_error:
                 _store_thumbnail_result(conn, port, data, mime, source, thumb_error)
+            _insert_event(
+                conn, ts=int(time.time()), event_type='preview_complete', port=port,
+                error_class=thumb_error,
+                details=json.dumps(
+                    {'total_ms': elapsed_ms, 'success': not bool(warning)},
+                    separators=(',', ':'),
+                ),
+            )
             conn.commit()
         except beacon_queues.LeaseLost:
             conn.rollback()
             return False
         finally:
             conn.close()
-    _record_event(
-        'preview_complete', port=port, error_class=thumb_error,
-        details=json.dumps({'total_ms': elapsed_ms, 'success': not bool(warning)}, separators=(',', ':')),
-    )
     return True
 
 

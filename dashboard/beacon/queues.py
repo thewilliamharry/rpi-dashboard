@@ -30,6 +30,7 @@ class LeaseLost(RuntimeError):
 @dataclass(frozen=True)
 class WorkerLease:
     worker_id: str
+    owner_token: str
     acquired_ts: int
     heartbeat_ts: int
     lease_until: int
@@ -58,12 +59,15 @@ class ScanLeaseHeartbeat:
     """
 
     def __init__(
-        self, db_path, request_id, owner_token, *, lease_seconds=30, now=None,
+        self, db_path, request_id, lease_owner, worker_id, worker_owner_token,
+        *, lease_seconds=30, now=None,
         monotonic=None, wait=None,
     ):
         self.db_path = db_path
         self.request_id = int(request_id)
-        self.owner_token = str(owner_token)
+        self.lease_owner = str(lease_owner)
+        self.worker_id = str(worker_id)
+        self.worker_owner_token = str(worker_owner_token)
         self.lease_seconds = int(lease_seconds)
         self.now = now or time.time
         self.monotonic = monotonic or time.monotonic
@@ -79,7 +83,8 @@ class ScanLeaseHeartbeat:
             return False
         try:
             renew_scan_lease(
-                self.db_path, self.request_id, self.owner_token,
+                self.db_path, self.request_id, self.lease_owner,
+                worker_id=self.worker_id, worker_owner_token=self.worker_owner_token,
                 now=int(self.now() if now is None else now),
                 lease_seconds=self.lease_seconds,
             )
@@ -139,6 +144,18 @@ def _save_owner(conn, owner, now):
     )
 
 
+def _assert_current_worker_owner(conn, worker_id, worker_owner_token, now):
+    """Prove durable scheduler authority inside the caller's write transaction."""
+    owner = _load_owner(conn)
+    if (
+        not owner
+        or owner.get('worker_id') != str(worker_id)
+        or owner.get('owner_token') != str(worker_owner_token)
+        or int(owner.get('lease_until') or 0) <= now
+    ):
+        raise LeaseLost('worker lease was lost')
+
+
 def _record_gap(conn, previous, now, ready_seconds):
     heartbeat_ts = previous.get('heartbeat_ts')
     try:
@@ -169,11 +186,12 @@ def acquire_worker_lease(db_path, worker_id, *, now=None, lease_seconds=15, read
         previous = _load_owner(conn)
         if previous:
             previous_until = int(previous.get('lease_until') or 0)
-            if previous_until > now and previous.get('worker_id') != worker_id:
+            if previous_until > now:
                 raise LeaseHeld('worker lease is held')
         gap_end = _record_gap(conn, previous, now, ready_seconds) if previous else None
         owner = {
             'worker_id': str(worker_id),
+            'owner_token': uuid.uuid4().hex,
             'acquired_ts': now,
             'heartbeat_ts': now,
             'lease_until': now + int(lease_seconds),
@@ -182,7 +200,8 @@ def acquire_worker_lease(db_path, worker_id, *, now=None, lease_seconds=15, read
         _save_owner(conn, owner, now)
         conn.commit()
         return WorkerLease(
-            worker_id=owner['worker_id'], acquired_ts=owner['acquired_ts'],
+            worker_id=owner['worker_id'], owner_token=owner['owner_token'],
+            acquired_ts=owner['acquired_ts'],
             heartbeat_ts=owner['heartbeat_ts'], lease_until=owner['lease_until'],
         )
     except Exception:
@@ -192,24 +211,21 @@ def acquire_worker_lease(db_path, worker_id, *, now=None, lease_seconds=15, read
         conn.close()
 
 
-def renew_worker_lease(db_path, worker_id, *, now=None, lease_seconds=15):
+def renew_worker_lease(db_path, worker_id, owner_token, *, now=None, lease_seconds=15):
     """Renew only the matching owner; stale workers receive ``LeaseLost``."""
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
         owner = _load_owner(conn)
-        if (
-            not owner or owner.get('worker_id') != worker_id
-            or int(owner.get('lease_until') or 0) <= now
-        ):
-            raise LeaseLost('worker lease was lost')
+        _assert_current_worker_owner(conn, worker_id, owner_token, now)
         owner['heartbeat_ts'] = now
         owner['lease_until'] = now + int(lease_seconds)
         _save_owner(conn, owner, now)
         conn.commit()
         return WorkerLease(
-            worker_id=str(worker_id), acquired_ts=int(owner['acquired_ts']),
+            worker_id=str(worker_id), owner_token=str(owner_token),
+            acquired_ts=int(owner['acquired_ts']),
             heartbeat_ts=now, lease_until=int(owner['lease_until']),
         )
     except Exception:
@@ -219,14 +235,17 @@ def renew_worker_lease(db_path, worker_id, *, now=None, lease_seconds=15):
         conn.close()
 
 
-def release_worker_lease(db_path, worker_id, *, now=None):
+def release_worker_lease(db_path, worker_id, owner_token, *, now=None):
     """Release only a matching worker owner; a successor is never disturbed."""
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
         owner = _load_owner(conn)
-        if not owner or owner.get('worker_id') != worker_id:
+        if (
+            not owner or owner.get('worker_id') != str(worker_id)
+            or owner.get('owner_token') != str(owner_token)
+        ):
             raise LeaseLost('worker lease was lost')
         conn.execute('DELETE FROM runtime_state WHERE key=?', (WORKER_OWNER_KEY,))
         conn.commit()
@@ -335,12 +354,13 @@ def _recover_expired_scan_leases_in_transaction(conn, *, now):
     )
 
 
-def claim_scan(db_path, worker_id, *, now=None, lease_seconds=30):
+def claim_scan(db_path, worker_id, *, worker_owner_token, now=None, lease_seconds=30):
     """Claim one non-expired queued scan using a conditional write transaction."""
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
         _recover_expired_scan_leases_in_transaction(conn, now=now)
         row = conn.execute(
             "SELECT id FROM scan_requests WHERE status='queued' AND deadline_ts > ? "
@@ -373,15 +393,19 @@ def claim_scan(db_path, worker_id, *, now=None, lease_seconds=30):
         conn.close()
 
 
-def renew_scan_lease(db_path, request_id, worker_id, *, now=None, lease_seconds=30):
+def renew_scan_lease(
+    db_path, request_id, lease_owner, *, worker_id, worker_owner_token,
+    now=None, lease_seconds=30,
+):
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
         changed = conn.execute(
             "UPDATE scan_requests SET lease_until=? WHERE id=? AND status='running' "
             "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
-            (now + int(lease_seconds), request_id, str(worker_id), now, now),
+            (now + int(lease_seconds), request_id, str(lease_owner), now, now),
         ).rowcount
         if not changed:
             raise LeaseLost('scan lease was lost')
@@ -393,16 +417,20 @@ def renew_scan_lease(db_path, request_id, worker_id, *, now=None, lease_seconds=
         conn.close()
 
 
-def _finish_scan(db_path, request_id, worker_id, *, status, error=None, result=None, now=None):
+def _finish_scan(
+    db_path, request_id, lease_owner, *, worker_id, worker_owner_token,
+    status, error=None, result=None, now=None,
+):
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
         changed = conn.execute(
             "UPDATE scan_requests SET status=?, completed_ts=?, terminal_ts=?, error=?, result=?, "
             "lease_owner=NULL, lease_until=NULL WHERE id=? AND status='running' "
             "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
-            (status, now, now, error, result, request_id, str(worker_id), now, now),
+            (status, now, now, error, result, request_id, str(lease_owner), now, now),
         ).rowcount
         if not changed:
             raise LeaseLost('scan lease was lost')
@@ -414,24 +442,31 @@ def _finish_scan(db_path, request_id, worker_id, *, status, error=None, result=N
         conn.close()
 
 
-def finish_scan(db_path, request_id, worker_id, *, result=None, now=None):
-    _finish_scan(db_path, request_id, worker_id, status='completed', result=result, now=now)
+def finish_scan(db_path, request_id, lease_owner, *, worker_id, worker_owner_token, result=None, now=None):
+    _finish_scan(
+        db_path, request_id, lease_owner, worker_id=worker_id,
+        worker_owner_token=worker_owner_token, status='completed', result=result, now=now,
+    )
 
 
-def fail_scan(db_path, request_id, worker_id, error, *, now=None):
-    _finish_scan(db_path, request_id, worker_id, status='failed', error=str(error)[:240], now=now)
+def fail_scan(db_path, request_id, lease_owner, error, *, worker_id, worker_owner_token, now=None):
+    _finish_scan(
+        db_path, request_id, lease_owner, worker_id=worker_id,
+        worker_owner_token=worker_owner_token, status='failed', error=str(error)[:240], now=now,
+    )
 
 
-def requeue_scan(db_path, request_id, worker_id, *, now=None):
+def requeue_scan(db_path, request_id, lease_owner, *, worker_id, worker_owner_token, now=None):
     """Return a still-owned scan to queued when local discovery is busy."""
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
         changed = conn.execute(
             "UPDATE scan_requests SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL "
             "WHERE id=? AND status='running' AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
-            (request_id, str(worker_id), now, now),
+            (request_id, str(lease_owner), now, now),
         ).rowcount
         if not changed:
             raise LeaseLost('scan lease was lost')
@@ -535,12 +570,13 @@ def enqueue_preview(db_path, port, *, now=None):
         conn.close()
 
 
-def claim_preview(db_path, worker_id, *, now=None, lease_seconds=60):
+def claim_preview(db_path, worker_id, *, worker_owner_token, now=None, lease_seconds=60):
     """Claim the latest non-expired preview revision, if any."""
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
         conn.execute(
             "UPDATE preview_requests SET status='expired', terminal_ts=?, completed_ts=?, error='expired' "
             "WHERE status='queued' AND deadline_ts <= ?", (now, now, now),
@@ -579,11 +615,15 @@ def claim_preview(db_path, worker_id, *, now=None, lease_seconds=60):
         conn.close()
 
 
-def renew_preview_lease(db_path, request_id, worker_id, *, revision, now=None, lease_seconds=60):
+def renew_preview_lease(
+    db_path, request_id, worker_id, *, worker_owner_token, revision,
+    now=None, lease_seconds=60,
+):
     now = _now(now)
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
         changed = conn.execute(
             "UPDATE preview_requests SET lease_until=? WHERE id=? AND revision=? AND status='running' "
             "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
@@ -599,9 +639,13 @@ def renew_preview_lease(db_path, request_id, worker_id, *, revision, now=None, l
         conn.close()
 
 
-def finish_preview_in_transaction(conn, request_id, worker_id, *, revision, status='completed', error=None, result=None, now=None):
+def finish_preview_in_transaction(
+    conn, request_id, worker_id, *, worker_owner_token, revision,
+    status='completed', error=None, result=None, now=None,
+):
     """Finish only a current revision while the caller holds its write transaction."""
     now = _now(now)
+    _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
     row = conn.execute(
         'SELECT port FROM preview_requests WHERE id=? AND revision=?', (request_id, revision),
     ).fetchone()
@@ -623,12 +667,16 @@ def finish_preview_in_transaction(conn, request_id, worker_id, *, revision, stat
         raise LeaseLost('preview lease was lost')
 
 
-def finish_preview(db_path, request_id, worker_id, *, revision, result=None, now=None):
+def finish_preview(
+    db_path, request_id, worker_id, *, worker_owner_token, revision,
+    result=None, now=None,
+):
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
         finish_preview_in_transaction(
-            conn, request_id, worker_id, revision=revision, result=result, now=now,
+            conn, request_id, worker_id, worker_owner_token=worker_owner_token,
+            revision=revision, result=result, now=now,
         )
         conn.commit()
     except Exception:
@@ -638,12 +686,15 @@ def finish_preview(db_path, request_id, worker_id, *, revision, result=None, now
         conn.close()
 
 
-def fail_preview(db_path, request_id, worker_id, error, *, revision, now=None):
+def fail_preview(
+    db_path, request_id, worker_id, error, *, worker_owner_token, revision, now=None,
+):
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
         finish_preview_in_transaction(
-            conn, request_id, worker_id, revision=revision, status='failed',
+            conn, request_id, worker_id, worker_owner_token=worker_owner_token,
+            revision=revision, status='failed',
             error=str(error)[:240], now=now,
         )
         conn.commit()
