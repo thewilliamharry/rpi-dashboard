@@ -10,6 +10,7 @@ import importlib
 import os
 import sqlite3
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -119,6 +120,17 @@ class WorkerOwnershipStaticContractTests(unittest.TestCase):
             {row.identifier for row in production.values() if row.ownership_required},
             set(TAKEOVER_CASE_REGISTRY),
         )
+        worker = importlib.import_module('dashboard.worker')
+        services = worker_main.build_worker_services(
+            worker.build_worker_operations(),
+            SimpleNamespace(db_path=':memory:', metric_sample_seconds=60),
+        )
+        scheduler = worker_main.build_scheduler(services)
+        jobs = {job.id: job for job in scheduler.get_jobs()}
+        self.assertEqual(set(jobs), set(SCHEDULER_JOB_IDS))
+        for callback in scheduled:
+            with self.subTest(scheduler_callback=callback.identifier):
+                self.assertEqual(jobs[callback.scheduler_id].func.args[-1], callback.identifier)
 
 
 class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
