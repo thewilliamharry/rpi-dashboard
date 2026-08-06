@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 01
-current_phase_name: Behavioral Safety & Runtime Ownership
-status: ready_to_execute
-stopped_at: Phase 1 system-wide ownership plans 01-21 through 01-23 verified and ready
-last_updated: "2026-08-06T19:38:10Z"
+current_phase_name: behavioral-safety-runtime-ownership
+status: executing
+stopped_at: Completed 01-21-PLAN.md
+last_updated: "2026-08-06T19:49:50.778Z"
 last_activity: 2026-08-06
-last_activity_desc: Waves 15-17 planned as one exhaustive worker-ownership closure and passed independent checks.
+last_activity_desc: Phase 01 execution started
 progress:
-  total_phases: 6
+  total_phases: 1
   completed_phases: 0
   total_plans: 23
-  completed_plans: 20
+  completed_plans: 21
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-24)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 01 — Behavioral Safety & Runtime Ownership
+**Current focus:** Phase 01 — behavioral-safety-runtime-ownership
 
 ## Current Position
 
-Phase: 01 of 6 (Behavioral Safety & Runtime Ownership)
-Plan: 20 of 23 executed; 3 verified closure plans ready
-Status: Ready to execute — exhaustive worker-ownership closure across Waves 15-17
-Last activity: 2026-08-06 — Plans 01-21 through 01-23 passed independent and deterministic checks.
+Phase: 01 (behavioral-safety-runtime-ownership) — EXECUTING
+Plan: 2 of 23
+Status: Ready to execute
+Last activity: 2026-08-06 — Phase 01 execution started
 
-Progress: [█████████░] 87%
+Progress: [█████████░] 91%
 
 ## Performance Metrics
 
@@ -77,6 +77,7 @@ Progress: [█████████░] 87%
 | Phase 01 P17 | 3min | 1 tasks | 2 files |
 | Phase 01 P18 | 12min | 1 tasks | 4 files |
 | Phase 01 P20 | 12min | 3 tasks | 8 files |
+| Phase 01 P21 | 9 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -129,6 +130,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: WSS is closed in Chromium before it can use the approved HTTPS CONNECT carrier as opaque duplex transport.
 - [Phase ?]: Every worker acquisition rotates an opaque owner epoch; worker IDs alone are never durable queue authority.
 - [Phase ?]: Lease loss closes local job admission before non-blocking scheduler shutdown, while the lifecycle thread drains work before Chromium cleanup.
+- [Phase ?]: Freeze all worker startup, scheduler, lifecycle, database, and effect boundaries before changing production authority.
+- [Phase ?]: Keep filesystem publication explicit with an empty current producer set because preview bytes remain SQLite BLOBs.
 
 ### Pending Todos
 
@@ -148,6 +151,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-06T19:38:10Z
-Stopped at: Phase 1 system-wide ownership plans 01-21 through 01-23 verified and ready
-Resume file: .planning/phases/01-behavioral-safety-runtime-ownership/01-21-PLAN.md
+Last session: 2026-08-06T19:49:50.767Z
+Stopped at: Completed 01-21-PLAN.md
+Resume file: None
