@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 import logging
 import signal
 import threading
@@ -40,17 +41,67 @@ class WorkerOperations:
     release_worker_lease: object
 
 
+@dataclass(frozen=True)
+class WorkerCallback:
+    """One immutable, production-dispatched callback boundary."""
+
+    identifier: str
+    operation_fields: tuple[str, ...]
+    handler: str
+    admission_category: str
+    database_surfaces: tuple[str, ...]
+    effect_surfaces: tuple[str, ...]
+    ownership_required: bool = True
+    scheduler_id: str | None = None
+    trigger: str | None = None
+    trigger_kwargs: tuple[tuple[str, object], ...] = ()
+    executor: str | None = None
+    misfire_grace_time: int | None = None
+
+
+# This is production data, not a duplicate test fixture.  The registry is the
+# only post-acquisition dispatch source for startup work and scheduler jobs.
+WORKER_CALLBACK_INVENTORY = (
+    WorkerCallback('P0', ('prepare_database',), 'prepare', 'pre_epoch_preparation', (), ('filesystem_publication',), False),
+    WorkerCallback('S1', ('recover_worker_state',), 'recover', 'startup_recovery', ('scan_requests', 'preview_requests', 'events', 'scan_state'), ()),
+    WorkerCallback('S2', ('update_worker_heartbeat', 'renew_worker_lease'), 'heartbeat', 'startup_heartbeat', ('worker_owner', 'worker_heartbeat'), ('browser_resource_lifecycle',)),
+    WorkerCallback('S3', ('collect_system_stats',), 'metrics', 'startup_metrics', ('system_stats', 'stats_history'), ()),
+    WorkerCallback('J1', ('update_worker_heartbeat', 'renew_worker_lease'), 'heartbeat', 'heartbeat', ('worker_owner', 'worker_heartbeat'), ('browser_resource_lifecycle',), scheduler_id='heartbeat', trigger='interval', trigger_kwargs=(('seconds', 5),), executor='metrics'),
+    WorkerCallback('J2', ('collect_system_stats',), 'metrics', 'metrics', ('system_stats', 'stats_history'), (), scheduler_id='metrics', trigger='interval', trigger_kwargs=(('seconds', None),), executor='metrics', misfire_grace_time=10),
+    WorkerCallback('J3', ('do_uptime_check',), 'uptime_all', 'uptime_all', ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'), ('webhook_delivery',), scheduler_id='uptime_all', trigger='interval', trigger_kwargs=(('minutes', 5),), executor='probes', misfire_grace_time=60),
+    WorkerCallback('J4', ('do_uptime_check',), 'uptime_down', 'uptime_down', ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'), ('webhook_delivery',), scheduler_id='uptime_down', trigger='interval', trigger_kwargs=(('minutes', 1),), executor='probes', misfire_grace_time=30),
+    WorkerCallback('J5', ('process_scan_requests',), 'scan', 'scan', ('scan_requests', 'scan_state', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'events', 'preview_requests'), ('webhook_delivery',), scheduler_id='scan_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='probes', misfire_grace_time=10),
+    WorkerCallback('J6', ('process_preview_requests',), 'preview', 'preview', ('preview_requests', 'services', 'events'), ('thumbnail_publication', 'browser_resource_lifecycle'), scheduler_id='preview_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='screenshots', misfire_grace_time=10),
+    WorkerCallback('J7', ('run_discovery', 'read_scan_state'), 'scheduled_discovery', 'scheduled_discovery', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='scheduled_discovery', trigger='interval', trigger_kwargs=(('hours', 24),), executor='probes', misfire_grace_time=300),
+    WorkerCallback('J8', ('cleanup_history',), 'cleanup', 'cleanup', ('stats_history', 'service_checks', 'events', 'scan_rate_hits'), (), scheduler_id='cleanup', trigger='interval', trigger_kwargs=(('hours', 1),), executor='metrics', misfire_grace_time=300),
+    WorkerCallback('J9', ('run_discovery', 'read_scan_state'), 'startup_discovery', 'startup_discovery', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='startup_discovery', trigger='date', trigger_kwargs=(('run_date', None),), executor='probes', misfire_grace_time=300),
+    WorkerCallback('L1', ('shutdown_browser', 'release_worker_lease'), 'finalize', 'lifecycle_finalization', ('worker_owner',), ('browser_resource_lifecycle',), False),
+)
+_CALLBACKS_BY_ID = {callback.identifier: callback for callback in WORKER_CALLBACK_INVENTORY}
+
+
 class WorkerAdmission:
     """Process-local cancellation and drain aid; SQLite remains authoritative."""
 
     def __init__(self):
         self._condition = threading.Condition()
         self._accepting = True
-        self._active = {'scan': 0, 'preview': 0}
+        self._active = {
+            callback.admission_category: 0
+            for callback in WORKER_CALLBACK_INVENTORY
+            if callback.ownership_required
+        }
+
+    @property
+    def active_counts(self):
+        with self._condition:
+            return dict(self._active)
 
     @contextmanager
     def admit(self, kind):
         with self._condition:
+            if kind not in self._active:
+                raise ValueError(f'unknown worker admission category: {kind}')
             if not self._accepting:
                 yield False
                 return
@@ -120,46 +171,14 @@ def build_worker_services(operations, settings=None):
     )
 
 
-def heartbeat(services):
-    if services.authority:
-        try:
-            services.renew_worker_lease(services.authority)
-        except queues.LeaseLost:
-            log.error('Beacon worker lease lost; stopping stale scheduler')
-            services.admission.close_admission()
-            stop_worker()
-            return False
-    if services.authority:
-        services.update_worker_heartbeat(services.authority)
-    return True
-
-
-def sample_metrics(services):
-    return services.collect_system_stats(services.authority)
-
-
-def process_scans(services):
-    with services.admission.admit('scan') as admitted:
-        if not admitted:
-            return None
-        return services.process_scan_requests(services.authority)
-
-
-def process_previews(services):
-    with services.admission.admit('preview') as admitted:
-        if not admitted:
-            return None
-        return services.process_preview_requests(services.authority)
-
-
-def scheduled_discovery(services):
+def _run_scheduled_discovery(services):
     state = services.read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
         return
     services.run_discovery(services.authority, source='scheduled')
 
 
-def startup_discovery(services):
+def _run_startup_discovery(services):
     state = services.read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
         return
@@ -168,12 +187,85 @@ def startup_discovery(services):
         services.run_discovery(services.authority, source='startup')
 
 
+def _invoke_callback(services, callback):
+    """Invoke a declared operation without admission bookkeeping."""
+    if callback.handler == 'prepare':
+        return services.prepare_database(services.settings)
+    if callback.handler == 'recover':
+        return services.recover_worker_state(services.authority)
+    if callback.handler == 'heartbeat':
+        if services.authority:
+            services.renew_worker_lease(services.authority)
+            services.update_worker_heartbeat(services.authority)
+        return True
+    if callback.handler == 'metrics':
+        return services.collect_system_stats(services.authority)
+    if callback.handler == 'uptime_all':
+        return services.do_uptime_check(services.authority, only_down=False)
+    if callback.handler == 'uptime_down':
+        return services.do_uptime_check(services.authority, only_down=True)
+    if callback.handler == 'scan':
+        return services.process_scan_requests(services.authority)
+    if callback.handler == 'preview':
+        return services.process_preview_requests(services.authority)
+    if callback.handler == 'scheduled_discovery':
+        return _run_scheduled_discovery(services)
+    if callback.handler == 'startup_discovery':
+        return _run_startup_discovery(services)
+    if callback.handler == 'cleanup':
+        return services.cleanup_history(services.authority)
+    raise ValueError(f'callback {callback.identifier} cannot be dispatched')
+
+
+def dispatch_callback(services, callback_id):
+    """Admit one real callback and revoke all work on durable lease loss."""
+    callback = _CALLBACKS_BY_ID[callback_id]
+    if not callback.ownership_required:
+        return _invoke_callback(services, callback)
+    with services.admission.admit(callback.admission_category) as admitted:
+        if not admitted:
+            return None
+        try:
+            return _invoke_callback(services, callback)
+        except queues.LeaseLost:
+            log.error('Beacon worker lease lost; stopping stale scheduler')
+            services.admission.close_admission()
+            stop_worker()
+            return False
+
+
+# Compatibility exports retain their former call shapes, but all post-acquisition
+# work now enters the one inventory-driven admission wrapper.
+def heartbeat(services):
+    return dispatch_callback(services, 'J1')
+
+
+def sample_metrics(services):
+    return dispatch_callback(services, 'J2')
+
+
+def process_scans(services):
+    return dispatch_callback(services, 'J5')
+
+
+def process_previews(services):
+    return dispatch_callback(services, 'J6')
+
+
+def scheduled_discovery(services):
+    return dispatch_callback(services, 'J7')
+
+
+def startup_discovery(services):
+    return dispatch_callback(services, 'J9')
+
+
 def uptime_check(services, *, only_down):
-    return services.do_uptime_check(services.authority, only_down=only_down)
+    return dispatch_callback(services, 'J4' if only_down else 'J3')
 
 
 def cleanup(services):
-    return services.cleanup_history(services.authority)
+    return dispatch_callback(services, 'J8')
 
 
 scheduler = None
@@ -203,39 +295,20 @@ def build_scheduler(services):
         'misfire_grace_time': 15,
     }
     built_scheduler = BlockingScheduler(executors=executors, job_defaults=job_defaults, timezone='UTC')
-    built_scheduler.add_job(heartbeat, 'interval', args=(services,), seconds=5, executor='metrics', id='heartbeat')
-    built_scheduler.add_job(
-        sample_metrics, 'interval', args=(services,), seconds=services.settings.metric_sample_seconds,
-        executor='metrics', id='metrics', misfire_grace_time=10,
-    )
-    built_scheduler.add_job(
-        uptime_check, 'interval', args=(services,), minutes=5, kwargs={'only_down': False},
-        executor='probes', id='uptime_all', misfire_grace_time=60,
-    )
-    built_scheduler.add_job(
-        uptime_check, 'interval', args=(services,), minutes=1, kwargs={'only_down': True},
-        executor='probes', id='uptime_down', misfire_grace_time=30,
-    )
-    built_scheduler.add_job(
-        process_scans, 'interval', args=(services,), seconds=2,
-        executor='probes', id='scan_requests', misfire_grace_time=10,
-    )
-    built_scheduler.add_job(
-        process_previews, 'interval', args=(services,), seconds=2,
-        executor='screenshots', id='preview_requests', misfire_grace_time=10,
-    )
-    built_scheduler.add_job(
-        scheduled_discovery, 'interval', args=(services,), hours=24, executor='probes',
-        id='scheduled_discovery', misfire_grace_time=300,
-    )
-    built_scheduler.add_job(
-        cleanup, 'interval', args=(services,), hours=1, executor='metrics',
-        id='cleanup', misfire_grace_time=300,
-    )
-    built_scheduler.add_job(
-        startup_discovery, 'date', args=(services,), run_date=None, executor='probes',
-        id='startup_discovery', misfire_grace_time=300,
-    )
+    for callback in WORKER_CALLBACK_INVENTORY:
+        if callback.scheduler_id is None:
+            continue
+        trigger_kwargs = dict(callback.trigger_kwargs)
+        if callback.identifier == 'J2':
+            trigger_kwargs['seconds'] = services.settings.metric_sample_seconds
+        built_scheduler.add_job(
+            partial(dispatch_callback, services, callback.identifier),
+            callback.trigger,
+            executor=callback.executor,
+            id=callback.scheduler_id,
+            misfire_grace_time=callback.misfire_grace_time,
+            **trigger_kwargs,
+        )
     return built_scheduler
 
 
@@ -267,7 +340,7 @@ def run_worker(operations, settings=None):
         if _worker_started:
             return
         services = build_worker_services(operations, settings)
-        services.prepare_database(services.settings)
+        dispatch_callback(services, 'P0')
         worker_id = uuid4().hex
         try:
             lease = services.acquire_worker_lease(services.settings.db_path, worker_id)
@@ -284,10 +357,10 @@ def run_worker(operations, settings=None):
             )
     try:
         with _worker_start_lock:
-            services.recover_worker_state(services.authority)
-            if not heartbeat(services):
+            dispatch_callback(services, 'S1')
+            if not dispatch_callback(services, 'S2'):
                 return
-            sample_metrics(services)
+            dispatch_callback(services, 'S3')
             scheduler = build_scheduler(services)
             _active_services = services
             _active_worker_id = services.authority.worker_id
