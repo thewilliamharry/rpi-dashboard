@@ -58,23 +58,36 @@ class WorkerCallback:
     executor: str | None = None
     misfire_grace_time: int | None = None
 
+    @property
+    def scheduler_metadata(self):
+        """The complete declarative scheduler identity used by build_scheduler."""
+        if self.scheduler_id is None:
+            return {}
+        return {
+            'id': self.scheduler_id,
+            'trigger': self.trigger,
+            'trigger_kwargs': self.trigger_kwargs,
+            'executor': self.executor,
+            'misfire_grace_time': self.misfire_grace_time,
+        }
+
 
 # This is production data, not a duplicate test fixture.  The registry is the
 # only post-acquisition dispatch source for startup work and scheduler jobs.
 WORKER_CALLBACK_INVENTORY = (
     WorkerCallback('P0', ('prepare_database',), 'prepare', 'pre_epoch_preparation', (), ('filesystem_publication',), False),
-    WorkerCallback('S1', ('recover_worker_state',), 'recover', 'startup_recovery', ('scan_requests', 'preview_requests', 'events', 'scan_state'), ()),
-    WorkerCallback('S2', ('update_worker_heartbeat', 'renew_worker_lease'), 'heartbeat', 'startup_heartbeat', ('worker_owner', 'worker_heartbeat'), ('browser_resource_lifecycle',)),
-    WorkerCallback('S3', ('collect_system_stats',), 'metrics', 'startup_metrics', ('system_stats', 'stats_history'), ()),
-    WorkerCallback('J1', ('update_worker_heartbeat', 'renew_worker_lease'), 'heartbeat', 'heartbeat', ('worker_owner', 'worker_heartbeat'), ('browser_resource_lifecycle',), scheduler_id='heartbeat', trigger='interval', trigger_kwargs=(('seconds', 5),), executor='metrics'),
-    WorkerCallback('J2', ('collect_system_stats',), 'metrics', 'metrics', ('system_stats', 'stats_history'), (), scheduler_id='metrics', trigger='interval', trigger_kwargs=(('seconds', None),), executor='metrics', misfire_grace_time=10),
-    WorkerCallback('J3', ('do_uptime_check',), 'uptime_all', 'uptime_all', ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'), ('webhook_delivery',), scheduler_id='uptime_all', trigger='interval', trigger_kwargs=(('minutes', 5),), executor='probes', misfire_grace_time=60),
-    WorkerCallback('J4', ('do_uptime_check',), 'uptime_down', 'uptime_down', ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'), ('webhook_delivery',), scheduler_id='uptime_down', trigger='interval', trigger_kwargs=(('minutes', 1),), executor='probes', misfire_grace_time=30),
-    WorkerCallback('J5', ('process_scan_requests',), 'scan', 'scan', ('scan_requests', 'scan_state', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'events', 'preview_requests'), ('webhook_delivery',), scheduler_id='scan_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='probes', misfire_grace_time=10),
-    WorkerCallback('J6', ('process_preview_requests',), 'preview', 'preview', ('preview_requests', 'services', 'events'), ('thumbnail_publication', 'browser_resource_lifecycle'), scheduler_id='preview_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='screenshots', misfire_grace_time=10),
-    WorkerCallback('J7', ('run_discovery', 'read_scan_state'), 'scheduled_discovery', 'scheduled_discovery', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='scheduled_discovery', trigger='interval', trigger_kwargs=(('hours', 24),), executor='probes', misfire_grace_time=300),
-    WorkerCallback('J8', ('cleanup_history',), 'cleanup', 'cleanup', ('stats_history', 'service_checks', 'events', 'scan_rate_hits'), (), scheduler_id='cleanup', trigger='interval', trigger_kwargs=(('hours', 1),), executor='metrics', misfire_grace_time=300),
-    WorkerCallback('J9', ('run_discovery', 'read_scan_state'), 'startup_discovery', 'startup_discovery', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='startup_discovery', trigger='date', trigger_kwargs=(('run_date', None),), executor='probes', misfire_grace_time=300),
+    WorkerCallback('S1', ('recover_worker_state',), 'recover', 'startup', ('scan_requests', 'preview_requests', 'events', 'scan_state'), ()),
+    WorkerCallback('S2', ('update_worker_heartbeat', 'renew_worker_lease'), 'heartbeat', 'startup', ('worker_owner', 'worker_heartbeat'), ('browser_resource_lifecycle',)),
+    WorkerCallback('S3', ('collect_system_stats',), 'metrics', 'startup', ('system_stats', 'stats_history'), ()),
+    WorkerCallback('J1', ('update_worker_heartbeat', 'renew_worker_lease'), 'heartbeat', 'scheduled', ('worker_owner', 'worker_heartbeat'), ('browser_resource_lifecycle',), scheduler_id='heartbeat', trigger='interval', trigger_kwargs=(('seconds', 5),), executor='metrics'),
+    WorkerCallback('J2', ('collect_system_stats',), 'metrics', 'scheduled', ('system_stats', 'stats_history'), (), scheduler_id='metrics', trigger='interval', trigger_kwargs=(('seconds', None),), executor='metrics', misfire_grace_time=10),
+    WorkerCallback('J3', ('do_uptime_check',), 'uptime_all', 'scheduled', ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'), ('webhook_delivery',), scheduler_id='uptime_all', trigger='interval', trigger_kwargs=(('minutes', 5),), executor='probes', misfire_grace_time=60),
+    WorkerCallback('J4', ('do_uptime_check',), 'uptime_down', 'scheduled', ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'), ('webhook_delivery',), scheduler_id='uptime_down', trigger='interval', trigger_kwargs=(('minutes', 1),), executor='probes', misfire_grace_time=30),
+    WorkerCallback('J5', ('process_scan_requests',), 'scan', 'scheduled', ('scan_requests', 'scan_state', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'events', 'preview_requests'), ('webhook_delivery',), scheduler_id='scan_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='probes', misfire_grace_time=10),
+    WorkerCallback('J6', ('process_preview_requests',), 'preview', 'scheduled', ('preview_requests', 'services', 'events'), ('thumbnail_publication', 'browser_resource_lifecycle'), scheduler_id='preview_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='screenshots', misfire_grace_time=10),
+    WorkerCallback('J7', ('run_discovery', 'read_scan_state'), 'scheduled_discovery', 'scheduled', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='scheduled_discovery', trigger='interval', trigger_kwargs=(('hours', 24),), executor='probes', misfire_grace_time=300),
+    WorkerCallback('J8', ('cleanup_history',), 'cleanup', 'scheduled', ('stats_history', 'service_checks', 'events', 'scan_rate_hits'), (), scheduler_id='cleanup', trigger='interval', trigger_kwargs=(('hours', 1),), executor='metrics', misfire_grace_time=300),
+    WorkerCallback('J9', ('run_discovery', 'read_scan_state'), 'startup_discovery', 'scheduled', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='startup_discovery', trigger='date', trigger_kwargs=(('run_date', None),), executor='probes', misfire_grace_time=300),
     WorkerCallback('L1', ('shutdown_browser', 'release_worker_lease'), 'finalize', 'lifecycle_finalization', ('worker_owner',), ('browser_resource_lifecycle',), False),
 )
 _CALLBACKS_BY_ID = {callback.identifier: callback for callback in WORKER_CALLBACK_INVENTORY}

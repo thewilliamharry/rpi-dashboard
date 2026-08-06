@@ -111,7 +111,7 @@ class WorkerOwnershipStaticContractTests(unittest.TestCase):
                 self.assertEqual(actual.ownership_required, expected.ownership_required)
                 self.assertEqual(
                     actual.scheduler_metadata['id'] if actual.scheduler_id else None,
-                    SCHEDULER_JOB_IDS.get(actual.scheduler_id),
+                    actual.scheduler_id,
                 )
         scheduled = [row for row in production.values() if row.scheduler_id]
         self.assertEqual({row.scheduler_metadata['id'] for row in scheduled}, set(SCHEDULER_JOB_IDS))
