@@ -1,12 +1,14 @@
 import logging
 import os
 import json
+import hashlib
 import ipaddress
 import socket
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from collections import defaultdict
 from pathlib import Path
@@ -98,6 +100,7 @@ _startup_lock = threading.Lock()
 _screenshot_sem = threading.Semaphore(1)
 _uptime_lock = threading.Lock()
 _browser_lock = threading.Lock()
+_worker_effect_authority = ContextVar('worker_effect_authority', default=None)
 _browser_playwright = None
 _browser_instance = None
 _preview_context = threading.local()
@@ -904,13 +907,6 @@ def _legacy_fetch_thumbnail(port, service_url=None):
     timings['total_ms'] = round((time.monotonic() - started) * 1000, 1)
     timings['success'] = bool(screenshot_data)
     log.info('preview_capture %s', json.dumps({'port': port, **timings}, sort_keys=True))
-    try:
-        _record_event(
-            'preview_capture', port=port, error_class=screenshot_error,
-            details=json.dumps(timings, separators=(',', ':'), sort_keys=True),
-        )
-    except Exception:
-        log.exception('Could not persist preview timing for port %d', port)
     if screenshot_data:
         return screenshot_data, screenshot_mime, 'screenshot', None
     return None, None, None, screenshot_error or "screenshot failed"
@@ -1464,6 +1460,9 @@ def _send_transition_alert(**kwargs):
 
 
 def _handle_state_transition(**kwargs):
+    authority = _worker_effect_authority.get()
+    if authority is not None:
+        return worker_handle_state_transition(authority, **kwargs)
     return beacon_monitoring.handle_state_transition(_monitoring_operations(), **kwargs)
 
 
@@ -1528,6 +1527,76 @@ def _assert_worker_callback_authority(authority):
         pass
 
 
+def _worker_record_event(authority, event_type, **kwargs):
+    """Persist an effect outcome only while the exact worker epoch is current."""
+    with _worker_write_transaction(authority) as conn:
+        _insert_event(conn, ts=authority.now(), event_type=event_type, **kwargs)
+
+
+def _worker_alert_is_due(authority, port, online, now):
+    with _worker_write_transaction(authority, now=now) as conn:
+        row = conn.execute(
+            "SELECT ts FROM events WHERE port=? AND event_type='alert_sent' AND online=? "
+            "ORDER BY ts DESC LIMIT 1",
+            (port, online),
+        ).fetchone()
+    return not row or now - int(row['ts']) >= ALERT_COOLDOWN_SECONDS
+
+
+def worker_send_transition_alert(authority, *, now, port, previous_online, online, title,
+                                 display_name, url, critical, latency_ms, error_class):
+    """Make the single bounded webhook effect while its epoch remains reserved."""
+    if not ALERT_WEBHOOK_URL or (ALERT_ONLY_CRITICAL and not critical):
+        return False
+    if not _worker_alert_is_due(authority, port, online, now):
+        return False
+    payload = {
+        'timestamp': now, 'port': port, 'service': display_name or title or f':{port}',
+        'title': title, 'url': url, 'critical': bool(critical),
+        'previous_online': bool(previous_online), 'online': bool(online),
+        'latency_ms': latency_ms, 'error_class': error_class,
+        'event': 'service_recovered' if online else 'service_down',
+    }
+    plan = _outbound_transport().policy.plan(ALERT_WEBHOOK_URL, OutboundPurpose.WEBHOOK)
+    # Reserve enough durable lease for the immutable strict transport budget.
+    beacon_queues.renew_worker_authority(
+        authority, now=now, lease_seconds=int(plan.connect_timeout + plan.read_timeout) + 2,
+    )
+    key_material = f'{now}:{port}:{int(bool(previous_online))}:{int(bool(online))}'.encode('ascii')
+    headers = {'Idempotency-Key': hashlib.sha256(key_material).hexdigest()}
+    try:
+        response = _outbound_transport().request_plan(
+            plan, method='POST', json=payload, headers=headers,
+        )
+        status = f'http_{response.status_code}'
+        event_type = 'alert_sent' if 200 <= response.status_code < 300 else 'alert_failed'
+        details = 'webhook delivered' if event_type == 'alert_sent' else 'webhook delivery rejected'
+    except OutboundPolicyError as exc:
+        event_type, status, details = 'alert_failed', 'policy_' + exc.reason, 'webhook policy rejected'
+    except Exception:
+        event_type, status, details = 'alert_failed', 'delivery_error', 'webhook delivery failed'
+    try:
+        _worker_record_event(
+            authority, event_type, port=port, online=online, previous_online=previous_online,
+            latency_ms=latency_ms, error_class=error_class, alert_status=status, details=details,
+        )
+    except beacon_queues.LeaseLost:
+        return False
+    return event_type == 'alert_sent'
+
+
+def worker_handle_state_transition(authority, **kwargs):
+    """Fence transition persistence and its optional external delivery separately."""
+    now = int(authority.now())
+    _worker_record_event(
+        authority, 'state_change', port=kwargs['port'], online=kwargs['online'],
+        previous_online=kwargs['previous_online'], latency_ms=kwargs['latency_ms'],
+        error_class=kwargs['error_class'],
+        details='service recovered' if kwargs['online'] else 'service went down',
+    )
+    return worker_send_transition_alert(authority, now=now, **kwargs)
+
+
 def worker_collect_system_stats(authority, now=None, persist_history=None):
     try:
         _assert_worker_callback_authority(authority)
@@ -1549,7 +1618,11 @@ def worker_run_discovery(authority, source='scheduled'):
         _assert_worker_callback_authority(authority)
     except beacon_queues.LeaseLost:
         return False
-    return run_discovery(source=source)
+    token = _worker_effect_authority.set(authority)
+    try:
+        return run_discovery(source=source)
+    finally:
+        _worker_effect_authority.reset(token)
 
 
 def worker_do_uptime_check(authority, only_down=False):
@@ -1557,7 +1630,11 @@ def worker_do_uptime_check(authority, only_down=False):
         _assert_worker_callback_authority(authority)
     except beacon_queues.LeaseLost:
         return False
-    return do_uptime_check(only_down=only_down)
+    token = _worker_effect_authority.set(authority)
+    try:
+        return do_uptime_check(only_down=only_down)
+    finally:
+        _worker_effect_authority.reset(token)
 
 
 def queue_discovery_request(client_key):
@@ -1741,6 +1818,16 @@ def worker_process_preview_requests(authority):
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
     try:
         with _worker_write_transaction(authority) as conn:
+            # Browser output is only an in-memory candidate until this same
+            # authority-plus-row/revision transaction succeeds.
+            _insert_event(
+                conn, ts=authority.now(), event_type='preview_capture', port=claim.port,
+                error_class=thumb_error,
+                details=json.dumps(
+                    {'total_ms': elapsed_ms, 'success': bool(data)},
+                    separators=(',', ':'), sort_keys=True,
+                ),
+            )
             beacon_queues.finish_preview_for_worker_in_transaction(
                 conn, authority, claim.request_id, revision=claim.revision,
                 status='failed' if warning else 'completed', error=warning,

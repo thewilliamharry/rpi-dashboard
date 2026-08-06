@@ -262,6 +262,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
         services = mock.Mock()
         services.settings = mock.Mock()
+        services.admission = worker_main.WorkerAdmission()
         services.prepare_database.side_effect = lambda _settings: lifecycle.append('prepare')
         services.recover_worker_state.side_effect = lambda _authority: lifecycle.append('recover')
         services.update_worker_heartbeat.side_effect = lambda _authority: lifecycle.append('heartbeat')
@@ -276,6 +277,9 @@ class RuntimeOwnershipTests(unittest.TestCase):
             mock.patch.object(worker_main.signal, 'signal') as register_signal,
         ):
             worker.main()
+            # Production builds a fresh service graph per lifecycle; this test
+            # intentionally reuses a mock graph to observe both calls.
+            services.admission = worker_main.WorkerAdmission()
             worker.main()
 
         self.assertEqual(lifecycle[:4], ['prepare', 'recover', 'heartbeat', 'metrics'])

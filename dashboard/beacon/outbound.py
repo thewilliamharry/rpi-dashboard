@@ -525,6 +525,17 @@ class OutboundTransport:
             candidate = urljoin(plan.url, location)
             previous_response = response
 
+    def request_plan(self, plan, *, method='GET', **kwargs):
+        """Send exactly one already-authorized, redirect-free pinned request."""
+        if plan.purpose is not OutboundPurpose.WEBHOOK:
+            raise OutboundPolicyError('target_not_allowed')
+        if self._requester is not None:
+            return self._requester(
+                method, plan.url, timeout=(plan.connect_timeout, plan.read_timeout),
+                verify=plan.tls.verify_certificate, allow_redirects=False, **kwargs,
+            )
+        return self._send_pinned(method, plan, **kwargs)
+
     def _send_pinned(self, method, plan, **kwargs):
         """Open exactly the validated numeric address, never the hostname.
 

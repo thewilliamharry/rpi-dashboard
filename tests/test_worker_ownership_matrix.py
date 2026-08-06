@@ -276,8 +276,8 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             with self.subTest(row_id=row_id):
                 self._run_after_takeover(row_id, setup, stale_callback, current_b_callback)
 
-    def test_preview_capture_effect_is_red_after_a_real_sqlite_takeover(self):
-        """J6 proves admission/effect fencing, not just its fenced SQL finish."""
+    def test_preview_capture_publication_is_fenced_after_a_real_sqlite_takeover(self):
+        """J6 may capture in memory, but only current B can publish its result."""
         self._fresh_case_database()
         self._seed_preview()
         owner_a = queues.acquire_worker_lease(
@@ -325,9 +325,15 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             self.operations.process_preview_requests(self._authority(owner_b))
 
         self._assert_b_is_current(owner_b)
+        self.assertEqual(effects, ['a', 'b'])
+        with sqlite3.connect(self.db_path) as conn:
+            published = conn.execute(
+                "SELECT event_type FROM events WHERE event_type IN ('preview_capture', 'preview_complete') "
+                "ORDER BY id"
+            ).fetchall()
         self.assertEqual(
-            effects, ['b'],
-            'J6: stale-A ownership/admission/effect boundary captured after Worker B acquired',
+            [row[0] for row in published], ['preview_capture', 'preview_complete'],
+            'J6: stale-A browser output published after Worker B acquired',
         )
 
 
