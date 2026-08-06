@@ -6,6 +6,7 @@ worker-only mutation and non-SQL effect boundary.
 """
 
 from dataclasses import fields, replace
+from contextlib import contextmanager
 import importlib
 import os
 import sqlite3
@@ -204,7 +205,13 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
         setup()
         _owner_a, owner_b = self._owner_a_then_b()
         before, runtime_before, _ = self._snapshot()
-        stale_callback()
+        try:
+            stale_callback()
+        except queues.LeaseLost:
+            # Direct operation bindings propagate durable loss so the universal
+            # scheduler dispatcher can close admission.  Compatibility helpers
+            # which already dispatch the callback return ``False`` instead.
+            pass
         after, runtime_after, _ = self._snapshot()
         self._assert_b_is_current(owner_b)
         self.assertEqual(
@@ -217,6 +224,91 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             (current, runtime_current), (before, runtime_before),
             f'{row_id}: current-B control suppressed all work',
         )
+
+    def _run_current_a_pause_then_takeover(self, row_id, setup):
+        """Exercise the real check-to-write interval, not a synthetic token."""
+        self._fresh_case_database()
+        setup()
+        owner_a = queues.acquire_worker_lease(
+            self.db_path, 'matrix-worker-a', now=self.now, lease_seconds=1,
+        )
+        authority_a = self._authority(owner_a)
+        services_a = self._services(owner_a)
+        paused = threading.Event()
+        release = threading.Event()
+        original_transaction = self.appmod._worker_write_transaction
+        paused_once = False
+
+        @contextmanager
+        def pause_before_authoritative_commit(authority, **kwargs):
+            nonlocal paused_once
+            if authority == authority_a and not paused_once:
+                paused_once = True
+                paused.set()
+                self.assertTrue(release.wait(timeout=2), f'{row_id}: takeover release was not signalled')
+            with original_transaction(authority, **kwargs) as conn:
+                yield conn
+
+        with mock.patch.object(
+            self.appmod, '_worker_write_transaction', pause_before_authoritative_commit,
+        ):
+            stale_result = []
+            stale = threading.Thread(
+                target=lambda: stale_result.append(worker_main.dispatch_callback(services_a, row_id)),
+                daemon=True,
+            )
+            stale.start()
+            self.assertTrue(paused.wait(timeout=2), f'{row_id}: A never reached an authoritative write')
+            self.now += 2
+            owner_b = queues.acquire_worker_lease(
+                self.db_path, 'matrix-worker-b', now=self.now, lease_seconds=30,
+            )
+            before_release, runtime_before_release, _ = self._snapshot()
+            release.set()
+            stale.join(timeout=2)
+
+        self.assertFalse(stale.is_alive(), f'{row_id}: stale callback did not drain')
+        self.assertEqual(stale_result, [False], f'{row_id}: LeaseLost did not reach universal dispatch')
+        self.assertFalse(services_a.admission._accepting, f'{row_id}: admission remained open after lease loss')
+        after, runtime_after, _ = self._snapshot()
+        self.assertEqual(
+            (after, runtime_after), (before_release, runtime_before_release),
+            f'{row_id}: current A committed after B acquired the durable lease',
+        )
+        self._assert_b_is_current(owner_b)
+        if row_id == 'J5':
+            # A's scan-row claim predates takeover and keeps its independent
+            # Wave-14 lease.  B becomes the queue processor once that row
+            # lease expires, while B's worker epoch is still current.
+            self.now += 29
+        current_b = worker_main.dispatch_callback(self._services(owner_b), row_id)
+        self.assertIsNot(current_b, False, f'{row_id}: current-B control did not run')
+
+    def test_current_a_takeover_before_authoritative_commits_is_fenced(self):
+        """Every legacy worker path must reject a real A→B handoff at its write."""
+        class FakeSocket:
+            def close(self):
+                return None
+
+        def connect(address, timeout):
+            if address[1] == 8080:
+                return FakeSocket()
+            raise OSError('closed')
+
+        cases = (
+            ('S1', self._seed_recovery), ('S3', lambda: None), ('J2', lambda: None),
+            ('J3', self._seed_service), ('J4', self._seed_service), ('J5', self._seed_scan),
+            ('J7', self._seed_service), ('J8', self._seed_cleanup), ('J9', self._seed_service),
+        )
+        with (
+            mock.patch.object(self.appmod.socket, 'create_connection', side_effect=connect),
+            mock.patch.object(self.appmod, '_legacy_probe_http', self._fake_probe),
+            mock.patch.object(self.appmod, '_legacy_extract_title', return_value='Matrix title'),
+            mock.patch.object(self.appmod.time, 'time', side_effect=lambda: self.now),
+        ):
+            for row_id, setup in cases:
+                with self.subTest(row_id=row_id):
+                    self._run_current_a_pause_then_takeover(row_id, setup)
 
     def _services(self, owner):
         services = worker_main.build_worker_services(
@@ -334,18 +426,21 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
                 effects.append('b')
             return 'Preview', b'png', 'image/png', 'screenshot', None, None
 
+        def run_stale_preview():
+            try:
+                self.operations.process_preview_requests(
+                    WorkerAuthority.from_lease(
+                        owner_a, self.db_path, clock=lambda: clock['now'],
+                    ),
+                )
+            except queues.LeaseLost:
+                pass
+
         with (
             mock.patch.object(self.appmod.time, 'time', side_effect=lambda: clock['now']),
             mock.patch.object(self.appmod, '_legacy_refresh_service_preview', side_effect=paused_capture),
         ):
-            stale = threading.Thread(
-                target=lambda: self.operations.process_preview_requests(
-                    WorkerAuthority.from_lease(
-                        owner_a, self.db_path, clock=lambda: clock['now'],
-                    ),
-                ),
-                daemon=True,
-            )
+            stale = threading.Thread(target=run_stale_preview, daemon=True)
             stale.start()
             self.assertTrue(capture_started.wait(timeout=2), 'preview never reached capture boundary')
             clock['now'] = self.now

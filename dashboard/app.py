@@ -101,6 +101,7 @@ _screenshot_sem = threading.Semaphore(1)
 _uptime_lock = threading.Lock()
 _browser_lock = threading.Lock()
 _worker_effect_authority = ContextVar('worker_effect_authority', default=None)
+_worker_mutation_authority = ContextVar('worker_mutation_authority', default=None)
 _browser_playwright = None
 _browser_instance = None
 _preview_context = threading.local()
@@ -238,12 +239,33 @@ def _worker_write_transaction(authority, *, now=None):
         conn.close()
 
 
+@contextmanager
+def _mutation_write_transaction(authority=None, *, now=None):
+    """Use the worker epoch for worker-originated writes, web lock otherwise."""
+    if authority is not None:
+        # A supplied timestamp may describe sampled data, but it must never
+        # become the authority clock for a later write transaction.
+        with _worker_write_transaction(authority) as conn:
+            yield conn
+        return
+    with _db_lock:
+        conn = get_db()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
 def worker_recover_worker_state(authority, now=None):
     """Recover queues and runtime state with an assertion in every transaction."""
     now = authority.now() if now is None else int(now)
     try:
         beacon_queues.recover_queues_for_worker(authority, now=now)
-        with _worker_write_transaction(authority, now=now) as conn:
+        with _worker_write_transaction(authority) as conn:
             heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
             heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
             try:
@@ -266,17 +288,17 @@ def worker_recover_worker_state(authority, now=None):
             })
             _set_runtime_state('scan_state', state, conn=conn, now=now)
     except beacon_queues.LeaseLost:
-        return False
+        raise
     return True
 
 
 def worker_update_worker_heartbeat(authority, now=None):
     now = authority.now() if now is None else int(now)
     try:
-        with _worker_write_transaction(authority, now=now) as conn:
+        with _worker_write_transaction(authority) as conn:
             _set_runtime_state('worker_heartbeat', {'ts': now}, conn=conn, now=now)
     except beacon_queues.LeaseLost:
-        return False
+        raise
     return True
 
 
@@ -305,6 +327,13 @@ def _read_scan_state(conn=None):
 
 
 def _update_scan_state(**changes):
+    authority = _worker_mutation_authority.get()
+    if authority is not None:
+        with _worker_write_transaction(authority) as conn:
+            state = _read_scan_state(conn)
+            state.update(changes)
+            _set_runtime_state('scan_state', state, conn=conn, now=authority.now())
+        return
     with _db_lock:
         conn = get_db()
         state = _read_scan_state(conn)
@@ -688,7 +717,16 @@ def _legacy_insert_event(conn, *, ts, event_type, port=None, online=None, previo
 
 def _legacy_record_event(event_type, port=None, online=None, previous_online=None,
                   latency_ms=None, error_class=None, alert_status=None, details=None):
-    now = int(time.time())
+    authority = _worker_mutation_authority.get()
+    now = authority.now() if authority is not None else int(time.time())
+    if authority is not None:
+        with _worker_write_transaction(authority) as conn:
+            _insert_event(
+                conn, ts=now, event_type=event_type, port=port, online=online,
+                previous_online=previous_online, latency_ms=latency_ms,
+                error_class=error_class, alert_status=alert_status, details=details,
+            )
+        return
     with _db_lock:
         conn = get_db()
         _insert_event(
@@ -1157,8 +1195,8 @@ def _legacy_do_discovery(source='scheduled'):
         existing = {}
 
         phase = time.monotonic()
-        with _db_lock:
-            conn = get_db()
+        authority = _worker_mutation_authority.get()
+        with _mutation_write_transaction(authority, now=now) as conn:
             existing_rows = conn.execute(
                 "SELECT s.port, s.title, s.is_online, s.thumb_ts, s.thumb_source, "
                 "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
@@ -1228,8 +1266,6 @@ def _legacy_do_discovery(source='scheduled'):
 
             conn.execute("DELETE FROM services WHERE last_seen < ?", (expire_cutoff,))
             conn.execute("DELETE FROM service_meta WHERE port NOT IN (SELECT port FROM services)")
-            conn.commit()
-            conn.close()
         timings['database_ms'] = round((time.monotonic() - phase) * 1000, 1)
 
         _update_scan_state(stage='previews', progress=0.68, timings=timings)
@@ -1243,11 +1279,13 @@ def _legacy_do_discovery(source='scheduled'):
             thumb_source = ex.get('thumb_source')
             if ex.get('has_thumb') and thumb_ts >= refresh_cutoff and thumb_source == 'screenshot':
                 continue
-            with _db_lock:
-                conn = get_db()
-                beacon_queues.enqueue_preview_in_transaction(conn, port, now=int(time.time()))
-                conn.commit()
-                conn.close()
+            with _mutation_write_transaction(authority, now=now) as conn:
+                if authority is None:
+                    beacon_queues.enqueue_preview_in_transaction(conn, port, now=now)
+                else:
+                    beacon_queues.enqueue_preview_for_worker_in_transaction(
+                        conn, authority, port, now=now,
+                    )
             _update_scan_state(progress=round(0.68 + 0.30 * (idx + 1) / max(1, len(discovered_ports)), 3))
         timings['previews_ms'] = round((time.monotonic() - phase) * 1000, 1)
 
@@ -1264,6 +1302,8 @@ def _legacy_do_discovery(source='scheduled'):
         _record_event("scan_complete", details=f"source={source}; found={found_count}")
         log.info("Discovery complete: %d HTTP services found", found_count)
         return True
+    except beacon_queues.LeaseLost:
+        raise
     except Exception as exc:
         log.exception("Discovery failed unexpectedly: %s", exc)
         timings['total_ms'] = round((time.monotonic() - scan_started) * 1000, 1)
@@ -1291,6 +1331,7 @@ def _legacy_do_uptime_check(only_down=False):
     now = int(time.time())
     expire_cutoff = now - EXPIRE_DAYS * 86400
     transitions = []
+    authority = _worker_mutation_authority.get()
     try:
         with _db_lock:
             conn = get_db()
@@ -1326,8 +1367,7 @@ def _legacy_do_uptime_check(only_down=False):
             online_int = 1 if online else 0
             title_update = _extract_title(resp, port) if online and resp is not None else ''
 
-            with _db_lock:
-                conn = get_db()
+            with _mutation_write_transaction(authority, now=now) as conn:
                 if online and title_update and title_update != f":{port}":
                     conn.execute(
                         "UPDATE services SET title=?, is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL, "
@@ -1354,9 +1394,12 @@ def _legacy_do_uptime_check(only_down=False):
                     conn, port, bool(service_plan and service_plan.tls.tls_unverified), now,
                 )
                 if online and not row['has_thumb']:
-                    beacon_queues.enqueue_preview_in_transaction(conn, port, now=now)
-                conn.commit()
-                conn.close()
+                    if authority is None:
+                        beacon_queues.enqueue_preview_in_transaction(conn, port, now=now)
+                    else:
+                        beacon_queues.enqueue_preview_for_worker_in_transaction(
+                            conn, authority, port, now=now,
+                        )
 
             if previous_online != online_int:
                 transitions.append({
@@ -1534,7 +1577,7 @@ def _worker_record_event(authority, event_type, **kwargs):
 
 
 def _worker_alert_is_due(authority, port, online, now):
-    with _worker_write_transaction(authority, now=now) as conn:
+    with _worker_write_transaction(authority) as conn:
         row = conn.execute(
             "SELECT ts FROM events WHERE port=? AND event_type='alert_sent' AND online=? "
             "ORDER BY ts DESC LIMIT 1",
@@ -1581,7 +1624,7 @@ def worker_send_transition_alert(authority, *, now, port, previous_online, onlin
             latency_ms=latency_ms, error_class=error_class, alert_status=status, details=details,
         )
     except beacon_queues.LeaseLost:
-        return False
+        raise
     return event_type == 'alert_sent'
 
 
@@ -1598,43 +1641,70 @@ def worker_handle_state_transition(authority, **kwargs):
 
 
 def worker_collect_system_stats(authority, now=None, persist_history=None):
-    try:
-        _assert_worker_callback_authority(authority)
-    except beacon_queues.LeaseLost:
-        return False
-    return collect_system_stats(now=authority.now() if now is None else now, persist_history=persist_history)
+    """Collect outside SQLite, then publish under the current worker epoch."""
+    now = authority.now() if now is None else int(now)
+    cpu = psutil.cpu_percent(interval=None)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    ram_available = int(ram.available)
+    ram_total = int(ram.total)
+    ram_used = max(0, ram_total - ram_available)
+    sample = {
+        'sample_ts': now, 'cpu': round(float(cpu), 1),
+        'ram': round((ram_used / ram_total * 100) if ram_total else 0.0, 1),
+        'ram_used': ram_used, 'ram_available': ram_available,
+        'ram_used_strict': int(ram.used), 'ram_total': ram_total,
+        'disk': round(float(disk.percent), 1), 'disk_used': int(disk.used),
+        'disk_total': int(disk.total), 'temp': get_temp(), 'hostname': socket.gethostname(),
+    }
+    with _worker_write_transaction(authority) as conn:
+        conn.execute(
+            "INSERT INTO system_stats(id,sample_ts,cpu,ram,ram_used,ram_available,ram_used_strict,ram_total,disk,disk_used,disk_total,temp,hostname) "
+            "VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "sample_ts=excluded.sample_ts,cpu=excluded.cpu,ram=excluded.ram,ram_used=excluded.ram_used,"
+            "ram_available=excluded.ram_available,ram_used_strict=excluded.ram_used_strict,ram_total=excluded.ram_total,"
+            "disk=excluded.disk,disk_used=excluded.disk_used,disk_total=excluded.disk_total,temp=excluded.temp,hostname=excluded.hostname",
+            (sample['sample_ts'], sample['cpu'], sample['ram'], sample['ram_used'], sample['ram_available'],
+             sample['ram_used_strict'], sample['ram_total'], sample['disk'], sample['disk_used'], sample['disk_total'],
+             sample['temp'], sample['hostname']),
+        )
+        if persist_history is None:
+            last = conn.execute('SELECT MAX(ts) AS ts FROM stats_history').fetchone()['ts']
+            persist_history = last is None or now - int(last) >= METRIC_HISTORY_SECONDS
+        if persist_history:
+            conn.execute('INSERT OR REPLACE INTO stats_history(ts,cpu,ram,disk,temp) VALUES(?,?,?,?,?)',
+                         (now, sample['cpu'], sample['ram'], sample['disk'], sample['temp']))
+    return sample
 
 
 def worker_cleanup_history(authority, now=None):
-    try:
-        _assert_worker_callback_authority(authority)
-    except beacon_queues.LeaseLost:
-        return False
-    return cleanup_history(now=authority.now() if now is None else now)
+    now = authority.now() if now is None else int(now)
+    with _worker_write_transaction(authority, now=now) as conn:
+        conn.execute('DELETE FROM stats_history WHERE ts < ?', (now - 86400,))
+        conn.execute('DELETE FROM service_checks WHERE ts < ?', (now - CHECK_RETENTION_SECONDS,))
+        conn.execute('DELETE FROM events WHERE ts < ?', (now - (14 * 86400),))
+        conn.execute('DELETE FROM scan_rate_hits WHERE ts < ?', (now - TRIGGER_SCAN_WINDOW_SECONDS,))
+    return True
 
 
 def worker_run_discovery(authority, source='scheduled'):
-    try:
-        _assert_worker_callback_authority(authority)
-    except beacon_queues.LeaseLost:
-        return False
-    token = _worker_effect_authority.set(authority)
+    effect_token = _worker_effect_authority.set(authority)
+    mutation_token = _worker_mutation_authority.set(authority)
     try:
         return run_discovery(source=source)
     finally:
-        _worker_effect_authority.reset(token)
+        _worker_mutation_authority.reset(mutation_token)
+        _worker_effect_authority.reset(effect_token)
 
 
 def worker_do_uptime_check(authority, only_down=False):
-    try:
-        _assert_worker_callback_authority(authority)
-    except beacon_queues.LeaseLost:
-        return False
-    token = _worker_effect_authority.set(authority)
+    effect_token = _worker_effect_authority.set(authority)
+    mutation_token = _worker_mutation_authority.set(authority)
     try:
         return do_uptime_check(only_down=only_down)
     finally:
-        _worker_effect_authority.reset(token)
+        _worker_mutation_authority.reset(mutation_token)
+        _worker_effect_authority.reset(effect_token)
 
 
 def queue_discovery_request(client_key):
@@ -1651,7 +1721,7 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
             authority, now=int(now_fn()), lease_seconds=lease_seconds,
         )
     except beacon_queues.LeaseLost:
-        return False
+        raise
     if not claim:
         return False
     heartbeat_factory = heartbeat_factory or beacon_queues.WorkerScanLeaseHeartbeat
@@ -1671,12 +1741,14 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
         state = _read_scan_state()
         status = 'failed' if outcome == 'failed' or state.get('last_error') else 'completed'
         error = state.get('last_error') if status == 'failed' else None
+    except beacon_queues.LeaseLost:
+        raise
     except Exception as exc:
         status, error = 'failed', str(exc)[:240]
     finally:
         heartbeat.stop()
     if heartbeat.lost:
-        return False
+        raise beacon_queues.LeaseLost('worker scan lease was lost')
     try:
         if status == 'completed':
             beacon_queues.finish_scan_for_worker(
@@ -1687,7 +1759,7 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
                 authority, claim.request_id, claim.lease_owner, error or 'scan failed', now=int(now_fn()),
             )
     except beacon_queues.LeaseLost:
-        return False
+        raise
     return True
 
 
@@ -1805,7 +1877,7 @@ def worker_process_preview_requests(authority):
     try:
         claim = beacon_queues.claim_preview_for_worker(authority)
     except beacon_queues.LeaseLost:
-        return False
+        raise
     if not claim:
         return False
     with connect_db(authority.db_path) as conn:
@@ -1842,7 +1914,7 @@ def worker_process_preview_requests(authority):
                 details=json.dumps({'total_ms': elapsed_ms, 'success': not bool(warning)}, separators=(',', ':')),
             )
     except beacon_queues.LeaseLost:
-        return False
+        raise
     return True
 
 
