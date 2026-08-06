@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: behavioral-safety-runtime-ownership
 status: executing
-stopped_at: Completed 01-21-PLAN.md
-last_updated: "2026-08-06T19:49:50.778Z"
+stopped_at: Completed 01-22-PLAN.md
+last_updated: "2026-08-06T20:01:16.928Z"
 last_activity: 2026-08-06
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 23
-  completed_plans: 21
+  completed_plans: 22
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 01 (behavioral-safety-runtime-ownership) — EXECUTING
-Plan: 2 of 23
+Plan: 3 of 23
 Status: Ready to execute
 Last activity: 2026-08-06 — Phase 01 execution started
 
-Progress: [█████████░] 91%
+Progress: [██████████] 96%
 
 ## Performance Metrics
 
@@ -78,6 +78,7 @@ Progress: [█████████░] 91%
 | Phase 01 P18 | 12min | 1 tasks | 4 files |
 | Phase 01 P20 | 12min | 3 tasks | 8 files |
 | Phase 01 P21 | 9 min | 2 tasks | 2 files |
+| Phase 01 P22 | 18 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -132,6 +133,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Lease loss closes local job admission before non-blocking scheduler shutdown, while the lifecycle thread drains work before Chromium cleanup.
 - [Phase ?]: Freeze all worker startup, scheduler, lifecycle, database, and effect boundaries before changing production authority.
 - [Phase ?]: Keep filesystem publication explicit with an empty current producer set because preview bytes remain SQLite BLOBs.
+- [Phase ?]: Worker authority is an immutable value bound to the exact acquisition epoch; logs and representations omit the opaque epoch.
+- [Phase ?]: Existing queue row, revision, lease, deadline, and coalescing fences remain additive to worker epoch authority.
 
 ### Pending Todos
 
@@ -151,6 +154,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-06T19:49:50.767Z
-Stopped at: Completed 01-21-PLAN.md
+Last session: 2026-08-06T20:01:16.918Z
+Stopped at: Completed 01-22-PLAN.md
 Resume file: None

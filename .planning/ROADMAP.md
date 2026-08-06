@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Loading the web application does not start monitoring, browser, probe, or scheduler work; the worker visibly owns shared scheduled work without duplicate execution.
   4. Service probes, fetched previews, redirects, and webhooks consistently block disallowed targets or invalid TLS and report a safe, understandable failure.
 
-**Plans**: 21/23 plans executed
+**Plans**: 22/23 plans executed
 
 - [x] 01-01-PLAN.md
 - [x] 01-02-PLAN.md
@@ -57,7 +57,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] 01-19-PLAN.md — Gap closure: release worker ownership on every terminal path
 - [x] 01-20-PLAN.md — Gap closure: fence in-flight queue work with the current durable worker epoch
 - [x] 01-21-PLAN.md — Freeze the production worker mutation/effect inventory and RED takeover oracle
-- [ ] 01-22-PLAN.md — Propagate immutable authority and fence every worker SQLite transaction
+- [x] 01-22-PLAN.md — Propagate immutable authority and fence every worker SQLite transaction
 - [ ] 01-23-PLAN.md — Close universal admission, non-SQL effects, and the production-to-evidence gate
 
 **Wave 1**
@@ -217,7 +217,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Behavioral Safety & Runtime Ownership | 21/23 | In Progress|  |
+| 1. Behavioral Safety & Runtime Ownership | 22/23 | In Progress|  |
 | 2. Bounded Telemetry & Retention | 0/TBD | Not started | - |
 | 3. Advanced Current Diagnosis | 0/TBD | Not started | - |
 | 4. Historical Investigation | 0/TBD | Not started | - |
