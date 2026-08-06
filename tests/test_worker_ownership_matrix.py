@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 from dashboard.beacon import queues, worker_main
+from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 from tests.worker_ownership_contract import (
     DATABASE_SURFACES,
@@ -88,6 +89,12 @@ class WorkerOwnershipStaticContractTests(unittest.TestCase):
             with self.subTest(row_id=row_id, job_id=job_id):
                 self.assertIn(f"id='{job_id}'", source)
 
+    def test_plan19_authority_shape_has_no_split_worker_credentials(self):
+        service_fields = {field.name for field in fields(worker_main.WorkerServices)}
+        self.assertIn('authority', service_fields)
+        self.assertNotIn('worker_id', service_fields)
+        self.assertNotIn('owner_token', service_fields)
+
 
 class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
     """Real-file SQLite A→B matrix; failures name stale authority, not setup."""
@@ -108,6 +115,9 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
         owner_a = queues.acquire_worker_lease(self.db_path, 'matrix-worker-a', now=self.now - 2, lease_seconds=1)
         owner_b = queues.acquire_worker_lease(self.db_path, 'matrix-worker-b', now=self.now, lease_seconds=30)
         return owner_a, owner_b
+
+    def _authority(self, lease):
+        return WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: self.now)
 
     def _fresh_case_database(self):
         """Each matrix row gets a fresh persisted owner, never a recycled B lease."""
@@ -176,28 +186,28 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             self.operations,
             type('Settings', (), {'db_path': self.db_path, 'metric_sample_seconds': 1})(),
         )
-        return replace(services, worker_id=owner.worker_id, owner_token=owner.owner_token)
+        return replace(services, authority=self._authority(owner))
 
     def _fake_probe(self, *args, **kwargs):
         return True, 7.5, None, object()
 
-    def _run_uptime(self, only_down):
+    def _run_uptime(self, authority, only_down):
         with (
             mock.patch.object(self.appmod.time, 'time', return_value=self.now),
             mock.patch.object(self.appmod, '_legacy_probe_http', self._fake_probe),
             mock.patch.object(self.appmod, '_legacy_extract_title', return_value='Matrix title'),
         ):
-            return self.operations.do_uptime_check(only_down=only_down)
+            return self.operations.do_uptime_check(authority, only_down=only_down)
 
-    def _run_metrics(self):
+    def _run_metrics(self, authority):
         with mock.patch.object(self.appmod.time, 'time', return_value=self.now):
-            return self.operations.collect_system_stats()
+            return self.operations.collect_system_stats(authority)
 
     def _seed_recovery(self):
         self.appmod.update_worker_heartbeat(now=self.now - 100)
 
-    def _run_recovery(self):
-        return self.operations.recover_worker_state()
+    def _run_recovery(self, authority):
+        return self.operations.recover_worker_state(authority)
 
     def _seed_cleanup(self):
         with self.appmod._db_lock:
@@ -208,11 +218,11 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
-    def _run_cleanup(self):
+    def _run_cleanup(self, authority):
         with mock.patch.object(self.appmod.time, 'time', return_value=self.now + 100_000):
-            return self.operations.cleanup_history()
+            return self.operations.cleanup_history(authority)
 
-    def _run_discovery(self, source):
+    def _run_discovery(self, authority, source):
         class FakeSocket:
             def close(self):
                 return None
@@ -228,14 +238,14 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             mock.patch.object(self.appmod, '_legacy_probe_http', self._fake_probe),
             mock.patch.object(self.appmod, '_legacy_extract_title', return_value='Discovered'),
         ):
-            return self.operations.run_discovery(source=source)
+            return self.operations.run_discovery(authority, source=source)
 
     def _seed_scan(self):
         queues.enqueue_scan(self.db_path, 'matrix', now=self.now)
 
     def _run_scan(self, owner):
         with mock.patch.object(self.appmod, 'run_discovery', return_value='completed'):
-            return self.operations.process_scan_requests(owner.worker_id, owner.owner_token, now_fn=lambda: self.now)
+            return self.operations.process_scan_requests(self._authority(owner), now_fn=lambda: self.now)
 
     def _seed_preview(self):
         self._seed_service()
@@ -243,23 +253,23 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
 
     def _run_preview(self, owner):
         with mock.patch.object(self.appmod, '_legacy_refresh_service_preview', return_value=('Preview', b'png', 'image/png', 'screenshot', None, None)):
-            return self.operations.process_preview_requests(owner.worker_id, owner.owner_token)
+            return self.operations.process_preview_requests(self._authority(owner))
 
-    def test_real_sqlite_takeover_matrix_is_red_for_unfenced_callbacks(self):
-        """Plans 01-22/23 make this table green without shrinking the registry."""
+    def test_database_takeover_matrix_fences_every_callback(self):
+        """Plan 01-22 makes the SQLite subset green without shrinking the registry."""
         cases = (
-            ('S1', self._seed_recovery, self._run_recovery, lambda _b: self._run_recovery()),
+            ('S1', self._seed_recovery, lambda: self._run_recovery(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_recovery(self._authority(b))),
             ('S2', lambda: None, lambda: worker_main.heartbeat(self._services(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: worker_main.heartbeat(self._services(b))),
-            ('S3', lambda: None, self._run_metrics, lambda _b: self._run_metrics()),
+            ('S3', lambda: None, lambda: self._run_metrics(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_metrics(self._authority(b))),
             ('J1', lambda: None, lambda: worker_main.heartbeat(self._services(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: worker_main.heartbeat(self._services(b))),
-            ('J2', lambda: None, self._run_metrics, lambda _b: self._run_metrics()),
-            ('J3', self._seed_service, lambda: self._run_uptime(False), lambda _b: self._run_uptime(False)),
-            ('J4', self._seed_service, lambda: self._run_uptime(True), lambda _b: self._run_uptime(True)),
+            ('J2', lambda: None, lambda: self._run_metrics(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_metrics(self._authority(b))),
+            ('J3', self._seed_service, lambda: self._run_uptime(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), False), lambda b: self._run_uptime(self._authority(b), False)),
+            ('J4', self._seed_service, lambda: self._run_uptime(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), True), lambda b: self._run_uptime(self._authority(b), True)),
             ('J5', self._seed_scan, lambda: self._run_scan(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), lambda b: self._run_scan(b)),
             ('J6', self._seed_preview, lambda: self._run_preview(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), lambda b: self._run_preview(b)),
-            ('J7', self._seed_service, lambda: self._run_discovery('scheduled'), lambda _b: self._run_discovery('scheduled')),
-            ('J8', self._seed_cleanup, self._run_cleanup, lambda _b: self._run_cleanup()),
-            ('J9', self._seed_service, lambda: self._run_discovery('startup'), lambda _b: self._run_discovery('startup')),
+            ('J7', self._seed_service, lambda: self._run_discovery(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), 'scheduled'), lambda b: self._run_discovery(self._authority(b), 'scheduled')),
+            ('J8', self._seed_cleanup, lambda: self._run_cleanup(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_cleanup(self._authority(b))),
+            ('J9', self._seed_service, lambda: self._run_discovery(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), 'startup'), lambda b: self._run_discovery(self._authority(b), 'startup')),
         )
         self.assertEqual(tuple(case[0] for case in cases), tuple(TAKEOVER_CASE_REGISTRY))
         for row_id, setup, stale_callback, current_b_callback in cases:
@@ -293,7 +303,9 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
         ):
             stale = threading.Thread(
                 target=lambda: self.operations.process_preview_requests(
-                    owner_a.worker_id, owner_a.owner_token,
+                    WorkerAuthority.from_lease(
+                        owner_a, self.db_path, clock=lambda: clock['now'],
+                    ),
                 ),
                 daemon=True,
             )
@@ -310,7 +322,7 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             # A new revision is a real current-B success control; it must be
             # allowed even though A's old result is rejected by queue fencing.
             queues.enqueue_preview(self.db_path, 8080, now=self.now)
-            self.operations.process_preview_requests(owner_b.worker_id, owner_b.owner_token)
+            self.operations.process_preview_requests(self._authority(owner_b))
 
         self._assert_b_is_current(owner_b)
         self.assertEqual(

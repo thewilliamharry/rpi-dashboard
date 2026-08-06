@@ -14,6 +14,7 @@ import uuid
 
 from .db import connect_db
 from .migrations import RECOVERY_MARKER
+from .worker_authority import WorkerAuthority
 
 
 WORKER_OWNER_KEY = 'worker_owner'
@@ -115,6 +116,30 @@ class ScanLeaseHeartbeat:
             self._thread.join(timeout=max(1.0, self.interval_seconds))
 
 
+class WorkerScanLeaseHeartbeat(ScanLeaseHeartbeat):
+    """Scan lease heartbeat bound to one immutable worker authority."""
+
+    def __init__(self, authority, request_id, lease_owner, **kwargs):
+        self.authority = authority
+        super().__init__(
+            authority.db_path, request_id, lease_owner,
+            authority.worker_id, authority.owner_token, **kwargs,
+        )
+
+    def renew_once(self, now=None):
+        if self.lost:
+            return False
+        try:
+            renew_scan_lease_for_worker(
+                self.authority, self.request_id, self.lease_owner,
+                now=int(self.now() if now is None else now), lease_seconds=self.lease_seconds,
+            )
+        except LeaseLost:
+            self.lost = True
+            return False
+        return True
+
+
 def _connect(db_path):
     return connect_db(db_path)
 
@@ -154,6 +179,39 @@ def _assert_current_worker_owner(conn, worker_id, worker_owner_token, now):
         or int(owner.get('lease_until') or 0) <= now
     ):
         raise LeaseLost('worker lease was lost')
+
+
+def assert_current_worker_authority(conn, authority, now=None):
+    """Prove an acquired authority on this connection's active write transaction.
+
+    Callers must issue ``BEGIN IMMEDIATE`` before this function.  Keeping the
+    assertion beside the mutation closes the check-to-write gap that an entry
+    point validation cannot cover.
+    """
+    if not isinstance(authority, WorkerAuthority):
+        raise LeaseLost('worker authority was lost')
+    if not conn.in_transaction:
+        raise RuntimeError('worker authority requires BEGIN IMMEDIATE')
+    _assert_current_worker_owner(
+        conn, authority.worker_id, authority.owner_token,
+        authority.now() if now is None else int(now),
+    )
+
+
+def renew_worker_authority(authority, *, now=None, lease_seconds=15):
+    """Renew the exact acquisition epoch and return its updated lease."""
+    return renew_worker_lease(
+        authority.db_path, authority.worker_id, authority.owner_token,
+        now=authority.now() if now is None else now, lease_seconds=lease_seconds,
+    )
+
+
+def release_worker_authority(authority, *, now=None):
+    """Release only the exact acquired epoch."""
+    return release_worker_lease(
+        authority.db_path, authority.worker_id, authority.owner_token,
+        now=authority.now() if now is None else now,
+    )
 
 
 def _record_gap(conn, previous, now, ready_seconds):
@@ -723,3 +781,101 @@ def expire_preview_requests(db_path, *, now=None):
         raise
     finally:
         conn.close()
+
+
+# Worker-only queue variants intentionally take one immutable authority.  The
+# owner-free functions above remain the web compatibility surface (D-13–D-15).
+def recover_queues_for_worker(authority, *, now=None):
+    now = authority.now() if now is None else int(now)
+    conn = _connect(authority.db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        assert_current_worker_authority(conn, authority, now)
+        _recover_expired_scan_leases_in_transaction(conn, now=now)
+        conn.execute('UPDATE preview_requests SET deadline_ts=requested_ts + 1800 WHERE deadline_ts IS NULL')
+        conn.execute(
+            "UPDATE preview_requests SET status='expired', terminal_ts=?, completed_ts=?, "
+            "lease_owner=NULL, lease_until=NULL, error='expired' "
+            "WHERE status IN ('queued', 'running') AND deadline_ts <= ?",
+            (now, now, now),
+        )
+        conn.execute(
+            "UPDATE preview_requests SET status='queued', started_ts=NULL, lease_owner=NULL, lease_until=NULL "
+            "WHERE status='running' AND (lease_until IS NULL OR lease_until <= ?) AND deadline_ts > ?",
+            (now, now),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def claim_scan_for_worker(authority, *, now=None, lease_seconds=30):
+    return claim_scan(
+        authority.db_path, authority.worker_id, worker_owner_token=authority.owner_token,
+        now=authority.now() if now is None else now, lease_seconds=lease_seconds,
+    )
+
+
+def renew_scan_lease_for_worker(authority, request_id, lease_owner, *, now=None, lease_seconds=30):
+    return renew_scan_lease(
+        authority.db_path, request_id, lease_owner, worker_id=authority.worker_id,
+        worker_owner_token=authority.owner_token,
+        now=authority.now() if now is None else now, lease_seconds=lease_seconds,
+    )
+
+
+def requeue_scan_for_worker(authority, request_id, lease_owner, *, now=None):
+    return requeue_scan(
+        authority.db_path, request_id, lease_owner, worker_id=authority.worker_id,
+        worker_owner_token=authority.owner_token, now=authority.now() if now is None else now,
+    )
+
+
+def finish_scan_for_worker(authority, request_id, lease_owner, *, result=None, now=None):
+    return finish_scan(
+        authority.db_path, request_id, lease_owner, worker_id=authority.worker_id,
+        worker_owner_token=authority.owner_token, result=result,
+        now=authority.now() if now is None else now,
+    )
+
+
+def fail_scan_for_worker(authority, request_id, lease_owner, error, *, now=None):
+    return fail_scan(
+        authority.db_path, request_id, lease_owner, error, worker_id=authority.worker_id,
+        worker_owner_token=authority.owner_token, now=authority.now() if now is None else now,
+    )
+
+
+def claim_preview_for_worker(authority, *, now=None, lease_seconds=60):
+    return claim_preview(
+        authority.db_path, authority.worker_id, worker_owner_token=authority.owner_token,
+        now=authority.now() if now is None else now, lease_seconds=lease_seconds,
+    )
+
+
+def renew_preview_lease_for_worker(authority, request_id, *, revision, now=None, lease_seconds=60):
+    return renew_preview_lease(
+        authority.db_path, request_id, authority.worker_id, worker_owner_token=authority.owner_token,
+        revision=revision, now=authority.now() if now is None else now, lease_seconds=lease_seconds,
+    )
+
+
+def finish_preview_for_worker_in_transaction(
+    conn, authority, request_id, *, revision, status='completed', error=None, result=None, now=None,
+):
+    now = authority.now() if now is None else int(now)
+    assert_current_worker_authority(conn, authority, now)
+    return finish_preview_in_transaction(
+        conn, request_id, authority.worker_id, worker_owner_token=authority.owner_token,
+        revision=revision, status=status, error=error, result=result, now=now,
+    )
+
+
+def enqueue_preview_for_worker_in_transaction(conn, authority, port, *, now=None):
+    assert_current_worker_authority(conn, authority, now)
+    return _enqueue_preview_in_transaction(
+        conn, int(port), now=authority.now() if now is None else int(now),
+    )

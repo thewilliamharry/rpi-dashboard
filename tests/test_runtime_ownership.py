@@ -13,6 +13,7 @@ from unittest import mock
 
 from dashboard.beacon import worker_main
 from dashboard.beacon import queues
+from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
 
@@ -43,27 +44,27 @@ class RuntimeOwnershipTests(unittest.TestCase):
             calls.append(('acquire', worker_id))
             return queues.acquire_worker_lease(db_path, worker_id)
 
-        def renew_worker_lease(db_path, worker_id, owner_token):
-            calls.append(('renew', worker_id))
-            return queues.renew_worker_lease(db_path, worker_id, owner_token)
+        def renew_worker_lease(authority):
+            calls.append(('renew', authority.worker_id))
+            return queues.renew_worker_authority(authority)
 
-        def real_release_worker_lease(db_path, worker_id, owner_token):
-            calls.append(('release', worker_id))
-            return queues.release_worker_lease(db_path, worker_id, owner_token)
+        def real_release_worker_lease(authority):
+            calls.append(('release', authority.worker_id))
+            return queues.release_worker_authority(authority)
 
         return worker_main.WorkerOperations(
             prepare_database=lambda _settings: calls.append(('prepare', None)),
-            recover_worker_state=recover or (lambda: calls.append(('recover', None))),
+            recover_worker_state=recover or (lambda _authority: calls.append(('recover', None))),
             update_worker_heartbeat=update_heartbeat or (
-                lambda: calls.append(('heartbeat', None))
+                lambda _authority: calls.append(('heartbeat', None))
             ),
-            collect_system_stats=collect_metrics or (lambda: calls.append(('metrics', None))),
+            collect_system_stats=collect_metrics or (lambda _authority: calls.append(('metrics', None))),
             read_scan_state=lambda: {},
-            run_discovery=lambda **_kwargs: None,
-            do_uptime_check=lambda **_kwargs: None,
-            process_scan_requests=lambda _worker_id: None,
-            process_preview_requests=lambda _worker_id: None,
-            cleanup_history=lambda: None,
+            run_discovery=lambda _authority, **_kwargs: None,
+            do_uptime_check=lambda _authority, **_kwargs: None,
+            process_scan_requests=lambda _authority: None,
+            process_preview_requests=lambda _authority: None,
+            cleanup_history=lambda _authority: None,
             shutdown_browser=shutdown_browser or (lambda: calls.append(('shutdown_browser', None))),
             acquire_worker_lease=acquire_worker_lease,
             renew_worker_lease=renew_worker_lease,
@@ -170,8 +171,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
         operations = worker.build_worker_operations()
 
-        self.assertIs(operations.recover_worker_state, worker.beacon.recover_worker_state)
-        self.assertIs(operations.process_preview_requests, worker.beacon.process_preview_requests)
+        self.assertIs(operations.recover_worker_state, worker.beacon.worker_recover_worker_state)
+        self.assertIs(operations.process_preview_requests, worker.beacon.worker_process_preview_requests)
         self.assertIs(operations.acquire_worker_lease, queues.acquire_worker_lease)
 
     def test_thumbnail_repository_persists_success_and_failure_for_api_reads(self):
@@ -262,9 +263,9 @@ class RuntimeOwnershipTests(unittest.TestCase):
         services = mock.Mock()
         services.settings = mock.Mock()
         services.prepare_database.side_effect = lambda _settings: lifecycle.append('prepare')
-        services.recover_worker_state.side_effect = lambda: lifecycle.append('recover')
-        services.update_worker_heartbeat.side_effect = lambda: lifecycle.append('heartbeat')
-        services.collect_system_stats.side_effect = lambda: lifecycle.append('metrics')
+        services.recover_worker_state.side_effect = lambda _authority: lifecycle.append('recover')
+        services.update_worker_heartbeat.side_effect = lambda _authority: lifecycle.append('heartbeat')
+        services.collect_system_stats.side_effect = lambda _authority: lifecycle.append('metrics')
         services.shutdown_browser.side_effect = lambda: lifecycle.append('shutdown')
 
         worker_main._worker_started = False
@@ -505,10 +506,10 @@ class RuntimeOwnershipTests(unittest.TestCase):
         allow_preview_exit = threading.Event()
         admission = worker_main.WorkerAdmission()
 
-        def renew(_db_path, _worker_id, _owner_token):
+        def renew(_authority):
             raise queues.LeaseLost('lost')
 
-        def preview(_worker_id, _owner_token):
+        def preview(_authority):
             preview_started.set()
             allow_preview_exit.wait(timeout=2)
             calls.append(('preview_exit', None))
@@ -516,22 +517,21 @@ class RuntimeOwnershipTests(unittest.TestCase):
         services = worker_main.WorkerServices(
             settings=SimpleNamespace(db_path=self.db_path),
             prepare_database=lambda _settings: None,
-            recover_worker_state=lambda: None,
-            update_worker_heartbeat=lambda: calls.append(('heartbeat', None)),
-            collect_system_stats=lambda: None,
+            recover_worker_state=lambda _authority: None,
+            update_worker_heartbeat=lambda _authority: calls.append(('heartbeat', None)),
+            collect_system_stats=lambda _authority: None,
             read_scan_state=lambda: {},
-            run_discovery=lambda **_kwargs: None,
-            do_uptime_check=lambda **_kwargs: None,
+            run_discovery=lambda _authority, **_kwargs: None,
+            do_uptime_check=lambda _authority, **_kwargs: None,
             process_scan_requests=lambda *_args: calls.append(('scan', None)),
             process_preview_requests=preview,
-            cleanup_history=lambda: None,
+            cleanup_history=lambda _authority: None,
             shutdown_browser=lambda: calls.append(('browser_shutdown', None)),
             clock=time.time,
             acquire_worker_lease=lambda *_args: None,
             renew_worker_lease=renew,
             release_worker_lease=lambda *_args: calls.append(('release', None)),
-            worker_id='worker-a',
-            owner_token='epoch-a',
+            authority=WorkerAuthority(self.db_path, 'worker-a', 'epoch-a'),
             admission=admission,
         )
 
@@ -550,7 +550,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
         finalizer = threading.Thread(
             target=worker_main._finalize_worker_lifecycle,
-            args=(services, services.worker_id, services.owner_token),
+            args=(services,),
         )
         finalizer.start()
         self.assertNotIn(('browser_shutdown', None), calls)

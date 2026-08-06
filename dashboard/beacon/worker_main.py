@@ -13,6 +13,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from .config import load_settings
 from . import queues
+from .worker_authority import WorkerAuthority
 
 
 log = logging.getLogger('beacon.worker')
@@ -92,8 +93,7 @@ class WorkerServices:
     acquire_worker_lease: object
     renew_worker_lease: object
     release_worker_lease: object
-    worker_id: str | None = None
-    owner_token: str | None = None
+    authority: WorkerAuthority | None = None
     admission: WorkerAdmission = field(default_factory=WorkerAdmission)
 
 
@@ -121,43 +121,42 @@ def build_worker_services(operations, settings=None):
 
 
 def heartbeat(services):
-    if services.worker_id and services.owner_token:
+    if services.authority:
         try:
-            services.renew_worker_lease(
-                services.settings.db_path, services.worker_id, services.owner_token,
-            )
+            services.renew_worker_lease(services.authority)
         except queues.LeaseLost:
             log.error('Beacon worker lease lost; stopping stale scheduler')
             services.admission.close_admission()
             stop_worker()
             return False
-    services.update_worker_heartbeat()
+    if services.authority:
+        services.update_worker_heartbeat(services.authority)
     return True
 
 
 def sample_metrics(services):
-    services.collect_system_stats()
+    return services.collect_system_stats(services.authority)
 
 
 def process_scans(services):
     with services.admission.admit('scan') as admitted:
         if not admitted:
             return None
-        return services.process_scan_requests(services.worker_id, services.owner_token)
+        return services.process_scan_requests(services.authority)
 
 
 def process_previews(services):
     with services.admission.admit('preview') as admitted:
         if not admitted:
             return None
-        return services.process_preview_requests(services.worker_id, services.owner_token)
+        return services.process_preview_requests(services.authority)
 
 
 def scheduled_discovery(services):
     state = services.read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
         return
-    services.run_discovery(source='scheduled')
+    services.run_discovery(services.authority, source='scheduled')
 
 
 def startup_discovery(services):
@@ -166,7 +165,15 @@ def startup_discovery(services):
         return
     last = state.get('last_discovery')
     if not last or int(services.clock()) - int(last) >= 300:
-        services.run_discovery(source='startup')
+        services.run_discovery(services.authority, source='startup')
+
+
+def uptime_check(services, *, only_down):
+    return services.do_uptime_check(services.authority, only_down=only_down)
+
+
+def cleanup(services):
+    return services.cleanup_history(services.authority)
 
 
 scheduler = None
@@ -202,11 +209,11 @@ def build_scheduler(services):
         executor='metrics', id='metrics', misfire_grace_time=10,
     )
     built_scheduler.add_job(
-        services.do_uptime_check, 'interval', minutes=5, kwargs={'only_down': False},
+        uptime_check, 'interval', args=(services,), minutes=5, kwargs={'only_down': False},
         executor='probes', id='uptime_all', misfire_grace_time=60,
     )
     built_scheduler.add_job(
-        services.do_uptime_check, 'interval', minutes=1, kwargs={'only_down': True},
+        uptime_check, 'interval', args=(services,), minutes=1, kwargs={'only_down': True},
         executor='probes', id='uptime_down', misfire_grace_time=30,
     )
     built_scheduler.add_job(
@@ -222,7 +229,7 @@ def build_scheduler(services):
         id='scheduled_discovery', misfire_grace_time=300,
     )
     built_scheduler.add_job(
-        services.cleanup_history, 'interval', hours=1, executor='metrics',
+        cleanup, 'interval', args=(services,), hours=1, executor='metrics',
         id='cleanup', misfire_grace_time=300,
     )
     built_scheduler.add_job(
@@ -232,7 +239,7 @@ def build_scheduler(services):
     return built_scheduler
 
 
-def _finalize_worker_lifecycle(services, worker_id, owner_token):
+def _finalize_worker_lifecycle(services):
     """Release a completed worker lease and clear all process-local ownership state."""
     global scheduler, _worker_started, _active_services, _active_worker_id
     try:
@@ -242,9 +249,8 @@ def _finalize_worker_lifecycle(services, worker_id, owner_token):
             services.shutdown_browser()
         finally:
             try:
-                services.release_worker_lease(
-                    services.settings.db_path, worker_id, owner_token,
-                )
+                if services.authority:
+                    services.release_worker_lease(services.authority)
             except queues.LeaseLost:
                 pass
     finally:
@@ -271,17 +277,20 @@ def run_worker(operations, settings=None):
         lease_acquired = True
         if isinstance(services, WorkerServices):
             services = replace(
-                services, worker_id=lease.worker_id, owner_token=lease.owner_token,
+                services,
+                authority=WorkerAuthority.from_lease(
+                    lease, services.settings.db_path, clock=services.clock,
+                ),
             )
     try:
         with _worker_start_lock:
-            services.recover_worker_state()
+            services.recover_worker_state(services.authority)
             if not heartbeat(services):
                 return
             sample_metrics(services)
             scheduler = build_scheduler(services)
             _active_services = services
-            _active_worker_id = worker_id
+            _active_worker_id = services.authority.worker_id
             signal.signal(signal.SIGTERM, stop_worker)
             signal.signal(signal.SIGINT, stop_worker)
             _worker_started = True
@@ -292,4 +301,4 @@ def run_worker(operations, settings=None):
         pass
     finally:
         if lease_acquired:
-            _finalize_worker_lifecycle(services, worker_id, lease.owner_token)
+            _finalize_worker_lifecycle(services)

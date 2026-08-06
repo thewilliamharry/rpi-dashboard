@@ -40,7 +40,7 @@ class DurableQueueTests(unittest.TestCase):
             conn.rollback()
         self.assertNotEqual(lease.owner_token, successor.owner_token)
 
-    def test_scan_submissions_coalesce_with_a_fifteen_minute_deadline(self):
+    def test_web_owner_free_scan_submissions_coalesce_with_a_fifteen_minute_deadline(self):
         first = queues.enqueue_scan(self.db_path, 'operator-a', now=1_000)
         second = queues.enqueue_scan(self.db_path, 'operator-b', now=1_001)
 
@@ -282,7 +282,7 @@ class DurableQueueTests(unittest.TestCase):
             row = conn.execute('SELECT status, error FROM scan_requests').fetchone()
         self.assertEqual(row, ('completed', None))
 
-    def test_metadata_save_enqueues_latest_preview_without_a_worker(self):
+    def test_web_owner_free_metadata_save_enqueues_latest_preview_without_a_worker(self):
         now = 1_000
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
