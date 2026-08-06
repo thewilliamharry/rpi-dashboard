@@ -101,13 +101,13 @@ Every v1 requirement maps to exactly one roadmap phase.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FND-01 | Phase 1 | Gaps Found |
-| FND-02 | Phase 1 | Gaps Found |
-| FND-03 | Phase 1 | Gaps Found |
-| FND-04 | Phase 1 | Gaps Found |
-| FND-05 | Phase 1 | Gaps Found |
-| FND-06 | Phase 1 | Gaps Found |
-| FND-07 | Phase 1 | Gaps Found |
+| FND-01 | Phase 1 | Complete |
+| FND-02 | Phase 1 | Complete |
+| FND-03 | Phase 1 | Complete |
+| FND-04 | Phase 1 | Complete |
+| FND-05 | Phase 1 | Complete |
+| FND-06 | Phase 1 | Complete |
+| FND-07 | Phase 1 | Complete |
 | TEL-01 | Phase 2 | Pending |
 | TEL-02 | Phase 2 | Pending |
 | TEL-03 | Phase 2 | Pending |
@@ -139,7 +139,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | OPS-02 | Phase 6 | Pending |
 | OPS-03 | Phase 6 | Pending |
 | OPS-04 | Phase 6 | Pending |
-| OPS-05 | Phase 1 | Gaps Found |
+| OPS-05 | Phase 1 | Complete |
 | OPS-06 | Phase 5 | Pending |
 | OPS-07 | Phase 6 | Pending |
 
