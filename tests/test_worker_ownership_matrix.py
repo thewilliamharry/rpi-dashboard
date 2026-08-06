@@ -8,6 +8,7 @@ worker-only mutation and non-SQL effect boundary.
 from dataclasses import fields, replace
 from contextlib import contextmanager
 import importlib
+import json
 import os
 import sqlite3
 import threading
@@ -34,6 +35,7 @@ SCHEDULER_JOB_IDS = {
     'scan_requests': 'J5', 'preview_requests': 'J6', 'scheduled_discovery': 'J7',
     'cleanup': 'J8', 'startup_discovery': 'J9',
 }
+DYNAMIC_MATRIX_ROW_IDS = ('S1', 'S2', 'S3', 'J1', 'J2', 'J3', 'J4', 'J5', 'J6', 'J7', 'J8', 'J9')
 
 
 class WorkerOwnershipStaticContractTests(unittest.TestCase):
@@ -53,6 +55,10 @@ class WorkerOwnershipStaticContractTests(unittest.TestCase):
 
     def test_inventory_or_registry_rows_have_complete_closure_identifiers(self):
         self.assertEqual(set(TAKEOVER_CASE_REGISTRY), {row.identifier for row in PRODUCTION_OWNERSHIP_INVENTORY if row.ownership_required})
+        self.assertEqual(
+            DYNAMIC_MATRIX_ROW_IDS, tuple(TAKEOVER_CASE_REGISTRY),
+            'dynamic takeover rows must cover every ownership-required registry row',
+        )
         for row in PRODUCTION_OWNERSHIP_INVENTORY:
             with self.subTest(row=row.identifier):
                 self.assertTrue(row.operation_fields)
@@ -284,6 +290,77 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
             for row_id, setup in cases:
                 with self.subTest(row_id=row_id):
                     self._run_current_a_pause_then_takeover(row_id, setup)
+
+    def test_heartbeat_renewal_to_persistence_handoff_is_fenced(self):
+        """S2/J1 must reject B takeover after A renewed but before it writes heartbeat."""
+        for row_id in ('S2', 'J1'):
+            with self.subTest(row_id=row_id):
+                self._fresh_case_database()
+                owner_a = queues.acquire_worker_lease(
+                    self.db_path, 'matrix-worker-a', now=self.now, lease_seconds=1,
+                )
+                authority_a = self._authority(owner_a)
+                services_a = self._services(owner_a)
+                paused = threading.Event()
+                release = threading.Event()
+                stop_requests = []
+                original_transaction = self.appmod._worker_write_transaction
+
+                @contextmanager
+                def pause_before_compatibility_heartbeat(authority, **kwargs):
+                    if authority == authority_a:
+                        paused.set()
+                        self.assertTrue(
+                            release.wait(timeout=2),
+                            f'{row_id}: heartbeat takeover release was not signalled',
+                        )
+                    with original_transaction(authority, **kwargs) as conn:
+                        yield conn
+
+                class FakeScheduler:
+                    def shutdown(self, wait=False):
+                        stop_requests.append(wait)
+
+                with (
+                    mock.patch.object(
+                        self.appmod, '_worker_write_transaction', pause_before_compatibility_heartbeat,
+                    ),
+                    mock.patch.object(worker_main, 'scheduler', FakeScheduler()),
+                ):
+                    stale_result = []
+                    stale = threading.Thread(
+                        target=lambda: stale_result.append(worker_main.dispatch_callback(services_a, row_id)),
+                        daemon=True,
+                    )
+                    stale.start()
+                    self.assertTrue(paused.wait(timeout=2), f'{row_id}: A never reached heartbeat persistence')
+                    with sqlite3.connect(self.db_path) as conn:
+                        owner = json.loads(conn.execute(
+                            "SELECT value FROM runtime_state WHERE key='worker_owner'"
+                        ).fetchone()[0])
+                    self.assertGreater(owner['lease_until'], self.now + 1, f'{row_id}: renewal did not commit')
+                    self.now += 16
+                    owner_b = queues.acquire_worker_lease(
+                        self.db_path, 'matrix-worker-b', now=self.now, lease_seconds=30,
+                    )
+                    before_release, runtime_before_release, _ = self._snapshot()
+                    release.set()
+                    stale.join(timeout=2)
+
+                self.assertFalse(stale.is_alive(), f'{row_id}: stale heartbeat did not drain')
+                self.assertEqual(stale_result, [False], f'{row_id}: stale heartbeat did not report lease loss')
+                self.assertFalse(services_a.admission._accepting, f'{row_id}: admission remained open')
+                self.assertEqual(stop_requests, [False], f'{row_id}: scheduler stop was not requested')
+                after, runtime_after, _ = self._snapshot()
+                self.assertEqual(
+                    (after, runtime_after), (before_release, runtime_before_release),
+                    f'{row_id}: stale A wrote worker_heartbeat after B acquired',
+                )
+                self._assert_b_is_current(owner_b)
+                self.assertIsNot(
+                    worker_main.dispatch_callback(self._services(owner_b), row_id), False,
+                    f'{row_id}: current-B heartbeat control did not run',
+                )
 
     def _services(self, owner):
         services = worker_main.build_worker_services(
