@@ -13,7 +13,7 @@ Beacon becomes a dependable, self-contained Raspberry Pi operations dashboard by
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Behavioral Safety & Runtime Ownership** - Preserve working Beacon behavior while making upgrades, background ownership, and outbound access safe.
+- [x] **Phase 1: Behavioral Safety & Runtime Ownership** - Preserve working Beacon behavior while making upgrades, background ownership, and outbound access safe. (completed 2026-08-07)
 - [ ] **Phase 2: Bounded Telemetry & Retention** - Establish truthful 90-day host and service history with bounded storage and query contracts.
 - [ ] **Phase 3: Advanced Current Diagnosis** - Let the operator open an advanced workspace for fresh host, service, settings, and pipeline-health diagnosis.
 - [ ] **Phase 4: Historical Investigation** - Turn retained telemetry into honest range-based charts, service history, and incident investigation.
@@ -217,7 +217,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Behavioral Safety & Runtime Ownership | 23/23 | In Progress|  |
+| 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 0/TBD | Not started | - |
 | 3. Advanced Current Diagnosis | 0/TBD | Not started | - |
 | 4. Historical Investigation | 0/TBD | Not started | - |
