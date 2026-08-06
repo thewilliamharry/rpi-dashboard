@@ -562,6 +562,60 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertLess(calls.index(('preview_exit', None)), calls.index(('browser_shutdown', None)))
         self.assertLess(calls.index(('browser_shutdown', None)), calls.index(('release', None)))
 
+    def test_universal_admission_rejects_each_inventory_callback_after_closure(self):
+        """Every post-acquisition callback is refused once a stale worker closes."""
+        admission = worker_main.WorkerAdmission()
+        categories = {
+            row.admission_category
+            for row in worker_main.WORKER_CALLBACK_INVENTORY
+            if row.ownership_required
+        }
+        self.assertEqual(set(admission.active_counts), categories)
+        admission.close_admission()
+        for category in categories:
+            with self.subTest(category=category):
+                with admission.admit(category) as admitted:
+                    self.assertFalse(admitted)
+        self.assertEqual(admission.active_counts, {category: 0 for category in categories})
+
+    def test_inventory_dispatch_closes_all_categories_when_any_callback_loses_authority(self):
+        """Lease loss from a startup or job path revokes all future work before stop."""
+        self._reset_worker_globals()
+        calls = []
+        admission = worker_main.WorkerAdmission()
+
+        services = worker_main.WorkerServices(
+            settings=SimpleNamespace(db_path=self.db_path),
+            prepare_database=lambda _settings: None,
+            recover_worker_state=lambda _authority: (_ for _ in ()).throw(queues.LeaseLost('lost')),
+            update_worker_heartbeat=lambda _authority: None,
+            collect_system_stats=lambda _authority: None,
+            read_scan_state=lambda: {},
+            run_discovery=lambda _authority, **_kwargs: None,
+            do_uptime_check=lambda _authority, **_kwargs: None,
+            process_scan_requests=lambda _authority: calls.append('scan'),
+            process_preview_requests=lambda _authority: calls.append('preview'),
+            cleanup_history=lambda _authority: None,
+            shutdown_browser=lambda: None,
+            clock=time.time,
+            acquire_worker_lease=lambda *_args: None,
+            renew_worker_lease=lambda _authority: None,
+            release_worker_lease=lambda *_args: None,
+            authority=WorkerAuthority(self.db_path, 'worker-a', 'epoch-a'),
+            admission=admission,
+        )
+
+        class FakeScheduler:
+            def shutdown(self, wait=False):
+                calls.append(('scheduler_shutdown', wait))
+
+        worker_main.scheduler = FakeScheduler()
+        self.assertFalse(worker_main.dispatch_callback(services, 'S1'))
+        self.assertIn(('scheduler_shutdown', False), calls)
+        self.assertIsNone(worker_main.dispatch_callback(services, 'J5'))
+        self.assertIsNone(worker_main.dispatch_callback(services, 'J6'))
+        self.assertEqual(calls, [('scheduler_shutdown', False)])
+
     def test_worker_lease_contender_leaves_process_state_untouched(self):
         """A failed acquisition has no acquired-lifecycle cleanup to perform."""
         self._reset_worker_globals()
