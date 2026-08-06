@@ -3,6 +3,7 @@ import sqlite3
 import unittest
 
 from dashboard.beacon import queues
+from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
 
@@ -17,6 +18,27 @@ class DurableQueueTests(unittest.TestCase):
         return queues.acquire_worker_lease(
             self.db_path, worker_id, now=now, lease_seconds=lease_seconds,
         )
+
+    def _authority(self, lease, now):
+        return WorkerAuthority.from_lease(
+            lease, self.db_path, clock=lambda: now,
+        )
+
+    def test_worker_authority_requires_the_exact_acquired_epoch_in_transaction(self):
+        lease = self._acquire_owner('worker-a', 1_000, lease_seconds=30)
+        authority = self._authority(lease, 1_001)
+        with queues._connect(self.db_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            queues.assert_current_worker_authority(conn, authority)
+            conn.rollback()
+
+        successor = self._acquire_owner('worker-a', 1_031, lease_seconds=30)
+        with queues._connect(self.db_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            with self.assertRaises(queues.LeaseLost):
+                queues.assert_current_worker_authority(conn, authority, now=1_031)
+            conn.rollback()
+        self.assertNotEqual(lease.owner_token, successor.owner_token)
 
     def test_scan_submissions_coalesce_with_a_fifteen_minute_deadline(self):
         first = queues.enqueue_scan(self.db_path, 'operator-a', now=1_000)
