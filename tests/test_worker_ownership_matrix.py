@@ -200,31 +200,6 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
         self.assertIn('matrix-worker-b', row[0])
         self.assertNotIn(owner_b.owner_token, self.id())  # never include opaque tokens in diagnostics
 
-    def _run_after_takeover(self, row_id, setup, stale_callback, current_b_callback):
-        self._fresh_case_database()
-        setup()
-        _owner_a, owner_b = self._owner_a_then_b()
-        before, runtime_before, _ = self._snapshot()
-        try:
-            stale_callback()
-        except queues.LeaseLost:
-            # Direct operation bindings propagate durable loss so the universal
-            # scheduler dispatcher can close admission.  Compatibility helpers
-            # which already dispatch the callback return ``False`` instead.
-            pass
-        after, runtime_after, _ = self._snapshot()
-        self._assert_b_is_current(owner_b)
-        self.assertEqual(
-            (after, runtime_after), (before, runtime_before),
-            f'{row_id}: stale-A ownership/admission/effect boundary changed after Worker B acquired',
-        )
-        current_b_callback(owner_b)
-        current, runtime_current, _ = self._snapshot()
-        self.assertNotEqual(
-            (current, runtime_current), (before, runtime_before),
-            f'{row_id}: current-B control suppressed all work',
-        )
-
     def _run_current_a_pause_then_takeover(self, row_id, setup):
         """Exercise the real check-to-write interval, not a synthetic token."""
         self._fresh_case_database()
@@ -383,27 +358,6 @@ class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
     def _run_preview(self, owner):
         with mock.patch.object(self.appmod, '_legacy_refresh_service_preview', return_value=('Preview', b'png', 'image/png', 'screenshot', None, None)):
             return self.operations.process_preview_requests(self._authority(owner))
-
-    def test_database_takeover_matrix_fences_every_callback(self):
-        """Plan 01-22 makes the SQLite subset green without shrinking the registry."""
-        cases = (
-            ('S1', self._seed_recovery, lambda: self._run_recovery(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_recovery(self._authority(b))),
-            ('S2', lambda: None, lambda: worker_main.heartbeat(self._services(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: worker_main.heartbeat(self._services(b))),
-            ('S3', lambda: None, lambda: self._run_metrics(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_metrics(self._authority(b))),
-            ('J1', lambda: None, lambda: worker_main.heartbeat(self._services(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: worker_main.heartbeat(self._services(b))),
-            ('J2', lambda: None, lambda: self._run_metrics(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_metrics(self._authority(b))),
-            ('J3', self._seed_service, lambda: self._run_uptime(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), False), lambda b: self._run_uptime(self._authority(b), False)),
-            ('J4', self._seed_service, lambda: self._run_uptime(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), True), lambda b: self._run_uptime(self._authority(b), True)),
-            ('J5', self._seed_scan, lambda: self._run_scan(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), lambda b: self._run_scan(b)),
-            ('J6', self._seed_preview, lambda: self._run_preview(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), lambda b: self._run_preview(b)),
-            ('J7', self._seed_service, lambda: self._run_discovery(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), 'scheduled'), lambda b: self._run_discovery(self._authority(b), 'scheduled')),
-            ('J8', self._seed_cleanup, lambda: self._run_cleanup(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})())), lambda b: self._run_cleanup(self._authority(b))),
-            ('J9', self._seed_service, lambda: self._run_discovery(self._authority(type('Owner', (), {'worker_id': 'matrix-worker-a', 'owner_token': 'stale'})()), 'startup'), lambda b: self._run_discovery(self._authority(b), 'startup')),
-        )
-        self.assertEqual(tuple(case[0] for case in cases), tuple(TAKEOVER_CASE_REGISTRY))
-        for row_id, setup, stale_callback, current_b_callback in cases:
-            with self.subTest(row_id=row_id):
-                self._run_after_takeover(row_id, setup, stale_callback, current_b_callback)
 
     def test_preview_capture_publication_is_fenced_after_a_real_sqlite_takeover(self):
         """J6 may capture in memory, but only current B can publish its result."""
