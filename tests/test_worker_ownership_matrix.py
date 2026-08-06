@@ -95,6 +95,31 @@ class WorkerOwnershipStaticContractTests(unittest.TestCase):
         self.assertNotIn('worker_id', service_fields)
         self.assertNotIn('owner_token', service_fields)
 
+    def test_actual_production_inventory_is_bijective_with_the_immutable_contract(self):
+        """Drift in callbacks, effects, admission, or scheduler metadata is fatal."""
+        production = {row.identifier: row for row in worker_main.WORKER_CALLBACK_INVENTORY}
+        contract = {row.identifier: row for row in PRODUCTION_OWNERSHIP_INVENTORY}
+        self.assertEqual(set(production), set(contract))
+        self.assertEqual(set(production), set(worker_main._CALLBACKS_BY_ID))
+        for identifier, expected in contract.items():
+            actual = production[identifier]
+            with self.subTest(identifier=identifier):
+                self.assertEqual(actual.operation_fields, expected.operation_fields)
+                self.assertEqual(actual.admission_category, expected.admission_category)
+                self.assertEqual(actual.database_surfaces, expected.database_surfaces)
+                self.assertEqual(actual.effect_surfaces, expected.effect_surfaces)
+                self.assertEqual(actual.ownership_required, expected.ownership_required)
+                self.assertEqual(
+                    actual.scheduler_metadata['id'] if actual.scheduler_id else None,
+                    SCHEDULER_JOB_IDS.get(actual.scheduler_id),
+                )
+        scheduled = [row for row in production.values() if row.scheduler_id]
+        self.assertEqual({row.scheduler_metadata['id'] for row in scheduled}, set(SCHEDULER_JOB_IDS))
+        self.assertEqual(
+            {row.identifier for row in production.values() if row.ownership_required},
+            set(TAKEOVER_CASE_REGISTRY),
+        )
+
 
 class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
     """Real-file SQLite A→B matrix; failures name stale authority, not setup."""
