@@ -66,8 +66,12 @@ def load_app(extra_env=None):
 
     _ensure_psutil_stub()
 
-    fd, db_path = tempfile.mkstemp(prefix='beacon-test-', suffix='.db')
-    os.close(fd)
+    # The maintenance lease lives beside the database.  Giving each test
+    # database its own directory prevents a delayed connection or background
+    # callback from one app reload from sharing `.beacon-maintenance.lock` with
+    # the next test module's migration setup.
+    db_dir = tempfile.mkdtemp(prefix='beacon-test-')
+    db_path = os.path.join(db_dir, 'dashboard.db')
 
     import dashboard.app as appmod
     appmod = importlib.reload(appmod)
@@ -78,10 +82,22 @@ def load_app(extra_env=None):
 
 
 def cleanup_db(path):
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
+    for candidate in (path, path + '-wal', path + '-shm'):
+        try:
+            os.remove(candidate)
+        except FileNotFoundError:
+            pass
+    parent = os.path.dirname(path)
+    if os.path.basename(parent).startswith('beacon-test-'):
+        for lock_name in ('.beacon-maintenance.lock', '.beacon-upgrade.lock'):
+            try:
+                os.remove(os.path.join(parent, lock_name))
+            except FileNotFoundError:
+                pass
+        try:
+            os.rmdir(parent)
+        except OSError:
+            pass
 
 
 class QuietHandler(http.server.BaseHTTPRequestHandler):
