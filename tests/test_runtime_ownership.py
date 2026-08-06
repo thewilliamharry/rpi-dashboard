@@ -616,6 +616,16 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertIsNone(worker_main.dispatch_callback(services, 'J6'))
         self.assertEqual(calls, [('scheduler_shutdown', False)])
 
+    def test_thumbnail_capture_keeps_events_in_memory_until_fenced_publication(self):
+        """The browser helper cannot publish a capture event before worker fencing."""
+        with (
+            mock.patch.object(self.appmod, '_screenshot_service', return_value=(b'png', 'image/png', None)),
+            mock.patch.object(self.appmod, '_record_event') as record_event,
+        ):
+            result = self.appmod._legacy_fetch_thumbnail(8080, 'http://127.0.0.1:8080')
+        self.assertEqual(result, (b'png', 'image/png', 'screenshot', None))
+        record_event.assert_not_called()
+
     def test_worker_lease_contender_leaves_process_state_untouched(self):
         """A failed acquisition has no acquired-lifecycle cleanup to perform."""
         self._reset_worker_globals()
