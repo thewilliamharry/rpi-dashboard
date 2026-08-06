@@ -21,18 +21,18 @@ At a glance, the operator can trust what is running, what is failing, and how th
 - ✓ Operator can edit service metadata and trigger scans from the local dashboard — existing
 - ✓ Dashboard provides compact analytics/history previews in both light and dark modes — existing
 - ✓ Web and background monitoring processes run locally in containers with SQLite persistence and no external monitoring backend — existing
+- ✓ Phase 1 established explicit web, persistence, monitoring, discovery, preview, scheduling, migration, and recovery boundaries while preserving compatibility — validated in Phase 1
+- ✓ Background work has one durable worker owner with transaction-local fencing, bounded admission/drain, and stale-worker effect rejection — validated in Phase 1
+- ✓ Critical migration, recovery, ownership, outbound-network, mutation, and UI safety contracts have automated regression coverage — validated in Phase 1
 
 ### Active
 
-- [ ] Existing bugs, fragile runtime behavior, and accidental complexity are identified and resolved without regressing relied-upon dashboard behavior
-- [ ] Application boundaries are restructured so web delivery, persistence, monitoring, discovery, previews, scheduling, and presentation can be maintained independently
 - [ ] Existing dashboard UI and interactions form a cohesive, responsive experience while preserving the distinct intent of light and dark modes
 - [ ] Compact preview analytics remain available on the main dashboard in both themes
 - [ ] Operator can open a separate advanced analytics and monitoring page from either theme
 - [ ] Advanced analytics provides detailed current-state diagnosis for the host Pi and configured services
 - [ ] Advanced analytics provides 90 days of bounded historical system and service data
 - [ ] Advanced analytics exposes the same monitoring capabilities and settings in both themes while adapting presentation and density to each theme
-- [ ] The stabilized system has automated coverage for its critical runtime, persistence, monitoring, security-boundary, and UI contracts
 
 ### Out of Scope
 
@@ -50,7 +50,7 @@ The current system uses a Flask web process and an APScheduler worker sharing SQ
 
 The main architectural concern is concentration of routes, persistence, monitoring, discovery, thumbnail capture, and coordination in `dashboard/app.py`. Import-time lifecycle behavior, cross-process SQLite coordination, embedded schema evolution, large thumbnail blobs, and limited production-concurrency coverage make future analytics harder to add safely.
 
-The first GSD milestone combines foundation work and analytics. Foundation work comes first so the deeper analytics page is built on explicit domain boundaries and dependable data collection rather than extending accidental coupling.
+The first GSD milestone combines foundation work and analytics. Phase 1 completed the behavioral-safety and runtime-ownership foundation, including versioned migration/recovery, tested outbound boundaries, durable worker authority, and exhaustive stale-worker fencing. Phase 2 can now build bounded telemetry and retention on those verified contracts rather than extending accidental coupling.
 
 ## Constraints
 
@@ -68,7 +68,7 @@ The first GSD milestone combines foundation work and analytics. Foundation work 
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Treat current behavior as the reference while allowing substantial internal restructuring | The product mostly works, but earlier development sessions produced inconsistent architecture and UX | — Pending |
+| Treat current behavior as the reference while allowing substantial internal restructuring | The product mostly works, but earlier development sessions produced inconsistent architecture and UX | ✓ Validated in Phase 1 |
 | Build foundation and advanced analytics in the first GSD milestone | Analytics needs trustworthy collection, persistence, and UI boundaries | — Pending |
 | Defer remote actions to a later milestone | Control requires a stricter safety and audit model than read-oriented monitoring | — Pending |
 | Retain 90 days of analytics history | Provides meaningful operational trends without turning the Pi into an indefinite monitoring archive | — Pending |
@@ -94,4 +94,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-24 after initialization*
+*Last updated: 2026-08-07 after Phase 1 completion*
