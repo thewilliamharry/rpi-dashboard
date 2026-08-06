@@ -6,6 +6,7 @@ import socket
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from collections import defaultdict
 from pathlib import Path
@@ -216,6 +217,64 @@ def recover_worker_state(now=None):
         _set_runtime_state('scan_state', state, conn=conn)
         conn.commit()
         conn.close()
+
+
+@contextmanager
+def _worker_write_transaction(authority, *, now=None):
+    """Open one worker-owned SQLite write transaction on the authority path."""
+    conn = connect_db(authority.db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        beacon_queues.assert_current_worker_authority(conn, authority, now)
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def worker_recover_worker_state(authority, now=None):
+    """Recover queues and runtime state with an assertion in every transaction."""
+    now = authority.now() if now is None else int(now)
+    try:
+        beacon_queues.recover_queues_for_worker(authority, now=now)
+        with _worker_write_transaction(authority, now=now) as conn:
+            heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
+            heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
+            try:
+                heartbeat_ts = int(heartbeat_ts) if heartbeat_ts is not None else None
+            except (TypeError, ValueError):
+                heartbeat_ts = None
+            if heartbeat_ts is not None and now - heartbeat_ts > WORKER_READY_SECONDS:
+                details = json.dumps({'start_ts': heartbeat_ts, 'end_ts': now}, separators=(',', ':'))
+                if not conn.execute(
+                    "SELECT 1 FROM events WHERE event_type='monitoring_gap' AND details=? LIMIT 1",
+                    (details,),
+                ).fetchone():
+                    _insert_event(conn, ts=now, event_type='monitoring_gap', details=details)
+            state = _read_scan_state(conn)
+            queued = conn.execute("SELECT 1 FROM scan_requests WHERE status='queued' LIMIT 1").fetchone()
+            state.update({
+                'stage': 'queued' if queued else 'idle', 'scanning': False, 'progress': 0.0,
+                'current_found': 0,
+                'last_error': 'worker restarted during active scan' if state.get('scanning') else state.get('last_error'),
+            })
+            _set_runtime_state('scan_state', state, conn=conn, now=now)
+    except beacon_queues.LeaseLost:
+        return False
+    return True
+
+
+def worker_update_worker_heartbeat(authority, now=None):
+    now = authority.now() if now is None else int(now)
+    try:
+        with _worker_write_transaction(authority, now=now) as conn:
+            _set_runtime_state('worker_heartbeat', {'ts': now}, conn=conn, now=now)
+    except beacon_queues.LeaseLost:
+        return False
+    return True
 
 
 def _default_scan_state():
@@ -1458,10 +1517,101 @@ def do_uptime_check(only_down=False):
     return beacon_monitoring.do_uptime_check(_monitoring_operations(), only_down)
 
 
+def _assert_worker_callback_authority(authority):
+    """Fence callbacks which delegate multiple bounded legacy transactions.
+
+    The concrete queue/publication transactions use ``_worker_write_transaction``
+    or queue worker variants.  This early check keeps expensive probe/browser
+    work from starting after a successor has taken the durable epoch.
+    """
+    with _worker_write_transaction(authority):
+        pass
+
+
+def worker_collect_system_stats(authority, now=None, persist_history=None):
+    try:
+        _assert_worker_callback_authority(authority)
+    except beacon_queues.LeaseLost:
+        return False
+    return collect_system_stats(now=authority.now() if now is None else now, persist_history=persist_history)
+
+
+def worker_cleanup_history(authority, now=None):
+    try:
+        _assert_worker_callback_authority(authority)
+    except beacon_queues.LeaseLost:
+        return False
+    return cleanup_history(now=authority.now() if now is None else now)
+
+
+def worker_run_discovery(authority, source='scheduled'):
+    try:
+        _assert_worker_callback_authority(authority)
+    except beacon_queues.LeaseLost:
+        return False
+    return run_discovery(source=source)
+
+
+def worker_do_uptime_check(authority, only_down=False):
+    try:
+        _assert_worker_callback_authority(authority)
+    except beacon_queues.LeaseLost:
+        return False
+    return do_uptime_check(only_down=only_down)
+
+
 def queue_discovery_request(client_key):
     request = beacon_queues.enqueue_scan(DB_PATH, client_key)
     _update_scan_state(stage='queued', scanning=False, progress=0.0, current_found=0, last_error=None)
     return request.request_id
+
+
+def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, heartbeat_factory=None):
+    """Run a claimed manual scan without reconstructing worker credentials."""
+    now_fn = now_fn or authority.now
+    try:
+        claim = beacon_queues.claim_scan_for_worker(
+            authority, now=int(now_fn()), lease_seconds=lease_seconds,
+        )
+    except beacon_queues.LeaseLost:
+        return False
+    if not claim:
+        return False
+    heartbeat_factory = heartbeat_factory or beacon_queues.WorkerScanLeaseHeartbeat
+    heartbeat = heartbeat_factory(
+        authority, claim.request_id, claim.lease_owner,
+        lease_seconds=lease_seconds, now=now_fn,
+    )
+    heartbeat.start()
+    try:
+        outcome = worker_run_discovery(authority, source=f'manual:{claim.request_id}')
+        if outcome == 'busy':
+            if not heartbeat.lost:
+                beacon_queues.requeue_scan_for_worker(
+                    authority, claim.request_id, claim.lease_owner, now=int(now_fn()),
+                )
+            return False
+        state = _read_scan_state()
+        status = 'failed' if outcome == 'failed' or state.get('last_error') else 'completed'
+        error = state.get('last_error') if status == 'failed' else None
+    except Exception as exc:
+        status, error = 'failed', str(exc)[:240]
+    finally:
+        heartbeat.stop()
+    if heartbeat.lost:
+        return False
+    try:
+        if status == 'completed':
+            beacon_queues.finish_scan_for_worker(
+                authority, claim.request_id, claim.lease_owner, now=int(now_fn()),
+            )
+        else:
+            beacon_queues.fail_scan_for_worker(
+                authority, claim.request_id, claim.lease_owner, error or 'scan failed', now=int(now_fn()),
+            )
+    except beacon_queues.LeaseLost:
+        return False
+    return True
 
 
 def process_scan_requests(worker_id, worker_owner_token, *, now_fn=None, lease_seconds=30, heartbeat_factory=None):
@@ -1570,6 +1720,42 @@ def process_preview_requests(worker_id, worker_owner_token):
             return False
         finally:
             conn.close()
+    return True
+
+
+def worker_process_preview_requests(authority):
+    """Publish preview results only in an authority-asserted transaction."""
+    try:
+        claim = beacon_queues.claim_preview_for_worker(authority)
+    except beacon_queues.LeaseLost:
+        return False
+    if not claim:
+        return False
+    with connect_db(authority.db_path) as conn:
+        row = conn.execute(
+            "SELECT COALESCE(url, '') AS url FROM service_meta WHERE port=?", (claim.port,)
+        ).fetchone()
+    url = _safe_service_url(row['url'] if row else '', claim.port)
+    started = time.monotonic()
+    title, data, mime, source, thumb_error, warning = _refresh_service_preview(claim.port, url)
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+    try:
+        with _worker_write_transaction(authority) as conn:
+            beacon_queues.finish_preview_for_worker_in_transaction(
+                conn, authority, claim.request_id, revision=claim.revision,
+                status='failed' if warning else 'completed', error=warning,
+            )
+            if title:
+                conn.execute("UPDATE services SET title=? WHERE port=?", (title, claim.port))
+            if data or thumb_error:
+                _store_thumbnail_result(conn, claim.port, data, mime, source, thumb_error)
+            _insert_event(
+                conn, ts=authority.now(), event_type='preview_complete', port=claim.port,
+                error_class=thumb_error,
+                details=json.dumps({'total_ms': elapsed_ms, 'success': not bool(warning)}, separators=(',', ':')),
+            )
+    except beacon_queues.LeaseLost:
+        return False
     return True
 
 

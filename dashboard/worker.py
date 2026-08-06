@@ -25,19 +25,19 @@ def build_worker_operations():
     """Join legacy compatibility operations to the independent worker runtime."""
     return worker_main.WorkerOperations(
         prepare_database=prepare_database,
-        recover_worker_state=beacon.recover_worker_state,
-        update_worker_heartbeat=beacon.update_worker_heartbeat,
-        collect_system_stats=beacon.collect_system_stats,
+        recover_worker_state=beacon.worker_recover_worker_state,
+        update_worker_heartbeat=beacon.worker_update_worker_heartbeat,
+        collect_system_stats=beacon.worker_collect_system_stats,
         read_scan_state=beacon._read_scan_state,
-        run_discovery=beacon.run_discovery,
-        do_uptime_check=beacon.do_uptime_check,
-        process_scan_requests=beacon.process_scan_requests,
-        process_preview_requests=beacon.process_preview_requests,
-        cleanup_history=beacon.cleanup_history,
+        run_discovery=beacon.worker_run_discovery,
+        do_uptime_check=beacon.worker_do_uptime_check,
+        process_scan_requests=beacon.worker_process_scan_requests,
+        process_preview_requests=beacon.worker_process_preview_requests,
+        cleanup_history=beacon.worker_cleanup_history,
         shutdown_browser=beacon.shutdown_browser,
         acquire_worker_lease=queues.acquire_worker_lease,
-        renew_worker_lease=queues.renew_worker_lease,
-        release_worker_lease=queues.release_worker_lease,
+        renew_worker_lease=queues.renew_worker_authority,
+        release_worker_lease=queues.release_worker_authority,
     )
 
 
