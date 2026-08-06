@@ -425,6 +425,22 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
                 self._assert_immediate_replacement(name)
 
+    def test_startup_lease_loss_aborts_before_scheduler_construction(self):
+        """S1/S2/S3 loss must close admission and never start stale scheduling."""
+        cases = (
+            ('S1', {'recover': mock.Mock(side_effect=queues.LeaseLost('lost'))}),
+            ('S2', {'update_heartbeat': mock.Mock(side_effect=queues.LeaseLost('lost'))}),
+            ('S3', {'collect_metrics': mock.Mock(side_effect=queues.LeaseLost('lost'))}),
+        )
+        for stage, overrides in cases:
+            with self.subTest(stage=stage):
+                self._reset_worker_globals()
+                operations = self._worker_operations(**overrides)
+                with mock.patch.object(worker_main, 'build_scheduler') as build_scheduler:
+                    worker_main.run_worker(operations, SimpleNamespace(db_path=self.db_path))
+                build_scheduler.assert_not_called()
+                self._assert_immediate_replacement(f'{stage.lower()}-loss')
+
     def test_worker_finalizer_suppresses_only_lease_lost_and_always_clears_globals(self):
         """An old worker cannot disturb a successor, but other release failures surface."""
         self._reset_worker_globals()

@@ -209,7 +209,7 @@ def _invoke_callback(services, callback):
     if callback.handler == 'heartbeat':
         if services.authority:
             services.renew_worker_lease(services.authority)
-            services.update_worker_heartbeat(services.authority)
+            return services.update_worker_heartbeat(services.authority)
         return True
     if callback.handler == 'metrics':
         return services.collect_system_stats(services.authority)
@@ -370,10 +370,12 @@ def run_worker(operations, settings=None):
             )
     try:
         with _worker_start_lock:
-            dispatch_callback(services, 'S1')
-            if not dispatch_callback(services, 'S2'):
+            if dispatch_callback(services, 'S1') is False:
                 return
-            dispatch_callback(services, 'S3')
+            if dispatch_callback(services, 'S2') is False:
+                return
+            if dispatch_callback(services, 'S3') is False:
+                return
             scheduler = build_scheduler(services)
             _active_services = services
             _active_worker_id = services.authority.worker_id
