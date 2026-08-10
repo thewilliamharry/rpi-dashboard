@@ -208,6 +208,16 @@ class RetentionRollupContractTests(unittest.TestCase):
 class StoragePressureContractTests(unittest.TestCase):
     """Executable D-10 through D-12 settings and no-flap state contract."""
 
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.now = UTC_NOW
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _connection(self):
+        return self.appmod.get_db()
+
     def test_settings_and_pressure_policy_exports_have_safe_defaults(self):
         self.assertTrue(hasattr(telemetry, 'evaluate_storage_pressure'))
         self.assertTrue(hasattr(telemetry, 'historical_persistence_allowed'))
@@ -242,6 +252,24 @@ class StoragePressureContractTests(unittest.TestCase):
             (invalid.telemetry_raw_days, invalid.telemetry_five_minute_days, invalid.telemetry_retention_days),
             (7, 30, 90),
         )
+        malformed = load_settings({
+            'TELEMETRY_DB_MAX_BYTES': 'zero',
+            'TELEMETRY_PRESSURE_WARNING_PERCENT': '90',
+            'TELEMETRY_PRESSURE_HARD_PERCENT': '80',
+            'TELEMETRY_RETRY_BASE_SECONDS': '3601',
+            'TELEMETRY_RETRY_MAX_SECONDS': '300',
+        })
+        self.assertEqual(malformed.telemetry_db_max_bytes, 536_870_912)
+        self.assertEqual(
+            (malformed.telemetry_pressure_recovery_percent,
+             malformed.telemetry_pressure_warning_percent,
+             malformed.telemetry_pressure_hard_percent),
+            (75, 80, 90),
+        )
+        self.assertEqual(
+            (malformed.telemetry_retry_base_seconds, malformed.telemetry_retry_max_seconds),
+            (300, 3_600),
+        )
 
     def test_storage_pressure_counts_database_wal_shm_and_requires_two_condition_recovery(self):
         policy = telemetry.RetentionPolicy(db_max_bytes=1_000, min_free_bytes=2_000, backlog_reserve_bytes=100)
@@ -250,11 +278,21 @@ class StoragePressureContractTests(unittest.TestCase):
         self.assertEqual((decision.previous_state, decision.state, decision.reason), ('normal', 'pressure', 'allocation_warning'))
         self.assertTrue(telemetry.historical_persistence_allowed(decision))
 
+        hard = telemetry.evaluate_storage_pressure(
+            'normal', telemetry.StorageSnapshot(850, 50, 0, 3_000), policy,
+        )
+        self.assertEqual((hard.state, hard.reason), ('pressure', 'allocation_hard'))
+        free_reserve = telemetry.evaluate_storage_pressure(
+            'normal', telemetry.StorageSnapshot(0, 0, 0, 2_100), policy,
+        )
+        self.assertEqual((free_reserve.state, free_reserve.reason), ('pressure', 'free_space_reserve'))
+
         suspended = telemetry.evaluate_storage_pressure(
             decision.state, telemetry.StorageSnapshot(900, 100, 100, 3_000), policy,
         )
         self.assertEqual(suspended.state, 'suspended')
         self.assertFalse(telemetry.historical_persistence_allowed(suspended))
+        self.assertTrue(telemetry.historical_persistence_allowed('pressure'))
 
         no_flap = telemetry.evaluate_storage_pressure(
             'suspended', telemetry.StorageSnapshot(700, 0, 0, 2_099), policy,

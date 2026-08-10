@@ -160,6 +160,42 @@ class PressureDecision:
         return self.state != 'suspended'
 
 
+def evaluate_storage_pressure(previous_state, snapshot, policy=None):
+    """Return the deterministic historical-storage transition for a filesystem snapshot."""
+    policy = policy or RetentionPolicy()
+    if previous_state not in {'normal', 'pressure', 'suspended'}:
+        raise ValueError('invalid previous storage state')
+    if not isinstance(snapshot, StorageSnapshot):
+        raise ValueError('snapshot must be a StorageSnapshot')
+    footprint = snapshot.footprint_bytes
+    recovery_free = policy.min_free_bytes + policy.backlog_reserve_bytes
+    recovery_footprint = (policy.db_max_bytes * policy.pressure_recovery_percent) // 100
+    if previous_state == 'suspended':
+        if footprint <= recovery_footprint and snapshot.free_bytes >= recovery_free:
+            return PressureDecision(previous_state, 'normal', 'recovered')
+        return PressureDecision(previous_state, 'suspended', 'recovery_pending')
+    if footprint >= policy.db_max_bytes + policy.backlog_reserve_bytes:
+        return PressureDecision(previous_state, 'suspended', 'allocation_exhausted')
+    if snapshot.free_bytes <= policy.min_free_bytes:
+        return PressureDecision(previous_state, 'suspended', 'free_space_exhausted')
+    if footprint >= (policy.db_max_bytes * policy.pressure_hard_percent) // 100:
+        return PressureDecision(previous_state, 'pressure', 'allocation_hard')
+    if footprint >= (policy.db_max_bytes * policy.pressure_warning_percent) // 100:
+        return PressureDecision(previous_state, 'pressure', 'allocation_warning')
+    if snapshot.free_bytes <= recovery_free:
+        return PressureDecision(previous_state, 'pressure', 'free_space_reserve')
+    return PressureDecision(previous_state, 'normal', None)
+
+
+def historical_persistence_allowed(decision_or_state):
+    """Distinguish only historical persistence from live/current monitoring work."""
+    if isinstance(decision_or_state, PressureDecision):
+        return decision_or_state.historical_persistence_allowed
+    if decision_or_state not in {'normal', 'pressure', 'suspended'}:
+        raise ValueError('invalid storage state')
+    return decision_or_state != 'suspended'
+
+
 def bucket_start(ts, seconds):
     """Return the canonical UTC half-open bucket start for an integer timestamp."""
     if isinstance(ts, bool) or not isinstance(ts, int):

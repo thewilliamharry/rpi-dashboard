@@ -43,6 +43,19 @@ class Settings:
     alert_webhook_url: str = ''
     alert_cooldown_seconds: int = 300
     alert_only_critical: bool = False
+    telemetry_raw_days: int = 7
+    telemetry_five_minute_days: int = 30
+    telemetry_retention_days: int = 90
+    telemetry_point_budget: int = 2048
+    telemetry_db_max_bytes: int = 536_870_912
+    telemetry_min_free_bytes: int = 1_073_741_824
+    telemetry_pressure_warning_percent: int = 80
+    telemetry_pressure_hard_percent: int = 90
+    telemetry_pressure_recovery_percent: int = 75
+    telemetry_backlog_reserve_bytes: int = 67_108_864
+    telemetry_rollup_batch_buckets: int = 32
+    telemetry_retry_base_seconds: int = 300
+    telemetry_retry_max_seconds: int = 3_600
 
 
 def _positive_int(environ, key, default):
@@ -113,6 +126,75 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     _, service_networks = _trusted_hosts(
         source.get('SERVICE_TARGET_NETWORKS', DEFAULT_SERVICE_TARGET_NETWORKS)
     )
+    telemetry_defaults = {
+        'raw_days': 7,
+        'five_minute_days': 30,
+        'retention_days': 90,
+        'point_budget': 2048,
+        'db_max_bytes': 536_870_912,
+        'min_free_bytes': 1_073_741_824,
+        'warning_percent': 80,
+        'hard_percent': 90,
+        'recovery_percent': 75,
+        'backlog_reserve_bytes': 67_108_864,
+        'rollup_batch_buckets': 32,
+        'retry_base_seconds': 300,
+        'retry_max_seconds': 3_600,
+    }
+    telemetry = {
+        'raw_days': _positive_int(source, 'TELEMETRY_RAW_DAYS', telemetry_defaults['raw_days']),
+        'five_minute_days': _positive_int(
+            source, 'TELEMETRY_FIVE_MINUTE_DAYS', telemetry_defaults['five_minute_days'],
+        ),
+        'retention_days': _positive_int(
+            source, 'TELEMETRY_RETENTION_DAYS', telemetry_defaults['retention_days'],
+        ),
+        'point_budget': _positive_int(
+            source, 'TELEMETRY_POINT_BUDGET', telemetry_defaults['point_budget'],
+        ),
+        'db_max_bytes': _positive_int(
+            source, 'TELEMETRY_DB_MAX_BYTES', telemetry_defaults['db_max_bytes'],
+        ),
+        'min_free_bytes': _positive_int(
+            source, 'TELEMETRY_MIN_FREE_BYTES', telemetry_defaults['min_free_bytes'],
+        ),
+        'warning_percent': _positive_int(
+            source, 'TELEMETRY_PRESSURE_WARNING_PERCENT', telemetry_defaults['warning_percent'],
+        ),
+        'hard_percent': _positive_int(
+            source, 'TELEMETRY_PRESSURE_HARD_PERCENT', telemetry_defaults['hard_percent'],
+        ),
+        'recovery_percent': _positive_int(
+            source, 'TELEMETRY_PRESSURE_RECOVERY_PERCENT', telemetry_defaults['recovery_percent'],
+        ),
+        'backlog_reserve_bytes': _positive_int(
+            source, 'TELEMETRY_BACKLOG_RESERVE_BYTES', telemetry_defaults['backlog_reserve_bytes'],
+        ),
+        'rollup_batch_buckets': _positive_int(
+            source, 'TELEMETRY_ROLLUP_BATCH_BUCKETS', telemetry_defaults['rollup_batch_buckets'],
+        ),
+        'retry_base_seconds': _positive_int(
+            source, 'TELEMETRY_RETRY_BASE_SECONDS', telemetry_defaults['retry_base_seconds'],
+        ),
+        'retry_max_seconds': _positive_int(
+            source, 'TELEMETRY_RETRY_MAX_SECONDS', telemetry_defaults['retry_max_seconds'],
+        ),
+    }
+    if not telemetry['raw_days'] < telemetry['five_minute_days'] < telemetry['retention_days']:
+        telemetry.update({key: telemetry_defaults[key] for key in (
+            'raw_days', 'five_minute_days', 'retention_days',
+        )})
+    if not (
+        0 < telemetry['recovery_percent'] < telemetry['warning_percent']
+        < telemetry['hard_percent'] <= 100
+    ):
+        telemetry.update({key: telemetry_defaults[key] for key in (
+            'warning_percent', 'hard_percent', 'recovery_percent',
+        )})
+    if telemetry['retry_base_seconds'] > telemetry['retry_max_seconds']:
+        telemetry.update({key: telemetry_defaults[key] for key in (
+            'retry_base_seconds', 'retry_max_seconds',
+        )})
     return Settings(
         db_path=source.get('DB_PATH', '/data/dashboard.db'),
         expire_days=_positive_int(source, 'EXPIRE_DAYS', 7),
@@ -133,4 +215,17 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         alert_webhook_url=source.get('ALERT_WEBHOOK_URL', '').strip(),
         alert_cooldown_seconds=_positive_int(source, 'ALERT_COOLDOWN_SECONDS', 300),
         alert_only_critical=_enabled(source.get('ALERT_ONLY_CRITICAL', '0')),
+        telemetry_raw_days=telemetry['raw_days'],
+        telemetry_five_minute_days=telemetry['five_minute_days'],
+        telemetry_retention_days=telemetry['retention_days'],
+        telemetry_point_budget=telemetry['point_budget'],
+        telemetry_db_max_bytes=telemetry['db_max_bytes'],
+        telemetry_min_free_bytes=telemetry['min_free_bytes'],
+        telemetry_pressure_warning_percent=telemetry['warning_percent'],
+        telemetry_pressure_hard_percent=telemetry['hard_percent'],
+        telemetry_pressure_recovery_percent=telemetry['recovery_percent'],
+        telemetry_backlog_reserve_bytes=telemetry['backlog_reserve_bytes'],
+        telemetry_rollup_batch_buckets=telemetry['rollup_batch_buckets'],
+        telemetry_retry_base_seconds=telemetry['retry_base_seconds'],
+        telemetry_retry_max_seconds=telemetry['retry_max_seconds'],
     )
