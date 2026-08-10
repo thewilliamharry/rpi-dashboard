@@ -200,3 +200,67 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         self.assertLessEqual(len(response["points"]), 4)
         hourly = next(point for point in response["points"] if point["offline_seconds"] == 3600)
         self.assertEqual(hourly["failure_class_counts"], {"timeout": 2})
+
+    def test_history_contract_partitions_coverage_and_discloses_pending_aggregation(self):
+        start_ts = self.now - 300
+        end_ts = self.now - 60
+        self._seed_host_rows([(start_ts, 12.0, 0.0, 0.0, 0.0)])
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO telemetry_streams("
+                    "stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, consecutive_misses) "
+                    "VALUES(?,?,?,?,?,0)",
+                    ("host", "cpu", start_ts, 60, self.now - 120),
+                )
+                conn.execute(
+                    "INSERT INTO telemetry_coverage("
+                    "stream_kind, stream_key, start_ts, end_ts, reason, detail) VALUES(?,?,?,?,?,?)",
+                    ("host", "cpu", self.now - 240, self.now - 180, "collection_gap", "storage_pressure"),
+                )
+                conn.execute(
+                    "INSERT INTO telemetry_rollup_jobs("
+                    "stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, "
+                    "next_retry_ts, last_error_class, updated_ts) VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("host", "cpu", self.now - 180, 300, "failed", 2, self.now + 60, "sqlite_busy", self.now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        response = self._request(start_ts=start_ts, end_ts=end_ts)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["selector"], {"kind": "host", "metric": "cpu"})
+        self.assertEqual(payload["coverage"], [
+            {"start_ts": start_ts, "end_ts": self.now - 240, "state": "observed"},
+            {
+                "start_ts": self.now - 240,
+                "end_ts": self.now - 180,
+                "state": "collection_gap",
+                "detail": "storage_pressure",
+            },
+            {"start_ts": self.now - 180, "end_ts": end_ts, "state": "unknown"},
+        ])
+        self.assertEqual(payload["aggregation_pending"], [{
+            "start_ts": self.now - 180,
+            "end_ts": self.now + 120,
+            "state": "failed",
+            "attempt_count": 2,
+            "next_retry_ts": self.now + 60,
+            "error_class": "sqlite_busy",
+        }])
+
+    def test_history_contract_rejects_duplicate_or_mixed_selectors(self):
+        query = [
+            ("kind", "host"),
+            ("metric", "cpu"),
+            ("metric", "ram"),
+            ("port", "8080"),
+            ("start_ts", str(self.now - 120)),
+            ("end_ts", str(self.now - 60)),
+        ]
+        response = self.client.get('/api/telemetry/history', query_string=query)
+        self.assertEqual(response.status_code, 400)
