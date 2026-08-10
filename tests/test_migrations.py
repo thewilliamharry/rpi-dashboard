@@ -145,7 +145,7 @@ class MigrationTests(unittest.TestCase):
             target = Path(directory) / CURRENT_V4_FIXTURE
             copy2(source, target)
             result = run_migrations(Settings(db_path=str(target)))
-            self.assertEqual(result.applied_versions, (5,))
+            self.assertEqual(result.applied_versions, (5, 6))
             with sqlite3.connect(target) as conn:
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self._assert_telemetry_schema(conn)
@@ -166,14 +166,14 @@ class MigrationTests(unittest.TestCase):
     def test_migration_five_failure_rolls_back_telemetry_schema_and_keeps_recovery_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             target = self._copied_fixture(directory, 'initial-2026-04.db')
-            original = MIGRATIONS[-1]
+            original = MIGRATIONS[4]
 
             def fail_migration_five(conn):
                 original.apply(conn)
                 raise RuntimeError('migration five sensitive failure')
 
             broken = Migration(5, 'bounded_telemetry', True, fail_migration_five)
-            with mock.patch('dashboard.beacon.migrations.MIGRATIONS', (*MIGRATIONS[:-1], broken)):
+            with mock.patch('dashboard.beacon.migrations.MIGRATIONS', (*MIGRATIONS[:4], broken)):
                 with self.assertRaises(MigrationPreparationError):
                     run_migrations(Settings(db_path=str(target)))
 
@@ -212,6 +212,7 @@ class MigrationTests(unittest.TestCase):
                 'service_port', 'bucket_start', 'bucket_seconds', 'online_seconds',
                 'offline_seconds', 'unknown_seconds', 'gap_seconds', 'latency_min',
                 'latency_max', 'latency_avg', 'check_count', 'failure_class_counts_json',
+                'latency_sample_count',
             ),
             'telemetry_coverage': (
                 'id', 'stream_kind', 'stream_key', 'start_ts', 'end_ts', 'reason', 'detail',
