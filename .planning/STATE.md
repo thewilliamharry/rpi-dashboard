@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 2
 current_phase_name: Bounded Telemetry & Retention
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-08-10T14:50:40.167Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-08-10T15:00:54.277Z"
 last_activity: 2026-08-10
 last_activity_desc: Phase 2 execution started
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 29
-  completed_plans: 27
+  completed_plans: 28
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 2 (Bounded Telemetry & Retention) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-08-10 — Phase 2 execution started
 
-Progress: [█████████░] 93%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -84,6 +84,7 @@ Progress: [█████████░] 93%
 | Phase 02-bounded-telemetry-retention P02 | 4 min | 1 tasks | 1 files |
 | Phase 02-bounded-telemetry-retention P03 | 4 min | 1 tasks | 5 files |
 | Phase 02-bounded-telemetry-retention P04 | 18 min | 2 tasks | 3 files |
+| Phase 02 P05 | 10min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -149,6 +150,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Migration 5 telemetry DDL executes as individual statements inside the existing SQLite transaction; service port remains the confirmed durable service-rollup stream key.
 - [Phase ?]: Host raw rows are deleted only after all observed fixed metrics in their shared bucket are verified, with a single durable host-bucket job identity.
 - [Phase ?]: Storage pressure returns an explicit historical-write decision; later worker wiring owns persistence-state recording and leaves safe rollup compaction available.
+- [Phase ?]: J8 remains the sole coalesced cleanup callback; retention and observation writes are fenced by the exact worker epoch.
+- [Phase ?]: Historical suspension skips only new rows and records storage_pressure gaps while current host and service state remains live.
 
 ### Pending Todos
 
@@ -168,6 +171,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-10T14:50:40.157Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-08-10T15:00:54.268Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
