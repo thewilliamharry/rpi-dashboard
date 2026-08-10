@@ -218,6 +218,7 @@ class StoragePressureContractTests(unittest.TestCase):
     def _connection(self):
         return self.appmod.get_db()
 
+
     def test_settings_and_pressure_policy_exports_have_safe_defaults(self):
         self.assertTrue(hasattr(telemetry, 'evaluate_storage_pressure'))
         self.assertTrue(hasattr(telemetry, 'historical_persistence_allowed'))
@@ -408,6 +409,84 @@ class StoragePressureContractTests(unittest.TestCase):
                 [tuple(row) for row in conn.execute('SELECT event_type FROM events ORDER BY ts').fetchall()],
                 [('edge',)],
             )
+        finally:
+            conn.close()
+
+
+class WorkerTelemetryObservationContractTests(unittest.TestCase):
+    """Executable D-06 and D-11 evidence through real telemetry tables."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.clock = UtcClock()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def test_observation_contract_closes_confirmed_gap_and_preserves_tri_state(self):
+        required = (
+            'record_observation',
+            'detect_collection_gaps',
+            'read_retention_state',
+            'write_retention_state',
+            'close_storage_pressure_gap',
+        )
+        self.assertTrue(all(hasattr(telemetry, name) for name in required))
+        conn = self.appmod.get_db()
+        try:
+            telemetry.record_observation(
+                conn, 'service', '8080', ts=0, cadence_seconds=300,
+                state=True, expected_cadence=True,
+            )
+            telemetry.detect_collection_gaps(conn, now=600)
+            telemetry.record_observation(
+                conn, 'service', '8080', ts=750, cadence_seconds=300,
+                state=False, expected_cadence=True,
+            )
+            telemetry.record_observation(
+                conn, 'service', '8081', ts=750, cadence_seconds=300,
+                state=None, expected_cadence=True,
+            )
+            coverage = conn.execute(
+                'SELECT stream_key, start_ts, end_ts, reason, detail FROM telemetry_coverage '
+                'ORDER BY stream_key, start_ts'
+            ).fetchall()
+            self.assertEqual(
+                [tuple(row) for row in coverage],
+                [('8080', 300, 750, 'collection_gap', None),
+                 ('8081', 750, 1050, 'unknown', None)],
+            )
+            stream = conn.execute(
+                "SELECT last_observed_ts, consecutive_misses, open_gap_start_ts "
+                "FROM telemetry_streams WHERE stream_kind='service' AND stream_key='8080'"
+            ).fetchone()
+            self.assertEqual(tuple(stream), (750, 0, None))
+        finally:
+            conn.close()
+
+    def test_worker_cleanup_retention_is_epoch_fenced_and_keeps_events_for_ninety_days(self):
+        authority_a, authority_b = seed_successive_worker_epochs(self.db_path, self.clock)
+        conn = self.appmod.get_db()
+        try:
+            seed_events(conn, [
+                (self.clock() - 30 * 86400, None, 'still_retained', None, None, None, None, 'none', '{}'),
+            ])
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(queues.LeaseLost):
+            self.appmod.worker_cleanup_history(authority_a, now=self.clock())
+        self.appmod.worker_cleanup_history(authority_b, now=self.clock())
+
+        conn = self.appmod.get_db()
+        try:
+            self.assertEqual(
+                [row['event_type'] for row in conn.execute('SELECT event_type FROM events')],
+                ['still_retained'],
+            )
+            state = self.appmod._get_runtime_state('telemetry_retention_state', {}, conn=conn)
+            self.assertEqual(state.get('state'), 'normal')
         finally:
             conn.close()
 
