@@ -1,4 +1,3 @@
-import tempfile
 import unittest
 
 from dashboard.beacon import queues
@@ -118,7 +117,7 @@ class TelemetryRetentionFixturesTests(unittest.TestCase):
         self.assertEqual(EXACT_CUTOFFS['90_days'], UTC_NOW - NINETY_DAYS)
         self.assertEqual(snapshot['stats_history'][0][0], EXACT_CUTOFFS['90_days'])
         self.assertEqual(snapshot['service_checks'], [(EXACT_CUTOFFS['7_days'], 8080, 1, 4.5, None)])
-        self.assertEqual(snapshot['events'][0][0], EXACT_CUTOFFS['30_days'])
+        self.assertEqual(snapshot['events'][0][1], EXACT_CUTOFFS['30_days'])
 
         authority_a, authority_b = seed_successive_worker_epochs(self.db_path, self.clock)
         self.assertEqual((authority_a.worker_id, authority_b.worker_id), ('worker-a', 'worker-b'))

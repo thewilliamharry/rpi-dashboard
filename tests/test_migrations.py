@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass
 from shutil import copy2
 from unittest import mock
 from pathlib import Path
@@ -39,6 +40,64 @@ EXPECTED_FINGERPRINTS = {
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
     'runtime-queues-2026-07.db': '791e5c1d380fb38b62e8c284349affb248acfaf5dbbd0e93a07b929b2ef59c91',
 }
+
+_LEGACY_PRESERVATION_COLUMNS = {
+    'services': ('port', 'title', 'first_seen', 'last_seen', 'is_online'),
+    'service_meta': ('port', 'display_name', 'url', 'critical', 'pinned_order', 'tags'),
+    'stats_history': ('ts', 'cpu', 'ram', 'disk', 'temp'),
+    'service_checks': ('ts', 'port', 'online', 'latency_ms', 'error_class'),
+    'events': (
+        'id', 'ts', 'port', 'event_type', 'online', 'previous_online',
+        'latency_ms', 'error_class', 'alert_status', 'details',
+    ),
+    'scan_requests': ('id', 'requested_ts', 'requested_by', 'status', 'started_ts', 'completed_ts', 'error'),
+    'preview_requests': ('port', 'requested_ts', 'status', 'error'),
+}
+
+
+@dataclass(frozen=True)
+class LegacyRowSnapshot:
+    rows: dict
+    columns: dict
+
+    def __getitem__(self, table):
+        return self.rows[table]
+
+
+def snapshot_legacy_rows(conn, columns_by_table=None):
+    """Capture stable legacy values for later migration-preservation assertions."""
+    table_names = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    snapshots = {}
+    selected_columns = {}
+    source_columns = columns_by_table or _LEGACY_PRESERVATION_COLUMNS
+    for table, columns in source_columns.items():
+        if table not in table_names:
+            continue
+        available = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        selected = tuple(columns) if columns_by_table else tuple(
+            column for column in columns if column in available
+        )
+        if not selected:
+            continue
+        if not set(selected).issubset(available):
+            raise AssertionError(f'legacy columns missing after migration: {table}')
+        column_sql = ', '.join(f'"{column}"' for column in selected)
+        order_sql = ', '.join(f'"{column}"' for column in selected)
+        snapshots[table] = [
+            tuple(row) for row in conn.execute(
+                f'SELECT {column_sql} FROM "{table}" ORDER BY {order_sql}'
+            )
+        ]
+        selected_columns[table] = selected
+    return LegacyRowSnapshot(snapshots, selected_columns)
+
+
+def assert_legacy_rows_preserved(test_case, before_rows, conn):
+    """Assert every pre-migration legacy row keeps both its values and count."""
+    after_rows = snapshot_legacy_rows(conn, before_rows.columns)
+    test_case.assertEqual(after_rows.rows, before_rows.rows)
 
 
 def _run_migration_process(db_path, start_event, result_queue):
@@ -76,17 +135,11 @@ class MigrationTests(unittest.TestCase):
                 target = Path(directory) / source_name
                 copy2(source, target)
                 with sqlite3.connect(target) as before_conn:
-                    service_rows = before_conn.execute('SELECT COUNT(*) FROM services').fetchone()[0]
-                    event_rows = (
-                        before_conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]
-                        if 'events' in {row[0] for row in before_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                        else 0
-                    )
+                    before_rows = snapshot_legacy_rows(before_conn)
                 result = run_migrations(Settings(db_path=str(target)))
                 self.assertTrue(result.applied_versions)
                 with sqlite3.connect(target) as conn:
-                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM services').fetchone()[0], service_rows)
-                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM events').fetchone()[0], event_rows)
+                    assert_legacy_rows_preserved(self, before_rows, conn)
                     self.assertEqual(
                         conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
                         MIGRATIONS[-1].version,
