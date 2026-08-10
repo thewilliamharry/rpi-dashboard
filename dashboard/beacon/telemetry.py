@@ -13,6 +13,7 @@ _COVERAGE_STATES = {
     'collection_gap',
     'expired',
     'not_yet_monitored',
+    'observed',
     'unknown',
 }
 
@@ -41,6 +42,7 @@ class CoverageInterval:
     start_ts: int
     end_ts: int
     state: str
+    detail: str | None = None
 
     def __post_init__(self):
         if self.start_ts >= self.end_ts:
@@ -49,11 +51,28 @@ class CoverageInterval:
             raise ValueError('invalid coverage state')
 
     def as_dict(self):
-        return {
+        payload = {
             'start_ts': self.start_ts,
             'end_ts': self.end_ts,
             'state': self.state,
         }
+        if self.detail is not None:
+            payload['detail'] = self.detail
+        return payload
+
+
+@dataclass(frozen=True)
+class SourceSegment:
+    """A bounded, immutable collection of display buckets from one retained tier."""
+
+    resolution_seconds: int
+    points: tuple
+
+    def __post_init__(self):
+        if isinstance(self.resolution_seconds, bool) or int(self.resolution_seconds) <= 0:
+            raise ValueError('source resolution must be positive')
+        object.__setattr__(self, 'resolution_seconds', int(self.resolution_seconds))
+        object.__setattr__(self, 'points', tuple(self.points))
 
 
 def select_resolution(start_ts, end_ts, point_budget=POINT_BUDGET):
@@ -69,8 +88,11 @@ def select_resolution(start_ts, end_ts, point_budget=POINT_BUDGET):
 
 
 def coalesce_coverage(intervals):
-    """Sort coverage deterministically and merge only touching equal-state intervals."""
-    ordered = sorted(intervals, key=lambda item: (item.start_ts, item.end_ts, item.state))
+    """Sort coverage deterministically and merge only touching equal-state/detail intervals."""
+    ordered = sorted(
+        intervals,
+        key=lambda item: (item.start_ts, item.end_ts, item.state, item.detail or ''),
+    )
     coalesced = []
     for interval in ordered:
         if not isinstance(interval, CoverageInterval):
@@ -81,12 +103,174 @@ def coalesce_coverage(intervals):
             coalesced
             and interval.start_ts == coalesced[-1].end_ts
             and interval.state == coalesced[-1].state
+            and interval.detail == coalesced[-1].detail
         ):
             prior = coalesced[-1]
-            coalesced[-1] = CoverageInterval(prior.start_ts, interval.end_ts, prior.state)
+            coalesced[-1] = CoverageInterval(
+                prior.start_ts, interval.end_ts, prior.state, prior.detail,
+            )
         else:
             coalesced.append(interval)
     return tuple(coalesced)
+
+
+def _merge_failure_counts(values):
+    merged = {}
+    for value in values:
+        if not value:
+            continue
+        try:
+            decoded = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError):
+            continue
+        entries = decoded if isinstance(decoded, list) else [decoded]
+        for entry in entries:
+            if isinstance(entry, str):
+                try:
+                    entry = json.loads(entry)
+                except (TypeError, ValueError):
+                    continue
+            if not isinstance(entry, dict):
+                continue
+            for name, count in entry.items():
+                try:
+                    merged[str(name)] = merged.get(str(name), 0) + int(count)
+                except (TypeError, ValueError):
+                    continue
+    return merged
+
+
+def _point_value(point, name, default=0):
+    value = point.get(name, default)
+    return default if value is None else value
+
+
+def _compose_host_bucket(bucket_start, points):
+    latest = max(points, key=lambda point: (int(_point_value(point, 'latest_ts', bucket_start)),))
+    sample_count = sum(int(_point_value(point, 'sample_count')) for point in points)
+    return {
+        'ts': int(bucket_start),
+        'min_value': min(float(point['min_value']) for point in points if point['min_value'] is not None),
+        'max_value': max(float(point['max_value']) for point in points if point['max_value'] is not None),
+        'avg_value': (
+            sum(float(point['avg_value']) * int(_point_value(point, 'sample_count')) for point in points)
+            / sample_count if sample_count else None
+        ),
+        'latest_value': latest['latest_value'],
+        'sample_count': sample_count,
+        'observed_seconds': sum(int(_point_value(point, 'observed_seconds')) for point in points),
+        'gap_seconds': sum(int(_point_value(point, 'gap_seconds')) for point in points),
+        'unknown_seconds': sum(int(_point_value(point, 'unknown_seconds')) for point in points),
+    }
+
+
+def _compose_service_bucket(bucket_start, points):
+    latency_count = sum(int(_point_value(point, 'latency_sample_count')) for point in points)
+    failures = _merge_failure_counts([point.get('failure_class_counts_json') for point in points])
+    latency_values = [point for point in points if point.get('latency_min') is not None]
+    return {
+        'ts': int(bucket_start),
+        'online_seconds': sum(int(_point_value(point, 'online_seconds')) for point in points),
+        'offline_seconds': sum(int(_point_value(point, 'offline_seconds')) for point in points),
+        'unknown_seconds': sum(int(_point_value(point, 'unknown_seconds')) for point in points),
+        'gap_seconds': sum(int(_point_value(point, 'gap_seconds')) for point in points),
+        'latency_min': min(float(point['latency_min']) for point in latency_values) if latency_values else None,
+        'latency_max': max(float(point['latency_max']) for point in latency_values) if latency_values else None,
+        'latency_avg': (
+            sum(float(point['latency_avg']) * int(_point_value(point, 'latency_sample_count')) for point in points
+                if point.get('latency_avg') is not None)
+            / latency_count if latency_count else None
+        ),
+        'check_count': sum(int(_point_value(point, 'check_count')) for point in points),
+        'failure_class_counts': failures,
+    }
+
+
+def compose_historical_response(source_segments, kind):
+    """Merge non-overlapping tier evidence into ordered display buckets without interpolation."""
+    if kind not in ('host', 'service'):
+        raise ValueError('invalid telemetry kind')
+    buckets = {}
+    resolutions = set()
+    for segment in source_segments:
+        if not isinstance(segment, SourceSegment):
+            raise ValueError('telemetry sources must be SourceSegment values')
+        resolutions.add(segment.resolution_seconds)
+        for raw_point in segment.points:
+            point = dict(raw_point)
+            bucket_start = int(point['bucket_start'])
+            buckets.setdefault(bucket_start, []).append(point)
+    composer = _compose_host_bucket if kind == 'host' else _compose_service_bucket
+    return {
+        'source_resolutions_seconds': sorted(resolutions),
+        'points': [composer(start, buckets[start]) for start in sorted(buckets)],
+    }
+
+
+def partition_coverage(
+    start_ts,
+    end_ts,
+    *,
+    retention_start_ts,
+    stream,
+    persisted_intervals=(),
+    source_segments=(),
+):
+    """Compose the exhaustive D-05 partition from durable stream and source evidence."""
+    requested = HistoricalRange(int(start_ts), int(end_ts))
+    boundaries = {requested.start_ts, requested.end_ts, int(retention_start_ts)}
+    explicit = []
+    for entry in persisted_intervals:
+        begin = max(requested.start_ts, int(_row_value(entry, 'start_ts')))
+        end = min(requested.end_ts, int(_row_value(entry, 'end_ts')))
+        if begin >= end:
+            continue
+        explicit.append((begin, end, str(_row_value(entry, 'reason')), _row_value(entry, 'detail')))
+        boundaries.update((begin, end))
+    started_ts = None if stream is None else int(_row_value(stream, 'started_ts'))
+    cadence = None if stream is None else int(_row_value(stream, 'cadence_seconds'))
+    last_observed = None if stream is None else _row_value(stream, 'last_observed_ts')
+    if started_ts is not None:
+        boundaries.add(started_ts)
+    if last_observed is not None and cadence is not None:
+        boundaries.add(int(last_observed) + cadence)
+    observed = []
+    for segment in source_segments:
+        for point in segment.points:
+            begin = int(point['bucket_start'])
+            if 'online_seconds' in point:
+                seconds = int(_point_value(point, 'online_seconds')) + int(_point_value(point, 'offline_seconds'))
+            else:
+                seconds = int(_point_value(point, 'observed_seconds'))
+            if seconds <= 0:
+                continue
+            end = begin + seconds
+            observed.append((begin, end))
+            boundaries.update((begin, end))
+    ordered = sorted(boundary for boundary in boundaries if requested.start_ts <= boundary <= requested.end_ts)
+    coverage = []
+    for begin, end in zip(ordered, ordered[1:]):
+        if begin >= end:
+            continue
+        if end <= int(retention_start_ts):
+            state, detail = 'expired', None
+        elif started_ts is None or end <= started_ts:
+            state, detail = 'not_yet_monitored', None
+        else:
+            matching = [item for item in explicit if item[0] <= begin and item[1] >= end]
+            if matching:
+                state, detail = max(
+                    matching,
+                    key=lambda item: (1 if item[2] == 'collection_gap' else 0, item[0], item[1]),
+                )[2:]
+            elif last_observed is not None and cadence is not None and begin >= int(last_observed) + cadence:
+                state, detail = 'unknown', None
+            elif any(item[0] <= begin and item[1] >= end for item in observed):
+                state, detail = 'observed', None
+            else:
+                state, detail = 'unknown', None
+        coverage.append(CoverageInterval(begin, end, state, detail))
+    return coalesce_coverage(coverage)
 
 
 @dataclass(frozen=True)
@@ -412,6 +596,7 @@ def build_service_rollup(rows, service_port, start, seconds, coverage=(), prior_
         'latency_min': min(latencies) if latencies else None,
         'latency_max': max(latencies) if latencies else None,
         'latency_avg': sum(latencies) / len(latencies) if latencies else None,
+        'latency_sample_count': len(latencies),
         'check_count': len(ordered),
         'failure_class_counts_json': json.dumps(
             failure_counts, separators=(',', ':'), sort_keys=True,
@@ -709,7 +894,10 @@ def _roll_service_five_minutes(conn, port, start, now):
     ).fetchall()
     if not rows:
         return False
-    latencies = [(row['latency_avg'], row['check_count']) for row in rows if row['latency_avg'] is not None]
+    latencies = [
+        (row['latency_avg'], row['latency_sample_count']) for row in rows
+        if row['latency_avg'] is not None and row['latency_sample_count']
+    ]
     failures = {}
     for row in rows:
         for failure, count in json.loads(row['failure_class_counts_json']).items():
@@ -724,6 +912,7 @@ def _roll_service_five_minutes(conn, port, start, now):
         'latency_min': min((row['latency_min'] for row in rows if row['latency_min'] is not None), default=None),
         'latency_max': max((row['latency_max'] for row in rows if row['latency_max'] is not None), default=None),
         'latency_avg': (sum(value * count for value, count in latencies) / sum(count for _, count in latencies)) if latencies else None,
+        'latency_sample_count': sum(count for _, count in latencies),
         'check_count': checks,
         'failure_class_counts_json': json.dumps(failures, separators=(',', ':'), sort_keys=True),
     }

@@ -150,9 +150,53 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
 
         response = telemetry.compose_historical_response(segments, "host")
         self.assertEqual(response["source_resolutions_seconds"], [60, 300, 3600])
-        self.assertEqual(len(response["points"]), 3)
+        # The raw and five-minute slices share a display bucket, so a truthful
+        # server aggregation returns one merged bucket rather than duplicates.
+        self.assertEqual(len(response["points"]), 2)
         self.assertEqual(
             [point["ts"] for point in response["points"]],
             sorted(point["ts"] for point in response["points"]),
         )
         self.assertTrue(all("sample_count" in point for point in response["points"]))
+
+    def test_repository_merges_service_durations_and_latency_across_tiers(self):
+        raw_cutoff = self.now - 7 * 86400
+        five_minute_cutoff = self.now - 30 * 86400
+        start_ts = five_minute_cutoff - 3600
+        end_ts = raw_cutoff + 3600
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO service_checks(ts, port, online, latency_ms, error_class) VALUES(?,?,?,?,?)",
+                    (raw_cutoff + 60, 8080, 1, 40.0, None),
+                )
+                conn.execute(
+                    "INSERT INTO service_rollups("
+                    "service_port, bucket_start, bucket_seconds, online_seconds, offline_seconds, "
+                    "unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, "
+                    "latency_sample_count, check_count, failure_class_counts_json) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (8080, raw_cutoff - 300, 300, 300, 0, 0, 0, 20.0, 30.0, 25.0, 2, 2, "{}"),
+                )
+                conn.execute(
+                    "INSERT INTO service_rollups("
+                    "service_port, bucket_start, bucket_seconds, online_seconds, offline_seconds, "
+                    "unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, "
+                    "latency_sample_count, check_count, failure_class_counts_json) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (8080, five_minute_cutoff - 3600, 3600, 0, 3600, 0, 0, 70.0, 90.0, 80.0, 2, 2, '{"timeout":2}'),
+                )
+                conn.commit()
+                segments = telemetry_repositories.get_service_telemetry(
+                    conn, 8080, start_ts, end_ts, 3600, telemetry.POINT_BUDGET + 1,
+                    {"raw_start_ts": raw_cutoff, "five_minute_start_ts": five_minute_cutoff},
+                )
+            finally:
+                conn.close()
+
+        response = telemetry.compose_historical_response(segments, "service")
+        self.assertEqual(response["source_resolutions_seconds"], [60, 300, 3600])
+        self.assertLessEqual(len(response["points"]), 4)
+        hourly = next(point for point in response["points"] if point["offline_seconds"] == 3600)
+        self.assertEqual(hourly["failure_class_counts"], {"timeout": 2})

@@ -8,6 +8,7 @@ import json
 import time
 
 from .queues import enqueue_preview_in_transaction
+from .telemetry import SourceSegment
 
 
 HOST_METRIC_COLUMNS = {
@@ -16,6 +17,231 @@ HOST_METRIC_COLUMNS = {
     'disk': 'disk',
     'temp': 'temp',
 }
+
+# These maps are deliberately constructed from module-owned strings.  Request
+# values choose an entry; they never become an SQL identifier.
+HOST_QUERY_SHAPES = {
+    metric: {
+        'raw': (
+            'WITH ranked AS ('
+            f'SELECT ts - (ts % ?) AS bucket_start, {column} AS value, '
+            f'ROW_NUMBER() OVER (PARTITION BY ts - (ts % ?) ORDER BY ts DESC) AS latest_rank '
+            f'FROM stats_history WHERE ts >= ? AND ts < ? AND {column} IS NOT NULL'
+            ') SELECT bucket_start, MIN(value) AS min_value, MAX(value) AS max_value, '
+            'AVG(value) AS avg_value, MAX(CASE WHEN latest_rank=1 THEN value END) AS latest_value, '
+            'COUNT(*) AS sample_count, MIN(COUNT(*) * ?, ?) AS observed_seconds, '
+            '0 AS gap_seconds, 0 AS unknown_seconds FROM ranked GROUP BY bucket_start '
+            'ORDER BY bucket_start ASC LIMIT ?'
+        ),
+        'rollup': (
+            'WITH ranked AS ('
+            'SELECT bucket_start - (bucket_start % ?) AS display_start, min_value, max_value, '
+            'avg_value, latest_value, sample_count, observed_seconds, gap_seconds, unknown_seconds, '
+            'ROW_NUMBER() OVER (PARTITION BY bucket_start - (bucket_start % ?) '
+            'ORDER BY bucket_start DESC) AS latest_rank FROM host_metric_rollups '
+            'WHERE metric=? AND bucket_seconds=? AND bucket_start >= ? AND bucket_start < ?'
+            ') SELECT display_start AS bucket_start, MIN(min_value) AS min_value, '
+            'MAX(max_value) AS max_value, '
+            'SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0) AS avg_value, '
+            'MAX(CASE WHEN latest_rank=1 THEN latest_value END) AS latest_value, '
+            'SUM(sample_count) AS sample_count, SUM(observed_seconds) AS observed_seconds, '
+            'SUM(gap_seconds) AS gap_seconds, SUM(unknown_seconds) AS unknown_seconds '
+            'FROM ranked GROUP BY display_start ORDER BY display_start ASC LIMIT ?'
+        ),
+    }
+    for metric, column in HOST_METRIC_COLUMNS.items()
+}
+
+SERVICE_QUERY_SHAPES = {
+    'raw': (
+        'WITH RECURSIVE source_rows AS ('
+        'SELECT ts, online, latency_ms, error_class FROM service_checks '
+        'WHERE port=? AND ts < ? ORDER BY ts DESC LIMIT 1'
+        '), all_rows AS ('
+        'SELECT * FROM source_rows UNION ALL '
+        'SELECT ts, online, latency_ms, error_class FROM service_checks '
+        'WHERE port=? AND ts >= ? AND ts < ?'
+        '), segments AS ('
+        'SELECT MAX(ts, ?) AS start_ts, MIN(LEAD(ts, 1, ?) OVER (ORDER BY ts), ?) AS end_ts, online '
+        'FROM all_rows'
+        '), buckets(bucket_start) AS ('
+        'SELECT ? - (? % ?) UNION ALL SELECT bucket_start + ? FROM buckets '
+        'WHERE bucket_start + ? < ?'
+        '), durations AS ('
+        'SELECT b.bucket_start, '
+        'SUM(CASE WHEN s.online=1 THEN MAX(0, MIN(s.end_ts, b.bucket_start + ?, ?) '
+        '- MAX(s.start_ts, b.bucket_start, ?)) ELSE 0 END) AS online_seconds, '
+        'SUM(CASE WHEN s.online=0 THEN MAX(0, MIN(s.end_ts, b.bucket_start + ?, ?) '
+        '- MAX(s.start_ts, b.bucket_start, ?)) ELSE 0 END) AS offline_seconds, '
+        'SUM(CASE WHEN s.online IS NULL THEN MAX(0, MIN(s.end_ts, b.bucket_start + ?, ?) '
+        '- MAX(s.start_ts, b.bucket_start, ?)) ELSE 0 END) AS unknown_seconds '
+        'FROM buckets b LEFT JOIN segments s ON s.start_ts < MIN(b.bucket_start + ?, ?) '
+        'AND s.end_ts > MAX(b.bucket_start, ?) GROUP BY b.bucket_start'
+        '), sample_rows AS ('
+        'SELECT ts - (ts % ?) AS bucket_start, latency_ms, error_class FROM service_checks '
+        'WHERE port=? AND ts >= ? AND ts < ?'
+        '), sample_stats AS ('
+        'SELECT bucket_start, MIN(latency_ms) AS latency_min, MAX(latency_ms) AS latency_max, '
+        'AVG(latency_ms) AS latency_avg, COUNT(*) AS check_count, '
+        'SUM(CASE WHEN latency_ms IS NOT NULL THEN 1 ELSE 0 END) AS latency_sample_count '
+        'FROM sample_rows GROUP BY bucket_start'
+        '), failure_counts AS ('
+        'SELECT bucket_start, error_class, COUNT(*) AS count FROM sample_rows '
+        'WHERE error_class IS NOT NULL GROUP BY bucket_start, error_class'
+        '), failure_json AS ('
+        'SELECT bucket_start, json_group_object(error_class, count) AS failure_class_counts_json '
+        'FROM failure_counts GROUP BY bucket_start'
+        ') SELECT b.bucket_start, COALESCE(d.online_seconds, 0) AS online_seconds, '
+        'COALESCE(d.offline_seconds, 0) AS offline_seconds, COALESCE(d.unknown_seconds, 0) AS unknown_seconds, '
+        '0 AS gap_seconds, s.latency_min, s.latency_max, s.latency_avg, '
+        'COALESCE(s.latency_sample_count, 0) AS latency_sample_count, COALESCE(s.check_count, 0) AS check_count, '
+        "COALESCE(f.failure_class_counts_json, '{}') AS failure_class_counts_json "
+        'FROM buckets b LEFT JOIN durations d ON d.bucket_start=b.bucket_start '
+        'LEFT JOIN sample_stats s ON s.bucket_start=b.bucket_start '
+        'LEFT JOIN failure_json f ON f.bucket_start=b.bucket_start '
+        'ORDER BY b.bucket_start ASC LIMIT ?'
+    ),
+    'rollup': (
+        'WITH ranked AS ('
+        'SELECT bucket_start - (bucket_start % ?) AS display_start, online_seconds, offline_seconds, '
+        'unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, latency_sample_count, '
+        'check_count, failure_class_counts_json, ROW_NUMBER() OVER ('
+        'PARTITION BY bucket_start - (bucket_start % ?) ORDER BY bucket_start DESC) AS latest_rank '
+        'FROM service_rollups WHERE service_port=? AND bucket_seconds=? '
+        'AND bucket_start >= ? AND bucket_start < ?'
+        ') SELECT display_start AS bucket_start, SUM(online_seconds) AS online_seconds, '
+        'SUM(offline_seconds) AS offline_seconds, SUM(unknown_seconds) AS unknown_seconds, '
+        'SUM(gap_seconds) AS gap_seconds, MIN(latency_min) AS latency_min, MAX(latency_max) AS latency_max, '
+        'SUM(latency_avg * latency_sample_count) / NULLIF(SUM(latency_sample_count), 0) AS latency_avg, '
+        'SUM(latency_sample_count) AS latency_sample_count, SUM(check_count) AS check_count, '
+        'json_group_array(failure_class_counts_json) AS failure_class_counts_json '
+        'FROM ranked GROUP BY display_start ORDER BY display_start ASC LIMIT ?'
+    ),
+}
+
+
+def _cutoff(cutoffs, name):
+    try:
+        return int(cutoffs[name])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError('invalid telemetry cutoffs') from error
+
+
+def _tier_ranges(start_ts, end_ts, cutoffs):
+    raw_start = _cutoff(cutoffs, 'raw_start_ts')
+    five_start = _cutoff(cutoffs, 'five_minute_start_ts')
+    return (
+        ('hourly', 3600, max(start_ts, -(2 ** 63)), min(end_ts, five_start)),
+        ('five_minute', 300, max(start_ts, five_start), min(end_ts, raw_start)),
+        ('raw', 60, max(start_ts, raw_start), end_ts),
+    )
+
+
+def _checked_rows(conn, query, values, limit):
+    rows = conn.execute(query, values).fetchall()
+    if len(rows) > limit - 1:
+        raise ValueError('telemetry query exceeded point budget')
+    return tuple(dict(row) for row in rows)
+
+
+def get_host_telemetry(conn, metric, start_ts, end_ts, display_bucket_seconds, limit, cutoffs):
+    """Read an allowlisted host stream from non-overlapping retained tiers."""
+    if metric not in HOST_QUERY_SHAPES:
+        raise ValueError('invalid host metric')
+    if min(int(display_bucket_seconds), int(limit)) <= 0:
+        raise ValueError('invalid telemetry query bounds')
+    segments = []
+    for tier, source_resolution, tier_start, tier_end in _tier_ranges(start_ts, end_ts, cutoffs):
+        if tier_start >= tier_end:
+            continue
+        if tier == 'raw':
+            values = (
+                display_bucket_seconds, display_bucket_seconds, tier_start, tier_end,
+                source_resolution, display_bucket_seconds, limit,
+            )
+            query = HOST_QUERY_SHAPES[metric]['raw']
+        else:
+            values = (
+                display_bucket_seconds, display_bucket_seconds, metric, source_resolution,
+                tier_start, tier_end, limit,
+            )
+            query = HOST_QUERY_SHAPES[metric]['rollup']
+        rows = _checked_rows(conn, query, values, int(limit))
+        if rows:
+            segments.append(SourceSegment(source_resolution, rows))
+    return tuple(segments)
+
+
+def get_service_telemetry(conn, port, start_ts, end_ts, display_bucket_seconds, limit, cutoffs):
+    """Read one range-checked service stream without materializing raw checks in Python."""
+    port = int(port)
+    if not 1 <= port <= 65535 or min(int(display_bucket_seconds), int(limit)) <= 0:
+        raise ValueError('invalid telemetry query bounds')
+    segments = []
+    for tier, source_resolution, tier_start, tier_end in _tier_ranges(start_ts, end_ts, cutoffs):
+        if tier_start >= tier_end:
+            continue
+        if tier == 'raw':
+            bucket_start = tier_start - (tier_start % int(display_bucket_seconds))
+            values = (
+                port, tier_start, port, tier_start, tier_end, tier_start, tier_end, tier_end,
+                bucket_start, tier_start, display_bucket_seconds, display_bucket_seconds,
+                display_bucket_seconds, tier_end,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, port, tier_start, tier_end, limit,
+            )
+            query = SERVICE_QUERY_SHAPES['raw']
+        else:
+            values = (
+                display_bucket_seconds, display_bucket_seconds, port, source_resolution,
+                tier_start, tier_end, limit,
+            )
+            query = SERVICE_QUERY_SHAPES['rollup']
+        rows = _checked_rows(conn, query, values, int(limit))
+        if rows:
+            segments.append(SourceSegment(source_resolution, rows))
+    return tuple(segments)
+
+
+def get_telemetry_coverage(conn, stream_kind, stream_key, start_ts, end_ts):
+    """Return stream metadata and sparse unavailable evidence in ascending order."""
+    if stream_kind not in ('host', 'service'):
+        raise ValueError('invalid telemetry stream')
+    stream = conn.execute(
+        'SELECT started_ts, cadence_seconds, last_observed_ts FROM telemetry_streams '
+        'WHERE stream_kind=? AND stream_key=?',
+        (stream_kind, str(stream_key)),
+    ).fetchone()
+    rows = conn.execute(
+        'SELECT start_ts, end_ts, reason, detail FROM telemetry_coverage '
+        'WHERE stream_kind=? AND stream_key=? AND start_ts < ? AND end_ts > ? '
+        'ORDER BY start_ts ASC, end_ts ASC',
+        (stream_kind, str(stream_key), int(end_ts), int(start_ts)),
+    ).fetchall()
+    return {
+        'stream': dict(stream) if stream else None,
+        'intervals': tuple(dict(row) for row in rows),
+    }
+
+
+def get_pending_aggregation(conn, stream_kind, stream_key, start_ts, end_ts, limit):
+    """Return bounded pending/failed jobs without hiding preserved raw evidence."""
+    if stream_kind not in ('host', 'service') or int(limit) <= 0:
+        raise ValueError('invalid telemetry stream')
+    rows = _checked_rows(
+        conn,
+        'SELECT bucket_start AS start_ts, bucket_start + bucket_seconds AS end_ts, state, '
+        'attempt_count, next_retry_ts, last_error_class AS error_class '
+        'FROM telemetry_rollup_jobs WHERE stream_kind=? AND stream_key=? '
+        "AND state IN ('pending', 'failed') AND bucket_start < ? AND bucket_start + bucket_seconds > ? "
+        'ORDER BY bucket_start ASC LIMIT ?',
+        (stream_kind, str(stream_key), int(end_ts), int(start_ts), int(limit)),
+        int(limit),
+    )
+    return rows
 
 
 def get_host_metric_history(conn, metric, start_ts, end_ts, limit):

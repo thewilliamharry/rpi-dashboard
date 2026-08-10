@@ -288,12 +288,22 @@ def _migration_5_bounded_telemetry(conn):
         conn.execute(statement)
 
 
+def _migration_6_rollup_latency_counts(conn):
+    """Store the denominator required for exact cross-tier latency averages."""
+    _add_column(
+        conn,
+        'service_rollups',
+        'latency_sample_count INTEGER NOT NULL DEFAULT 0 CHECK (latency_sample_count >= 0)',
+    )
+
+
 MIGRATIONS = (
     Migration(1, 'baseline_schema', True, _migration_1_baseline),
     Migration(2, 'service_diagnostics', True, _migration_2_service_diagnostics),
     Migration(3, 'metadata_and_state', True, _migration_3_metadata_and_state),
     Migration(4, 'durable_work_queues', True, _migration_4_durable_work_queues),
     Migration(5, 'bounded_telemetry', True, _migration_5_bounded_telemetry),
+    Migration(6, 'rollup_latency_counts', True, _migration_6_rollup_latency_counts),
 )
 
 
