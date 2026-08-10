@@ -17,11 +17,11 @@
 
 ### Telemetry and Retention
 
-- [x] **TEL-01**: Beacon retains a rolling 90 days of bounded host metrics, service history, and events.
-- [x] **TEL-02**: Beacon preserves detailed recent observations and uses documented aggregates for older ranges.
-- [x] **TEL-03**: Rollups complete successfully before their source observations are deleted.
-- [x] **TEL-04**: Historical queries explicitly distinguish known values, unknown intervals, collection gaps, and retention expiry.
-- [x] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
+- [ ] **TEL-01**: Beacon retains a rolling 90 days of bounded host metrics, service history, and events.
+- [ ] **TEL-02**: Beacon preserves detailed recent observations and uses documented aggregates for older ranges.
+- [ ] **TEL-03**: Rollups complete successfully before their source observations are deleted.
+- [ ] **TEL-04**: Historical queries explicitly distinguish known values, unknown intervals, collection gaps, and retention expiry.
+- [ ] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
 - [ ] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
 
 ### Advanced Diagnosis
@@ -108,11 +108,11 @@ Every v1 requirement maps to exactly one roadmap phase.
 | FND-05 | Phase 1 | Complete |
 | FND-06 | Phase 1 | Complete |
 | FND-07 | Phase 1 | Complete |
-| TEL-01 | Phase 2 | Complete |
-| TEL-02 | Phase 2 | Complete |
-| TEL-03 | Phase 2 | Complete |
-| TEL-04 | Phase 2 | Complete |
-| TEL-05 | Phase 2 | Complete |
+| TEL-01 | Phase 2 | Gaps Found |
+| TEL-02 | Phase 2 | Gaps Found |
+| TEL-03 | Phase 2 | Gaps Found |
+| TEL-04 | Phase 2 | Gaps Found |
+| TEL-05 | Phase 2 | Gaps Found |
 | TEL-06 | Phase 3 | Pending |
 | DIA-01 | Phase 3 | Pending |
 | DIA-02 | Phase 3 | Pending |
