@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 2
 current_phase_name: Bounded Telemetry & Retention
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-08-10T13:34:39.889Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-08-10T14:28:10.617Z"
 last_activity: 2026-08-10
 last_activity_desc: Phase 2 execution started
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 29
-  completed_plans: 24
+  completed_plans: 25
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 2 (Bounded Telemetry & Retention) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-08-10 — Phase 2 execution started
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 86%
 
 ## Performance Metrics
 
@@ -81,6 +81,7 @@ Progress: [████████░░] 83%
 | Phase 01 P22 | 18 min | 2 tasks | 8 files |
 | Phase 01 P23 | 15 min | 3 tasks | 5 files |
 | Phase 02 P01 | 16 min | 2 tasks | 6 files |
+| Phase 02-bounded-telemetry-retention P02 | 4 min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -142,6 +143,7 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Host history preserves exact half-open bounds with a 2,048-point cap and explicit coverage instead of interpolation.
 - [Phase ?]: Wave 0 retention tests inject UTC time and use real Worker A-to-B lease takeover without wall-clock sleeps.
 - [Phase ?]: Migration preservation snapshots source fixture columns and values before asserting the same data after additive upgrades.
+- [Phase ?]: Approved additive telemetry evidence contract: per-metric and per-service bucket rows, sparse coverage, stream/bucket retries, exact 7/30/90-day cutoffs, and aggregate write/read-back verification before same-transaction source deletion.
 
 ### Pending Todos
 
@@ -161,6 +163,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-10T13:34:39.879Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-08-10T14:28:10.607Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
