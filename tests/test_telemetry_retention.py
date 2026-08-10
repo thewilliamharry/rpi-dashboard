@@ -203,6 +203,57 @@ class RetentionRollupContractTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_cutoff_ownership_keeps_partial_raw_and_exact_hourly_boundaries(self):
+        policy = telemetry.RetentionPolicy(rollup_batch_buckets=4)
+        raw_cutoff = self.now - policy.raw_days * 86400
+        hourly_cutoff = self.now - policy.retention_days * 86400
+        complete_start = telemetry.bucket_start(raw_cutoff - 1, 300)
+        partial_start = telemetry.bucket_start(raw_cutoff, 300)
+        conn = self._connection()
+        try:
+            seed_host_rows(conn, [
+                (complete_start, 1.0, None, None, None),
+                (partial_start, 2.0, None, None, None),
+                (partial_start + 1, None, None, None, None),
+            ])
+            conn.execute(
+                'INSERT INTO host_metric_rollups VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                ('cpu', hourly_cutoff - 3600, 3600, 1.0, 1.0, 1.0, 1.0, 1, 3600, 0, 0),
+            )
+            conn.execute(
+                'INSERT INTO host_metric_rollups VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                ('cpu', hourly_cutoff, 3600, 2.0, 2.0, 2.0, 2.0, 1, 3600, 0, 0),
+            )
+            conn.commit()
+            telemetry.run_retention_batch(conn, now=self.now, policy=policy)
+            self.assertEqual(
+                [row['ts'] for row in conn.execute('SELECT ts FROM stats_history ORDER BY ts')],
+                [partial_start, partial_start + 1],
+            )
+            self.assertEqual(
+                [row['bucket_start'] for row in conn.execute(
+                    'SELECT bucket_start FROM host_metric_rollups WHERE bucket_seconds=3600 ORDER BY bucket_start'
+                )],
+                [hourly_cutoff],
+            )
+        finally:
+            conn.close()
+
+    def test_empty_host_bucket_neither_rolls_nor_deletes_its_source(self):
+        policy = telemetry.RetentionPolicy()
+        cutoff = self.now - policy.raw_days * 86400
+        start = telemetry.bucket_start(cutoff - 300, 300)
+        conn = self._connection()
+        try:
+            seed_host_rows(conn, [(start, None, None, None, None)])
+            conn.commit()
+            result = telemetry.run_retention_batch(conn, now=self.now, policy=policy)
+            self.assertEqual(result['rolled_buckets'], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM stats_history').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM host_metric_rollups').fetchone()[0], 0)
+        finally:
+            conn.close()
+
     def test_service_rollup_is_time_weighted_and_failure_counts_are_stable(self):
         policy = telemetry.RetentionPolicy(rollup_batch_buckets=4)
         cutoff = self.now - policy.raw_days * 86400
@@ -236,7 +287,7 @@ class RetentionRollupContractTests(unittest.TestCase):
             seed_host_rows(conn, [(start, 1.0, None, None, None)])
             seed_events(conn, [
                 (self.now - policy.retention_days * 86400 - 1, None, 'old', None, None, None, None, 'none', '{}'),
-                (self.now - policy.retention_days * 86400, None, 'edge', None, None, None, None, 'none', '{}'),
+                (self.now + 300 - policy.retention_days * 86400, None, 'edge', None, None, None, None, 'none', '{}'),
             ])
             conn.commit()
             with self.assertRaises(RuntimeError):
@@ -254,7 +305,7 @@ class RetentionRollupContractTests(unittest.TestCase):
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM host_metric_rollups').fetchone()[0], 1)
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM telemetry_rollup_jobs').fetchone()[0], 1)
             self.assertEqual(
-                conn.execute('SELECT event_type FROM events ORDER BY ts').fetchall(),
+                [tuple(row) for row in conn.execute('SELECT event_type FROM events ORDER BY ts').fetchall()],
                 [('edge',)],
             )
         finally:

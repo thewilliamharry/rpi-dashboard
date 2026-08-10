@@ -1,6 +1,8 @@
-"""Framework-free policy for bounded historical telemetry responses."""
+"""Framework-free policy and durable operations for bounded telemetry."""
 
 from dataclasses import dataclass
+import json
+import math
 
 
 POINT_BUDGET = 2048
@@ -84,3 +86,477 @@ def coalesce_coverage(intervals):
         else:
             coalesced.append(interval)
     return tuple(coalesced)
+
+
+@dataclass(frozen=True)
+class RetentionPolicy:
+    """Validated, immutable retention and pressure values for one worker batch."""
+
+    raw_days: int = 7
+    five_minute_days: int = 30
+    retention_days: int = 90
+    point_budget: int = POINT_BUDGET
+    db_max_bytes: int = 536_870_912
+    min_free_bytes: int = 1_073_741_824
+    pressure_warning_percent: int = 80
+    pressure_hard_percent: int = 90
+    pressure_recovery_percent: int = 75
+    backlog_reserve_bytes: int = 67_108_864
+    rollup_batch_buckets: int = 32
+    retry_base_seconds: int = 300
+    retry_max_seconds: int = 3_600
+
+    def __post_init__(self):
+        positive = (
+            'raw_days', 'five_minute_days', 'retention_days', 'point_budget',
+            'db_max_bytes', 'min_free_bytes', 'backlog_reserve_bytes',
+            'rollup_batch_buckets', 'retry_base_seconds', 'retry_max_seconds',
+        )
+        for name in positive:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f'{name} must be a positive integer')
+        if not self.raw_days < self.five_minute_days < self.retention_days:
+            raise ValueError('retention tiers must increase strictly')
+        if not (
+            0 < self.pressure_recovery_percent < self.pressure_warning_percent
+            < self.pressure_hard_percent <= 100
+        ):
+            raise ValueError('pressure thresholds must satisfy recovery < warning < hard <= 100')
+        if self.retry_base_seconds > self.retry_max_seconds:
+            raise ValueError('retry_base_seconds must not exceed retry_max_seconds')
+
+
+@dataclass(frozen=True)
+class StorageSnapshot:
+    """Filesystem state used to decide whether historical writes remain safe."""
+
+    database_bytes: int
+    wal_bytes: int
+    shm_bytes: int
+    free_bytes: int
+
+    def __post_init__(self):
+        for name in ('database_bytes', 'wal_bytes', 'shm_bytes', 'free_bytes'):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f'{name} must be a non-negative integer')
+
+    @property
+    def footprint_bytes(self):
+        return self.database_bytes + self.wal_bytes + self.shm_bytes
+
+
+@dataclass(frozen=True)
+class PressureDecision:
+    """A pure storage-pressure transition with a historical-write permission."""
+
+    previous_state: str
+    state: str
+    reason: str | None
+
+    @property
+    def historical_persistence_allowed(self):
+        return self.state != 'suspended'
+
+
+def bucket_start(ts, seconds):
+    """Return the canonical UTC half-open bucket start for an integer timestamp."""
+    if isinstance(ts, bool) or not isinstance(ts, int):
+        raise ValueError('ts must be an integer')
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
+        raise ValueError('seconds must be a positive integer')
+    return (ts // seconds) * seconds
+
+
+def bucket_is_complete(start, seconds, cutoff_ts):
+    """Whether a full bucket ends at or before a retention cutoff."""
+    return bucket_start(start, seconds) == start and start + seconds <= int(cutoff_ts)
+
+
+def _row_value(row, name):
+    try:
+        return row[name]
+    except (IndexError, KeyError, TypeError):
+        return getattr(row, name)
+
+
+def _duration_breakdown(start, end, observations, coverage=(), initial_state=None):
+    """Resolve observed status intervals, letting persisted gaps override evidence."""
+    cursor = start
+    state = initial_state
+    totals = {'online_seconds': 0, 'offline_seconds': 0, 'unknown_seconds': 0, 'gap_seconds': 0}
+    segments = []
+    for ts, next_state in sorted(observations, key=lambda item: item[0]):
+        ts = min(max(int(ts), start), end)
+        if ts > cursor:
+            segments.append((cursor, ts, state))
+        cursor = ts
+        state = next_state
+    if cursor < end:
+        segments.append((cursor, end, state))
+    for segment_start, segment_end, segment_state in segments:
+        field = {True: 'online_seconds', False: 'offline_seconds'}.get(segment_state, 'unknown_seconds')
+        totals[field] += segment_end - segment_start
+    for interval in coverage:
+        overlap_start = max(start, int(_row_value(interval, 'start_ts')))
+        overlap_end = min(end, int(_row_value(interval, 'end_ts')))
+        if overlap_start >= overlap_end:
+            continue
+        replacement = (
+            'gap_seconds' if _row_value(interval, 'reason') == 'collection_gap'
+            else 'unknown_seconds'
+        )
+        for segment_start, segment_end, segment_state in segments:
+            overlap = max(0, min(segment_end, overlap_end) - max(segment_start, overlap_start))
+            if not overlap:
+                continue
+            field = {True: 'online_seconds', False: 'offline_seconds'}.get(
+                segment_state, 'unknown_seconds',
+            )
+            totals[field] -= overlap
+            totals[replacement] += overlap
+    return totals
+
+
+def build_host_rollup(rows, metric, start, seconds, coverage=()):
+    """Build one host rollup from ordered raw values without interpolating gaps."""
+    end = start + seconds
+    ordered = sorted(rows, key=lambda row: int(_row_value(row, 'ts')))
+    samples = [
+        (int(_row_value(row, 'ts')), float(_row_value(row, metric)))
+        for row in ordered if _row_value(row, metric) is not None
+    ]
+    if not samples:
+        return None
+    observed = 0
+    for index, (ts, _) in enumerate(samples):
+        next_ts = samples[index + 1][0] if index + 1 < len(samples) else end
+        observed += max(0, min(end, next_ts) - max(start, ts))
+    gap_seconds = 0
+    unknown_seconds = max(0, seconds - observed)
+    for interval in coverage:
+        overlap = max(
+            0,
+            min(end, int(_row_value(interval, 'end_ts')))
+            - max(start, int(_row_value(interval, 'start_ts'))),
+        )
+        if not overlap:
+            continue
+        observed = max(0, observed - overlap)
+        if _row_value(interval, 'reason') == 'collection_gap':
+            gap_seconds += overlap
+        else:
+            unknown_seconds += overlap
+    values = [value for _, value in samples]
+    return {
+        'metric': metric,
+        'bucket_start': start,
+        'bucket_seconds': seconds,
+        'min_value': min(values),
+        'max_value': max(values),
+        'avg_value': sum(values) / len(values),
+        'latest_value': values[-1],
+        'sample_count': len(values),
+        'observed_seconds': observed,
+        'gap_seconds': gap_seconds,
+        'unknown_seconds': unknown_seconds,
+    }
+
+
+def build_service_rollup(rows, service_port, start, seconds, coverage=(), prior_online=None):
+    """Build a time-weighted service rollup; false is observed offline, never a gap."""
+    end = start + seconds
+    ordered = sorted(rows, key=lambda row: int(_row_value(row, 'ts')))
+    observations = [
+        (int(_row_value(row, 'ts')), _row_value(row, 'online')) for row in ordered
+    ]
+    durations = _duration_breakdown(start, end, observations, coverage, prior_online)
+    latencies = [
+        float(_row_value(row, 'latency_ms')) for row in ordered
+        if _row_value(row, 'latency_ms') is not None
+    ]
+    failure_counts = {}
+    for row in ordered:
+        failure = _row_value(row, 'error_class')
+        if failure:
+            failure_counts[str(failure)] = failure_counts.get(str(failure), 0) + 1
+    return {
+        'service_port': int(service_port),
+        'bucket_start': start,
+        'bucket_seconds': seconds,
+        **durations,
+        'latency_min': min(latencies) if latencies else None,
+        'latency_max': max(latencies) if latencies else None,
+        'latency_avg': sum(latencies) / len(latencies) if latencies else None,
+        'check_count': len(ordered),
+        'failure_class_counts_json': json.dumps(
+            failure_counts, separators=(',', ':'), sort_keys=True,
+        ),
+    }
+
+
+def record_coverage_interval(conn, stream_kind, stream_key, start_ts, end_ts, reason, detail=None):
+    """Insert one validated, non-overlapping sparse coverage interval."""
+    interval = CoverageInterval(int(start_ts), int(end_ts), str(reason))
+    overlapping = conn.execute(
+        'SELECT 1 FROM telemetry_coverage WHERE stream_kind=? AND stream_key=? '
+        'AND start_ts < ? AND end_ts > ? LIMIT 1',
+        (str(stream_kind), str(stream_key), interval.end_ts, interval.start_ts),
+    ).fetchone()
+    if overlapping is not None:
+        raise ValueError('coverage intervals must not overlap')
+    conn.execute(
+        'INSERT INTO telemetry_coverage(stream_kind, stream_key, start_ts, end_ts, reason, detail) '
+        'VALUES(?,?,?,?,?,?)',
+        (str(stream_kind), str(stream_key), interval.start_ts, interval.end_ts, interval.state, detail),
+    )
+
+
+def _coverage_for(conn, stream_kind, stream_key, start, end):
+    return conn.execute(
+        'SELECT start_ts, end_ts, reason FROM telemetry_coverage '
+        'WHERE stream_kind=? AND stream_key=? AND start_ts < ? AND end_ts > ? '
+        'ORDER BY start_ts, end_ts',
+        (stream_kind, str(stream_key), end, start),
+    ).fetchall()
+
+
+def _upsert_and_verify(conn, table, values, keys):
+    columns = tuple(values)
+    assignments = ', '.join(f'{column}=excluded.{column}' for column in columns if column not in keys)
+    conn.execute(
+        f'INSERT INTO {table} ({", ".join(columns)}) VALUES ({", ".join("?" for _ in columns)}) '
+        f'ON CONFLICT({", ".join(keys)}) DO UPDATE SET {assignments}',
+        tuple(values[column] for column in columns),
+    )
+    where = ' AND '.join(f'{key}=?' for key in keys)
+    stored = conn.execute(
+        f'SELECT {", ".join(columns)} FROM {table} WHERE {where}',
+        tuple(values[key] for key in keys),
+    ).fetchone()
+    if stored is None:
+        raise AssertionError('aggregate read-back missing')
+    for column in columns:
+        actual = stored[column]
+        expected = values[column]
+        if isinstance(expected, float):
+            if actual is None or not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12):
+                raise AssertionError(f'aggregate read-back mismatch for {column}')
+        elif actual != expected:
+            raise AssertionError(f'aggregate read-back mismatch for {column}')
+
+
+def _mark_succeeded(conn, stream_kind, stream_key, start, seconds, now):
+    conn.execute(
+        'INSERT INTO telemetry_rollup_jobs('
+        'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+        'next_retry_ts, last_error_class, updated_ts) VALUES(?,?,?,?,\'succeeded\',0,NULL,NULL,?) '
+        'ON CONFLICT(stream_kind, stream_key, bucket_start, bucket_seconds) DO UPDATE SET '
+        'state=\'succeeded\', next_retry_ts=NULL, last_error_class=NULL, updated_ts=excluded.updated_ts',
+        (stream_kind, str(stream_key), start, seconds, now),
+    )
+
+
+def _mark_failed(conn, stream_kind, stream_key, start, seconds, now, policy, error):
+    prior = conn.execute(
+        'SELECT attempt_count FROM telemetry_rollup_jobs WHERE stream_kind=? AND stream_key=? '
+        'AND bucket_start=? AND bucket_seconds=?',
+        (stream_kind, str(stream_key), start, seconds),
+    ).fetchone()
+    attempt = (prior['attempt_count'] if prior else 0) + 1
+    delay = min(policy.retry_base_seconds * (2 ** (attempt - 1)), policy.retry_max_seconds)
+    conn.execute(
+        'INSERT INTO telemetry_rollup_jobs('
+        'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+        'next_retry_ts, last_error_class, updated_ts) VALUES(?,?,?,?,\'failed\',?,?,?,?) '
+        'ON CONFLICT(stream_kind, stream_key, bucket_start, bucket_seconds) DO UPDATE SET '
+        'state=\'failed\', attempt_count=excluded.attempt_count, next_retry_ts=excluded.next_retry_ts, '
+        'last_error_class=excluded.last_error_class, updated_ts=excluded.updated_ts',
+        (stream_kind, str(stream_key), start, seconds, attempt, now + delay, type(error).__name__, now),
+    )
+
+
+def _raw_candidates(conn, cutoff):
+    candidates = []
+    for row in conn.execute('SELECT ts FROM stats_history WHERE ts < ? ORDER BY ts', (cutoff,)):
+        start = bucket_start(int(row['ts']), 300)
+        if bucket_is_complete(start, 300, cutoff):
+            candidates.append((start, 300, 'host', 'host'))
+    for row in conn.execute(
+        'SELECT ts, port FROM service_checks WHERE ts < ? ORDER BY ts, port', (cutoff,),
+    ):
+        start = bucket_start(int(row['ts']), 300)
+        if bucket_is_complete(start, 300, cutoff):
+            candidates.append((start, 300, 'service', str(row['port'])))
+    return candidates
+
+
+def _five_minute_candidates(conn, cutoff):
+    candidates = []
+    for row in conn.execute(
+        'SELECT DISTINCT metric, bucket_start FROM host_metric_rollups '
+        'WHERE bucket_seconds=300 AND bucket_start + bucket_seconds <= ? ORDER BY bucket_start, metric',
+        (cutoff,),
+    ):
+        start = bucket_start(int(row['bucket_start']), 3600)
+        if bucket_is_complete(start, 3600, cutoff):
+            candidates.append((start, 3600, 'host_rollup', str(row['metric'])))
+    for row in conn.execute(
+        'SELECT DISTINCT service_port, bucket_start FROM service_rollups '
+        'WHERE bucket_seconds=300 AND bucket_start + bucket_seconds <= ? ORDER BY bucket_start, service_port',
+        (cutoff,),
+    ):
+        start = bucket_start(int(row['bucket_start']), 3600)
+        if bucket_is_complete(start, 3600, cutoff):
+            candidates.append((start, 3600, 'service_rollup', str(row['service_port'])))
+    return candidates
+
+
+def _roll_host_raw(conn, start, now, policy):
+    end = start + 300
+    rows = conn.execute(
+        'SELECT ts, cpu, ram, disk, temp FROM stats_history WHERE ts >= ? AND ts < ? ORDER BY ts',
+        (start, end),
+    ).fetchall()
+    created = 0
+    for metric in ('cpu', 'ram', 'disk', 'temp'):
+        aggregate = build_host_rollup(rows, metric, start, 300, _coverage_for(conn, 'host', metric, start, end))
+        if aggregate is None:
+            continue
+        _upsert_and_verify(conn, 'host_metric_rollups', aggregate, ('metric', 'bucket_start', 'bucket_seconds'))
+        created += 1
+    if not created:
+        return False
+    _mark_succeeded(conn, 'host', 'host', start, 300, now)
+    conn.execute('DELETE FROM stats_history WHERE ts >= ? AND ts < ?', (start, end))
+    return True
+
+
+def _roll_service_raw(conn, port, start, now):
+    end = start + 300
+    prior = conn.execute(
+        'SELECT online FROM service_checks WHERE port=? AND ts < ? ORDER BY ts DESC LIMIT 1',
+        (int(port), start),
+    ).fetchone()
+    rows = conn.execute(
+        'SELECT ts, online, latency_ms, error_class FROM service_checks '
+        'WHERE port=? AND ts >= ? AND ts < ? ORDER BY ts',
+        (int(port), start, end),
+    ).fetchall()
+    if not rows:
+        return False
+    aggregate = build_service_rollup(
+        rows, int(port), start, 300, _coverage_for(conn, 'service', port, start, end),
+        prior_online=None if prior is None else prior['online'],
+    )
+    _upsert_and_verify(conn, 'service_rollups', aggregate, ('service_port', 'bucket_start', 'bucket_seconds'))
+    _mark_succeeded(conn, 'service', port, start, 300, now)
+    conn.execute('DELETE FROM service_checks WHERE port=? AND ts >= ? AND ts < ?', (int(port), start, end))
+    return True
+
+
+def _roll_host_five_minutes(conn, metric, start, now):
+    end = start + 3600
+    rows = conn.execute(
+        'SELECT * FROM host_metric_rollups WHERE metric=? AND bucket_seconds=300 '
+        'AND bucket_start >= ? AND bucket_start < ? ORDER BY bucket_start',
+        (metric, start, end),
+    ).fetchall()
+    if not rows:
+        return False
+    count = sum(row['sample_count'] for row in rows)
+    aggregate = {
+        'metric': metric, 'bucket_start': start, 'bucket_seconds': 3600,
+        'min_value': min(row['min_value'] for row in rows if row['min_value'] is not None),
+        'max_value': max(row['max_value'] for row in rows if row['max_value'] is not None),
+        'avg_value': sum(row['avg_value'] * row['sample_count'] for row in rows if row['avg_value'] is not None) / count,
+        'latest_value': rows[-1]['latest_value'], 'sample_count': count,
+        'observed_seconds': sum(row['observed_seconds'] for row in rows),
+        'gap_seconds': sum(row['gap_seconds'] for row in rows),
+        'unknown_seconds': sum(row['unknown_seconds'] for row in rows),
+    }
+    _upsert_and_verify(conn, 'host_metric_rollups', aggregate, ('metric', 'bucket_start', 'bucket_seconds'))
+    _mark_succeeded(conn, 'host', metric, start, 3600, now)
+    conn.execute(
+        'DELETE FROM host_metric_rollups WHERE metric=? AND bucket_seconds=300 '
+        'AND bucket_start >= ? AND bucket_start < ?', (metric, start, end),
+    )
+    return True
+
+
+def _roll_service_five_minutes(conn, port, start, now):
+    end = start + 3600
+    rows = conn.execute(
+        'SELECT * FROM service_rollups WHERE service_port=? AND bucket_seconds=300 '
+        'AND bucket_start >= ? AND bucket_start < ? ORDER BY bucket_start',
+        (int(port), start, end),
+    ).fetchall()
+    if not rows:
+        return False
+    latencies = [(row['latency_avg'], row['check_count']) for row in rows if row['latency_avg'] is not None]
+    failures = {}
+    for row in rows:
+        for failure, count in json.loads(row['failure_class_counts_json']).items():
+            failures[failure] = failures.get(failure, 0) + int(count)
+    checks = sum(row['check_count'] for row in rows)
+    aggregate = {
+        'service_port': int(port), 'bucket_start': start, 'bucket_seconds': 3600,
+        'online_seconds': sum(row['online_seconds'] for row in rows),
+        'offline_seconds': sum(row['offline_seconds'] for row in rows),
+        'unknown_seconds': sum(row['unknown_seconds'] for row in rows),
+        'gap_seconds': sum(row['gap_seconds'] for row in rows),
+        'latency_min': min((row['latency_min'] for row in rows if row['latency_min'] is not None), default=None),
+        'latency_max': max((row['latency_max'] for row in rows if row['latency_max'] is not None), default=None),
+        'latency_avg': (sum(value * count for value, count in latencies) / sum(count for _, count in latencies)) if latencies else None,
+        'check_count': checks,
+        'failure_class_counts_json': json.dumps(failures, separators=(',', ':'), sort_keys=True),
+    }
+    _upsert_and_verify(conn, 'service_rollups', aggregate, ('service_port', 'bucket_start', 'bucket_seconds'))
+    _mark_succeeded(conn, 'service', port, start, 3600, now)
+    conn.execute(
+        'DELETE FROM service_rollups WHERE service_port=? AND bucket_seconds=300 '
+        'AND bucket_start >= ? AND bucket_start < ?', (int(port), start, end),
+    )
+    return True
+
+
+def run_retention_batch(conn, *, now, policy=None, before_verify=None, raise_on_failure=False):
+    """Roll at most one deterministic batch inside the caller-owned worker transaction."""
+    policy = policy or RetentionPolicy()
+    now = int(now)
+    raw_cutoff = now - policy.raw_days * 86400
+    five_cutoff = now - policy.five_minute_days * 86400
+    candidates = _raw_candidates(conn, raw_cutoff) + _five_minute_candidates(conn, five_cutoff)
+    ordered = sorted(set(candidates), key=lambda item: (item[0], item[1], item[2], item[3]))
+    rolled = 0
+    failures = 0
+    for index, (start, seconds, kind, stream_key) in enumerate(ordered[:policy.rollup_batch_buckets]):
+        savepoint = f'telemetry_bucket_{index}'
+        conn.execute(f'SAVEPOINT {savepoint}')
+        stream_kind = 'host' if kind.startswith('host') else 'service'
+        try:
+            if kind == 'host':
+                changed = _roll_host_raw(conn, start, now, policy)
+            elif kind == 'service':
+                changed = _roll_service_raw(conn, stream_key, start, now)
+            elif kind == 'host_rollup':
+                changed = _roll_host_five_minutes(conn, stream_key, start, now)
+            else:
+                changed = _roll_service_five_minutes(conn, stream_key, start, now)
+            if changed and before_verify is not None:
+                before_verify(kind, stream_key, start, seconds)
+            conn.execute(f'RELEASE SAVEPOINT {savepoint}')
+            rolled += int(bool(changed))
+        except Exception as error:
+            conn.execute(f'ROLLBACK TO SAVEPOINT {savepoint}')
+            conn.execute(f'RELEASE SAVEPOINT {savepoint}')
+            _mark_failed(conn, stream_kind, stream_key, start, seconds, now, policy, error)
+            failures += 1
+            if raise_on_failure:
+                raise
+    expiry_cutoff = now - policy.retention_days * 86400
+    conn.execute('DELETE FROM host_metric_rollups WHERE bucket_seconds=3600 AND bucket_start < ?', (expiry_cutoff,))
+    conn.execute('DELETE FROM service_rollups WHERE bucket_seconds=3600 AND bucket_start < ?', (expiry_cutoff,))
+    conn.execute('DELETE FROM events WHERE ts < ?', (expiry_cutoff,))
+    return {'rolled_buckets': rolled, 'failed_buckets': failures}
