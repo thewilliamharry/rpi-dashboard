@@ -41,7 +41,7 @@ created: 2026-08-10
 | 02-04-01 / 02-05-02 | 04 / 05 | 4 / 5 | TEL-01 | T-02-12 / T-02-14 | Retention stays bounded and stale workers cannot mutate data | unit + integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
 | 02-04-01 | 04 | 4 | TEL-02 | T-02-10 | Tier boundaries and aggregate fields are deterministic | unit | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
 | 02-04-01 / 02-05-01 | 04 / 05 | 4 / 5 | TEL-03 | T-02-10 / T-02-14 | Raw data is never deleted before verified rollup persistence | integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
-| 02-05-01 / 02-06-02 | 05 / 06 | 5 / 6 | TEL-04 | T-02-17 / T-02-19 | Coverage partitions are exhaustive and selectors use fixed query shapes | API integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ W0 via 02-01-02 | ⬜ pending |
+| 02-05-01 / 02-06-02 | 05 / 06 | 5 / 6 | TEL-04 | T-02-17 / T-02-19 | Coverage partitions are exhaustive, selectors use fixed query shapes, and service results map `True` to observed online, `False` to observed offline even with `error_class`, and only `None` to unknown | worker + API integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py tests/test_historical_telemetry_api.py` | ❌ W0 via 02-01-02 | ⬜ pending |
 | 02-01-01 / 02-06-02 | 01 / 06 | 1 / 6 | TEL-05 | T-02-01 / T-02-18 | Range validation and server resolution cap response work | API unit + integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ W0 via 02-01-02 | ⬜ pending |
 
 *Task IDs, plans, and waves are populated when PLAN.md files are finalized. Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky.*
@@ -50,7 +50,7 @@ created: 2026-08-10
 
 ## Wave 0 Requirements
 
-- [ ] `tests/test_telemetry_retention.py` — deterministic clock/data fixtures, tier boundaries, rollup-before-delete, retries, pressure/recovery, and concurrent worker epoch loss
+- [ ] `tests/test_telemetry_retention.py` — deterministic clock/data fixtures, tier boundaries, rollup-before-delete, retries, pressure/recovery, concurrent worker epoch loss, and a table-driven service-result assertion for `True -> observed online`, `False -> observed offline` (including `error_class`), and `None -> unknown`
 - [ ] `tests/test_historical_telemetry_api.py` — query validation, coverage partition, requested bounds, response budget, and resolution metadata
 - [ ] `tests/test_migrations.py` — extend migration coverage to prove legacy data survives and telemetry indexes/constraints are created
 

@@ -320,22 +320,22 @@ The planner should use defaults of 512 MiB database allocation, 1 GiB filesystem
 | A4 | A sparse non-observed coverage ledger and a Flask-free `telemetry.py` module are the best schema/module division. | Architecture Patterns | Implementation may need small adaptation to preserve current adapters. |
 | A5 | The five-minute all-service probe is the base cadence and down-only checks are extra evidence. | Architecture Patterns | Gap detection may be semantically wrong for a service lifecycle edge case. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does the confirmed production database fingerprint contain enough existing service identity/history to migrate without a service-key transition?**
-   - What we know: Phase 1 freezes the supported legacy fingerprints and `service_checks` currently keys observations by `(ts, port)`. [VERIFIED: dashboard/beacon/migrations.py]
-   - What's unclear: Whether any retained production data needs a service-instance identity beyond port after a service is rediscovered. [ASSUMED]
-   - Recommendation: Inspect the confirmed production fixture and preserve the existing port key in Phase 2; introduce an opaque service identity only if fixture evidence requires it. [ASSUMED]
+   - **Final choice:** Preserve the existing port identity: raw checks remain keyed by `(ts, port)`, service rollups and stream state use `service_port`, and Phase 2 introduces no opaque service identity or history rewrite. [VERIFIED: dashboard/beacon/migrations.py] [RESOLVED: Plan 02-03]
+   - **Reversibility:** Costly — changing identity after rollups exist would require a versioned schema/API migration and an explicit history-association policy.
+   - **Validation status:** Plan 02-03 inspects the frozen operator fixture before migration work and tests the exact supported fingerprints plus legacy-data preservation. If that fixture contradicts port identity, execution halts rather than silently choosing a different identity; this is an evidence precondition, not an open design choice.
 
 2. **What target filesystem capacity must defaults protect?**
-   - What we know: The local research filesystem has 83.7 GB free, which is not representative of a Raspberry Pi SD card. [VERIFIED: environment probe]
-   - What's unclear: Operator Pi volume size, competing data, and acceptable telemetry share. [ASSUMED]
-   - Recommendation: Implement validated environment overrides and make the selected defaults visible to Phase 3, then perform Pi sizing in Phase 6. [VERIFIED: 02-CONTEXT.md] [ASSUMED]
+   - **Final choice:** Use a 512 MiB database allocation, 1 GiB minimum free-disk reserve, 80% warning threshold, 90% hard-pressure threshold, 75% recovery threshold, and 64 MiB emergency rollup-backlog reserve. Every value is a validated environment override, and recovery requires both allocation and free-space conditions. [RESOLVED: Plan 02-04]
+   - **Reversibility:** Reversible — operators can tune validated settings without changing the schema or retention vocabulary; the locked 7/30/90-day retention contract remains unchanged.
+   - **Validation status:** Plan 02-04 supplies automated threshold, boundary, reserve, and hysteresis tests. The target-Pi capacity exercise remains a deployment-suitability measurement in Phase 6 and may tune defaults, but it does not block the Phase 2 pressure-state contract.
 
 3. **What represents an indeterminate service result?**
-   - What we know: Current probe writers persist `online` as 0 or 1 and store an `error_class`; the new contract needs a distinct `unknown` interval. [VERIFIED: codebase grep] [VERIFIED: 02-CONTEXT.md]
-   - What's unclear: Which operational failures should become known-offline versus unknown under the product's intended semantics. [ASSUMED]
-   - Recommendation: Lock an explicit mapping in the plan/test matrix before changing writers; do not infer unknown from any false Boolean. [ASSUMED]
+   - **Final choice:** `online is True` is observed-online; `online is False` is observed-offline even when an `error_class` is present; only an explicit adapter result `online is None` creates an `unknown` interval. Never infer `unknown` from a false Boolean or from `error_class`, and never encode indeterminate state as a numeric latency/status sentinel. `storage_pressure` remains detail on a `collection_gap`, not a service-result state. [VERIFIED: 02-CONTEXT.md] [RESOLVED: Plan 02-05]
+   - **Reversibility:** Costly — reclassifying persisted service history would change D-05 coverage meaning consumed by later analytics.
+   - **Validation status:** Wave 0 and Plan 02-05 add a table-driven assertion for `True -> observed online`, `False -> observed offline`, and `None -> unknown`, including a false result with `error_class`; Plan 02-06 verifies that the resulting unknown interval is returned unchanged in the exhaustive coverage partition.
 
 ## Environment Availability
 
@@ -368,7 +368,7 @@ The planner should use defaults of 512 MiB database allocation, 1 GiB filesystem
 | TEL-01 | Raw/rollup/event expiry results in bounded 90-day retained data. | unit + integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ Wave 0 |
 | TEL-02 | Exact 7d/30d/90d tier boundary and aggregate fields. | unit | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ Wave 0 |
 | TEL-03 | Fail/crash/retry never deletes raw source before a successful rollup. | integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ Wave 0 |
-| TEL-04 | Coverage exhaustively labels observed, unknown, gap, expired, and not-yet-monitored ranges. | API integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ Wave 0 |
+| TEL-04 | Coverage exhaustively labels observed, unknown, gap, expired, and not-yet-monitored ranges; service results map `True` to observed online, `False` to observed offline, and only `None` to unknown. | API + worker integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py tests/test_historical_telemetry_api.py` | ❌ Wave 0 |
 | TEL-05 | Valid range chooses stable resolution and cannot exceed point budget. | API unit + integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ Wave 0 |
 
 ### Sampling Rate
@@ -379,7 +379,7 @@ The planner should use defaults of 512 MiB database allocation, 1 GiB filesystem
 
 ### Wave 0 Gaps
 
-- [ ] `tests/test_telemetry_retention.py` — deterministic clock/data fixtures, tier boundaries, rollup-before-delete, retries, pressure/recovery, and concurrent worker epoch loss.
+- [ ] `tests/test_telemetry_retention.py` — deterministic clock/data fixtures, tier boundaries, rollup-before-delete, retries, pressure/recovery, concurrent worker epoch loss, and the exact service-result table `True -> observed online`, `False -> observed offline` (including `error_class`), `None -> unknown`.
 - [ ] `tests/test_historical_telemetry_api.py` — query validation, coverage partition, requested bounds, response budget, and resolution metadata.
 - [ ] Extend `tests/test_migrations.py` — assert upgrade preserves legacy tables/data and creates all telemetry indexes/constraints.
 
