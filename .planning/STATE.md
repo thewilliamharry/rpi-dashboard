@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 2
 current_phase_name: Bounded Telemetry & Retention
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-08-10T13:11:50.385Z"
-last_activity: 2026-08-07
-last_activity_desc: Phase 1 complete, transitioned to Phase 2
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-08-10T13:34:39.889Z"
+last_activity: 2026-08-10
+last_activity_desc: Phase 2 execution started
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 29
-  completed_plans: 23
+  completed_plans: 24
 ---
 
 # Project State
@@ -27,12 +27,12 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 2 — Bounded Telemetry & Retention
-Plan: Not started
+Phase: 2 (Bounded Telemetry & Retention) — EXECUTING
+Plan: 2 of 6
 Status: Ready to execute
-Last activity: 2026-08-07 — Phase 1 complete, transitioned to Phase 2
+Last activity: 2026-08-10 — Phase 2 execution started
 
-Progress: [██░░░░░░░░] 17%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
@@ -80,6 +80,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 01 P21 | 9 min | 2 tasks | 2 files |
 | Phase 01 P22 | 18 min | 2 tasks | 8 files |
 | Phase 01 P23 | 15 min | 3 tasks | 5 files |
+| Phase 02 P01 | 16 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -138,6 +139,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Existing queue row, revision, lease, deadline, and coalescing fences remain additive to worker epoch authority.
 - [Phase ?]: All ownership-required callbacks preserve immutable startup/scheduled classifications through one close-and-drain registry.
 - [Phase ?]: Preview publication is atomic with durable authority and Wave 14 queue fencing; webhooks reserve the exact epoch across bounded delivery.
+- [Phase ?]: Host history preserves exact half-open bounds with a 2,048-point cap and explicit coverage instead of interpolation.
+- [Phase ?]: Wave 0 retention tests inject UTC time and use real Worker A-to-B lease takeover without wall-clock sleeps.
+- [Phase ?]: Migration preservation snapshots source fixture columns and values before asserting the same data after additive upgrades.
 
 ### Pending Todos
 
@@ -157,6 +161,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-06T21:44:46.020Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-bounded-telemetry-retention/02-CONTEXT.md
+Last session: 2026-08-10T13:34:39.879Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None
