@@ -4,16 +4,16 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 2
 current_phase_name: Bounded Telemetry & Retention
-status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-08-10T15:00:54.277Z"
+status: verifying
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-08-10T15:24:48.092Z"
 last_activity: 2026-08-10
 last_activity_desc: Phase 2 execution started
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 29
-  completed_plans: 28
+  completed_plans: 29
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 Phase: 2 (Bounded Telemetry & Retention) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-10 — Phase 2 execution started
 
-Progress: [██████████] 97%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -85,6 +85,7 @@ Progress: [██████████] 97%
 | Phase 02-bounded-telemetry-retention P03 | 4 min | 1 tasks | 5 files |
 | Phase 02-bounded-telemetry-retention P04 | 18 min | 2 tasks | 3 files |
 | Phase 02 P05 | 10min | 2 tasks | 5 files |
+| Phase 02 P06 | 21min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -152,6 +153,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Storage pressure returns an explicit historical-write decision; later worker wiring owns persistence-state recording and leaves safe rollup compaction available.
 - [Phase ?]: J8 remains the sole coalesced cleanup callback; retention and observation writes are fenced by the exact worker epoch.
 - [Phase ?]: Historical suspension skips only new rows and records storage_pressure gaps while current host and service state remains live.
+- [Phase ?]: Service rollups retain latency_sample_count so cross-tier latency averages use their real denominator.
+- [Phase ?]: Coverage is an exhaustive five-state partition, while pending and failed rollups remain a separate raw-evidence disclosure.
 
 ### Pending Todos
 
@@ -171,6 +174,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-10T15:00:54.268Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-08-10T15:24:48.083Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None

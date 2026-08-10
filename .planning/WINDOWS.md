@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 5
 waived_count: 0
-fixed_count: 0
-total_count: 5
-last_updated: 2026-08-10T15:00:53.841Z
+fixed_count: 3
+total_count: 8
+last_updated: 2026-08-10T15:25:37.905Z
 ---
 
 # Broken Windows Ledger
@@ -20,6 +20,9 @@ last_updated: 2026-08-10T15:00:53.841Z
 | 3 | 01 | deviation | dashboard/beacon/recovery.py |  | Staging I/O errors are redacted as fixed recovery failures. | open |  | 2026-07-31T21:01:33.357Z |  |
 | 4 | 01 | deviation | tests/test_outbound_policy.py |  | Added real Chromium main-frame, subresource, and CONNECT/SNI tests as required browser-boundary evidence. | open |  | 2026-08-01T06:46:19.283Z |  |
 | 5 | 02 | deviation | tests/worker_ownership_contract.py |  | Added runtime_state to the frozen database-surface universe after inventory verification. | open |  | 2026-08-10T15:00:53.841Z |  |
+| 6 | 02 | deviation | dashboard/beacon/migrations.py |  | Added latency_sample_count migration to preserve exact cross-tier latency averages. | fixed |  | 2026-08-10T15:24:57.532Z | 2026-08-10T15:25:37.783Z |
+| 7 | 02 | deviation | dashboard/beacon/repositories.py |  | Corrected raw-host timestamp and service display-bucket query details. | fixed |  | 2026-08-10T15:24:57.593Z | 2026-08-10T15:25:37.844Z |
+| 8 | 02 | deviation | dashboard/beacon/support_floor.json |  | Advanced migration support-floor metadata for additive migration 6. | fixed |  | 2026-08-10T15:24:57.655Z | 2026-08-10T15:25:37.905Z |
 
 ````json
 [
@@ -82,6 +85,42 @@ last_updated: 2026-08-10T15:00:53.841Z
     "reason": "",
     "recorded_at": "2026-08-10T15:00:53.841Z",
     "resolved_at": null
+  },
+  {
+    "id": 6,
+    "kind": "deviation",
+    "phase": "02",
+    "file": "dashboard/beacon/migrations.py",
+    "line": null,
+    "description": "Added latency_sample_count migration to preserve exact cross-tier latency averages.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-10T15:24:57.532Z",
+    "resolved_at": "2026-08-10T15:25:37.783Z"
+  },
+  {
+    "id": 7,
+    "kind": "deviation",
+    "phase": "02",
+    "file": "dashboard/beacon/repositories.py",
+    "line": null,
+    "description": "Corrected raw-host timestamp and service display-bucket query details.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-10T15:24:57.593Z",
+    "resolved_at": "2026-08-10T15:25:37.844Z"
+  },
+  {
+    "id": 8,
+    "kind": "deviation",
+    "phase": "02",
+    "file": "dashboard/beacon/support_floor.json",
+    "line": null,
+    "description": "Advanced migration support-floor metadata for additive migration 6.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-10T15:24:57.655Z",
+    "resolved_at": "2026-08-10T15:25:37.905Z"
   }
 ]
 ````
