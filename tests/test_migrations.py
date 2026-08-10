@@ -35,6 +35,7 @@ FIXTURES = {
         'preview_requests',
     },
 }
+CURRENT_V4_FIXTURE = 'current-v4.db'
 EXPECTED_FINGERPRINTS = {
     'initial-2026-04.db': '4330feaa6a22043681d7d55fec900b3279fec9302f68e41417df29653c7cf906',
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
@@ -119,6 +120,7 @@ class MigrationTests(unittest.TestCase):
         supported = {entry['fingerprint']: entry for entry in manifest['supported_schemas']}
         expected = set(EXPECTED_FINGERPRINTS.values()) | {
             json.loads((OPERATOR_FIXTURE_DIR / 'production.json').read_text())['schema_fingerprint'],
+            collect_inventory(FIXTURE_DIR / CURRENT_V4_FIXTURE)['schema_fingerprint'],
         }
         self.assertEqual(set(supported), expected)
         for entry in supported.values():
@@ -126,6 +128,101 @@ class MigrationTests(unittest.TestCase):
             self.assertIn('source', entry)
             self.assertIn('minimum_schema_version', entry)
             self.assertEqual(entry['target_version'], MIGRATIONS[-1].version)
+
+        packaged_manifest = json.loads(
+            Path('dashboard/beacon/support_floor.json').read_text(encoding='utf-8')
+        )
+        self.assertEqual(packaged_manifest, manifest)
+
+    def test_current_v4_fixture_is_canonical_and_migrates_preserving_rows(self):
+        source = FIXTURE_DIR / CURRENT_V4_FIXTURE
+        inventory = collect_inventory(source)
+        self.assertEqual(inventory['migration_versions'], [1, 2, 3, 4])
+        with sqlite3.connect(source) as before_conn:
+            before_rows = snapshot_legacy_rows(before_conn)
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / CURRENT_V4_FIXTURE
+            copy2(source, target)
+            result = run_migrations(Settings(db_path=str(target)))
+            self.assertEqual(result.applied_versions, (5,))
+            with sqlite3.connect(target) as conn:
+                assert_legacy_rows_preserved(self, before_rows, conn)
+                self._assert_telemetry_schema(conn)
+                self._assert_telemetry_tables_empty(conn)
+
+    def test_operator_service_port_remains_the_service_rollup_stream_key(self):
+        source = OPERATOR_FIXTURE_DIR / 'production.db'
+        with sqlite3.connect(source) as before_conn:
+            checks_columns = {
+                row[1] for row in before_conn.execute('PRAGMA table_info(service_checks)')
+            }
+            service_columns = {
+                row[1] for row in before_conn.execute('PRAGMA table_info(services)')
+            }
+        self.assertIn('port', checks_columns)
+        self.assertIn('port', service_columns)
+
+    def test_migration_five_failure_rolls_back_telemetry_schema_and_keeps_recovery_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            original = MIGRATIONS[-1]
+
+            def fail_migration_five(conn):
+                original.apply(conn)
+                raise RuntimeError('migration five sensitive failure')
+
+            broken = Migration(5, 'bounded_telemetry', True, fail_migration_five)
+            with mock.patch('dashboard.beacon.migrations.MIGRATIONS', (*MIGRATIONS[:-1], broken)):
+                with self.assertRaises(MigrationPreparationError):
+                    run_migrations(Settings(db_path=str(target)))
+
+            with sqlite3.connect(target) as conn:
+                tables = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )}
+                self.assertFalse(tables.intersection({
+                    'telemetry_streams',
+                    'host_metric_rollups',
+                    'service_rollups',
+                    'telemetry_coverage',
+                    'telemetry_rollup_jobs',
+                }))
+                versions = {row[0] for row in conn.execute('SELECT version FROM schema_migrations')}
+                self.assertNotIn(5, versions)
+            marker = json.loads((target.parent / 'recovery-required.json').read_text())
+            self.assertEqual(marker['failed_target_version'], 5)
+            self.assertEqual(marker['reason_class'], 'RuntimeError')
+            self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
+
+    def _assert_telemetry_schema(self, conn):
+        expected_tables = {
+            'telemetry_streams',
+            'host_metric_rollups',
+            'service_rollups',
+            'telemetry_coverage',
+            'telemetry_rollup_jobs',
+        }
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        self.assertTrue(expected_tables.issubset(tables))
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        self.assertTrue({
+            'idx_checks_port_ts',
+            'idx_host_rollups_range',
+            'idx_service_rollups_range',
+            'idx_telemetry_coverage_range',
+            'idx_telemetry_rollup_jobs_due',
+        }.issubset(indexes))
+
+    def _assert_telemetry_tables_empty(self, conn):
+        for table in (
+            'telemetry_streams',
+            'host_metric_rollups',
+            'service_rollups',
+            'telemetry_coverage',
+            'telemetry_rollup_jobs',
+        ):
+            self.assertEqual(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0], 0)
 
     def test_each_supported_fixture_upgrades_once_preserving_representative_rows(self):
         with tempfile.TemporaryDirectory() as directory:
