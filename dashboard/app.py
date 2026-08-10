@@ -2143,75 +2143,118 @@ def api_history():
 
 
 def _parse_history_timestamp(name):
-    value = request.args.get(name)
+    values = request.args.getlist(name)
+    if len(values) != 1:
+        raise ValueError(f'{name} must be supplied exactly once')
+    value = values[0]
     if value is None or not value.isascii() or not value.isdecimal():
         raise ValueError(f'{name} must be a decimal integer')
     return int(value)
 
 
+def _history_selector():
+    """Validate one fixed, non-ambiguous telemetry selector before opening SQLite."""
+    kinds = request.args.getlist('kind')
+    if len(kinds) != 1:
+        raise ValueError('kind must be supplied exactly once')
+    kind = kinds[0]
+    metrics = request.args.getlist('metric')
+    ports = request.args.getlist('port')
+    if kind == 'host':
+        if len(metrics) != 1 or ports or metrics[0] not in beacon_repositories.HOST_METRIC_COLUMNS:
+            raise ValueError('invalid host selector')
+        return kind, metrics[0], None
+    if kind == 'service':
+        if metrics or len(ports) != 1:
+            raise ValueError('invalid service selector')
+        value = ports[0]
+        if not value.isascii() or not value.isdecimal():
+            raise ValueError('port must be a decimal integer')
+        port = int(value)
+        if not 1 <= port <= 65535:
+            raise ValueError('port must be between 1 and 65535')
+        return kind, None, port
+    raise ValueError('invalid telemetry kind')
+
+
 @app.route('/api/telemetry/history')
 def api_telemetry_history():
-    """Serve bounded raw host history without changing the legacy history route."""
+    """Serve bounded, mixed-tier telemetry without changing the legacy history route."""
     try:
-        if request.args.get('kind') != 'host':
-            raise ValueError('kind must be host')
-        metric = request.args.get('metric')
-        if metric not in beacon_repositories.HOST_METRIC_COLUMNS:
-            raise ValueError('invalid metric')
+        kind, metric, port = _history_selector()
         requested = beacon_telemetry.HistoricalRange(
             _parse_history_timestamp('start_ts'),
             _parse_history_timestamp('end_ts'),
         )
-        if requested.end_ts > int(time.time()):
+        now = int(time.time())
+        if requested.end_ts > now:
             raise ValueError('end_ts must not be in the future')
         resolution = beacon_telemetry.select_resolution(
             requested.start_ts,
             requested.end_ts,
             beacon_telemetry.POINT_BUDGET,
         )
+        policy = beacon_telemetry.RetentionPolicy()
+        cutoffs = {
+            'raw_start_ts': now - policy.raw_days * 86400,
+            'five_minute_start_ts': now - policy.five_minute_days * 86400,
+        }
+        stream_key = metric if kind == 'host' else str(port)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
-    with _db_lock:
-        conn = get_db()
-        try:
-            rows = beacon_repositories.get_host_metric_history(
-                conn,
-                metric,
-                requested.start_ts,
-                requested.end_ts,
-                beacon_telemetry.POINT_BUDGET + 1,
-            )
-            stream_bounds = beacon_repositories.get_host_stream_bounds(conn)
-        finally:
-            conn.close()
+    try:
+        with _db_lock:
+            conn = get_db()
+            try:
+                if kind == 'host':
+                    sources = beacon_repositories.get_host_telemetry(
+                        conn, metric, requested.start_ts, requested.end_ts, resolution,
+                        beacon_telemetry.POINT_BUDGET + 1, cutoffs,
+                    )
+                else:
+                    sources = beacon_repositories.get_service_telemetry(
+                        conn, port, requested.start_ts, requested.end_ts, resolution,
+                        beacon_telemetry.POINT_BUDGET + 1, cutoffs,
+                    )
+                coverage_data = beacon_repositories.get_telemetry_coverage(
+                    conn, kind, stream_key, requested.start_ts, requested.end_ts,
+                    beacon_telemetry.POINT_BUDGET + 1,
+                )
+                pending = beacon_repositories.get_pending_aggregation(
+                    conn, kind, stream_key, requested.start_ts, requested.end_ts,
+                    beacon_telemetry.POINT_BUDGET + 1,
+                )
+            finally:
+                conn.close()
+        history = beacon_telemetry.compose_historical_response(sources, kind)
+        if len(history['points']) > beacon_telemetry.POINT_BUDGET:
+            raise ValueError('telemetry result exceeds point budget')
+        coverage = [interval.as_dict() for interval in beacon_telemetry.partition_coverage(
+            requested.start_ts,
+            requested.end_ts,
+            retention_start_ts=now - policy.retention_days * 86400,
+            stream=coverage_data['stream'],
+            persisted_intervals=coverage_data['intervals'],
+            source_segments=sources,
+        )]
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
 
-    points = [dict(row) for row in rows[:beacon_telemetry.POINT_BUDGET]]
-    if stream_bounds is None or requested.end_ts <= stream_bounds[0]:
-        intervals = [beacon_telemetry.CoverageInterval(
-            requested.start_ts, requested.end_ts, 'not_yet_monitored',
-        )]
-    elif requested.start_ts < stream_bounds[0]:
-        intervals = [
-            beacon_telemetry.CoverageInterval(
-                requested.start_ts, stream_bounds[0], 'not_yet_monitored',
-            ),
-            beacon_telemetry.CoverageInterval(
-                stream_bounds[0], requested.end_ts, 'unknown',
-            ),
-        ]
+    selector = {'kind': kind}
+    if kind == 'host':
+        selector['metric'] = metric
     else:
-        intervals = [beacon_telemetry.CoverageInterval(
-            requested.start_ts, requested.end_ts, 'unknown',
-        )]
-    coverage = [interval.as_dict() for interval in beacon_telemetry.coalesce_coverage(intervals)]
+        selector['port'] = port
     return jsonify({
         'requested': {'start_ts': requested.start_ts, 'end_ts': requested.end_ts},
+        'selector': selector,
         'effective_resolution_seconds': resolution,
         'point_budget': beacon_telemetry.POINT_BUDGET,
-        'source_resolutions_seconds': [60] if points else [],
-        'points': points,
+        'source_resolutions_seconds': history['source_resolutions_seconds'],
+        'points': history['points'],
         'coverage': coverage,
+        'aggregation_pending': list(pending),
     })
 
 

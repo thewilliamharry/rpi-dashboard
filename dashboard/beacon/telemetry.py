@@ -237,7 +237,7 @@ def partition_coverage(
     observed = []
     for segment in source_segments:
         for point in segment.points:
-            begin = int(point['bucket_start'])
+            begin = int(_point_value(point, 'first_ts', point['bucket_start']))
             if 'online_seconds' in point:
                 seconds = int(_point_value(point, 'online_seconds')) + int(_point_value(point, 'offline_seconds'))
             else:

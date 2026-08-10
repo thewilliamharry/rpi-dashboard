@@ -54,18 +54,14 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         self.assertEqual(payload['effective_resolution_seconds'], 60)
         self.assertEqual(payload['point_budget'], 2048)
         self.assertEqual(payload['source_resolutions_seconds'], [60])
-        self.assertEqual(
-            payload['points'],
-            [
-                {'ts': self.now - 240, 'value': 30.0},
-                {'ts': self.now - 180, 'value': 10.0},
-                {'ts': self.now - 120, 'value': 20.0},
-            ],
-        )
+        self.assertEqual([point['latest_value'] for point in payload['points']], [30.0, 10.0, 20.0])
+        self.assertTrue(all({
+            'min_value', 'max_value', 'avg_value', 'latest_value', 'sample_count',
+            'observed_seconds', 'gap_seconds', 'unknown_seconds',
+        }.issubset(point) for point in payload['points']))
         self.assertLessEqual(len(payload['points']), payload['point_budget'])
         self.assertEqual(payload['coverage'], [
-            {'start_ts': start_ts, 'end_ts': self.now - 240, 'state': 'not_yet_monitored'},
-            {'start_ts': self.now - 240, 'end_ts': end_ts, 'state': 'unknown'},
+            {'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'},
         ])
 
     def test_empty_and_single_sample_ranges_preserve_missing_history(self):
@@ -82,12 +78,10 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         self._seed_host_rows([(self.now - 180, 10.0, 20.0, 30.0, 40.0)])
         single = self._request(start_ts=start_ts, end_ts=end_ts)
         self.assertEqual(single.status_code, 200)
-        self.assertEqual(single.get_json()['points'], [
-            {'ts': self.now - 180, 'value': 10.0},
-        ])
+        self.assertEqual(len(single.get_json()['points']), 1)
+        self.assertEqual(single.get_json()['points'][0]['latest_value'], 10.0)
         self.assertEqual(single.get_json()['coverage'], [
-            {'start_ts': start_ts, 'end_ts': self.now - 180, 'state': 'not_yet_monitored'},
-            {'start_ts': self.now - 180, 'end_ts': end_ts, 'state': 'unknown'},
+            {'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'},
         ])
 
     def test_invalid_selectors_and_bounds_are_rejected_before_history_read(self):
@@ -264,3 +258,60 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         ]
         response = self.client.get('/api/telemetry/history', query_string=query)
         self.assertEqual(response.status_code, 400)
+
+    def test_partition_coverage_tiles_all_states_without_overlap(self):
+        sources = (
+            telemetry.SourceSegment(60, ({"bucket_start": 20, "first_ts": 20, "observed_seconds": 20},)),
+            telemetry.SourceSegment(60, ({"bucket_start": 55, "first_ts": 55, "observed_seconds": 5},)),
+        )
+        coverage = telemetry.partition_coverage(
+            0,
+            100,
+            retention_start_ts=10,
+            stream={"started_ts": 20, "cadence_seconds": 10, "last_observed_ts": 60},
+            persisted_intervals=(
+                {"start_ts": 40, "end_ts": 50, "reason": "collection_gap", "detail": "storage_pressure"},
+                {"start_ts": 50, "end_ts": 55, "reason": "unknown", "detail": "retrying"},
+            ),
+            source_segments=sources,
+        )
+
+        self.assertEqual([interval.as_dict() for interval in coverage], [
+            {"start_ts": 0, "end_ts": 10, "state": "expired"},
+            {"start_ts": 10, "end_ts": 20, "state": "not_yet_monitored"},
+            {"start_ts": 20, "end_ts": 40, "state": "observed"},
+            {"start_ts": 40, "end_ts": 50, "state": "collection_gap", "detail": "storage_pressure"},
+            {"start_ts": 50, "end_ts": 55, "state": "unknown", "detail": "retrying"},
+            {"start_ts": 55, "end_ts": 60, "state": "observed"},
+            {"start_ts": 60, "end_ts": 100, "state": "unknown"},
+        ])
+        self.assertEqual(sum(interval.end_ts - interval.start_ts for interval in coverage), 100)
+
+    def test_service_history_accepts_only_a_range_checked_port_selector(self):
+        start_ts = self.now - 180
+        end_ts = self.now - 60
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO service_checks(ts, port, online, latency_ms, error_class) VALUES(?,?,?,?,?)",
+                    (start_ts, 8080, 1, 12.5, None),
+                )
+                conn.execute(
+                    "INSERT INTO telemetry_streams("
+                    "stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, consecutive_misses) "
+                    "VALUES(?,?,?,?,?,0)",
+                    ("service", "8080", start_ts, 60, start_ts),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        response = self.client.get('/api/telemetry/history', query_string={
+            'kind': 'service', 'port': '8080', 'start_ts': str(start_ts), 'end_ts': str(end_ts),
+        })
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['selector'], {'kind': 'service', 'port': 8080})
+        self.assertLessEqual(len(payload['points']), payload['point_budget'])
+        self.assertEqual(payload['points'][0]['latency_avg'], 12.5)

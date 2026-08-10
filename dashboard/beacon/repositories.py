@@ -24,11 +24,12 @@ HOST_QUERY_SHAPES = {
     metric: {
         'raw': (
             'WITH ranked AS ('
-            f'SELECT ts - (ts % ?) AS bucket_start, {column} AS value, '
+            f'SELECT ts, ts - (ts % ?) AS bucket_start, {column} AS value, '
             f'ROW_NUMBER() OVER (PARTITION BY ts - (ts % ?) ORDER BY ts DESC) AS latest_rank '
             f'FROM stats_history WHERE ts >= ? AND ts < ? AND {column} IS NOT NULL'
-            ') SELECT bucket_start, MIN(value) AS min_value, MAX(value) AS max_value, '
+            ') SELECT bucket_start, MIN(ts) AS first_ts, MIN(value) AS min_value, MAX(value) AS max_value, '
             'AVG(value) AS avg_value, MAX(CASE WHEN latest_rank=1 THEN value END) AS latest_value, '
+            'MAX(CASE WHEN latest_rank=1 THEN ts END) AS latest_ts, '
             'COUNT(*) AS sample_count, MIN(COUNT(*) * ?, ?) AS observed_seconds, '
             '0 AS gap_seconds, 0 AS unknown_seconds FROM ranked GROUP BY bucket_start '
             'ORDER BY bucket_start ASC LIMIT ?'
@@ -40,10 +41,11 @@ HOST_QUERY_SHAPES = {
             'ROW_NUMBER() OVER (PARTITION BY bucket_start - (bucket_start % ?) '
             'ORDER BY bucket_start DESC) AS latest_rank FROM host_metric_rollups '
             'WHERE metric=? AND bucket_seconds=? AND bucket_start >= ? AND bucket_start < ?'
-            ') SELECT display_start AS bucket_start, MIN(min_value) AS min_value, '
+            ') SELECT display_start AS bucket_start, MIN(display_start) AS first_ts, MIN(min_value) AS min_value, '
             'MAX(max_value) AS max_value, '
             'SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0) AS avg_value, '
             'MAX(CASE WHEN latest_rank=1 THEN latest_value END) AS latest_value, '
+            'MAX(CASE WHEN latest_rank=1 THEN display_start END) AS latest_ts, '
             'SUM(sample_count) AS sample_count, SUM(observed_seconds) AS observed_seconds, '
             'SUM(gap_seconds) AS gap_seconds, SUM(unknown_seconds) AS unknown_seconds '
             'FROM ranked GROUP BY display_start ORDER BY display_start ASC LIMIT ?'
@@ -99,6 +101,7 @@ SERVICE_QUERY_SHAPES = {
         'FROM buckets b LEFT JOIN durations d ON d.bucket_start=b.bucket_start '
         'LEFT JOIN sample_stats s ON s.bucket_start=b.bucket_start '
         'LEFT JOIN failure_json f ON f.bucket_start=b.bucket_start '
+        'WHERE d.bucket_start IS NOT NULL OR s.bucket_start IS NOT NULL '
         'ORDER BY b.bucket_start ASC LIMIT ?'
     ),
     'rollup': (
@@ -182,10 +185,9 @@ def get_service_telemetry(conn, port, start_ts, end_ts, display_bucket_seconds, 
         if tier_start >= tier_end:
             continue
         if tier == 'raw':
-            bucket_start = tier_start - (tier_start % int(display_bucket_seconds))
             values = (
                 port, tier_start, port, tier_start, tier_end, tier_start, tier_end, tier_end,
-                bucket_start, tier_start, display_bucket_seconds, display_bucket_seconds,
+                tier_start, tier_start, display_bucket_seconds, display_bucket_seconds,
                 display_bucket_seconds, tier_end,
                 display_bucket_seconds, tier_end, tier_start,
                 display_bucket_seconds, tier_end, tier_start,
@@ -206,7 +208,7 @@ def get_service_telemetry(conn, port, start_ts, end_ts, display_bucket_seconds, 
     return tuple(segments)
 
 
-def get_telemetry_coverage(conn, stream_kind, stream_key, start_ts, end_ts):
+def get_telemetry_coverage(conn, stream_kind, stream_key, start_ts, end_ts, limit):
     """Return stream metadata and sparse unavailable evidence in ascending order."""
     if stream_kind not in ('host', 'service'):
         raise ValueError('invalid telemetry stream')
@@ -215,15 +217,17 @@ def get_telemetry_coverage(conn, stream_kind, stream_key, start_ts, end_ts):
         'WHERE stream_kind=? AND stream_key=?',
         (stream_kind, str(stream_key)),
     ).fetchone()
-    rows = conn.execute(
+    rows = _checked_rows(
+        conn,
         'SELECT start_ts, end_ts, reason, detail FROM telemetry_coverage '
         'WHERE stream_kind=? AND stream_key=? AND start_ts < ? AND end_ts > ? '
-        'ORDER BY start_ts ASC, end_ts ASC',
-        (stream_kind, str(stream_key), int(end_ts), int(start_ts)),
-    ).fetchall()
+        'ORDER BY start_ts ASC, end_ts ASC LIMIT ?',
+        (stream_kind, str(stream_key), int(end_ts), int(start_ts), int(limit)),
+        int(limit),
+    )
     return {
         'stream': dict(stream) if stream else None,
-        'intervals': tuple(dict(row) for row in rows),
+        'intervals': rows,
     }
 
 
