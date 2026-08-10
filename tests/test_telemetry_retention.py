@@ -2,6 +2,7 @@ import unittest
 
 from dashboard.beacon import queues
 from dashboard.beacon import telemetry
+from dashboard.beacon.config import load_settings
 from dashboard.beacon.telemetry import (
     CoverageInterval,
     POINT_BUDGET,
@@ -202,6 +203,67 @@ class RetentionRollupContractTests(unittest.TestCase):
             self.assertEqual(result['rolled_buckets'], 1)
         finally:
             conn.close()
+
+
+class StoragePressureContractTests(unittest.TestCase):
+    """Executable D-10 through D-12 settings and no-flap state contract."""
+
+    def test_settings_and_pressure_policy_exports_have_safe_defaults(self):
+        self.assertTrue(hasattr(telemetry, 'evaluate_storage_pressure'))
+        self.assertTrue(hasattr(telemetry, 'historical_persistence_allowed'))
+
+        settings = load_settings({
+            'TELEMETRY_RAW_DAYS': '8',
+            'TELEMETRY_FIVE_MINUTE_DAYS': '31',
+            'TELEMETRY_RETENTION_DAYS': '91',
+            'TELEMETRY_POINT_BUDGET': '1024',
+            'TELEMETRY_DB_MAX_BYTES': '1000',
+            'TELEMETRY_MIN_FREE_BYTES': '2000',
+            'TELEMETRY_PRESSURE_WARNING_PERCENT': '81',
+            'TELEMETRY_PRESSURE_HARD_PERCENT': '91',
+            'TELEMETRY_PRESSURE_RECOVERY_PERCENT': '76',
+            'TELEMETRY_BACKLOG_RESERVE_BYTES': '100',
+            'TELEMETRY_ROLLUP_BATCH_BUCKETS': '16',
+            'TELEMETRY_RETRY_BASE_SECONDS': '301',
+            'TELEMETRY_RETRY_MAX_SECONDS': '3601',
+        })
+        self.assertEqual(
+            (settings.telemetry_raw_days, settings.telemetry_five_minute_days,
+             settings.telemetry_retention_days, settings.telemetry_point_budget,
+             settings.telemetry_db_max_bytes, settings.telemetry_min_free_bytes,
+             settings.telemetry_pressure_warning_percent, settings.telemetry_pressure_hard_percent,
+             settings.telemetry_pressure_recovery_percent, settings.telemetry_backlog_reserve_bytes,
+             settings.telemetry_rollup_batch_buckets, settings.telemetry_retry_base_seconds,
+             settings.telemetry_retry_max_seconds),
+            (8, 31, 91, 1024, 1000, 2000, 81, 91, 76, 100, 16, 301, 3601),
+        )
+        invalid = load_settings({'TELEMETRY_RAW_DAYS': '30'})
+        self.assertEqual(
+            (invalid.telemetry_raw_days, invalid.telemetry_five_minute_days, invalid.telemetry_retention_days),
+            (7, 30, 90),
+        )
+
+    def test_storage_pressure_counts_database_wal_shm_and_requires_two_condition_recovery(self):
+        policy = telemetry.RetentionPolicy(db_max_bytes=1_000, min_free_bytes=2_000, backlog_reserve_bytes=100)
+        warning = telemetry.StorageSnapshot(700, 50, 50, 3_000)
+        decision = telemetry.evaluate_storage_pressure('normal', warning, policy)
+        self.assertEqual((decision.previous_state, decision.state, decision.reason), ('normal', 'pressure', 'allocation_warning'))
+        self.assertTrue(telemetry.historical_persistence_allowed(decision))
+
+        suspended = telemetry.evaluate_storage_pressure(
+            decision.state, telemetry.StorageSnapshot(900, 100, 100, 3_000), policy,
+        )
+        self.assertEqual(suspended.state, 'suspended')
+        self.assertFalse(telemetry.historical_persistence_allowed(suspended))
+
+        no_flap = telemetry.evaluate_storage_pressure(
+            'suspended', telemetry.StorageSnapshot(700, 0, 0, 2_099), policy,
+        )
+        self.assertEqual(no_flap.state, 'suspended')
+        recovered = telemetry.evaluate_storage_pressure(
+            'suspended', telemetry.StorageSnapshot(700, 0, 0, 2_100), policy,
+        )
+        self.assertEqual(recovered.state, 'normal')
 
     def test_cutoff_ownership_keeps_partial_raw_and_exact_hourly_boundaries(self):
         policy = telemetry.RetentionPolicy(rollup_batch_buckets=4)
