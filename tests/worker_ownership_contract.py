@@ -11,6 +11,7 @@ from dataclasses import dataclass
 DATABASE_SURFACES = frozenset({
     'worker_owner',
     'worker_heartbeat',
+    'runtime_state',
     'scan_state',
     'service_tls_posture',
     'scan_requests',
