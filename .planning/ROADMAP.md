@@ -149,11 +149,28 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 6 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 02-01-PLAN.md — Trace a bounded host-history request end to end and establish Wave 0 telemetry tests.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 02-02-PLAN.md — Confirm the one-way aggregate, coverage, and expiry storage contract.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 02-03-PLAN.md — Add migration 5 with legacy/current data-preservation and rollback proof.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 02-04-PLAN.md — Implement idempotent tiered rollups, retries, event expiry, and pressure hysteresis.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 02-05-PLAN.md — Wire retention and coverage gaps into the sole epoch-fenced worker.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 02-06-PLAN.md — Complete bounded mixed-tier host/service queries and exhaustive coverage responses.
 
 ### Phase 3: Advanced Current Diagnosis
