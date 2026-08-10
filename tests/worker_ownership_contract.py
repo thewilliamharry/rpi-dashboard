@@ -22,6 +22,11 @@ DATABASE_SURFACES = frozenset({
     'system_stats',
     'stats_history',
     'scan_rate_hits',
+    'telemetry_streams',
+    'host_metric_rollups',
+    'service_rollups',
+    'telemetry_coverage',
+    'telemetry_rollup_jobs',
 })
 
 EFFECT_SURFACES = frozenset({
@@ -99,7 +104,7 @@ PRODUCTION_OWNERSHIP_INVENTORY = (
     ),
     _row(
         'S3', ('collect_system_stats',), 'initial metrics sample', 'startup',
-        ('system_stats', 'stats_history'), (), ('before_metric_write',),
+        ('system_stats', 'stats_history', 'telemetry_streams', 'telemetry_coverage', 'runtime_state'), (), ('before_metric_write',),
     ),
     _row(
         'J1', ('update_worker_heartbeat', 'renew_worker_lease'), 'scheduler job heartbeat', 'scheduled',
@@ -108,16 +113,16 @@ PRODUCTION_OWNERSHIP_INVENTORY = (
     ),
     _row(
         'J2', ('collect_system_stats',), 'scheduler job metrics', 'scheduled',
-        ('system_stats', 'stats_history'), (), ('before_metric_write',),
+        ('system_stats', 'stats_history', 'telemetry_streams', 'telemetry_coverage', 'runtime_state'), (), ('before_metric_write',),
     ),
     _row(
         'J3', ('do_uptime_check',), 'scheduler job uptime_all', 'scheduled',
-        ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'),
+        ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state', 'telemetry_streams', 'telemetry_coverage', 'runtime_state'),
         ('webhook_delivery',), ('before_service_transaction', 'before_preview_enqueue', 'before_transition', 'before_webhook'),
     ),
     _row(
         'J4', ('do_uptime_check',), 'scheduler job uptime_down', 'scheduled',
-        ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state'),
+        ('services', 'service_checks', 'service_tls_posture', 'preview_requests', 'events', 'scan_state', 'telemetry_streams', 'telemetry_coverage', 'runtime_state'),
         ('webhook_delivery',), ('before_service_transaction', 'before_preview_enqueue', 'before_transition', 'before_webhook'),
     ),
     _row(
@@ -138,7 +143,7 @@ PRODUCTION_OWNERSHIP_INVENTORY = (
     ),
     _row(
         'J8', ('cleanup_history',), 'scheduler job cleanup', 'scheduled',
-        ('stats_history', 'service_checks', 'events', 'scan_rate_hits'), (), ('before_cleanup_transaction',),
+        ('stats_history', 'service_checks', 'events', 'scan_rate_hits', 'host_metric_rollups', 'service_rollups', 'telemetry_streams', 'telemetry_coverage', 'telemetry_rollup_jobs', 'runtime_state'), (), ('before_cleanup_transaction',),
     ),
     _row(
         'J9', ('run_discovery', 'read_scan_state'), 'scheduler job startup_discovery', 'scheduled',
