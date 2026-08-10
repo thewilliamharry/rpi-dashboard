@@ -146,7 +146,15 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A requested historical range explicitly distinguishes observed values from collection gaps, unknown intervals, and data that has expired under retention.
   4. Beacon selects an appropriate server-side resolution for each historical request and returns a bounded number of points without misleading the operator about coverage.
 
-**Plans**: TBD
+**Plans**: 6 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Trace a bounded host-history request end to end and establish Wave 0 telemetry tests.
+- [ ] 02-02-PLAN.md — Confirm the one-way aggregate, coverage, and expiry storage contract.
+- [ ] 02-03-PLAN.md — Add migration 5 with legacy/current data-preservation and rollback proof.
+- [ ] 02-04-PLAN.md — Implement idempotent tiered rollups, retries, event expiry, and pressure hysteresis.
+- [ ] 02-05-PLAN.md — Wire retention and coverage gaps into the sole epoch-fenced worker.
+- [ ] 02-06-PLAN.md — Complete bounded mixed-tier host/service queries and exhaustive coverage responses.
 
 ### Phase 3: Advanced Current Diagnosis
 

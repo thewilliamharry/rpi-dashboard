@@ -2,7 +2,7 @@
 phase: 02
 slug: bounded-telemetry-retention
 status: draft
-nyquist_compliant: false
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-08-10
 ---
@@ -38,11 +38,11 @@ created: 2026-08-10
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | 0 | TEL-01 | T-02-03 / T-02-04 | Retention stays bounded and stale workers cannot mutate data | unit + integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 | ⬜ pending |
-| TBD | TBD | 0 | TEL-02 | T-02-03 | Tier boundaries and aggregate fields are deterministic | unit | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 | ⬜ pending |
-| TBD | TBD | 0 | TEL-03 | T-02-04 | Raw data is never deleted before verified rollup persistence | integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 | ⬜ pending |
-| TBD | TBD | 0 | TEL-04 | T-02-01 / T-02-02 | Coverage partitions are exhaustive and selectors use fixed query shapes | API integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ W0 | ⬜ pending |
-| TBD | TBD | 0 | TEL-05 | T-02-01 | Range validation and server resolution cap response work | API unit + integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ W0 | ⬜ pending |
+| 02-04-01 / 02-05-02 | 04 / 05 | 4 / 5 | TEL-01 | T-02-12 / T-02-14 | Retention stays bounded and stale workers cannot mutate data | unit + integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
+| 02-04-01 | 04 | 4 | TEL-02 | T-02-10 | Tier boundaries and aggregate fields are deterministic | unit | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
+| 02-04-01 / 02-05-01 | 04 / 05 | 4 / 5 | TEL-03 | T-02-10 / T-02-14 | Raw data is never deleted before verified rollup persistence | integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
+| 02-05-01 / 02-06-02 | 05 / 06 | 5 / 6 | TEL-04 | T-02-17 / T-02-19 | Coverage partitions are exhaustive and selectors use fixed query shapes | API integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ W0 via 02-01-02 | ⬜ pending |
+| 02-01-01 / 02-06-02 | 01 / 06 | 1 / 6 | TEL-05 | T-02-01 / T-02-18 | Range validation and server resolution cap response work | API unit + integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ W0 via 02-01-02 | ⬜ pending |
 
 *Task IDs, plans, and waves are populated when PLAN.md files are finalized. Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky.*
 
