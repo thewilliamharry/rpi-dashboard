@@ -193,18 +193,63 @@ class MigrationTests(unittest.TestCase):
             marker = json.loads((target.parent / 'recovery-required.json').read_text())
             self.assertEqual(marker['failed_target_version'], 5)
             self.assertEqual(marker['reason_class'], 'RuntimeError')
-            self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
+            backups = list((target.parent / 'backups').glob('*.db'))
+            self.assertEqual(len(backups), 3)
+            self.assertIn(marker['backup_catalog_id'], {backup.name for backup in backups})
 
     def _assert_telemetry_schema(self, conn):
-        expected_tables = {
-            'telemetry_streams',
-            'host_metric_rollups',
-            'service_rollups',
-            'telemetry_coverage',
-            'telemetry_rollup_jobs',
+        expected_columns = {
+            'telemetry_streams': (
+                'stream_kind', 'stream_key', 'started_ts', 'cadence_seconds',
+                'last_observed_ts', 'consecutive_misses', 'open_gap_start_ts',
+            ),
+            'host_metric_rollups': (
+                'metric', 'bucket_start', 'bucket_seconds', 'min_value', 'max_value',
+                'avg_value', 'latest_value', 'sample_count', 'observed_seconds',
+                'gap_seconds', 'unknown_seconds',
+            ),
+            'service_rollups': (
+                'service_port', 'bucket_start', 'bucket_seconds', 'online_seconds',
+                'offline_seconds', 'unknown_seconds', 'gap_seconds', 'latency_min',
+                'latency_max', 'latency_avg', 'check_count', 'failure_class_counts_json',
+            ),
+            'telemetry_coverage': (
+                'id', 'stream_kind', 'stream_key', 'start_ts', 'end_ts', 'reason', 'detail',
+            ),
+            'telemetry_rollup_jobs': (
+                'stream_kind', 'stream_key', 'bucket_start', 'bucket_seconds', 'state',
+                'attempt_count', 'next_retry_ts', 'last_error_class', 'updated_ts',
+            ),
         }
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        self.assertTrue(expected_tables.issubset(tables))
+        self.assertTrue(set(expected_columns).issubset(tables))
+        expected_primary_keys = {
+            'telemetry_streams': ('stream_kind', 'stream_key'),
+            'host_metric_rollups': ('metric', 'bucket_start', 'bucket_seconds'),
+            'service_rollups': ('service_port', 'bucket_start', 'bucket_seconds'),
+            'telemetry_coverage': ('id',),
+            'telemetry_rollup_jobs': (
+                'stream_kind', 'stream_key', 'bucket_start', 'bucket_seconds',
+            ),
+        }
+        for table, columns in expected_columns.items():
+            info = list(conn.execute(f'PRAGMA table_info("{table}")'))
+            self.assertEqual(tuple(row[1] for row in info), columns)
+            primary_key = tuple(
+                row[1] for row in sorted(info, key=lambda row: row[5]) if row[5]
+            )
+            self.assertEqual(primary_key, expected_primary_keys[table])
+
+        schema_sql = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+                "AND name LIKE 'telemetry_%'"
+            )
+        }
+        self.assertIn('CHECK (end_ts > start_ts)', schema_sql['telemetry_coverage'])
+        self.assertIn("'collection_gap', 'unknown', 'expired', 'not_yet_monitored'", schema_sql['telemetry_coverage'])
+        self.assertIn("'pending', 'failed', 'succeeded'", schema_sql['telemetry_rollup_jobs'])
         indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
         self.assertTrue({
             'idx_checks_port_ts',
@@ -213,6 +258,18 @@ class MigrationTests(unittest.TestCase):
             'idx_telemetry_coverage_range',
             'idx_telemetry_rollup_jobs_due',
         }.issubset(indexes))
+        expected_index_columns = {
+            'idx_checks_port_ts': ('port', 'ts'),
+            'idx_host_rollups_range': ('metric', 'bucket_seconds', 'bucket_start'),
+            'idx_service_rollups_range': ('service_port', 'bucket_seconds', 'bucket_start'),
+            'idx_telemetry_coverage_range': ('stream_kind', 'stream_key', 'start_ts', 'end_ts'),
+            'idx_telemetry_rollup_jobs_due': ('state', 'next_retry_ts', 'updated_ts'),
+        }
+        for index, columns in expected_index_columns.items():
+            self.assertEqual(
+                tuple(row[2] for row in conn.execute(f'PRAGMA index_info("{index}")')),
+                columns,
+            )
 
     def _assert_telemetry_tables_empty(self, conn):
         for table in (
@@ -237,6 +294,8 @@ class MigrationTests(unittest.TestCase):
                 self.assertTrue(result.applied_versions)
                 with sqlite3.connect(target) as conn:
                     assert_legacy_rows_preserved(self, before_rows, conn)
+                    self._assert_telemetry_schema(conn)
+                    self._assert_telemetry_tables_empty(conn)
                     self.assertEqual(
                         conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
                         MIGRATIONS[-1].version,
@@ -325,7 +384,7 @@ class MigrationTests(unittest.TestCase):
                 runner.join(timeout=10)
                 self.assertEqual(runner.exitcode, 0)
             results = sorted(result_queue.get(timeout=2) for _ in runners)
-            self.assertEqual(results, [(), (1, 2, 3, 4)])
+            self.assertEqual(results, [(), tuple(migration.version for migration in MIGRATIONS)])
             self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 3)
 
     def test_ordinary_access_blocks_migration_before_any_backup_or_marker_write(self):

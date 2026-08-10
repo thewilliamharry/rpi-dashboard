@@ -209,11 +209,91 @@ def _migration_4_durable_work_queues(conn):
     )
 
 
+def _migration_5_bounded_telemetry(conn):
+    """Add the durable, empty telemetry evidence store without rewriting history."""
+    statements = (
+        """CREATE TABLE telemetry_streams (
+            stream_kind TEXT NOT NULL,
+            stream_key TEXT NOT NULL,
+            started_ts INTEGER NOT NULL,
+            cadence_seconds INTEGER NOT NULL CHECK (cadence_seconds > 0),
+            last_observed_ts INTEGER,
+            consecutive_misses INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_misses >= 0),
+            open_gap_start_ts INTEGER,
+            PRIMARY KEY (stream_kind, stream_key)
+        )""",
+        """CREATE TABLE host_metric_rollups (
+            metric TEXT NOT NULL,
+            bucket_start INTEGER NOT NULL,
+            bucket_seconds INTEGER NOT NULL CHECK (bucket_seconds > 0),
+            min_value REAL,
+            max_value REAL,
+            avg_value REAL,
+            latest_value REAL,
+            sample_count INTEGER NOT NULL CHECK (sample_count >= 0),
+            observed_seconds INTEGER NOT NULL CHECK (observed_seconds >= 0),
+            gap_seconds INTEGER NOT NULL CHECK (gap_seconds >= 0),
+            unknown_seconds INTEGER NOT NULL CHECK (unknown_seconds >= 0),
+            PRIMARY KEY (metric, bucket_start, bucket_seconds)
+        )""",
+        """CREATE TABLE service_rollups (
+            service_port INTEGER NOT NULL,
+            bucket_start INTEGER NOT NULL,
+            bucket_seconds INTEGER NOT NULL CHECK (bucket_seconds > 0),
+            online_seconds INTEGER NOT NULL CHECK (online_seconds >= 0),
+            offline_seconds INTEGER NOT NULL CHECK (offline_seconds >= 0),
+            unknown_seconds INTEGER NOT NULL CHECK (unknown_seconds >= 0),
+            gap_seconds INTEGER NOT NULL CHECK (gap_seconds >= 0),
+            latency_min REAL,
+            latency_max REAL,
+            latency_avg REAL,
+            check_count INTEGER NOT NULL CHECK (check_count >= 0),
+            failure_class_counts_json TEXT NOT NULL,
+            PRIMARY KEY (service_port, bucket_start, bucket_seconds)
+        )""",
+        """CREATE TABLE telemetry_coverage (
+            id INTEGER PRIMARY KEY,
+            stream_kind TEXT NOT NULL,
+            stream_key TEXT NOT NULL,
+            start_ts INTEGER NOT NULL,
+            end_ts INTEGER NOT NULL CHECK (end_ts > start_ts),
+            reason TEXT NOT NULL CHECK (reason IN (
+                'collection_gap', 'unknown', 'expired', 'not_yet_monitored'
+            )),
+            detail TEXT
+        )""",
+        """CREATE TABLE telemetry_rollup_jobs (
+            stream_kind TEXT NOT NULL,
+            stream_key TEXT NOT NULL,
+            bucket_start INTEGER NOT NULL,
+            bucket_seconds INTEGER NOT NULL CHECK (bucket_seconds > 0),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'failed', 'succeeded')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            next_retry_ts INTEGER,
+            last_error_class TEXT,
+            updated_ts INTEGER NOT NULL,
+            PRIMARY KEY (stream_kind, stream_key, bucket_start, bucket_seconds)
+        )""",
+        'CREATE INDEX idx_checks_port_ts ON service_checks(port, ts)',
+        'CREATE INDEX idx_host_rollups_range '
+        'ON host_metric_rollups(metric, bucket_seconds, bucket_start)',
+        'CREATE INDEX idx_service_rollups_range '
+        'ON service_rollups(service_port, bucket_seconds, bucket_start)',
+        'CREATE INDEX idx_telemetry_coverage_range '
+        'ON telemetry_coverage(stream_kind, stream_key, start_ts, end_ts)',
+        'CREATE INDEX idx_telemetry_rollup_jobs_due '
+        'ON telemetry_rollup_jobs(state, next_retry_ts, updated_ts)',
+    )
+    for statement in statements:
+        conn.execute(statement)
+
+
 MIGRATIONS = (
     Migration(1, 'baseline_schema', True, _migration_1_baseline),
     Migration(2, 'service_diagnostics', True, _migration_2_service_diagnostics),
     Migration(3, 'metadata_and_state', True, _migration_3_metadata_and_state),
     Migration(4, 'durable_work_queues', True, _migration_4_durable_work_queues),
+    Migration(5, 'bounded_telemetry', True, _migration_5_bounded_telemetry),
 )
 
 
