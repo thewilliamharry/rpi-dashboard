@@ -10,6 +10,34 @@ import time
 from .queues import enqueue_preview_in_transaction
 
 
+HOST_METRIC_COLUMNS = {
+    'cpu': 'cpu',
+    'ram': 'ram',
+    'disk': 'disk',
+    'temp': 'temp',
+}
+
+
+def get_host_metric_history(conn, metric, start_ts, end_ts, limit):
+    """Return one allowlisted raw metric stream in ascending half-open order."""
+    column = HOST_METRIC_COLUMNS.get(metric)
+    if column is None:
+        raise ValueError('invalid host metric')
+    return conn.execute(
+        f'SELECT ts, {column} AS value FROM stats_history '
+        'WHERE ts >= ? AND ts < ? ORDER BY ts ASC LIMIT ?',
+        (start_ts, end_ts, limit),
+    ).fetchall()
+
+
+def get_host_stream_bounds(conn):
+    """Return the first and last raw host observations without retaining a cursor."""
+    row = conn.execute(
+        'SELECT MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM stats_history'
+    ).fetchone()
+    return (row['first_ts'], row['last_ts']) if row and row['first_ts'] is not None else None
+
+
 class ThumbnailRepository:
     """Own thumbnail result persistence while callers retain transaction scope."""
 

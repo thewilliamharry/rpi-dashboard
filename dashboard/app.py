@@ -22,6 +22,7 @@ from flask import Flask, jsonify, make_response, request, send_file
 try:
     from .beacon.config import load_settings
     from .beacon import repositories as beacon_repositories
+    from .beacon import telemetry as beacon_telemetry
     from .beacon import web as beacon_web
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
@@ -32,6 +33,7 @@ try:
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon.config import load_settings
     from beacon import repositories as beacon_repositories
+    from beacon import telemetry as beacon_telemetry
     from beacon import web as beacon_web
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
@@ -2059,6 +2061,79 @@ def api_history():
         ).fetchall()
         conn.close()
     return jsonify([dict(r) for r in rows])
+
+
+def _parse_history_timestamp(name):
+    value = request.args.get(name)
+    if value is None or not value.isascii() or not value.isdecimal():
+        raise ValueError(f'{name} must be a decimal integer')
+    return int(value)
+
+
+@app.route('/api/telemetry/history')
+def api_telemetry_history():
+    """Serve bounded raw host history without changing the legacy history route."""
+    try:
+        if request.args.get('kind') != 'host':
+            raise ValueError('kind must be host')
+        metric = request.args.get('metric')
+        if metric not in beacon_repositories.HOST_METRIC_COLUMNS:
+            raise ValueError('invalid metric')
+        requested = beacon_telemetry.HistoricalRange(
+            _parse_history_timestamp('start_ts'),
+            _parse_history_timestamp('end_ts'),
+        )
+        if requested.end_ts > int(time.time()):
+            raise ValueError('end_ts must not be in the future')
+        resolution = beacon_telemetry.select_resolution(
+            requested.start_ts,
+            requested.end_ts,
+            beacon_telemetry.POINT_BUDGET,
+        )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    with _db_lock:
+        conn = get_db()
+        try:
+            rows = beacon_repositories.get_host_metric_history(
+                conn,
+                metric,
+                requested.start_ts,
+                requested.end_ts,
+                beacon_telemetry.POINT_BUDGET + 1,
+            )
+            stream_bounds = beacon_repositories.get_host_stream_bounds(conn)
+        finally:
+            conn.close()
+
+    points = [dict(row) for row in rows[:beacon_telemetry.POINT_BUDGET]]
+    if stream_bounds is None or requested.end_ts <= stream_bounds[0]:
+        intervals = [beacon_telemetry.CoverageInterval(
+            requested.start_ts, requested.end_ts, 'not_yet_monitored',
+        )]
+    elif requested.start_ts < stream_bounds[0]:
+        intervals = [
+            beacon_telemetry.CoverageInterval(
+                requested.start_ts, stream_bounds[0], 'not_yet_monitored',
+            ),
+            beacon_telemetry.CoverageInterval(
+                stream_bounds[0], requested.end_ts, 'unknown',
+            ),
+        ]
+    else:
+        intervals = [beacon_telemetry.CoverageInterval(
+            requested.start_ts, requested.end_ts, 'unknown',
+        )]
+    coverage = [interval.as_dict() for interval in beacon_telemetry.coalesce_coverage(intervals)]
+    return jsonify({
+        'requested': {'start_ts': requested.start_ts, 'end_ts': requested.end_ts},
+        'effective_resolution_seconds': resolution,
+        'point_budget': beacon_telemetry.POINT_BUDGET,
+        'source_resolutions_seconds': [60] if points else [],
+        'points': points,
+        'coverage': coverage,
+    })
 
 
 @app.route("/api/services")

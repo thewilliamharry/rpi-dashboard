@@ -62,7 +62,8 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         )
         self.assertLessEqual(len(payload['points']), payload['point_budget'])
         self.assertEqual(payload['coverage'], [
-            {'start_ts': start_ts, 'end_ts': end_ts, 'state': 'unknown'},
+            {'start_ts': start_ts, 'end_ts': self.now - 240, 'state': 'not_yet_monitored'},
+            {'start_ts': self.now - 240, 'end_ts': end_ts, 'state': 'unknown'},
         ])
 
     def test_empty_and_single_sample_ranges_preserve_missing_history(self):
@@ -83,7 +84,8 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
             {'ts': self.now - 180, 'value': 10.0},
         ])
         self.assertEqual(single.get_json()['coverage'], [
-            {'start_ts': start_ts, 'end_ts': end_ts, 'state': 'unknown'},
+            {'start_ts': start_ts, 'end_ts': self.now - 180, 'state': 'not_yet_monitored'},
+            {'start_ts': self.now - 180, 'end_ts': end_ts, 'state': 'unknown'},
         ])
 
     def test_invalid_selectors_and_bounds_are_rejected_before_history_read(self):
@@ -93,11 +95,10 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
             {'kind': 'host', 'metric': 'cpu', 'start_ts': 'true', 'end_ts': str(self.now - 60)},
             {'kind': 'host', 'metric': 'cpu', 'start_ts': '1.5', 'end_ts': str(self.now - 60)},
             {'kind': 'host', 'metric': 'cpu', 'start_ts': str(self.now - 60), 'end_ts': str(self.now - 120)},
-            {'kind': 'host', 'metric': 'cpu', 'start_ts': str(self.now - 90 * 86400 - 1), 'end_ts': str(self.now - 1)},
+            {'kind': 'host', 'metric': 'cpu', 'start_ts': str(self.now - 90 * 86400 - 2), 'end_ts': str(self.now - 1)},
             {'kind': 'host', 'metric': 'cpu', 'start_ts': str(self.now - 60), 'end_ts': str(self.now + 1)},
         ]
         for query in cases:
             with self.subTest(query=query):
                 response = self.client.get('/api/telemetry/history', query_string=query)
                 self.assertEqual(response.status_code, 400)
-
