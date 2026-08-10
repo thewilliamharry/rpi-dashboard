@@ -1,6 +1,7 @@
 import unittest
 
 from dashboard.beacon import queues
+from dashboard.beacon import telemetry
 from dashboard.beacon.telemetry import (
     CoverageInterval,
     POINT_BUDGET,
@@ -145,6 +146,119 @@ class TelemetryRetentionFixturesTests(unittest.TestCase):
                 CoverageInterval(40, 50, 'expired'),
             ),
         )
+
+
+class RetentionRollupContractTests(unittest.TestCase):
+    """Executable D-01 through D-04 and D-09 retention contract."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.now = UTC_NOW
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _connection(self):
+        return self.appmod.get_db()
+
+    def test_retention_engine_exports_canonical_bucket_and_batch_contract(self):
+        required = (
+            'RetentionPolicy',
+            'bucket_start',
+            'bucket_is_complete',
+            'build_host_rollup',
+            'build_service_rollup',
+            'record_coverage_interval',
+            'run_retention_batch',
+        )
+        self.assertTrue(all(hasattr(telemetry, name) for name in required))
+
+        policy = telemetry.RetentionPolicy()
+        cutoff = self.now - policy.raw_days * 86400
+        self.assertEqual(telemetry.bucket_start(cutoff + 299, 300), cutoff)
+        self.assertTrue(telemetry.bucket_is_complete(cutoff - 300, 300, cutoff))
+        self.assertFalse(telemetry.bucket_is_complete(cutoff, 300, cutoff))
+
+    def test_complete_host_bucket_is_verified_before_exact_source_deletion(self):
+        policy = telemetry.RetentionPolicy(rollup_batch_buckets=4)
+        cutoff = self.now - policy.raw_days * 86400
+        start = telemetry.bucket_start(cutoff - 300, 300)
+        conn = self._connection()
+        try:
+            seed_host_rows(conn, [
+                (start, 1.0, None, None, None),
+                (start + 100, 3.0, None, None, None),
+                (start + 200, 2.0, None, None, None),
+            ])
+            conn.commit()
+            result = telemetry.run_retention_batch(conn, now=self.now, policy=policy)
+            row = conn.execute(
+                'SELECT min_value, max_value, avg_value, latest_value, sample_count '
+                'FROM host_metric_rollups WHERE metric=? AND bucket_start=? AND bucket_seconds=300',
+                ('cpu', start),
+            ).fetchone()
+            self.assertEqual(tuple(row), (1.0, 3.0, 2.0, 2.0, 3))
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM stats_history').fetchone()[0], 0)
+            self.assertEqual(result['rolled_buckets'], 1)
+        finally:
+            conn.close()
+
+    def test_service_rollup_is_time_weighted_and_failure_counts_are_stable(self):
+        policy = telemetry.RetentionPolicy(rollup_batch_buckets=4)
+        cutoff = self.now - policy.raw_days * 86400
+        start = telemetry.bucket_start(cutoff - 300, 300)
+        conn = self._connection()
+        try:
+            seed_service_checks(conn, [
+                (start, 8080, 1, 10.0, 'zeta'),
+                (start + 100, 8080, 0, 30.0, 'alpha'),
+                (start + 200, 8080, None, None, 'alpha'),
+            ])
+            conn.commit()
+            telemetry.run_retention_batch(conn, now=self.now, policy=policy)
+            row = conn.execute(
+                'SELECT online_seconds, offline_seconds, unknown_seconds, gap_seconds, '
+                'latency_min, latency_max, latency_avg, check_count, failure_class_counts_json '
+                'FROM service_rollups WHERE service_port=8080 AND bucket_start=? AND bucket_seconds=300',
+                (start,),
+            ).fetchone()
+            self.assertEqual(tuple(row), (100, 100, 100, 0, 10.0, 30.0, 20.0, 3, '{"alpha":2,"zeta":1}'))
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_checks').fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_failed_rollup_preserves_sources_retries_once_and_events_expire_strictly(self):
+        policy = telemetry.RetentionPolicy(rollup_batch_buckets=4)
+        cutoff = self.now - policy.raw_days * 86400
+        start = telemetry.bucket_start(cutoff - 300, 300)
+        conn = self._connection()
+        try:
+            seed_host_rows(conn, [(start, 1.0, None, None, None)])
+            seed_events(conn, [
+                (self.now - policy.retention_days * 86400 - 1, None, 'old', None, None, None, None, 'none', '{}'),
+                (self.now - policy.retention_days * 86400, None, 'edge', None, None, None, None, 'none', '{}'),
+            ])
+            conn.commit()
+            with self.assertRaises(RuntimeError):
+                telemetry.run_retention_batch(
+                    conn, now=self.now, policy=policy, before_verify=lambda *_: (_ for _ in ()).throw(RuntimeError('injected')),
+                    raise_on_failure=True,
+                )
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM stats_history').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM host_metric_rollups').fetchone()[0], 0)
+            job = conn.execute(
+                "SELECT state, attempt_count, next_retry_ts, last_error_class FROM telemetry_rollup_jobs"
+            ).fetchone()
+            self.assertEqual(tuple(job), ('failed', 1, self.now + 300, 'RuntimeError'))
+            telemetry.run_retention_batch(conn, now=self.now + 300, policy=policy)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM host_metric_rollups').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM telemetry_rollup_jobs').fetchone()[0], 1)
+            self.assertEqual(
+                conn.execute('SELECT event_type FROM events ORDER BY ts').fetchall(),
+                [('edge',)],
+            )
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':
