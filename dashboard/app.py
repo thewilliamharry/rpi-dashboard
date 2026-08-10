@@ -1334,6 +1334,7 @@ def _legacy_do_uptime_check(only_down=False):
     expire_cutoff = now - EXPIRE_DAYS * 86400
     transitions = []
     authority = _worker_mutation_authority.get()
+    snapshot = beacon_telemetry.measure_storage(authority.db_path) if authority is not None else None
     try:
         with _db_lock:
             conn = get_db()
@@ -1370,6 +1371,9 @@ def _legacy_do_uptime_check(only_down=False):
             title_update = _extract_title(resp, port) if online and resp is not None else ''
 
             with _mutation_write_transaction(authority, now=now) as conn:
+                decision = None
+                if authority is not None:
+                    decision = _telemetry_persistence_decision(conn, now=now, snapshot=snapshot)
                 if online and title_update and title_update != f":{port}":
                     conn.execute(
                         "UPDATE services SET title=?, is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL, "
@@ -1388,10 +1392,28 @@ def _legacy_do_uptime_check(only_down=False):
                         "state_since=CASE WHEN is_online != 0 THEN ? ELSE state_since END WHERE port=?",
                         (error_class or 'probe_failed', now, port),
                     )
-                conn.execute(
-                    "INSERT OR REPLACE INTO service_checks (ts, port, online, latency_ms, error_class) VALUES (?,?,?,?,?)",
-                    (now, port, online_int, latency_ms, error_class),
-                )
+                if decision is None or decision.historical_persistence_allowed:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO service_checks (ts, port, online, latency_ms, error_class) VALUES (?,?,?,?,?)",
+                        (now, port, online_int, latency_ms, error_class),
+                    )
+                    if authority is not None:
+                        state = beacon_telemetry.close_storage_pressure_gap(
+                            conn, 'service', str(port), now=now,
+                        )
+                        beacon_telemetry.record_observation(
+                            conn, 'service', str(port), ts=now, cadence_seconds=300,
+                            state=(True if online is True else False if online is False else None),
+                            expected_cadence=not only_down,
+                        )
+                        state['state'] = decision.state
+                        beacon_telemetry.write_retention_state(conn, state, now=now)
+                elif authority is not None:
+                    state = beacon_telemetry.open_storage_pressure_gap(
+                        conn, 'service', str(port), now=now,
+                    )
+                    state['state'] = decision.state
+                    beacon_telemetry.write_retention_state(conn, state, now=now)
                 beacon_repositories.set_service_tls_posture(
                     conn, port, bool(service_plan and service_plan.tls.tls_unverified), now,
                 )
@@ -1642,6 +1664,46 @@ def worker_handle_state_transition(authority, **kwargs):
     return worker_send_transition_alert(authority, now=now, **kwargs)
 
 
+def _telemetry_policy():
+    """Compose retention policy once from the validated process settings."""
+    return beacon_telemetry.RetentionPolicy(
+        raw_days=SETTINGS.telemetry_raw_days,
+        five_minute_days=SETTINGS.telemetry_five_minute_days,
+        retention_days=SETTINGS.telemetry_retention_days,
+        point_budget=SETTINGS.telemetry_point_budget,
+        db_max_bytes=SETTINGS.telemetry_db_max_bytes,
+        min_free_bytes=SETTINGS.telemetry_min_free_bytes,
+        pressure_warning_percent=SETTINGS.telemetry_pressure_warning_percent,
+        pressure_hard_percent=SETTINGS.telemetry_pressure_hard_percent,
+        pressure_recovery_percent=SETTINGS.telemetry_pressure_recovery_percent,
+        backlog_reserve_bytes=SETTINGS.telemetry_backlog_reserve_bytes,
+        rollup_batch_buckets=SETTINGS.telemetry_rollup_batch_buckets,
+        retry_base_seconds=SETTINGS.telemetry_retry_base_seconds,
+        retry_max_seconds=SETTINGS.telemetry_retry_max_seconds,
+    )
+
+
+def _telemetry_persistence_decision(conn, *, now, snapshot):
+    """Persist the storage transition after worker authority has been asserted."""
+    previous = beacon_telemetry.read_retention_state(conn)
+    decision = beacon_telemetry.evaluate_storage_pressure(
+        previous['state'], snapshot, _telemetry_policy(),
+    )
+    state = dict(previous)
+    state.update({
+        'state': decision.state,
+        'reason': decision.reason,
+        'snapshot': {
+            'database_bytes': snapshot.database_bytes,
+            'wal_bytes': snapshot.wal_bytes,
+            'shm_bytes': snapshot.shm_bytes,
+            'free_bytes': snapshot.free_bytes,
+        },
+    })
+    beacon_telemetry.write_retention_state(conn, state, now=now)
+    return decision
+
+
 def worker_collect_system_stats(authority, now=None, persist_history=None):
     """Collect outside SQLite, then publish under the current worker epoch."""
     now = authority.now() if now is None else int(now)
@@ -1659,7 +1721,9 @@ def worker_collect_system_stats(authority, now=None, persist_history=None):
         'disk': round(float(disk.percent), 1), 'disk_used': int(disk.used),
         'disk_total': int(disk.total), 'temp': get_temp(), 'hostname': socket.gethostname(),
     }
+    snapshot = beacon_telemetry.measure_storage(authority.db_path)
     with _worker_write_transaction(authority) as conn:
+        decision = _telemetry_persistence_decision(conn, now=now, snapshot=snapshot)
         conn.execute(
             "INSERT INTO system_stats(id,sample_ts,cpu,ram,ram_used,ram_available,ram_used_strict,ram_total,disk,disk_used,disk_total,temp,hostname) "
             "VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
@@ -1673,18 +1737,33 @@ def worker_collect_system_stats(authority, now=None, persist_history=None):
         if persist_history is None:
             last = conn.execute('SELECT MAX(ts) AS ts FROM stats_history').fetchone()['ts']
             persist_history = last is None or now - int(last) >= METRIC_HISTORY_SECONDS
-        if persist_history:
+        if decision.historical_persistence_allowed and persist_history:
             conn.execute('INSERT OR REPLACE INTO stats_history(ts,cpu,ram,disk,temp) VALUES(?,?,?,?,?)',
                          (now, sample['cpu'], sample['ram'], sample['disk'], sample['temp']))
+            state = beacon_telemetry.close_storage_pressure_gap(
+                conn, 'host', 'host', now=now,
+            )
+            beacon_telemetry.record_observation(
+                conn, 'host', 'host', ts=now, cadence_seconds=METRIC_HISTORY_SECONDS,
+                state=True, expected_cadence=True,
+            )
+            beacon_telemetry.write_retention_state(conn, state, now=now)
+        elif not decision.historical_persistence_allowed:
+            state = beacon_telemetry.open_storage_pressure_gap(
+                conn, 'host', 'host', now=now,
+            )
+            state['state'] = decision.state
+            beacon_telemetry.write_retention_state(conn, state, now=now)
     return sample
 
 
 def worker_cleanup_history(authority, now=None):
     now = authority.now() if now is None else int(now)
+    snapshot = beacon_telemetry.measure_storage(authority.db_path)
     with _worker_write_transaction(authority, now=now) as conn:
-        conn.execute('DELETE FROM stats_history WHERE ts < ?', (now - 86400,))
-        conn.execute('DELETE FROM service_checks WHERE ts < ?', (now - CHECK_RETENTION_SECONDS,))
-        conn.execute('DELETE FROM events WHERE ts < ?', (now - (14 * 86400),))
+        _telemetry_persistence_decision(conn, now=now, snapshot=snapshot)
+        beacon_telemetry.run_retention_batch(conn, now=now, policy=_telemetry_policy())
+        beacon_telemetry.detect_collection_gaps(conn, now=now)
         conn.execute('DELETE FROM scan_rate_hits WHERE ts < ?', (now - TRIGGER_SCAN_WINDOW_SECONDS,))
     return True
 

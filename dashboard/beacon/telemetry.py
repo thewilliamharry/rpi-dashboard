@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import json
 import math
+import os
 
 
 POINT_BUDGET = 2048
@@ -196,6 +197,92 @@ def historical_persistence_allowed(decision_or_state):
     return decision_or_state != 'suspended'
 
 
+def measure_storage(db_path):
+    """Return one filesystem snapshot without requiring a SQLite connection."""
+    path = os.fspath(db_path)
+    parent = os.path.dirname(path) or '.'
+    stat = os.statvfs(parent)
+
+    def size(candidate):
+        try:
+            return os.path.getsize(candidate)
+        except FileNotFoundError:
+            return 0
+
+    return StorageSnapshot(
+        size(path), size(path + '-wal'), size(path + '-shm'),
+        int(stat.f_bavail) * int(stat.f_frsize),
+    )
+
+
+def _runtime_state(conn, key, default):
+    row = conn.execute('SELECT value FROM runtime_state WHERE key=?', (key,)).fetchone()
+    if row is None:
+        return default
+    try:
+        value = json.loads(_row_value(row, 'value'))
+    except (TypeError, ValueError):
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+def read_retention_state(conn):
+    """Read the durable pressure state without a process-local fallback."""
+    state = _runtime_state(conn, 'telemetry_retention_state', {})
+    if state.get('state') not in {'normal', 'pressure', 'suspended'}:
+        return {'state': 'normal', 'pressure_gaps': {}}
+    state.setdefault('pressure_gaps', {})
+    return state
+
+
+def write_retention_state(conn, state, *, now):
+    """Persist a validated retention state in the caller-owned transaction."""
+    value = dict(state)
+    if value.get('state') not in {'normal', 'pressure', 'suspended'}:
+        raise ValueError('invalid retention state')
+    gaps = value.get('pressure_gaps', {})
+    if not isinstance(gaps, dict):
+        raise ValueError('pressure_gaps must be a mapping')
+    value['pressure_gaps'] = {
+        str(key): int(start)
+        for key, start in gaps.items()
+        if isinstance(start, int) and not isinstance(start, bool)
+    }
+    conn.execute(
+        'INSERT INTO runtime_state(key, value, updated_ts) VALUES(?,?,?) '
+        'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts',
+        ('telemetry_retention_state', json.dumps(value, separators=(',', ':'), sort_keys=True), int(now)),
+    )
+    return value
+
+
+def _stream_gap_key(stream_kind, stream_key):
+    return f'{stream_kind}:{stream_key}'
+
+
+def open_storage_pressure_gap(conn, stream_kind, stream_key, *, now):
+    """Remember a suspended-history interval until normal persistence returns."""
+    state = read_retention_state(conn)
+    gaps = dict(state['pressure_gaps'])
+    gaps.setdefault(_stream_gap_key(stream_kind, stream_key), int(now))
+    state['pressure_gaps'] = gaps
+    return state
+
+
+def close_storage_pressure_gap(conn, stream_kind, stream_key, *, now):
+    """Close one durable storage-pressure gap without inventing observations."""
+    state = read_retention_state(conn)
+    gaps = dict(state['pressure_gaps'])
+    start = gaps.pop(_stream_gap_key(stream_kind, stream_key), None)
+    if start is not None and int(start) < int(now):
+        record_coverage_interval(
+            conn, stream_kind, stream_key, int(start), int(now),
+            'collection_gap', 'storage_pressure',
+        )
+    state['pressure_gaps'] = gaps
+    return state
+
+
 def bucket_start(ts, seconds):
     """Return the canonical UTC half-open bucket start for an integer timestamp."""
     if isinstance(ts, bool) or not isinstance(ts, int):
@@ -333,20 +420,112 @@ def build_service_rollup(rows, service_port, start, seconds, coverage=(), prior_
 
 
 def record_coverage_interval(conn, stream_kind, stream_key, start_ts, end_ts, reason, detail=None):
-    """Insert one validated, non-overlapping sparse coverage interval."""
+    """Insert one sparse interval, coalescing only matching adjacent evidence."""
     interval = CoverageInterval(int(start_ts), int(end_ts), str(reason))
+    stream_kind = str(stream_kind)
+    stream_key = str(stream_key)
+    adjacent = conn.execute(
+        'SELECT id, start_ts FROM telemetry_coverage WHERE stream_kind=? AND stream_key=? '
+        'AND end_ts=? AND reason=? AND detail IS ? ORDER BY start_ts DESC LIMIT 1',
+        (stream_kind, stream_key, interval.start_ts, interval.state, detail),
+    ).fetchone()
+    if adjacent is not None:
+        conn.execute('UPDATE telemetry_coverage SET end_ts=? WHERE id=?', (interval.end_ts, adjacent['id']))
+        return
     overlapping = conn.execute(
         'SELECT 1 FROM telemetry_coverage WHERE stream_kind=? AND stream_key=? '
         'AND start_ts < ? AND end_ts > ? LIMIT 1',
-        (str(stream_kind), str(stream_key), interval.end_ts, interval.start_ts),
+        (stream_kind, stream_key, interval.end_ts, interval.start_ts),
     ).fetchone()
     if overlapping is not None:
         raise ValueError('coverage intervals must not overlap')
     conn.execute(
         'INSERT INTO telemetry_coverage(stream_kind, stream_key, start_ts, end_ts, reason, detail) '
         'VALUES(?,?,?,?,?,?)',
-        (str(stream_kind), str(stream_key), interval.start_ts, interval.end_ts, interval.state, detail),
+        (stream_kind, stream_key, interval.start_ts, interval.end_ts, interval.state, detail),
     )
+
+
+def detect_collection_gaps(conn, *, now, stream_kind=None, stream_key=None):
+    """Confirm gaps only after two expected cadence boundaries have passed."""
+    clauses = []
+    params = []
+    if stream_kind is not None:
+        clauses.append('stream_kind=?')
+        params.append(str(stream_kind))
+    if stream_key is not None:
+        clauses.append('stream_key=?')
+        params.append(str(stream_key))
+    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    rows = conn.execute(
+        'SELECT stream_kind, stream_key, last_observed_ts, cadence_seconds, open_gap_start_ts '
+        'FROM telemetry_streams' + where,
+        tuple(params),
+    ).fetchall()
+    confirmed = 0
+    for row in rows:
+        last = row['last_observed_ts']
+        cadence = int(row['cadence_seconds'])
+        if last is None or row['open_gap_start_ts'] is not None:
+            continue
+        if int(now) >= int(last) + 2 * cadence:
+            conn.execute(
+                'UPDATE telemetry_streams SET consecutive_misses=2, open_gap_start_ts=? '
+                'WHERE stream_kind=? AND stream_key=?',
+                (int(last) + cadence, row['stream_kind'], row['stream_key']),
+            )
+            confirmed += 1
+    return confirmed
+
+
+def record_observation(
+    conn, stream_kind, stream_key, *, ts, cadence_seconds, state, expected_cadence=True,
+):
+    """Advance one stream with explicit True/False/None availability evidence."""
+    if state is not True and state is not False and state is not None:
+        raise ValueError('state must be True, False, or None')
+    stream_kind = str(stream_kind)
+    stream_key = str(stream_key)
+    ts = int(ts)
+    cadence_seconds = int(cadence_seconds)
+    if cadence_seconds <= 0:
+        raise ValueError('cadence_seconds must be positive')
+    row = conn.execute(
+        'SELECT started_ts, cadence_seconds, last_observed_ts, open_gap_start_ts '
+        'FROM telemetry_streams WHERE stream_kind=? AND stream_key=?',
+        (stream_kind, stream_key),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            'INSERT INTO telemetry_streams('
+            'stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, '
+            'consecutive_misses, open_gap_start_ts) VALUES(?,?,?,?,?,0,NULL)',
+            (stream_kind, stream_key, ts, cadence_seconds, ts),
+        )
+    elif expected_cadence:
+        if int(row['cadence_seconds']) != cadence_seconds:
+            raise ValueError('stream cadence cannot change')
+        detect_collection_gaps(
+            conn, now=ts, stream_kind=stream_kind, stream_key=stream_key,
+        )
+        current = conn.execute(
+            'SELECT open_gap_start_ts FROM telemetry_streams WHERE stream_kind=? AND stream_key=?',
+            (stream_kind, stream_key),
+        ).fetchone()
+        gap_start = current['open_gap_start_ts']
+        if gap_start is not None and int(gap_start) < ts:
+            record_coverage_interval(
+                conn, stream_kind, stream_key, int(gap_start), ts, 'collection_gap', None,
+            )
+        conn.execute(
+            'UPDATE telemetry_streams SET last_observed_ts=?, consecutive_misses=0, open_gap_start_ts=NULL '
+            'WHERE stream_kind=? AND stream_key=?',
+            (ts, stream_kind, stream_key),
+        )
+    if state is None:
+        record_coverage_interval(
+            conn, stream_kind, stream_key, ts, ts + cadence_seconds, 'unknown', None,
+        )
 
 
 def _coverage_for(conn, stream_kind, stream_key, start, end):
