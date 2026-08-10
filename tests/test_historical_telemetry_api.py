@@ -1,6 +1,8 @@
 import time
 import unittest
 
+from dashboard.beacon import repositories as telemetry_repositories
+from dashboard.beacon import telemetry
 from tests.helpers import cleanup_db, load_app
 
 
@@ -102,3 +104,55 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
             with self.subTest(query=query):
                 response = self.client.get('/api/telemetry/history', query_string=query)
                 self.assertEqual(response.status_code, 400)
+
+    def test_repository_merges_each_retained_host_tier_without_boundary_duplicates(self):
+        """Raw, five-minute, and hourly evidence stays distinguishable after re-bucketing."""
+        raw_cutoff = self.now - 7 * 86400
+        five_minute_cutoff = self.now - 30 * 86400
+        start_ts = five_minute_cutoff - 3600
+        end_ts = raw_cutoff + 3600
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO stats_history(ts, cpu, ram, disk, temp) VALUES(?,?,?,?,?)",
+                    (raw_cutoff + 60, 12.0, 0.0, 0.0, 0.0),
+                )
+                conn.execute(
+                    "INSERT INTO host_metric_rollups("
+                    "metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, latest_value, "
+                    "sample_count, observed_seconds, gap_seconds, unknown_seconds) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    ("cpu", raw_cutoff - 300, 300, 8.0, 10.0, 9.0, 10.0, 2, 300, 0, 0),
+                )
+                conn.execute(
+                    "INSERT INTO host_metric_rollups("
+                    "metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, latest_value, "
+                    "sample_count, observed_seconds, gap_seconds, unknown_seconds) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    ("cpu", five_minute_cutoff - 3600, 3600, 1.0, 4.0, 2.5, 4.0, 4, 3600, 0, 0),
+                )
+                conn.commit()
+                segments = telemetry_repositories.get_host_telemetry(
+                    conn,
+                    "cpu",
+                    start_ts,
+                    end_ts,
+                    3600,
+                    telemetry.POINT_BUDGET + 1,
+                    {
+                        "raw_start_ts": raw_cutoff,
+                        "five_minute_start_ts": five_minute_cutoff,
+                    },
+                )
+            finally:
+                conn.close()
+
+        response = telemetry.compose_historical_response(segments, "host")
+        self.assertEqual(response["source_resolutions_seconds"], [60, 300, 3600])
+        self.assertEqual(len(response["points"]), 3)
+        self.assertEqual(
+            [point["ts"] for point in response["points"]],
+            sorted(point["ts"] for point in response["points"]),
+        )
+        self.assertTrue(all("sample_count" in point for point in response["points"]))
