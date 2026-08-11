@@ -478,11 +478,26 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
         finally:
             conn.close()
 
+        with self.assertRaises(queues.LeaseLost):
+            self.appmod.worker_cleanup_history(authority_a, now=self.clock())
+        self.appmod.worker_cleanup_history(authority_b, now=self.clock())
+
+        conn = self.appmod.get_db()
+        try:
+            self.assertEqual(
+                [row['event_type'] for row in conn.execute('SELECT event_type FROM events')],
+                ['still_retained'],
+            )
+            state = self.appmod._get_runtime_state('telemetry_retention_state', {}, conn=conn)
+            self.assertEqual(state.get('state'), 'normal')
+        finally:
+            conn.close()
+
     def test_real_worker_samples_use_metric_streams_and_close_pressure_gaps(self):
         """The worker's four host values must be readable through their API streams."""
-        self.clock = UtcClock(int(time.time()) - 600)
+        self.clock = UtcClock(int(time.time()) - 1_000)
         authority_a, authority_b = seed_successive_worker_epochs(
-            self.db_path, self.clock, lease_seconds=3_000,
+            self.db_path, self.clock, lease_seconds=300,
         )
         policy = self.appmod._telemetry_policy()
         normal = telemetry.StorageSnapshot(
@@ -545,14 +560,14 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
 
         self.assertEqual(
             streams,
-            [('host', metric) for metric in telemetry.HOST_METRICS],
+            sorted(('host', metric) for metric in telemetry.HOST_METRICS),
         )
         self.assertEqual(
             gaps,
-            [
+            sorted([
                 (metric, suspend_ts, recovered_ts, 'collection_gap', 'storage_pressure')
                 for metric in telemetry.HOST_METRICS
-            ],
+            ]),
         )
 
         client = self.appmod.app.test_client()
@@ -576,22 +591,6 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
                     },
                     payload['coverage'],
                 )
-
-        with self.assertRaises(queues.LeaseLost):
-            self.appmod.worker_cleanup_history(authority_a, now=self.clock())
-        self.appmod.worker_cleanup_history(authority_b, now=self.clock())
-
-        conn = self.appmod.get_db()
-        try:
-            self.assertEqual(
-                [row['event_type'] for row in conn.execute('SELECT event_type FROM events')],
-                ['still_retained'],
-            )
-            state = self.appmod._get_runtime_state('telemetry_retention_state', {}, conn=conn)
-            self.assertEqual(state.get('state'), 'normal')
-        finally:
-            conn.close()
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -9,6 +9,7 @@ import os
 POINT_BUDGET = 2048
 MAX_HISTORY_SECONDS = 90 * 86400
 RESOLUTION_LADDER_SECONDS = (60, 300, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400)
+HOST_METRICS = ('cpu', 'ram', 'disk', 'temp')
 _COVERAGE_STATES = {
     'collection_gap',
     'expired',
@@ -16,6 +17,13 @@ _COVERAGE_STATES = {
     'observed',
     'unknown',
 }
+
+
+def host_stream_key(metric):
+    """Return the canonical, metric-specific host coverage stream key."""
+    if metric not in HOST_METRICS:
+        raise ValueError('invalid host metric')
+    return metric
 
 
 @dataclass(frozen=True)
@@ -444,18 +452,18 @@ def _stream_gap_key(stream_kind, stream_key):
     return f'{stream_kind}:{stream_key}'
 
 
-def open_storage_pressure_gap(conn, stream_kind, stream_key, *, now):
+def open_storage_pressure_gap(conn, stream_kind, stream_key, *, now, state=None):
     """Remember a suspended-history interval until normal persistence returns."""
-    state = read_retention_state(conn)
+    state = dict(read_retention_state(conn) if state is None else state)
     gaps = dict(state['pressure_gaps'])
     gaps.setdefault(_stream_gap_key(stream_kind, stream_key), int(now))
     state['pressure_gaps'] = gaps
     return state
 
 
-def close_storage_pressure_gap(conn, stream_kind, stream_key, *, now):
+def close_storage_pressure_gap(conn, stream_kind, stream_key, *, now, state=None):
     """Close one durable storage-pressure gap without inventing observations."""
-    state = read_retention_state(conn)
+    state = dict(read_retention_state(conn) if state is None else state)
     gaps = dict(state['pressure_gaps'])
     start = gaps.pop(_stream_gap_key(stream_kind, stream_key), None)
     if start is not None and int(start) < int(now):
@@ -665,6 +673,7 @@ def detect_collection_gaps(conn, *, now, stream_kind=None, stream_key=None):
 
 def record_observation(
     conn, stream_kind, stream_key, *, ts, cadence_seconds, state, expected_cadence=True,
+    known_gap=False,
 ):
     """Advance one stream with explicit True/False/None availability evidence."""
     if state is not True and state is not False and state is not None:
@@ -690,18 +699,19 @@ def record_observation(
     elif expected_cadence:
         if int(row['cadence_seconds']) != cadence_seconds:
             raise ValueError('stream cadence cannot change')
-        detect_collection_gaps(
-            conn, now=ts, stream_kind=stream_kind, stream_key=stream_key,
-        )
-        current = conn.execute(
-            'SELECT open_gap_start_ts FROM telemetry_streams WHERE stream_kind=? AND stream_key=?',
-            (stream_kind, stream_key),
-        ).fetchone()
-        gap_start = current['open_gap_start_ts']
-        if gap_start is not None and int(gap_start) < ts:
-            record_coverage_interval(
-                conn, stream_kind, stream_key, int(gap_start), ts, 'collection_gap', None,
+        if not known_gap:
+            detect_collection_gaps(
+                conn, now=ts, stream_kind=stream_kind, stream_key=stream_key,
             )
+            current = conn.execute(
+                'SELECT open_gap_start_ts FROM telemetry_streams WHERE stream_kind=? AND stream_key=?',
+                (stream_kind, stream_key),
+            ).fetchone()
+            gap_start = current['open_gap_start_ts']
+            if gap_start is not None and int(gap_start) < ts:
+                record_coverage_interval(
+                    conn, stream_kind, stream_key, int(gap_start), ts, 'collection_gap', None,
+                )
         conn.execute(
             'UPDATE telemetry_streams SET last_observed_ts=?, consecutive_misses=0, open_gap_start_ts=NULL '
             'WHERE stream_kind=? AND stream_key=?',
@@ -820,8 +830,11 @@ def _roll_host_raw(conn, start, now, policy):
         (start, end),
     ).fetchall()
     created = 0
-    for metric in ('cpu', 'ram', 'disk', 'temp'):
-        aggregate = build_host_rollup(rows, metric, start, 300, _coverage_for(conn, 'host', metric, start, end))
+    for metric in HOST_METRICS:
+        stream_key = host_stream_key(metric)
+        aggregate = build_host_rollup(
+            rows, metric, start, 300, _coverage_for(conn, 'host', stream_key, start, end),
+        )
         if aggregate is None:
             continue
         _upsert_and_verify(conn, 'host_metric_rollups', aggregate, ('metric', 'bucket_start', 'bucket_seconds'))

@@ -1740,18 +1740,27 @@ def worker_collect_system_stats(authority, now=None, persist_history=None):
         if decision.historical_persistence_allowed and persist_history:
             conn.execute('INSERT OR REPLACE INTO stats_history(ts,cpu,ram,disk,temp) VALUES(?,?,?,?,?)',
                          (now, sample['cpu'], sample['ram'], sample['disk'], sample['temp']))
-            state = beacon_telemetry.close_storage_pressure_gap(
-                conn, 'host', 'host', now=now,
-            )
-            beacon_telemetry.record_observation(
-                conn, 'host', 'host', ts=now, cadence_seconds=METRIC_HISTORY_SECONDS,
-                state=True, expected_cadence=True,
-            )
+            state = beacon_telemetry.read_retention_state(conn)
+            for metric in beacon_telemetry.HOST_METRICS:
+                stream_key = beacon_telemetry.host_stream_key(metric)
+                had_pressure_gap = f'host:{stream_key}' in state['pressure_gaps']
+                state = beacon_telemetry.close_storage_pressure_gap(
+                    conn, 'host', stream_key, now=now, state=state,
+                )
+                beacon_telemetry.record_observation(
+                    conn, 'host', stream_key, ts=now,
+                    cadence_seconds=METRIC_HISTORY_SECONDS,
+                    state=sample[metric] is not None, expected_cadence=True,
+                    known_gap=had_pressure_gap,
+                )
             beacon_telemetry.write_retention_state(conn, state, now=now)
         elif not decision.historical_persistence_allowed:
-            state = beacon_telemetry.open_storage_pressure_gap(
-                conn, 'host', 'host', now=now,
-            )
+            state = beacon_telemetry.read_retention_state(conn)
+            for metric in beacon_telemetry.HOST_METRICS:
+                stream_key = beacon_telemetry.host_stream_key(metric)
+                state = beacon_telemetry.open_storage_pressure_gap(
+                    conn, 'host', stream_key, now=now, state=state,
+                )
             state['state'] = decision.state
             beacon_telemetry.write_retention_state(conn, state, now=now)
     return sample
@@ -2161,9 +2170,9 @@ def _history_selector():
     metrics = request.args.getlist('metric')
     ports = request.args.getlist('port')
     if kind == 'host':
-        if len(metrics) != 1 or ports or metrics[0] not in beacon_repositories.HOST_METRIC_COLUMNS:
+        if len(metrics) != 1 or ports:
             raise ValueError('invalid host selector')
-        return kind, metrics[0], None
+        return kind, beacon_telemetry.host_stream_key(metrics[0]), None
     if kind == 'service':
         if metrics or len(ports) != 1:
             raise ValueError('invalid service selector')
@@ -2199,7 +2208,7 @@ def api_telemetry_history():
             'raw_start_ts': now - policy.raw_days * 86400,
             'five_minute_start_ts': now - policy.five_minute_days * 86400,
         }
-        stream_key = metric if kind == 'host' else str(port)
+        stream_key = beacon_telemetry.host_stream_key(metric) if kind == 'host' else str(port)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
