@@ -104,7 +104,9 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
 
     def test_repository_merges_each_retained_host_tier_without_boundary_duplicates(self):
         """Raw, five-minute, and hourly evidence stays distinguishable after re-bucketing."""
-        raw_cutoff = self.now - 7 * 86400
+        # Keep the two sources inside one hourly display bucket regardless of
+        # the wall-clock minute when this regression runs.
+        raw_cutoff = (self.now // 3600) * 3600 + 1800
         five_minute_cutoff = self.now - 30 * 86400
         start_ts = five_minute_cutoff - 3600
         end_ts = raw_cutoff + 3600

@@ -299,6 +299,25 @@ class RetentionPolicy:
     retry_base_seconds: int = 300
     retry_max_seconds: int = 3_600
 
+    @classmethod
+    def from_settings(cls, settings):
+        """Compose one immutable policy from an already validated Settings value."""
+        return cls(
+            raw_days=settings.telemetry_raw_days,
+            five_minute_days=settings.telemetry_five_minute_days,
+            retention_days=settings.telemetry_retention_days,
+            point_budget=settings.telemetry_point_budget,
+            db_max_bytes=settings.telemetry_db_max_bytes,
+            min_free_bytes=settings.telemetry_min_free_bytes,
+            pressure_warning_percent=settings.telemetry_pressure_warning_percent,
+            pressure_hard_percent=settings.telemetry_pressure_hard_percent,
+            pressure_recovery_percent=settings.telemetry_pressure_recovery_percent,
+            backlog_reserve_bytes=settings.telemetry_backlog_reserve_bytes,
+            rollup_batch_buckets=settings.telemetry_rollup_batch_buckets,
+            retry_base_seconds=settings.telemetry_retry_base_seconds,
+            retry_max_seconds=settings.telemetry_retry_max_seconds,
+        )
+
     def __post_init__(self):
         positive = (
             'raw_days', 'five_minute_days', 'retention_days', 'point_budget',

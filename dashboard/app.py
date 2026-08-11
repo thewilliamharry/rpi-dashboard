@@ -1666,21 +1666,7 @@ def worker_handle_state_transition(authority, **kwargs):
 
 def _telemetry_policy():
     """Compose retention policy once from the validated process settings."""
-    return beacon_telemetry.RetentionPolicy(
-        raw_days=SETTINGS.telemetry_raw_days,
-        five_minute_days=SETTINGS.telemetry_five_minute_days,
-        retention_days=SETTINGS.telemetry_retention_days,
-        point_budget=SETTINGS.telemetry_point_budget,
-        db_max_bytes=SETTINGS.telemetry_db_max_bytes,
-        min_free_bytes=SETTINGS.telemetry_min_free_bytes,
-        pressure_warning_percent=SETTINGS.telemetry_pressure_warning_percent,
-        pressure_hard_percent=SETTINGS.telemetry_pressure_hard_percent,
-        pressure_recovery_percent=SETTINGS.telemetry_pressure_recovery_percent,
-        backlog_reserve_bytes=SETTINGS.telemetry_backlog_reserve_bytes,
-        rollup_batch_buckets=SETTINGS.telemetry_rollup_batch_buckets,
-        retry_base_seconds=SETTINGS.telemetry_retry_base_seconds,
-        retry_max_seconds=SETTINGS.telemetry_retry_max_seconds,
-    )
+    return beacon_telemetry.RetentionPolicy.from_settings(SETTINGS)
 
 
 def _telemetry_persistence_decision(conn, *, now, snapshot):
@@ -2198,12 +2184,12 @@ def api_telemetry_history():
         now = int(time.time())
         if requested.end_ts > now:
             raise ValueError('end_ts must not be in the future')
+        policy = _telemetry_policy()
         resolution = beacon_telemetry.select_resolution(
             requested.start_ts,
             requested.end_ts,
-            beacon_telemetry.POINT_BUDGET,
+            policy.point_budget,
         )
-        policy = beacon_telemetry.RetentionPolicy()
         cutoffs = {
             'raw_start_ts': now - policy.raw_days * 86400,
             'five_minute_start_ts': now - policy.five_minute_days * 86400,
@@ -2219,25 +2205,25 @@ def api_telemetry_history():
                 if kind == 'host':
                     sources = beacon_repositories.get_host_telemetry(
                         conn, metric, requested.start_ts, requested.end_ts, resolution,
-                        beacon_telemetry.POINT_BUDGET + 1, cutoffs,
+                        policy.point_budget + 1, cutoffs,
                     )
                 else:
                     sources = beacon_repositories.get_service_telemetry(
                         conn, port, requested.start_ts, requested.end_ts, resolution,
-                        beacon_telemetry.POINT_BUDGET + 1, cutoffs,
+                        policy.point_budget + 1, cutoffs,
                     )
                 coverage_data = beacon_repositories.get_telemetry_coverage(
                     conn, kind, stream_key, requested.start_ts, requested.end_ts,
-                    beacon_telemetry.POINT_BUDGET + 1,
+                    policy.point_budget + 1,
                 )
                 pending = beacon_repositories.get_pending_aggregation(
                     conn, kind, stream_key, requested.start_ts, requested.end_ts,
-                    beacon_telemetry.POINT_BUDGET + 1,
+                    policy.point_budget + 1,
                 )
             finally:
                 conn.close()
         history = beacon_telemetry.compose_historical_response(sources, kind)
-        if len(history['points']) > beacon_telemetry.POINT_BUDGET:
+        if len(history['points']) > policy.point_budget:
             raise ValueError('telemetry result exceeds point budget')
         coverage = [interval.as_dict() for interval in beacon_telemetry.partition_coverage(
             requested.start_ts,
@@ -2259,7 +2245,7 @@ def api_telemetry_history():
         'requested': {'start_ts': requested.start_ts, 'end_ts': requested.end_ts},
         'selector': selector,
         'effective_resolution_seconds': resolution,
-        'point_budget': beacon_telemetry.POINT_BUDGET,
+        'point_budget': policy.point_budget,
         'source_resolutions_seconds': history['source_resolutions_seconds'],
         'points': history['points'],
         'coverage': coverage,
