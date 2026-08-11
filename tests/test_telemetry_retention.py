@@ -207,6 +207,55 @@ class RetentionRollupContractTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_non_aligned_hourly_expiry_keeps_crossing_host_and_service_buckets(self):
+        """Hourly evidence expires only after its whole half-open bucket closes."""
+        policy = telemetry.RetentionPolicy(rollup_batch_buckets=4)
+        now = self.now + 863
+        cutoff = now - policy.retention_days * 86400
+        crossing_start = telemetry.bucket_start(cutoff, 3600)
+        closed_start = crossing_start - 3600
+        exact_end_start = cutoff - 3600
+        conn = self._connection()
+        try:
+            for start, value in ((closed_start, 1.0), (exact_end_start, 2.0), (crossing_start, 3.0)):
+                conn.execute(
+                    'INSERT INTO host_metric_rollups('
+                    'metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, '
+                    'latest_value, sample_count, observed_seconds, gap_seconds, unknown_seconds'
+                    ') VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    ('cpu', start, 3600, value, value, value, value, 1, 3600, 0, 0),
+                )
+                conn.execute(
+                    'INSERT INTO service_rollups('
+                    'service_port, bucket_start, bucket_seconds, online_seconds, offline_seconds, '
+                    'unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, '
+                    'latency_sample_count, check_count, failure_class_counts_json'
+                    ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (8080, start, 3600, 3600, 0, 0, 0, value, value, value, 1, 1, '{}'),
+                )
+            seed_events(conn, [
+                (cutoff - 1, None, 'expired', None, None, None, None, 'none', '{}'),
+                (cutoff, None, 'edge', None, None, None, None, 'none', '{}'),
+            ])
+            conn.commit()
+
+            telemetry.run_retention_batch(conn, now=now, policy=policy)
+
+            for table, key in (('host_metric_rollups', 'metric'), ('service_rollups', 'service_port')):
+                with self.subTest(table=table):
+                    rows = conn.execute(
+                        f'SELECT bucket_start FROM {table} WHERE bucket_seconds=3600 '
+                        f'AND {key}=? ORDER BY bucket_start',
+                        ('cpu' if table == 'host_metric_rollups' else 8080,),
+                    ).fetchall()
+                    self.assertEqual([row['bucket_start'] for row in rows], [crossing_start])
+            self.assertEqual(
+                [row['event_type'] for row in conn.execute('SELECT event_type FROM events ORDER BY ts')],
+                ['edge'],
+            )
+        finally:
+            conn.close()
+
 
 class StoragePressureContractTests(unittest.TestCase):
     """Executable D-10 through D-12 settings and no-flap state contract."""
