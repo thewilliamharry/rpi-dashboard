@@ -58,7 +58,7 @@ status: complete
 ## Outcomes
 
 - Added a strict four-metric host stream contract shared by sampling, pressure-gap persistence, rollups, and API selector/coverage lookup.
-- Made pressure recovery preserve one exact `storage_pressure` gap for each host metric while retaining the single shared raw-rollup job key.
+- Made pressure recovery preserve one exact `storage_pressure` gap for each host metric, and represent explicit null samples as `unknown`, while retaining the single shared raw-rollup job key.
 - Composed `RetentionPolicy` directly from validated `Settings`, then used that one value for worker cleanup and every history route cutoff, sentinel limit, overflow check, and serialized budget.
 - Added production-path regressions for worker-to-Flask history reads, storage pressure, stale worker rejection, non-default tier days, and response budgets.
 
@@ -69,7 +69,7 @@ status: complete
 
 ## Task Commits
 
-1. **Task 1: Trace all four real worker host metrics through canonical stream evidence** — `08091e2` (RED), `36b0054` (GREEN)
+1. **Task 1: Trace all four real worker host metrics through canonical stream evidence** — `08091e2` (RED), `36b0054` (GREEN), `8894dd2` (null-sample correction)
 2. **Task 2: Route worker and API through one deployed retention policy** — `1145e19` (RED), `3d9b05a` (GREEN)
 
 ## Files Created/Modified
@@ -104,7 +104,15 @@ status: complete
 - **Verification:** Focused configured policy suite passes.
 - **Committed in:** `3d9b05a`
 
-**Total deviations:** 2 auto-fixed (1 Rule 1, 1 Rule 3).
+**3. [Rule 1 - Bug] Recorded explicit null host metric samples as unknown coverage**
+- **Found during:** Final task self-check
+- **Issue:** The per-metric loop converted a null value into a false observation instead of the required unknown state.
+- **Fix:** Passed `None` into the tri-state observation contract and added null-temperature coverage to the production worker regression.
+- **Files modified:** `dashboard/app.py`, `tests/test_telemetry_retention.py`
+- **Verification:** Focused worker regression and both required suites pass.
+- **Committed in:** `8894dd2`
+
+**Total deviations:** 3 auto-fixed (2 Rule 1, 1 Rule 3).
 
 ## Known Stubs
 
@@ -121,5 +129,5 @@ Plan 02-08 can repair closed-bucket expiry and retry-due enforcement on top of c
 ## Self-Check: PASSED
 
 - Confirmed all four implementation/test files exist.
-- Confirmed task commits `08091e2`, `36b0054`, `1145e19`, and `3d9b05a` exist in git history.
+- Confirmed task commits `08091e2`, `36b0054`, `8894dd2`, `1145e19`, and `3d9b05a` exist in git history.
 - Confirmed this plan deleted no tracked files.
