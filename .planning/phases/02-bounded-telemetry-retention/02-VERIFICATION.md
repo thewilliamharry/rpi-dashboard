@@ -1,63 +1,49 @@
 ---
 phase: 02-bounded-telemetry-retention
-verified: 2026-08-10T15:37:24Z
+verified: 2026-08-11T00:00:00Z
 status: gaps_found
-score: 15/27 must-haves verified
+score: 2/4 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
+re_verification:
+  previous_status: gaps_found
+  previous_score: 15/27
+  gaps_closed:
+    - "New worker samples use canonical per-metric host stream identities and the API uses the same Settings-derived policy."
+    - "Hourly retention expires only fully closed buckets."
+    - "Preserved raw and five-minute source evidence remains queryable until a completed replacement exists."
+    - "Rollup admission honors persisted retry due times."
+  gaps_remaining: []
+  regressions: []
 gaps:
-  - truth: "Beacon retains a rolling 90 days of bounded host metrics, service history, and events without unbounded database growth."
-    status: failed
-    reason: "Hourly host and service rollups are deleted by bucket start, so an hourly bucket that overlaps a non-hour-aligned 90-day cutoff is removed while part of it is still retained history."
-    artifacts:
-      - path: "dashboard/beacon/telemetry.py"
-        issue: "Lines 963-964 use bucket_start < expiry_cutoff instead of requiring bucket_start + bucket_seconds <= expiry_cutoff."
-    missing:
-      - "Expire only fully closed hourly buckets and add a non-hour-aligned cutoff regression test for host and service rollups."
-  - truth: "Recent observations remain detailed while older history is represented by documented aggregates, with each aggregate completed before its source data is removed."
-    status: failed
-    reason: "Tier selection excludes raw rows as soon as they pass the configured raw cutoff, even while they are still retained awaiting bounded asynchronous compaction. The API therefore omits preserved source evidence."
-    artifacts:
-      - path: "dashboard/beacon/repositories.py"
-        issue: "_tier_ranges (lines 133-141) reads raw, five-minute, and hourly tiers exclusively; it has no awaiting-compaction raw fallback."
-      - path: "dashboard/beacon/telemetry.py"
-        issue: "run_retention_batch compacts a bounded batch asynchronously, so retained source rows can remain outside the queryable tier for more than one cleanup interval."
-    missing:
-      - "Make preserved raw evidence queryable until its replacement rollup is available, or durably disclose and query pending aggregation before excluding it."
   - truth: "A requested historical range explicitly distinguishes observed values from collection gaps, unknown intervals, and data that has expired under retention."
     status: failed
-    reason: "The production host sampler writes stream, cadence, and storage-pressure evidence under host:host, but host history/rollup readers look up host:cpu, host:ram, host:disk, or host:temp. Normal host requests therefore report not_yet_monitored/unknown instead of the worker-recorded evidence."
+    reason: "Existing installations can retain legacy host:host stream metadata, coverage rows, and pressure state, but current readers and writers use only host:cpu/ram/disk/temp. No data migration or compatibility lookup transfers that durable evidence, so a metric request reports unknown/not_yet_monitored despite recorded historical collection-gap evidence."
     artifacts:
+      - path: "dashboard/beacon/migrations.py"
+        issue: "The migration catalog ends at version 6 and contains no idempotent host:host-to-per-metric telemetry data migration."
+      - path: "dashboard/beacon/repositories.py"
+        issue: "get_telemetry_coverage performs an exact stream_key lookup and has no legacy host:host compatibility path."
       - path: "dashboard/app.py"
-        issue: "worker_collect_system_stats lines 1743-1753 closes/opens and records only host:host; api_telemetry_history derives the reader key from the requested metric."
-      - path: "dashboard/beacon/telemetry.py"
-        issue: "_roll_host_raw reads coverage per metric, so worker-recorded host:host pressure/gap evidence cannot enter host aggregates."
+        issue: "The writer and API both use host_stream_key(metric), so they cannot close or read pre-upgrade host:host pressure state."
     missing:
-      - "Use one canonical per-metric host stream identity across sampling, pressure-gap recording, rollups, and history reads, with a production-writer-to-reader integration test."
+      - "Add an idempotent upgrade path that expands legacy host:host stream/coverage/pressure-gaps to all four metric keys, plus a seeded upgrade regression through the API."
   - truth: "Beacon selects an appropriate server-side resolution for each historical request and returns a bounded number of points without misleading the operator about coverage."
     status: failed
-    reason: "The API constructs a default RetentionPolicy and constant point budget rather than the validated deployed settings used by the worker. Configured tier boundaries and point budget can therefore disagree with the tables the worker writes and expires."
+    reason: "Derived five-minute aggregation backlog is emitted as a 3,600-second pending interval even though the source bucket is 300 seconds. Coalescing can therefore claim pending aggregation for timestamps with no preserved source evidence."
     artifacts:
-      - path: "dashboard/app.py"
-        issue: "api_telemetry_history lines 2192-2200 and 2212/2253 use POINT_BUDGET and RetentionPolicy() instead of _telemetry_policy()."
+      - path: "dashboard/beacon/repositories.py"
+        issue: "Both host and service five_query projections use bucket_start + 3600 AS end_ts while filtering bucket_seconds=300."
     missing:
-      - "Use the same settings-backed policy for API resolution, cutoffs, retention coverage, and response budget as the worker uses for retention."
-  - truth: "Failure or retry never duplicates an aggregate or deletes source evidence; the job remains failed/pending with bounded backoff and an error class."
-    status: failed
-    reason: "_mark_failed persists next_retry_ts, but _raw_candidates and _five_minute_candidates never examine telemetry_rollup_jobs. A failed candidate is retried by every cleanup invocation before its due time."
-    artifacts:
-      - path: "dashboard/beacon/telemetry.py"
-        issue: "Lines 780-818 select solely from source/rollup rows; run_retention_batch lines 928-958 processes all selected candidates without a due-time predicate."
-    missing:
-      - "Filter candidates using persisted failed/pending job state and next_retry_ts, and test that a pre-due retry leaves attempt_count and source rows unchanged."
+      - "Project five-minute derived backlog as bucket_start + 300 and add host/service exact-interval and coalescing regressions."
 ---
 
 # Phase 2: Bounded Telemetry & Retention Verification Report
 
 **Phase Goal:** Beacon maintains an accurate, bounded 90-day telemetry record whose resolution, gaps, and retention rules remain trustworthy under normal operation.
-**Verified:** 2026-08-10T15:37:24Z
+**Verified:** 2026-08-11T00:00:00Z
 **Status:** gaps_found
-**Re-verification:** No — initial verification
+**Re-verification:** Yes — after gap closure
 
 ## Goal Achievement
 
@@ -65,97 +51,94 @@ gaps:
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | Beacon retains host metrics, service history, and events for a rolling 90 days without unbounded database growth. | ✗ FAILED | `run_retention_batch()` deletes hourly rollups on `bucket_start < expiry_cutoff` at `telemetry.py:963-964`; a bucket crossing a non-hour-aligned cutoff loses still-in-window data. |
-| 2 | Recent observations remain detailed while older history is represented by documented aggregates, with each aggregate completed before its source data is removed. | ✗ FAILED | Aggregate-before-delete is ordered correctly, but `_tier_ranges()` omits retained raw rows awaiting a bounded asynchronous rollup. Preserved evidence can disappear from reads. |
-| 3 | A requested range distinguishes observed values, collection gaps, unknown intervals, and expired data. | ✗ FAILED | The worker writes host coverage as `host:host` (`app.py:1743-1753`), while API and host rollups read metric keys (`host:cpu`, etc.). Worker evidence is disconnected from responses. |
-| 4 | Historical APIs choose appropriate server-side resolution and return a bounded point count without misleading coverage. | ✗ FAILED | The endpoint fixes both policy and budget to defaults (`app.py:2192-2200`, `2253`) rather than using `_telemetry_policy()` and deployed settings. |
+| 1 | Beacon retains host metrics, service history, and events for a rolling 90 days without unbounded database growth. | ✓ VERIFIED | `run_retention_batch()` expires hourly rows only when `bucket_start + bucket_seconds <= expiry_cutoff`; the focused non-aligned host/service/event regression passed. Bounded due-only batch admission and strict event expiry are also present. |
+| 2 | Recent observations remain detailed while older history is represented by documented aggregates, with each aggregate completed before its source data is removed. | ✓ VERIFIED | Fallback query shapes retain lower-tier source evidence until a completed higher tier exists; `run_retention_batch()` verifies the aggregate before its exact source delete. The fallback/replacement and retry regressions passed. |
+| 3 | A requested historical range explicitly distinguishes observed values from collection gaps, unknown intervals, and data that has expired under retention. | ✗ FAILED | New samples are metric-specific, but pre-upgrade `host:host` stream/coverage/pressure state is neither migrated nor read. Exact metric lookup therefore strands durable gap evidence. |
+| 4 | Beacon selects an appropriate server-side resolution for each historical request and returns a bounded number of points without misleading the operator about coverage. | ✗ FAILED | Resolution and point-budget policy are Settings-backed, but derived five-minute backlog is reported as `[bucket_start, bucket_start + 3600)` rather than its actual 300-second interval. |
 
-**Roadmap-contract score:** 0/4 truths verified (0 present, behavior-unverified).  
-**Merged must-have score:** 15/27 verified — this includes the 23 plan truths; the four non-negotiable roadmap truths above all fail, so the phase goal is not achieved.
+**Score:** 2/4 roadmap success criteria verified.
 
-## Plan Must-Have Findings
+## Original Gap-Closure Reconciliation
 
-| Plan | Finding | Status | Evidence |
-| --- | --- | --- | --- |
-| 02-01 | Fixed selector validation, half-open bound preservation, ordering/coalescing, and legacy route coexistence are implemented. | ✓ VERIFIED | `HistoricalRange`, `select_resolution`, repository query maps, `api_telemetry_history`, and `api_history` are substantive and wired. The named API coverage test passed. |
-| 02-02 | The summary says `approve-contract`, but no independent developer decision artifact records the checkpoint; its claimed exact expiry contract is contradicted by production code. | ⚠️ UNCERTAIN / ✗ FAILED | `02-02-SUMMARY.md` is the sole approval evidence. Separately, the implemented hourly expiry removes a partially retained bucket, contrary to the recorded contract. |
-| 02-03 | Supported fixtures migrate transactionally and preserve legacy rows. | ✓ VERIFIED | Migration 5 tables plus migration 6 are registered; the named current-v4 preservation test passed. |
-| 02-04 | Verified aggregate-before-exact-source-delete is present; retention expiry and retry backoff contracts are not. | ✗ FAILED | `_upsert_and_verify()` precedes source `DELETE`, but hourly expiry is unsafe and `next_retry_ts` is not enforced. |
-| 02-05 | J8 is wired through worker authority and stale epoch rejection works, but host coverage production wiring is wrong. | ✗ FAILED | `_worker_write_transaction()` asserts current authority; named stale/current epoch test passed. `worker_collect_system_stats()` nevertheless uses the incompatible `host:host` stream key. |
-| 02-06 | Fixed queries, selector allowlists, and response ceiling exist, but mixed-tier data and configured retention policy are not truthfully wired. | ✗ FAILED | `_tier_ranges()` has no raw-awaiting-compaction fallback and the API bypasses settings-backed policy. |
+| Previous finding | Actual current-code result |
+| --- | --- |
+| New host sample coverage used `host:host` while readers used metrics. | Fixed for new writes: `worker_collect_system_stats()` loops `HOST_METRICS`, and API reads `host_stream_key(metric)`. The separate legacy-upgrade gap remains. |
+| API used default policy/budget instead of deployed settings. | Fixed: `_telemetry_policy()` composes `RetentionPolicy.from_settings(SETTINGS)` and the route uses `policy` for resolution, query limit, retention, and response budget. |
+| Expiry removed hourly buckets crossing a non-aligned 90-day cutoff. | Fixed: both hourly deletes require `bucket_start + bucket_seconds <= expiry_cutoff`. |
+| Uncompacted raw evidence was omitted from historical reads. | Fixed: fixed raw/five-minute fallback queries exclude only intervals covered by a completed replacement. |
+| Persisted retry backoff was not admitted by due time. | Fixed: raw and five-minute candidate queries join `telemetry_rollup_jobs` and require pending/failed `next_retry_ts <= now` (or NULL). |
 
-### Required Artifacts
+## Required Artifacts
 
 | Artifact | Expected | Status | Details |
 | --- | --- | --- | --- |
-| `dashboard/beacon/migrations.py` | Additive telemetry migration | ✓ VERIFIED | Substantive migrations 5/6, indexes, transactional migration engine, and current-v4 preservation test. |
-| `dashboard/beacon/config.py` | Validated retention/budget settings | ⚠️ PARTIAL | Validates settings, and `_telemetry_policy()` consumes them for worker retention; the history API does not. |
-| `dashboard/beacon/telemetry.py` | Retention, coverage, rollup policy | ⚠️ HOLLOW | Substantive and worker-wired, but has unsafe hourly expiry and ignores persisted retry due time. |
-| `dashboard/beacon/repositories.py` | Bounded mixed-tier history reads | ⚠️ HOLLOW | Fixed parameterized shapes are real, but exclusive tiers make preserved uncompacted raw evidence unreadable. |
-| `dashboard/app.py` | Authority-fenced writes and bounded history endpoint | ⚠️ HOLLOW | Wired to worker, policy and repositories, but production host stream identity and API policy wiring break truthfulness. |
-| `dashboard/beacon/worker_main.py` | Sole J8 worker dispatch | ✓ VERIFIED | J8 dispatches `cleanup_history(authority)` and its mutation inventory declares telemetry surfaces. |
-| `tests/test_historical_telemetry_api.py` | End-to-end history evidence | ⚠️ PARTIAL | It seeds `host:cpu` directly, bypassing the production `host:host` writer. |
-| `tests/test_telemetry_retention.py` | Retention and authority evidence | ⚠️ PARTIAL | Tests aligned cutoff and post-due retry, but not non-aligned hourly expiry or a pre-due retry. |
+| `dashboard/beacon/migrations.py` | Transactional, additive telemetry schema and compatibility upgrade path | ⚠️ PARTIAL | Migrations 5/6 are substantive and tested, but no migration handles already-persisted shared host telemetry state. |
+| `dashboard/beacon/telemetry.py` | Retention, rollup, coverage, and retry lifecycle | ✓ VERIFIED | Closed-bucket expiry, aggregate-before-delete savepoints, due-only admission, metric stream key helper, and pressure state helpers are substantive and worker-wired. |
+| `dashboard/beacon/repositories.py` | Fixed, bounded, non-overlapping historical reads and pending disclosure | ✗ HOLLOW | Main tier/fallback reads are wired, parameterized, and bounded; derived five-minute pending interval width is false for both kinds. |
+| `dashboard/app.py` | Sole-worker writers and bounded history API | ⚠️ PARTIAL | New writes and API policy are correctly wired, but neither provides legacy `host:host` evidence compatibility. |
+| `tests/test_telemetry_retention.py` | Retention, authority, stream, pressure, and retry evidence | ⚠️ PARTIAL | Tests prove new-worker metric streams and original repairs; none seeds legacy shared state and proves upgrade/API preservation. |
+| `tests/test_historical_telemetry_api.py` | Host/service fallback and pending API evidence | ⚠️ PARTIAL | Tests prove fallback/replacement paths; no host/service test asserts a five-minute derived pending interval ends at `+300`. |
 
-### Key Link Verification
+## Key Link Verification
 
 | From | To | Via | Status | Details |
 | --- | --- | --- | --- | --- |
-| `worker_main.py` | `app.py` | J8 → `cleanup_history(authority)` | ✓ WIRED | Inventory dispatch invokes the bound cleanup operation. |
-| `app.py` | `telemetry.py` | Worker transaction + policy/retention helpers | ✓ WIRED | `_worker_write_transaction()` asserts current epoch before `run_retention_batch()`. |
-| `app.py` | `repositories.py` | Validated history request → fixed query maps | ⚠️ PARTIAL | Calls are real, but API supplies default rather than deployed cutoffs. |
-| `worker_collect_system_stats()` | host history/rollups | Coverage stream identity | ✗ NOT_WIRED | Writer is `host:host`; readers require per-metric keys. |
-| `telemetry.py` | `telemetry_rollup_jobs` | Retry scheduling | ✗ NOT_WIRED | Failed jobs are written, but candidate selection never reads their due timestamp. |
-| `repositories.py` | retained raw source | Pending aggregation fallback | ✗ NOT_WIRED | Tier routing excludes retained raw source before its replacement aggregate exists. |
+| `worker_collect_system_stats()` | history coverage read | `host_stream_key(metric)` on both writer and API | ⚠️ PARTIAL | Correct for post-upgrade samples; no legacy-state conversion/read bridge. |
+| `Settings` | worker cleanup and history API | `_telemetry_policy()` | ✓ WIRED | The shared immutable policy supplies cutoffs, resolution budget, query sentinel, and serialized `point_budget`. |
+| `run_retention_batch()` | hourly rollups/retry jobs | closed-bucket expiry and due job predicates | ✓ WIRED | Every source class joins durable job state before batch admission; hourly deletes are bucket-end based. |
+| fallback source rows | `partition_coverage()` | `SourceSegment` values become observed coverage | ✓ WIRED | Completed replacement `NOT EXISTS` predicates preserve exactly one contributing tier. |
+| five-minute source rows | `aggregation_pending` | `_pending_source_rows()` → `get_pending_aggregation()` | ✗ NOT_WIRED CORRECTLY | Its 300-second sources are projected as 3,600-second intervals before coalescing. |
 
-### Data-Flow Trace (Level 4)
+## Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 | --- | --- | --- | --- | --- |
-| `app.py` history route | `sources`, `coverage_data`, `pending` | SQLite repository reads | Yes, but selection is inconsistent | ⚠️ HOLLOW — defaults can select wrong tiers and raw backlog is omitted. |
-| `worker_collect_system_stats()` | host telemetry stream/coverage | Real system sample → `stats_history` + telemetry state | Yes, but wrong identity | ✗ DISCONNECTED — coverage is written for `host:host`, never read by metric requests. |
-| `run_retention_batch()` | rollups/jobs/events | SQLite raw rows and rollups | Yes, but unsafe lifecycle | ⚠️ HOLLOW — partial hourly expiry and pre-due retries violate retention contract. |
+| history route | `sources`, `coverage_data`, `pending` | SQLite repositories through a short-lived connection | Yes, except five-minute derived pending end timestamps | ⚠️ HOLLOW |
+| host sampler | per-metric streams/gaps | live system sample → `stats_history`, `telemetry_streams`, `telemetry_coverage` | Yes for new samples; persisted legacy evidence is disconnected | ⚠️ HOLLOW |
+| retention engine | rollups/jobs/events | raw tables and durable job rows | Yes | ✓ FLOWING |
 
-### Behavioral Spot-Checks
+## Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 | --- | --- | --- | --- |
-| API coverage response, aggregate-before-delete, stale worker epoch, current-v4 migration preservation | `uv run --project dashboard python -m pytest -q` with four named tests | `4 passed in 0.20s` | ✓ PASS |
-| Full workspace suite | `uv run --project dashboard python -m pytest -q` | Process completed after emitting progress through 30%; terminal exit/result was not returned by the execution channel. It is not counted as a passing result. | ? INCONCLUSIVE |
+| New metric-specific worker streams and pressure gaps | `uv run --project dashboard python -m pytest -q ...test_real_worker_samples_use_metric_streams_and_close_pressure_gaps` | passed | ✓ PASS |
+| Deployed policy parity | `uv run --project dashboard python -m pytest -q ...test_configured_policy_controls_worker_and_history_route` | passed | ✓ PASS |
+| Closed hourly expiry | `uv run --project dashboard python -m pytest -q ...test_non_aligned_hourly_expiry_keeps_crossing_host_and_service_buckets` | passed | ✓ PASS |
+| Due-only retries | `uv run --project dashboard python -m pytest -q ...test_pre_due_host_and_service_jobs_preserve_sources_until_exact_due_time` | passed | ✓ PASS |
+| Pending source fallback ownership | `uv run --project dashboard python -m pytest -q ...test_host_five_minute_fallback_and_exact_cutoffs_have_one_owner` | passed | ✓ PASS |
 
-The four passing named tests establish that these limited paths work; they do not exercise the production writer-to-reader host identity, a non-hour-aligned expiry cutoff, configured API settings, preserved-uncompacted raw data, or a pre-due retry.
+The five named checks ran together and completed as **5 passed, 6 subtests passed in 0.34s**. They establish the original repair paths but do not cover either newly identified failure.
 
-### Probe Execution
+## Probe Execution
 
-Step 7c: SKIPPED — no `scripts/**/tests/probe-*.sh` files or Phase 02 probe declarations found.
+SKIPPED — no Phase 2 probe declaration or `scripts/**/tests/probe-*.sh` file exists.
 
-### Requirements Coverage
+## Requirements Coverage
 
 | Requirement | Source Plans | Description | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| TEL-01 | 02-02, 02-03, 02-04, 02-05 | Rolling 90-day bounded host/service/event retention | ✗ BLOCKED | `bucket_start < expiry_cutoff` deletes overlapping hourly retention data. |
-| TEL-02 | 02-02, 02-03, 02-04, 02-06 | Recent detailed data and documented older aggregates | ✗ BLOCKED | Retained raw evidence is omitted while awaiting compaction. |
-| TEL-03 | 02-02, 02-03, 02-04, 02-05 | Aggregate completes before source deletion | ✓ SATISFIED | `_upsert_and_verify()` and `_mark_succeeded()` precede exact-range deletion; named regression passed. |
-| TEL-04 | 02-01, 02-05, 02-06 | Explicit values, unknowns, gaps, and expiry | ✗ BLOCKED | Host coverage identity mismatch and raw-awaiting-compaction omission cause wrong partitions. |
-| TEL-05 | 02-01, 02-06 | Appropriate resolution and bounded response budget | ✗ BLOCKED | Point count is capped, but API ignores deployed policy/budget and can select misleading tiers. |
+| TEL-01 | 02-02, 02-03, 02-04, 02-05, 02-08 | Rolling 90-day bounded host/service/event retention | ✓ SATISFIED | Closed-bucket expiry, strict event deletion, and bounded due-only rollup processing are implemented and focused-tested. |
+| TEL-02 | 02-02, 02-03, 02-04, 02-06, 02-07, 02-09 | Detailed recent evidence and documented older aggregates | ✓ SATISFIED | Retained raw/five-minute fallback stays queryable until the completed aggregate owns the interval. |
+| TEL-03 | 02-02, 02-03, 02-04, 02-05, 02-08, 02-09 | Aggregate completed before source deletion | ✓ SATISFIED | Aggregate read-back precedes exact source deletion; pre-due jobs retain sources and succeeded jobs are not repeated. |
+| TEL-04 | 02-01, 02-05, 02-06, 02-07, 02-09 | Explicit known, unknown, collection-gap, and expiry history | ✗ BLOCKED | Legacy `host:host` coverage and pressure state is stranded from per-metric API reads. |
+| TEL-05 | 02-01, 02-06, 02-07 | Appropriate server-side resolution and bounded response budget | ✗ BLOCKED | Policy/budget selection is correct, but five-minute pending disclosure overstates the actual range by 3,300 seconds. |
 
-No Phase 02 requirement is orphaned: every TEL-01 through TEL-05 ID appears in at least one plan frontmatter and maps to Phase 2 in `REQUIREMENTS.md`.
+Every TEL-01 through TEL-05 requirement appears in at least one plan frontmatter and maps to Phase 2 in `REQUIREMENTS.md`; no Phase 2 requirement is orphaned.
 
-### Anti-Patterns Found
+## Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 | --- | --- | --- | --- | --- |
-| `dashboard/app.py` | 1743-1753 | Writer/reader stream-key mismatch | 🛑 Blocker | Normal host coverage and pressure gaps cannot reach the metric-specific API. |
-| `dashboard/app.py` | 2192-2200, 2253 | Settings bypass | 🛑 Blocker | Deployed retention and response policy can disagree with API results. |
-| `dashboard/beacon/telemetry.py` | 963-964 | Partial-bucket expiry | 🛑 Blocker | Irreversible deletion of in-window hourly evidence. |
-| `dashboard/beacon/repositories.py` | 133-175 | Exclusive tier reads | 🛑 Blocker | Retained, queryable source evidence disappears until compaction. |
-| `dashboard/beacon/telemetry.py` | 780-818, 928-958 | Retry backoff state unwired | ⚠️ Warning | Cleanup retries failures before persisted `next_retry_ts`. |
+| `dashboard/beacon/migrations.py` | 300-308 | Missing durable upgrade for shared host evidence | 🛑 Blocker | Historical stored gap/pressure evidence can be silently hidden after upgrade. |
+| `dashboard/beacon/repositories.py` | 425-457 | `bucket_seconds=300` projected as `+3600` | 🛑 Blocker | `aggregation_pending` can disclose a full hour with only five minutes of source work. |
 
-No unreferenced `TBD`, `FIXME`, or `XXX` debt markers were found in Phase 02 production/test files.
+No unreferenced `TBD`, `FIXME`, or `XXX` marker was found in the Phase 2 implementation or focused test files.
 
-### Gaps Summary
+## Gaps Summary
 
-The phase is not ready to advance. The data model, migrations, fixed query shapes, and worker epoch fence are substantive, but four production-path defects directly contradict the phase goal: misleading host coverage, mismatch between configured retention and API policy, deletion of partial hourly buckets, and omission of retained raw evidence. A fifth defect leaves the declared retry backoff inactive. Later roadmap phases cover analytics presentation and Pi acceptance, not these retention/telemetry correctness repairs, so none are deferred.
+The original five defects have executable repairs and focused passing evidence. Phase 2 nevertheless remains incomplete: a real upgrade can lose access to pre-existing collection-gap/pressure evidence, and a normal five-minute compaction backlog is reported as an hour. Neither issue is assigned to a later roadmap phase; Phase 3/4 add diagnosis and visualization on top of this data contract, so both are current Phase 2 correctness gaps.
 
-_Verified: 2026-08-10T15:37:24Z_
+**Next action:** Run `$gsd-plan-phase 2 --gaps` to plan the two scoped repairs, then re-run `$gsd-execute-phase 2 --gaps-only`.
+
+_Verified: 2026-08-11T00:00:00Z_
 _Verifier: the agent (gsd-verifier)_
