@@ -321,6 +321,100 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         self.assertLessEqual(len(payload['points']), payload['point_budget'])
         self.assertEqual(payload['points'][0]['latency_avg'], 12.5)
 
+    def test_host_raw_fallback_is_observed_until_a_completed_rollup_owns_it(self):
+        """A retained raw point stays visible past its normal age band."""
+        cutoffs = {'raw_start_ts': 100, 'five_minute_start_ts': 0}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    'INSERT INTO stats_history(ts, cpu, ram, disk, temp) VALUES(?,?,?,?,?)',
+                    (60, 12.0, 22.0, 32.0, 42.0),
+                )
+                conn.execute(
+                    'INSERT INTO telemetry_streams('
+                    'stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, consecutive_misses) '
+                    'VALUES(?,?,?,?,?,0)',
+                    ('host', 'cpu', 0, 60, 60),
+                )
+                conn.commit()
+                fallback = telemetry_repositories.get_host_telemetry(
+                    conn, 'cpu', 0, 100, 60, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+                coverage_data = telemetry_repositories.get_telemetry_coverage(
+                    conn, 'host', 'cpu', 0, 100, telemetry.POINT_BUDGET + 1,
+                )
+            finally:
+                conn.close()
+
+        history = telemetry.compose_historical_response(fallback, 'host')
+        self.assertEqual(history['source_resolutions_seconds'], [60])
+        self.assertEqual([point['latest_value'] for point in history['points']], [12.0])
+        coverage = telemetry.partition_coverage(
+            0,
+            100,
+            retention_start_ts=0,
+            stream=coverage_data['stream'],
+            persisted_intervals=coverage_data['intervals'],
+            source_segments=fallback,
+        )
+        self.assertEqual([interval.as_dict() for interval in coverage], [
+            {'start_ts': 0, 'end_ts': 60, 'state': 'unknown'},
+            {'start_ts': 60, 'end_ts': 100, 'state': 'observed'},
+        ])
+
+    def test_host_completed_rollup_suppresses_raw_fallback_and_shared_job_overrides_pending(self):
+        """Higher completed evidence owns a bucket; raw-host work is shared by metric."""
+        cutoffs = {'raw_start_ts': 100, 'five_minute_start_ts': 0}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    'INSERT INTO stats_history(ts, cpu, ram, disk, temp) VALUES(?,?,?,?,?)',
+                    (60, 12.0, 22.0, 32.0, 42.0),
+                )
+                conn.execute(
+                    'INSERT INTO host_metric_rollups('
+                    'metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, latest_value, '
+                    'sample_count, observed_seconds, gap_seconds, unknown_seconds) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    ('cpu', 0, 300, 9.0, 9.0, 9.0, 9.0, 1, 60, 0, 0),
+                )
+                conn.execute(
+                    'INSERT INTO telemetry_rollup_jobs('
+                    'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+                    'next_retry_ts, last_error_class, updated_ts) VALUES(?,?,?,?,?,?,?,?,?)',
+                    ('host', 'host', 0, 300, 'failed', 2, 180, 'sqlite_busy', 120),
+                )
+                conn.commit()
+                fallback = telemetry_repositories.get_host_telemetry(
+                    conn, 'cpu', 0, 100, 60, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+                pending = telemetry_repositories.get_pending_aggregation(
+                    conn,
+                    'host',
+                    'cpu',
+                    0,
+                    100,
+                    60,
+                    telemetry.POINT_BUDGET + 1,
+                    cutoffs,
+                )
+            finally:
+                conn.close()
+
+        history = telemetry.compose_historical_response(fallback, 'host')
+        self.assertEqual(history['source_resolutions_seconds'], [300])
+        self.assertEqual([point['latest_value'] for point in history['points']], [9.0])
+        self.assertEqual(pending, ({
+            'start_ts': 0,
+            'end_ts': 300,
+            'state': 'failed',
+            'attempt_count': 2,
+            'next_retry_ts': 180,
+            'error_class': 'sqlite_busy',
+        },))
+
 
 class ConfiguredTelemetryPolicyApiTests(unittest.TestCase):
     """The API and worker must consume the one deployed telemetry policy."""
