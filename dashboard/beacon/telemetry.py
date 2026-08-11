@@ -806,39 +806,92 @@ def _mark_failed(conn, stream_kind, stream_key, start, seconds, now, policy, err
     )
 
 
-def _raw_candidates(conn, cutoff):
+def _raw_candidates(conn, cutoff, now, result_cap):
+    """Return at most one bounded, due-only raw bucket batch per stream class."""
     candidates = []
-    for row in conn.execute('SELECT ts FROM stats_history WHERE ts < ? ORDER BY ts', (cutoff,)):
-        start = bucket_start(int(row['ts']), 300)
-        if bucket_is_complete(start, 300, cutoff):
-            candidates.append((start, 300, 'host', 'host'))
-    for row in conn.execute(
-        'SELECT ts, port FROM service_checks WHERE ts < ? ORDER BY ts, port', (cutoff,),
-    ):
-        start = bucket_start(int(row['ts']), 300)
-        if bucket_is_complete(start, 300, cutoff):
-            candidates.append((start, 300, 'service', str(row['port'])))
+    host_rows = conn.execute(
+        'WITH source AS ('
+        'SELECT (ts / 300) * 300 AS bucket_start FROM stats_history WHERE ts < ? '
+        'GROUP BY bucket_start'
+        ') '
+        'SELECT source.bucket_start FROM source '
+        'LEFT JOIN telemetry_rollup_jobs job ON '
+        "job.stream_kind='host' AND job.stream_key='host' "
+        'AND job.bucket_start=source.bucket_start AND job.bucket_seconds=300 '
+        'WHERE source.bucket_start + 300 <= ? AND ('
+        'job.stream_kind IS NULL OR (job.state IN (\'pending\', \'failed\') '
+        'AND (job.next_retry_ts IS NULL OR job.next_retry_ts <= ?))'
+        ') ORDER BY source.bucket_start LIMIT ?',
+        (cutoff, cutoff, now, result_cap),
+    )
+    candidates.extend((int(row['bucket_start']), 300, 'host', 'host') for row in host_rows)
+
+    service_rows = conn.execute(
+        'WITH source AS ('
+        'SELECT port, (ts / 300) * 300 AS bucket_start FROM service_checks WHERE ts < ? '
+        'GROUP BY port, bucket_start'
+        ') '
+        'SELECT source.port, source.bucket_start FROM source '
+        'LEFT JOIN telemetry_rollup_jobs job ON '
+        "job.stream_kind='service' AND job.stream_key=CAST(source.port AS TEXT) "
+        'AND job.bucket_start=source.bucket_start AND job.bucket_seconds=300 '
+        'WHERE source.bucket_start + 300 <= ? AND ('
+        'job.stream_kind IS NULL OR (job.state IN (\'pending\', \'failed\') '
+        'AND (job.next_retry_ts IS NULL OR job.next_retry_ts <= ?))'
+        ') ORDER BY source.bucket_start, source.port LIMIT ?',
+        (cutoff, cutoff, now, result_cap),
+    )
+    candidates.extend(
+        (int(row['bucket_start']), 300, 'service', str(row['port'])) for row in service_rows
+    )
     return candidates
 
 
-def _five_minute_candidates(conn, cutoff):
+def _five_minute_candidates(conn, cutoff, now, result_cap):
+    """Return at most one bounded, due-only hourly bucket batch per stream class."""
     candidates = []
-    for row in conn.execute(
-        'SELECT DISTINCT metric, bucket_start FROM host_metric_rollups '
-        'WHERE bucket_seconds=300 AND bucket_start + bucket_seconds <= ? ORDER BY bucket_start, metric',
-        (cutoff,),
-    ):
-        start = bucket_start(int(row['bucket_start']), 3600)
-        if bucket_is_complete(start, 3600, cutoff):
-            candidates.append((start, 3600, 'host_rollup', str(row['metric'])))
-    for row in conn.execute(
-        'SELECT DISTINCT service_port, bucket_start FROM service_rollups '
-        'WHERE bucket_seconds=300 AND bucket_start + bucket_seconds <= ? ORDER BY bucket_start, service_port',
-        (cutoff,),
-    ):
-        start = bucket_start(int(row['bucket_start']), 3600)
-        if bucket_is_complete(start, 3600, cutoff):
-            candidates.append((start, 3600, 'service_rollup', str(row['service_port'])))
+    host_rows = conn.execute(
+        'WITH source AS ('
+        'SELECT metric, (bucket_start / 3600) * 3600 AS bucket_start '
+        'FROM host_metric_rollups WHERE bucket_seconds=300 '
+        'AND bucket_start + bucket_seconds <= ? '
+        'GROUP BY metric, (bucket_start / 3600) * 3600'
+        ') '
+        'SELECT source.metric, source.bucket_start FROM source '
+        'LEFT JOIN telemetry_rollup_jobs job ON '
+        "job.stream_kind='host' AND job.stream_key=source.metric "
+        'AND job.bucket_start=source.bucket_start AND job.bucket_seconds=3600 '
+        'WHERE source.bucket_start + 3600 <= ? AND ('
+        'job.stream_kind IS NULL OR (job.state IN (\'pending\', \'failed\') '
+        'AND (job.next_retry_ts IS NULL OR job.next_retry_ts <= ?))'
+        ') ORDER BY source.bucket_start, source.metric LIMIT ?',
+        (cutoff, cutoff, now, result_cap),
+    )
+    candidates.extend(
+        (int(row['bucket_start']), 3600, 'host_rollup', str(row['metric'])) for row in host_rows
+    )
+
+    service_rows = conn.execute(
+        'WITH source AS ('
+        'SELECT service_port, (bucket_start / 3600) * 3600 AS bucket_start '
+        'FROM service_rollups WHERE bucket_seconds=300 '
+        'AND bucket_start + bucket_seconds <= ? '
+        'GROUP BY service_port, (bucket_start / 3600) * 3600'
+        ') '
+        'SELECT source.service_port, source.bucket_start FROM source '
+        'LEFT JOIN telemetry_rollup_jobs job ON '
+        "job.stream_kind='service' AND job.stream_key=CAST(source.service_port AS TEXT) "
+        'AND job.bucket_start=source.bucket_start AND job.bucket_seconds=3600 '
+        'WHERE source.bucket_start + 3600 <= ? AND ('
+        'job.stream_kind IS NULL OR (job.state IN (\'pending\', \'failed\') '
+        'AND (job.next_retry_ts IS NULL OR job.next_retry_ts <= ?))'
+        ') ORDER BY source.bucket_start, source.service_port LIMIT ?',
+        (cutoff, cutoff, now, result_cap),
+    )
+    candidates.extend(
+        (int(row['bucket_start']), 3600, 'service_rollup', str(row['service_port']))
+        for row in service_rows
+    )
     return candidates
 
 
@@ -963,7 +1016,10 @@ def run_retention_batch(conn, *, now, policy=None, before_verify=None, raise_on_
     now = int(now)
     raw_cutoff = now - policy.raw_days * 86400
     five_cutoff = now - policy.five_minute_days * 86400
-    candidates = _raw_candidates(conn, raw_cutoff) + _five_minute_candidates(conn, five_cutoff)
+    candidates = (
+        _raw_candidates(conn, raw_cutoff, now, policy.rollup_batch_buckets)
+        + _five_minute_candidates(conn, five_cutoff, now, policy.rollup_batch_buckets)
+    )
     ordered = sorted(set(candidates), key=lambda item: (item[0], item[1], item[2], item[3]))
     rolled = 0
     failures = 0
