@@ -376,6 +376,8 @@ def _migration_7_canonical_host_streams(conn):
 
     state = None
     pressure_gaps = None
+    has_legacy_pressure = False
+    legacy_pressure_start = None
     if state_row is not None:
         try:
             state = json.loads(state_row[0])
@@ -384,13 +386,12 @@ def _migration_7_canonical_host_streams(conn):
         if not isinstance(state, dict) or not isinstance(state.get('pressure_gaps'), dict):
             raise ValueError('invalid telemetry retention state')
         pressure_gaps = dict(state['pressure_gaps'])
+        has_legacy_pressure = 'host:host' in pressure_gaps
         legacy_pressure_start = pressure_gaps.get('host:host')
-        if legacy_pressure_start is not None and (
+        if has_legacy_pressure and (
             isinstance(legacy_pressure_start, bool) or not isinstance(legacy_pressure_start, int)
         ):
             raise ValueError('invalid legacy host pressure gap')
-    else:
-        legacy_pressure_start = None
 
     if legacy_stream is not None:
         for metric in _CANONICAL_HOST_METRICS:
@@ -448,7 +449,7 @@ def _migration_7_canonical_host_streams(conn):
                 ],
             )
 
-    if legacy_pressure_start is not None:
+    if has_legacy_pressure:
         for metric in _CANONICAL_HOST_METRICS:
             key = 'host:{}'.format(metric)
             existing_start = pressure_gaps.get(key)
