@@ -1,8 +1,11 @@
 import time
 import unittest
+from unittest import mock
 
+from dashboard.beacon import queues
 from dashboard.beacon import repositories as telemetry_repositories
 from dashboard.beacon import telemetry
+from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
 
@@ -315,3 +318,77 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         self.assertEqual(payload['selector'], {'kind': 'service', 'port': 8080})
         self.assertLessEqual(len(payload['points']), payload['point_budget'])
         self.assertEqual(payload['points'][0]['latency_avg'], 12.5)
+
+
+class ConfiguredTelemetryPolicyApiTests(unittest.TestCase):
+    """The API and worker must consume the one deployed telemetry policy."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app(extra_env={
+            'TELEMETRY_RAW_DAYS': '8',
+            'TELEMETRY_FIVE_MINUTE_DAYS': '31',
+            'TELEMETRY_RETENTION_DAYS': '91',
+            'TELEMETRY_POINT_BUDGET': '2',
+        })
+        self.client = self.appmod.app.test_client()
+        self.now = int(time.time())
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def test_configured_policy_controls_worker_and_history_route(self):
+        policy = telemetry.RetentionPolicy.from_settings(self.appmod.SETTINGS)
+        self.assertEqual(policy.raw_days, 8)
+        self.assertEqual(policy.five_minute_days, 31)
+        self.assertEqual(policy.retention_days, 91)
+        self.assertEqual(policy.point_budget, 2)
+        self.assertEqual(self.appmod._telemetry_policy(), policy)
+
+        raw_ts = self.now - (7 * 86400) - 180
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.executemany(
+                    'INSERT INTO stats_history(ts, cpu, ram, disk, temp) VALUES(?,?,?,?,?)',
+                    [
+                        (raw_ts, 10.0, 20.0, 30.0, 40.0),
+                        (raw_ts + 60, 11.0, 21.0, 31.0, 41.0),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        with mock.patch.object(
+            self.appmod.beacon_repositories,
+            'get_host_telemetry',
+            wraps=self.appmod.beacon_repositories.get_host_telemetry,
+        ) as read_history:
+            response = self.client.get('/api/telemetry/history', query_string={
+                'kind': 'host',
+                'metric': 'cpu',
+                'start_ts': str(raw_ts - 60),
+                'end_ts': str(raw_ts + 120),
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['point_budget'], policy.point_budget)
+        self.assertLessEqual(len(payload['points']), policy.point_budget)
+        self.assertEqual(payload['source_resolutions_seconds'], [60])
+        self.assertEqual(read_history.call_args.args[5], policy.point_budget + 1)
+
+        lease = queues.acquire_worker_lease(self.db_path, 'policy-worker', now=self.now)
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: self.now)
+        snapshot = telemetry.StorageSnapshot(
+            database_bytes=0,
+            wal_bytes=0,
+            shm_bytes=0,
+            free_bytes=policy.min_free_bytes + policy.backlog_reserve_bytes + 1,
+        )
+        with (
+            mock.patch.object(self.appmod.beacon_telemetry, 'measure_storage', return_value=snapshot),
+            mock.patch.object(self.appmod.beacon_telemetry, 'run_retention_batch') as cleanup,
+        ):
+            self.appmod.worker_cleanup_history(authority, now=self.now)
+        self.assertEqual(cleanup.call_args.kwargs['policy'], policy)
