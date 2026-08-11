@@ -992,7 +992,15 @@ def run_retention_batch(conn, *, now, policy=None, before_verify=None, raise_on_
             if raise_on_failure:
                 raise
     expiry_cutoff = now - policy.retention_days * 86400
-    conn.execute('DELETE FROM host_metric_rollups WHERE bucket_seconds=3600 AND bucket_start < ?', (expiry_cutoff,))
-    conn.execute('DELETE FROM service_rollups WHERE bucket_seconds=3600 AND bucket_start < ?', (expiry_cutoff,))
+    conn.execute(
+        'DELETE FROM host_metric_rollups WHERE bucket_seconds=3600 '
+        'AND bucket_start + bucket_seconds <= ?',
+        (expiry_cutoff,),
+    )
+    conn.execute(
+        'DELETE FROM service_rollups WHERE bucket_seconds=3600 '
+        'AND bucket_start + bucket_seconds <= ?',
+        (expiry_cutoff,),
+    )
     conn.execute('DELETE FROM events WHERE ts < ?', (expiry_cutoff,))
     return {'rolled_buckets': rolled, 'failed_buckets': failures}
