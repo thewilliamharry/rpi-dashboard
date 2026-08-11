@@ -35,6 +35,13 @@
       "source": "canonical Phase 1 migrations 1-4",
       "minimum_schema_version": 4,
       "target_version": 6
+    },
+    {
+      "fingerprint": "a1120723f0de239e1428952edef24f2ac6679832eb0413e56383e45f54d36622",
+      "fixture": "current-v6.db",
+      "source": "canonical Phase 2 migrations 1-6",
+      "minimum_schema_version": 6,
+      "target_version": 6
     }
   ]
 }

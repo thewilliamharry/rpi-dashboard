@@ -19,6 +19,7 @@ from dashboard.beacon.migrations import (
     Migration,
     MigrationPreparationError,
     UnsupportedSchemaError,
+    _migration_7_canonical_host_streams,
     run_migrations,
 )
 
@@ -36,6 +37,7 @@ FIXTURES = {
     },
 }
 CURRENT_V4_FIXTURE = 'current-v4.db'
+CURRENT_V6_FIXTURE = 'current-v6.db'
 EXPECTED_FINGERPRINTS = {
     'initial-2026-04.db': '4330feaa6a22043681d7d55fec900b3279fec9302f68e41417df29653c7cf906',
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
@@ -121,6 +123,7 @@ class MigrationTests(unittest.TestCase):
         expected = set(EXPECTED_FINGERPRINTS.values()) | {
             json.loads((OPERATOR_FIXTURE_DIR / 'production.json').read_text())['schema_fingerprint'],
             collect_inventory(FIXTURE_DIR / CURRENT_V4_FIXTURE)['schema_fingerprint'],
+            collect_inventory(FIXTURE_DIR / CURRENT_V6_FIXTURE)['schema_fingerprint'],
         }
         self.assertEqual(set(supported), expected)
         for entry in supported.values():
@@ -150,6 +153,123 @@ class MigrationTests(unittest.TestCase):
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self._assert_telemetry_schema(conn)
                 self._assert_telemetry_tables_empty(conn)
+
+    def test_current_v6_legacy_host_state_migrates_once_without_overlap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
+            settings = Settings(db_path=str(target))
+
+            result = run_migrations(settings)
+            self.assertEqual(result.applied_versions, (7,))
+            self.assertEqual(len(result.backups), 1)
+
+            with sqlite3.connect(target) as conn:
+                streams = list(conn.execute(
+                    'SELECT stream_key, started_ts, cadence_seconds, last_observed_ts, '
+                    'consecutive_misses, open_gap_start_ts FROM telemetry_streams '
+                    "WHERE stream_kind='host' ORDER BY stream_key"
+                ))
+                self.assertEqual(streams, [
+                    (metric, 1700000000, 60, 1700000700, 3, 1700000650)
+                    for metric in ('cpu', 'disk', 'ram', 'temp')
+                ])
+                for metric in ('disk', 'ram', 'temp'):
+                    self.assertEqual(list(conn.execute(
+                        'SELECT start_ts, end_ts, reason, detail FROM telemetry_coverage '
+                        'WHERE stream_kind=? AND stream_key=? ORDER BY start_ts, end_ts, id',
+                        ('host', metric),
+                    )), [
+                        (1700000000, 1700000200, 'collection_gap', 'legacy collector outage'),
+                        (1700000200, 1700000300, 'unknown', 'legacy unknown'),
+                    ])
+                self.assertEqual(list(conn.execute(
+                    'SELECT start_ts, end_ts, reason, detail FROM telemetry_coverage '
+                    'WHERE stream_kind=? AND stream_key=? ORDER BY start_ts, end_ts, id',
+                    ('host', 'cpu'),
+                )), [
+                    (1700000000, 1700000050, 'collection_gap', 'legacy collector outage'),
+                    (1700000050, 1700000150, 'collection_gap', 'cpu authoritative'),
+                    (1700000150, 1700000200, 'collection_gap', 'legacy collector outage'),
+                    (1700000200, 1700000300, 'unknown', 'legacy unknown'),
+                ])
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM telemetry_streams WHERE stream_kind='host' AND stream_key='host'"
+                ).fetchone()[0], 0)
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM telemetry_coverage WHERE stream_kind='host' AND stream_key='host'"
+                ).fetchone()[0], 0)
+                state = json.loads(conn.execute(
+                    "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+                ).fetchone()[0])
+                self.assertEqual(state['pressure_gaps'], {
+                    'host:cpu': 1700000300,
+                    'host:disk': 1700000300,
+                    'host:ram': 1700000300,
+                    'host:temp': 1700000300,
+                    'service:8080': 1700000350,
+                })
+                self.assertEqual(state['unrelated'], {'keep': 'value'})
+                self.assertEqual(conn.execute(
+                    'SELECT stream_kind, stream_key, bucket_start, bucket_seconds, state, '
+                    'attempt_count, next_retry_ts, last_error_class, updated_ts '
+                    'FROM telemetry_rollup_jobs'
+                ).fetchall(), [
+                    ('host', 'host', 1700000000, 300, 'pending', 2, 1700000900, 'sqlite_busy', 1700000700),
+                ])
+
+                before_reentry = (
+                    list(conn.execute('SELECT * FROM telemetry_streams ORDER BY stream_kind, stream_key')),
+                    list(conn.execute('SELECT * FROM telemetry_coverage ORDER BY stream_kind, stream_key, start_ts, end_ts, id')),
+                    conn.execute("SELECT value FROM runtime_state WHERE key='telemetry_retention_state'").fetchone()[0],
+                )
+                _migration_7_canonical_host_streams(conn)
+                after_reentry = (
+                    list(conn.execute('SELECT * FROM telemetry_streams ORDER BY stream_kind, stream_key')),
+                    list(conn.execute('SELECT * FROM telemetry_coverage ORDER BY stream_kind, stream_key, start_ts, end_ts, id')),
+                    conn.execute("SELECT value FROM runtime_state WHERE key='telemetry_retention_state'").fetchone()[0],
+                )
+                self.assertEqual(after_reentry, before_reentry)
+
+            before_rerun = target.read_bytes()
+            backup_count = len(list((target.parent / 'backups').glob('*.db')))
+            self.assertEqual(run_migrations(settings).applied_versions, ())
+            self.assertEqual(target.read_bytes(), before_rerun)
+            self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), backup_count)
+
+    def test_migration_seven_failure_rolls_back_legacy_host_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
+            with sqlite3.connect(target) as conn:
+                before = (
+                    list(conn.execute('SELECT * FROM telemetry_streams ORDER BY stream_kind, stream_key')),
+                    list(conn.execute('SELECT * FROM telemetry_coverage ORDER BY id')),
+                    conn.execute("SELECT value FROM runtime_state WHERE key='telemetry_retention_state'").fetchone()[0],
+                    list(conn.execute('SELECT * FROM telemetry_rollup_jobs')),
+                )
+            original = MIGRATIONS[-1]
+
+            def fail_after_transform(conn):
+                original.apply(conn)
+                raise RuntimeError('migration seven sensitive failure')
+
+            broken = Migration(7, 'canonical_host_streams', True, fail_after_transform)
+            with mock.patch('dashboard.beacon.migrations.MIGRATIONS', (*MIGRATIONS[:-1], broken)):
+                with self.assertRaises(MigrationPreparationError):
+                    run_migrations(Settings(db_path=str(target)))
+
+            with sqlite3.connect(target) as conn:
+                after = (
+                    list(conn.execute('SELECT * FROM telemetry_streams ORDER BY stream_kind, stream_key')),
+                    list(conn.execute('SELECT * FROM telemetry_coverage ORDER BY id')),
+                    conn.execute("SELECT value FROM runtime_state WHERE key='telemetry_retention_state'").fetchone()[0],
+                    list(conn.execute('SELECT * FROM telemetry_rollup_jobs')),
+                )
+                self.assertEqual(after, before)
+                self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 6)
+            marker = json.loads((target.parent / 'recovery-required.json').read_text())
+            self.assertEqual(marker['failed_target_version'], 7)
+            self.assertEqual(marker['reason_class'], 'RuntimeError')
+            self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
 
     def test_operator_service_port_remains_the_service_rollup_stream_key(self):
         source = OPERATOR_FIXTURE_DIR / 'production.db'

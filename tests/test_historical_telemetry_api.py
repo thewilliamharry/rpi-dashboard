@@ -1,3 +1,8 @@
+import json
+from pathlib import Path
+from shutil import copy2
+import sqlite3
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -86,6 +91,82 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         self.assertEqual(single.get_json()['coverage'], [
             {'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'},
         ])
+
+    def test_legacy_host_upgrade_is_visible_to_all_metric_history_endpoints(self):
+        fixture_base = 1700000000
+        offset = self.now - fixture_base - 1000
+        requested_start = fixture_base + offset + 150
+        requested_end = fixture_base + offset + 200
+        fixture = Path(__file__).parent / 'fixtures' / 'legacy' / 'current-v6.db'
+        original_path = self.appmod.DB_PATH
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / 'current-v6.db'
+                copy2(fixture, target)
+                with sqlite3.connect(target) as conn:
+                    conn.execute(
+                        'UPDATE telemetry_streams SET started_ts=started_ts + ?, '
+                        'last_observed_ts=last_observed_ts + ?, '
+                        'open_gap_start_ts=open_gap_start_ts + ? WHERE stream_kind=?',
+                        (offset, offset, offset, 'host'),
+                    )
+                    conn.execute(
+                        'UPDATE telemetry_coverage SET start_ts=start_ts + ?, end_ts=end_ts + ? '
+                        'WHERE stream_kind=?',
+                        (offset, offset, 'host'),
+                    )
+                    state = json.loads(conn.execute(
+                        "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+                    ).fetchone()[0])
+                    state['pressure_gaps'] = {
+                        key: value + offset for key, value in state['pressure_gaps'].items()
+                    }
+                    conn.execute(
+                        "UPDATE runtime_state SET value=?, updated_ts=updated_ts + ? "
+                        "WHERE key='telemetry_retention_state'",
+                        (json.dumps(state, separators=(',', ':')), offset),
+                    )
+                    conn.execute(
+                        'UPDATE telemetry_rollup_jobs SET bucket_start=bucket_start + ?, '
+                        'next_retry_ts=next_retry_ts + ?, updated_ts=updated_ts + ?',
+                        (offset, offset, offset),
+                    )
+                    conn.commit()
+
+                self.appmod.DB_PATH = str(target)
+                self.appmod.init_db()
+                for metric in telemetry.HOST_METRICS:
+                    response = self._request(
+                        metric=metric,
+                        start_ts=requested_start,
+                        end_ts=requested_end,
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.get_json()
+                    self.assertEqual(payload['requested'], {
+                        'start_ts': requested_start,
+                        'end_ts': requested_end,
+                    })
+                    self.assertEqual(payload['coverage'], [{
+                        'start_ts': requested_start,
+                        'end_ts': requested_end,
+                        'state': 'collection_gap',
+                        'detail': 'legacy collector outage',
+                    }])
+
+                with sqlite3.connect(target) as conn:
+                    self.assertEqual(conn.execute(
+                        "SELECT COUNT(*) FROM telemetry_streams WHERE stream_kind='host' AND stream_key='host'"
+                    ).fetchone()[0], 0)
+                    state = json.loads(conn.execute(
+                        "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+                    ).fetchone()[0])
+                    self.assertNotIn('host:host', state['pressure_gaps'])
+                    self.assertEqual(conn.execute(
+                        "SELECT COUNT(*) FROM telemetry_rollup_jobs WHERE stream_kind='host' AND stream_key='host'"
+                    ).fetchone()[0], 1)
+        finally:
+            self.appmod.DB_PATH = original_path
 
     def test_invalid_selectors_and_bounds_are_rejected_before_history_read(self):
         cases = [
