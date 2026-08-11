@@ -1,39 +1,25 @@
 ---
 phase: 02-bounded-telemetry-retention
-verified: 2026-08-11T12:03:51Z
-status: gaps_found
-score: 3/4 must-haves verified
+verified: 2026-08-11T16:35:35Z
+status: passed
+score: 4/4 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
-  previous_score: 2/4
+  previous_score: 3/4
   gaps_closed:
-    - "Existing version-6 host:host stream and coverage evidence migrates to canonical cpu, ram, disk, and temp identities."
-    - "Canonical host history endpoints expose migrated collection-gap coverage while the shared raw-rollup job identity remains host:host."
-    - "Five-minute host and service pending ranges use exact 300-second half-open intervals with equality-only adjacency coalescing."
-  gaps_remaining:
-    - "A present JSON-null host:host pressure entry is accepted as absent, so Migration 7 publishes successfully without removing or rejecting the obsolete malformed identity."
+    - "Migration 7 now rejects a present JSON-null or other malformed legacy host:host pressure value before any durable mutation."
+  gaps_remaining: []
   regressions: []
-gaps:
-  - truth: "Legacy host:host is removed from telemetry_streams, telemetry_coverage, and telemetry_retention_state.pressure_gaps after a successful Migration 7; malformed legacy pressure values fail closed."
-    status: failed
-    reason: "Migration 7 uses pressure_gaps.get('host:host'), so a present JSON null is indistinguishable from an absent key. It then deletes legacy stream and coverage rows, records schema version 7, and leaves the malformed host:host pressure key behind."
-    artifacts:
-      - path: "dashboard/beacon/migrations.py"
-        issue: "Lines 387-391 validate only non-null values and lines 451-468 remove the key only when its value is non-null."
-      - path: "tests/test_migrations.py"
-        issue: "The malformed-state rollback test covers boolean true but not JSON null."
-    missing:
-      - "Distinguish key presence from its value, reject any present non-integer (including null) before mutating data, and add a rollback regression proving a null host:host value leaves the database at version 6."
 ---
 
 # Phase 2: Bounded Telemetry & Retention Verification Report
 
 **Phase Goal:** Beacon maintains an accurate, bounded 90-day telemetry record whose resolution, gaps, and retention rules remain trustworthy under normal operation.
-**Verified:** 2026-08-11T12:03:51Z
-**Status:** gaps_found
-**Re-verification:** Yes — after the 02-10 and 02-11 gap-closure plans
+**Verified:** 2026-08-11T16:35:35Z
+**Status:** passed
+**Re-verification:** Yes — after gap closure plan 02-12
 
 ## Goal Achievement
 
@@ -41,94 +27,95 @@ gaps:
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | Beacon retains host metrics, service history, and events for a rolling 90 days without unbounded database growth. | ✓ VERIFIED | `run_retention_batch()` expires only fully closed hourly buckets (`bucket_start + bucket_seconds <= cutoff`) and events older than the strict 90-day cutoff. Candidate admission is bounded and due-only. The focused retention regressions had already passed, and the phase’s final full suite was green. |
-| 2 | Recent observations remain detailed while older history is represented by documented aggregates, with each aggregate completed before its source data is removed. | ✓ VERIFIED | The retention batch uses per-bucket savepoints; each rollup is inserted and read back before its exact source deletion. Repository fallback queries retain raw/5-minute evidence until a completed replacement owns the interval. |
-| 3 | A requested historical range explicitly distinguishes observed values from collection gaps, unknown intervals, and data that has expired under retention. | ✗ FAILED | Normal legacy host coverage migrates and is visible to all four host endpoints, but a present malformed `host:host: null` pressure key bypasses Migration 7 validation/removal while the migration is published. The compatibility migration therefore falsely reports completion with an obsolete invalid pressure identity still persisted. |
-| 4 | Beacon selects an appropriate server-side resolution for each historical request and returns a bounded number of points without misleading the operator about coverage. | ✓ VERIFIED | The route composes one Settings-derived `RetentionPolicy`, passes its point budget to fixed repository queries, returns it in `point_budget`, and emits `bucket_start + 300` for both host and service five-minute pending rows. Direct focused tests passed. |
+| 1 | Beacon retains host metrics, service history, and events for a rolling 90 days without unbounded database growth. | ✓ VERIFIED | `run_retention_batch()` applies the Settings-derived 90-day policy, deletes hourly host/service rollups only where `bucket_start + bucket_seconds <= cutoff`, and expires events where `ts < cutoff`. Candidate SQL is batch-limited and admits pending/failed retry work only when `next_retry_ts` is null or due. Focused retention regressions passed. |
+| 2 | Recent observations remain detailed while older history is represented by documented aggregates, with each aggregate completed before its source data is removed. | ✓ VERIFIED | The retention engine keeps raw data for 7 days, five-minute data through day 30, and hourly data through day 90. Each rollup calls `_upsert_and_verify()`, marks its job succeeded, and only then deletes its exact half-open source interval inside the transaction/savepoint. Repository fallback queries continue returning raw/five-minute evidence until a completed replacement aggregate owns it. |
+| 3 | A requested historical range explicitly distinguishes observed values from collection gaps, unknown intervals, and data that has expired under retention. | ✓ VERIFIED | The history route partitions requested bounds using persisted coverage, source segments, and the retention cutoff. Migration 7 canonicalizes valid legacy `host:host` evidence, while present malformed pressure values—including JSON `null`—raise before stream, coverage, retention-state, or schema-version mutation. The runner's `BEGIN IMMEDIATE` transaction rolls the failed migration back to exact version-6 evidence. |
+| 4 | Beacon selects an appropriate server-side resolution for each historical request and returns a bounded number of points without misleading the operator about coverage. | ✓ VERIFIED | `/api/telemetry/history` validates a half-open request, selects server resolution, passes `point_budget + 1` to fixed repository queries, rejects overflow, and returns the effective resolution, disclosed budget, source resolutions, coverage, and pending aggregation separately. Host/service five-minute pending intervals are exactly `[bucket_start, bucket_start + 300)` and only exactly touching pending intervals coalesce. |
 
-**Score:** 3/4 roadmap success criteria verified.
+**Score:** 4/4 roadmap success criteria verified.
 
-## Re-verification of Prior Gaps
+## Historical Gap Closure: Migration 7
 
-| Prior concern | Current code evidence | Result |
+| Required property | Code and test evidence | Status |
 | --- | --- | --- |
-| Canonical new host streams vs. shared `host:host` reads | `worker_collect_system_stats()` writes/opens/closes each `host_stream_key(metric)`; the history route reads the same metric key. | ✓ Closed |
-| Deployed policy parity | `_telemetry_policy()` builds `RetentionPolicy.from_settings(SETTINGS)` and supplies it to both cleanup and history responses. | ✓ Closed |
-| Non-aligned hourly expiry | Hourly host/service deletes require bucket end at or before the cutoff. | ✓ Closed |
-| Pending compaction hiding source evidence | Raw/5-minute fallback queries exclude source rows only when a completed replacement exists. | ✓ Closed |
-| Retry before persisted due time | Candidate queries join job state and require a due `next_retry_ts`. | ✓ Closed |
-| Legacy host stream/coverage conversion | Migration 7 expands normal v6 `host:host` metadata and coverage into all four canonical metric streams; the Flask regression verifies each endpoint; raw rollup jobs deliberately keep shared `host:host`. | ✓ Closed |
-| Five-minute pending width/coalescing | Host and service projections use `bucket_start + 300`; coalescing requires exact boundary equality. | ✓ Closed |
-| JSON-null legacy pressure key | A present `host:host: null` is treated as absent, then survives migration version publication. | ✗ Open blocker |
+| Absent `pressure_gaps["host:host"]` is a valid pressure-state no-op. | The presence flag is false when the key is absent; `test_migration_seven_absent_legacy_pressure_key_is_a_successful_no_op` passes. Normal legacy stream/coverage conversion remains allowed. | ✓ VERIFIED |
+| Present JSON `null` or another malformed pressure value fails before mutation. | `_migration_7_canonical_host_streams()` distinguishes membership from `.get()` and accepts only a non-boolean `int`; JSON null, booleans, string, float, list, and object are covered by named regressions. | ✓ VERIFIED |
+| Failure leaves v6 schema and all legacy evidence/job state unchanged. | The validation occurs before canonical stream/coverage writes. `run_migrations()` wraps helper execution and version-7 insertion in one `BEGIN IMMEDIATE` transaction. Snapshot tests compare telemetry streams, coverage, exact retention JSON, rollup jobs, and `schema_migrations` before/after each failure. | ✓ VERIFIED |
+| Valid integers expand/removal is correct and idempotent. | Valid `host:host` pressure time expands to cpu/ram/disk/temp using earliest canonical time, removes the obsolete key, preserves unrelated state and the intentional raw-rollup job key `host:host`; helper re-entry and a second runner execution make no change. | ✓ VERIFIED |
 
 ## Required Artifacts
 
 | Artifact | Expected | Status | Details |
-| --- | --- | --- | --- |
-| `dashboard/beacon/migrations.py` | Transactional, idempotent v7 conversion of legacy host stream, coverage, and pressure state | ✗ PARTIAL | Correctly migrates valid evidence and preserves shared raw rollup-job identity, but accepts JSON null rather than rejecting it or removing the key. |
-| `dashboard/beacon/telemetry.py` | Bounded retention, aggregate-before-delete, coverage, pressure, and retry lifecycle | ✓ VERIFIED | Worker-owned batching, closed-bucket expiry, exact source deletion after verification, and due-only retries are substantive and wired. |
-| `dashboard/beacon/repositories.py` | Fixed, bounded historical reads and truthful pending disclosure | ✓ VERIFIED | Host/service five-minute derived pending SQL now uses `bucket_start + 300`; durable jobs take precedence and exact adjacency is the only coalescing condition. |
-| `dashboard/app.py` | Per-metric writing plus policy-aware bounded history API | ✓ VERIFIED | Worker and route use the canonical stream key and shared Settings-derived policy. |
-| `tests/test_migrations.py` | v7 valid-state, overlap, idempotence, and rollback evidence | ⚠️ PARTIAL | Valid legacy migration, generic rollback, and boolean malformed pressure state are tested; JSON null is not. |
-| `tests/test_historical_telemetry_api.py` | API-visible migration and exact pending evidence | ✓ VERIFIED | Covers all host metric endpoints plus host/service exact width, adjacency, empty, order, and durable-precedence cases. |
+| --- | --- | --- |
+| `dashboard/beacon/migrations.py` | Transactional v5–v7 telemetry schema and legacy canonicalization | ✓ VERIFIED | Migration 7's presence-aware validation precedes mutations; migration runner commits schema version only after successful helper return. |
+| `dashboard/beacon/telemetry.py` | Tiered retention, rollup-before-delete, pressure and retry lifecycle | ✓ VERIFIED | Savepoint-contained rollups, read-back verification, due-only candidates, closed-bucket expiry, and event expiry are substantive. |
+| `dashboard/beacon/repositories.py` | Fixed bounded reads and truthful pending disclosure | ✓ VERIFIED | Completed replacements suppress only their owned source interval; fallback remains observable; five-minute pending end is `+ 300` and coalescing needs equality. |
+| `dashboard/app.py` | Canonical worker writes and policy-aware historical API | ✓ VERIFIED | Worker writes per-metric canonical host streams; route composes one Settings-backed policy and returns real SQLite history/coverage/pending data. |
+| `tests/test_migrations.py` | Migration 7 valid, absent, malformed, rollback, and idempotence proof | ✓ VERIFIED | The test suite snapshots all version-6 evidence and exercises null plus each malformed JSON type. |
+| `tests/test_telemetry_retention.py` and `tests/test_historical_telemetry_api.py` | Retention and API contract proof | ✓ VERIFIED | Tests cover closed expiry, due retries, aggregate ownership/fallback, bounded response, and exact host/service pending intervals. |
 
 ## Key Link Verification
 
 | From | To | Via | Status | Details |
-| --- | --- | --- | --- | --- |
-| `worker_collect_system_stats()` | `api_telemetry_history()` | `host_stream_key(metric)` at both write and read boundaries | ✓ WIRED | All new host evidence is canonical metric-specific. |
-| `_migration_7_canonical_host_streams()` | `telemetry_streams` / `telemetry_coverage` / `runtime_state` | One runner-owned transaction | ⚠️ PARTIAL | Stream and coverage migration are transactional; null pressure-state handling is neither rejected nor completed. |
-| `get_pending_aggregation()` | history response `aggregation_pending` | fixed selector SQL and `bucket_start + 300` five-minute projections | ✓ WIRED | Host/service regressions directly assert repository and Flask response output. |
-| `RetentionPolicy.from_settings()` | cleanup and history API | `_telemetry_policy()` | ✓ WIRED | The policy controls cutoff, resolution budget, repository limit, response check, and serialized budget. |
+| --- | --- | --- | --- |
+| `worker_collect_system_stats()` | `api_telemetry_history()` | Shared `host_stream_key(metric)` identities | ✓ WIRED | New host evidence writes each canonical metric; host history reads the same metric identity. |
+| `_migration_7_canonical_host_streams()` | `schema_migrations` | One runner-owned immediate SQLite transaction | ✓ WIRED | A validation exception prevents both data publication and version-7 insertion; tests prove snapshot equality after failure. |
+| `run_retention_batch()` | host/service source tables | `_upsert_and_verify()` then succeeded job then exact source delete | ✓ WIRED | Aggregate visibility is confirmed before source deletion and failed work is retained for due retry. |
+| `RetentionPolicy.from_settings()` | cleanup and history response | `_telemetry_policy()` | ✓ WIRED | A single policy controls cutoffs, resolution selection, repository limit, overflow enforcement, and response budget. |
+| `get_pending_aggregation()` | history response | fixed host/service SQL and response serialization | ✓ WIRED | Durable jobs take exact interval precedence; derived five-minute intervals use 300 seconds and stay outside coverage states. |
 
-## Data-Flow Trace (Level 4)
+## Data-Flow Trace
 
-| Artifact | Data Variable | Source | Produces Real Data | Status |
+| Artifact | Data variable | Source | Produces real data | Status |
 | --- | --- | --- | --- | --- |
-| History response | points, coverage, aggregation_pending | SQLite source/rollup/coverage/job tables via repositories | Yes; parameterized queries return real rows and coverage is composed from source segments plus sparse ledger. | ✓ FLOWING |
-| Host worker path | per-metric streams and pressure gaps | live system sample → `stats_history` + canonical telemetry state | Yes for valid persisted state; malformed legacy JSON-null state remains an invalid migration edge. | ⚠️ PARTIAL |
-| Retention batch | aggregate/job/source lifecycle | source observations + durable retry rows | Yes; read-back occurs before delete and retries are admitted only when due. | ✓ FLOWING |
+| Historical response | points, coverage, aggregation_pending | SQLite source/rollup/coverage/job tables | Yes; fixed parameterized queries feed the route and response composition. | ✓ FLOWING |
+| Host collection path | per-metric streams and pressure gaps | live sample → `stats_history`/runtime state/telemetry streams | Yes; all four metric identities are recorded after a persisted history sample. | ✓ FLOWING |
+| Retention batch | aggregate/job/source lifecycle | source observations plus durable rollup jobs | Yes; verified aggregates and due retry state determine deletion/admission. | ✓ FLOWING |
 
 ## Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 | --- | --- | --- | --- |
-| Valid v6 legacy migration, rollback, all metric history endpoints, and exact pending output | `uv run --project dashboard python -m pytest -q tests/test_migrations.py tests/test_historical_telemetry_api.py -k 'current_v6 or migration_seven or legacy_host_upgrade or five_minute and pending' -x` | `7 passed, 34 deselected in 0.24s` | ✓ PASS |
-| JSON-null legacy pressure-state migration | Disposable v6 fixture copied to `/private/tmp`; write `pressure_gaps.host:host = null`, run migration, inspect database | Migration applied `(7,)`, database version became `7`, and `legacy_pressure_key_present` was `True`. | ✗ FAIL |
+| Migration 7 absent, valid, malformed, rollback, expansion/removal, and idempotency | `uv run --project dashboard python -m pytest -q tests/test_migrations.py -k 'migration_seven or current_v6_legacy_host_state' -x` | Included in independent focused matrix; 17 tests/8 subtests total passed. | ✓ PASS |
+| Closed hourly expiry and exact due-time retry admission | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py -k 'non_aligned_hourly_expiry or pre_due_host_and_service or deferred_and_succeeded_jobs' -x` | Included in independent focused matrix; passed. | ✓ PASS |
+| Fallback ownership, point budget, and exact host/service five-minute pending intervals | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py -k 'five_minute_pending or fallback or point_budget' -x` | Included in independent focused matrix; passed. | ✓ PASS |
 
-The full Phase 2 suite was reported green after both final execution waves. This verifier independently ran the focused 7-test migration/API matrix above and reproduced the remaining null-state defect in an isolated copy; it did not rerun the full suite.
+**Independent command actually run:**
+
+```text
+uv run --project dashboard python -m pytest -q tests/test_migrations.py tests/test_telemetry_retention.py tests/test_historical_telemetry_api.py -k 'migration_seven or current_v6_legacy_host_state or non_aligned_hourly_expiry or pre_due_host_and_service or deferred_and_succeeded_jobs or five_minute_pending or fallback or point_budget' -x
+17 passed, 43 deselected, 8 subtests passed in 0.62s
+```
 
 ## Probe Execution
 
-SKIPPED — no Phase 2 probe was declared and no `scripts/**/tests/probe-*.sh` exists.
+SKIPPED — Phase 2 declares no probe and `scripts/**/tests/probe-*.sh` is absent.
 
 ## Requirements Coverage
 
-| Requirement | Status | Evidence |
-| --- | --- | --- |
-| TEL-01 | ✓ SATISFIED | Rolling raw/aggregate/event retention, closed-bucket expiry, bounded batch size, and storage-pressure retention controls are implemented. |
-| TEL-02 | ✓ SATISFIED | Raw/five-minute source fallback remains queryable until a completed replacement aggregate owns the same half-open interval. |
-| TEL-03 | ✓ SATISFIED | Savepoint-contained aggregate read-back precedes exact source deletion; failed/pending jobs preserve evidence until their retry is due. |
-| TEL-04 | ✗ BLOCKED | Migration 7 must migrate or fail closed for every persisted legacy pressure entry. JSON null instead advances the schema while leaving the obsolete invalid identity, violating the phase compatibility and truthful-gap contract. |
-| TEL-05 | ✓ SATISFIED | Settings-derived resolution/point budget is enforced at route, repository, composition, and response boundaries; exact 300-second pending intervals no longer misstate coverage. |
+| Requirement | Source plans | Status | Evidence |
+| --- | --- | --- | --- |
+| TEL-01 | 02-02, 02-03, 02-04, 02-05, 02-08 | ✓ SATISFIED | Rolling raw/aggregate/event retention, bounded candidate batches, closed-hour expiry, and pressure controls are implemented and tested. |
+| TEL-02 | 02-02, 02-03, 02-04, 02-06, 02-07, 02-09 | ✓ SATISFIED | The documented 7-day/30-day/90-day tiers retain detailed lower-tier evidence until a completed aggregate owns it. |
+| TEL-03 | 02-02, 02-03, 02-04, 02-05, 02-08, 02-09 | ✓ SATISFIED | Upsert/read-back verification and success-marking precede exact source deletion; pre-due failures preserve sources. |
+| TEL-04 | 02-01, 02-05, 02-06, 02-07, 02-09, 02-10, 02-11, 02-12 | ✓ SATISFIED | Coverage partitioning exposes observed/gap/unknown/expired semantics; Migration 7 either fully canonicalizes valid evidence or rolls malformed state back. |
+| TEL-05 | 02-01, 02-06, 02-07, 02-11 | ✓ SATISFIED | Server-side resolution selection, point-budget enforcement, bounded repository limits, and honest 300-second pending ranges are verified. |
 
-All TEL-01 through TEL-05 requirements are declared by Phase 2 plans; none is orphaned. No later roadmap phase specifically owns correction of a Phase 2 migration’s malformed-state transaction, so this blocker is not deferred.
+All TEL-01 through TEL-05 are claimed by Phase 2 plans. No requirement is orphaned. No later roadmap phase owns an outstanding Phase 2 defect.
 
 ## Anti-Patterns Found
 
-| File | Line | Pattern | Severity | Impact |
-| --- | --- | --- | --- | --- |
-| `dashboard/beacon/migrations.py` | 387-391, 451-468 | `.get()` conflates an absent key with a present JSON-null legacy pressure value. | 🛑 BLOCKER | A success-versioned migration leaves an invalid obsolete state identity and defeats the specified malformed-state fail-closed boundary. |
+None. The Phase 2 implementation and focused test files contain no unreferenced `TBD`, `FIXME`, or `XXX` marker and no user-visible stub/hardcoded-empty implementation.
 
-No unreferenced `TBD`, `FIXME`, or `XXX` marker was found in the Phase 2 implementation or focused test files.
+## Human Verification Required
 
-## Gaps Summary
+None. Every roadmap success criterion is backend behavior exercised by the focused automated evidence above; no visual, external-service, or unexercised state-transition claim remains.
 
-Migration 7 is correct for valid legacy `host:host` data: streams and coverage are expanded into cpu, ram, disk, and temp; canonical coverage wins overlaps; all four historical APIs expose the migrated gap; and the shared raw rollup job remains intentionally unchanged. Plan 11 also closes the false one-hour pending disclosure with exact 300-second host/service intervals.
+## Conclusion
 
-However, a persisted `{"host:host": null}` is malformed legacy state. The migration currently treats it as absent and publishes version 7 after deleting the other shared records, leaving the invalid obsolete key. This is not merely cosmetic: it marks canonicalisation complete without enforcing the data-integrity boundary the migration advertises, and TEL-04’s trustworthy historical-gap compatibility contract depends on that boundary. The phase therefore cannot pass until this state either fails the migration transaction or is explicitly and safely normalized under an approved contract.
+Phase 2's goal is achieved. The prior blocker is closed: a present malformed `host:host` pressure value can no longer be mistaken for absence or leave malformed state behind a published Migration 7. Host/service telemetry retention, tier transitions, query coverage, resolution budget, pending intervals, and retry behavior remain code-backed and regression-tested.
 
-**Next action:** Run `$gsd-plan-phase 2 --gaps` to add the small Migration 7 validation/rollback repair, then `$gsd-execute-phase 2 --gaps-only`.
+**Next action:** Mark Phase 2 complete in orchestrator state, then proceed with `$gsd-plan-phase 3`.
 
-_Verified: 2026-08-11T12:03:51Z_
+_Verified: 2026-08-11T16:35:35Z_
 _Verifier: the agent (gsd-verifier)_
