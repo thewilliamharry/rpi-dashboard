@@ -20,10 +20,10 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-07)
+See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 02 — Bounded Telemetry & Retention — Gap Closure
+**Current focus:** Phase 3 — Advanced Current Diagnosis
 
 ## Current Position
 

@@ -108,11 +108,11 @@ Every v1 requirement maps to exactly one roadmap phase.
 | FND-05 | Phase 1 | Complete |
 | FND-06 | Phase 1 | Complete |
 | FND-07 | Phase 1 | Complete |
-| TEL-01 | Phase 2 | Gaps Found |
-| TEL-02 | Phase 2 | Gaps Found |
-| TEL-03 | Phase 2 | Gaps Found |
-| TEL-04 | Phase 2 | Gaps Found |
-| TEL-05 | Phase 2 | Gaps Found |
+| TEL-01 | Phase 2 | Complete |
+| TEL-02 | Phase 2 | Complete |
+| TEL-03 | Phase 2 | Complete |
+| TEL-04 | Phase 2 | Complete |
+| TEL-05 | Phase 2 | Complete |
 | TEL-06 | Phase 3 | Pending |
 | DIA-01 | Phase 3 | Pending |
 | DIA-02 | Phase 3 | Pending |
