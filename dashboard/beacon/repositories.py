@@ -423,7 +423,7 @@ def _pending_source_rows(conn, stream_kind, stream_key, start_ts, end_ts, cutoff
             'GROUP BY start_ts ORDER BY start_ts ASC LIMIT ?'
         )
         five_query = (
-            'SELECT bucket_start AS start_ts, bucket_start + 3600 AS end_ts FROM host_metric_rollups '
+            'SELECT bucket_start AS start_ts, bucket_start + 300 AS end_ts FROM host_metric_rollups '
             'WHERE metric=? AND bucket_seconds=300 AND bucket_start < ? AND bucket_start < ? '
             'AND bucket_start + 300 > ? AND NOT EXISTS (SELECT 1 FROM host_metric_rollups replacement '
             'WHERE replacement.metric=host_metric_rollups.metric AND replacement.bucket_seconds=3600 '
@@ -445,7 +445,7 @@ def _pending_source_rows(conn, stream_kind, stream_key, start_ts, end_ts, cutoff
             'GROUP BY start_ts ORDER BY start_ts ASC LIMIT ?'
         )
         five_query = (
-            'SELECT bucket_start AS start_ts, bucket_start + 3600 AS end_ts FROM service_rollups '
+            'SELECT bucket_start AS start_ts, bucket_start + 300 AS end_ts FROM service_rollups '
             'WHERE service_port=? AND bucket_seconds=300 AND bucket_start < ? AND bucket_start < ? '
             'AND bucket_start + 300 > ? AND NOT EXISTS (SELECT 1 FROM service_rollups replacement '
             'WHERE replacement.service_port=service_rollups.service_port AND replacement.bucket_seconds=3600 '
@@ -466,9 +466,9 @@ def _coalesce_pending(rows):
     for row in sorted(rows, key=lambda item: (item['start_ts'], item['end_ts'], item['state'])):
         if (
             result and row['state'] == 'pending' and result[-1]['state'] == 'pending'
-            and row['start_ts'] <= result[-1]['end_ts']
+            and row['start_ts'] == result[-1]['end_ts']
         ):
-            result[-1]['end_ts'] = max(result[-1]['end_ts'], row['end_ts'])
+            result[-1]['end_ts'] = row['end_ts']
         else:
             result.append(dict(row))
     return tuple(result)
