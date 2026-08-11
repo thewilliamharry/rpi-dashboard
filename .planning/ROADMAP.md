@@ -146,7 +146,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A requested historical range explicitly distinguishes observed values from collection gaps, unknown intervals, and data that has expired under retention.
   4. Beacon selects an appropriate server-side resolution for each historical request and returns a bounded number of points without misleading the operator about coverage.
 
-**Plans**: 8/9 plans executed
+**Plans**: 9/9 plans executed
 
 Plans:
 **Wave 1**
@@ -183,7 +183,7 @@ Plans:
 
 **Wave 9** *(blocked on retention/retry repair; final Phase 2 regression gate)*
 
-- [ ] 02-09-PLAN.md — Keep host/service source evidence queryable and non-duplicating while compaction is pending.
+- [x] 02-09-PLAN.md — Keep host/service source evidence queryable and non-duplicating while compaction is pending.
 
 ### Phase 3: Advanced Current Diagnosis
 
@@ -255,7 +255,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
-| 2. Bounded Telemetry & Retention | 8/9 | In Progress|  |
+| 2. Bounded Telemetry & Retention | 9/9 | In Progress|  |
 | 3. Advanced Current Diagnosis | 0/TBD | Not started | - |
 | 4. Historical Investigation | 0/TBD | Not started | - |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |

@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 2
 current_phase_name: Bounded Telemetry & Retention — Gap Closure
 status: executing
-stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-08-11T06:13:06.767Z"
+stopped_at: Completed 02-09-PLAN.md
+last_updated: "2026-08-11T06:25:35.966Z"
 last_activity: 2026-08-11
 last_activity_desc: Phase 2 execution started
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 32
-  completed_plans: 31
+  completed_plans: 32
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 2 (Bounded Telemetry & Retention — Gap Closure) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-08-11 — Phase 2 execution started
 
-Progress: [██████████] 97%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -88,6 +88,7 @@ Progress: [██████████] 97%
 | Phase 02 P06 | 21min | 2 tasks | 8 files |
 | Phase 02 P07 | 6min | 2 tasks | 4 files |
 | Phase 02 P08 | 3 min | 2 tasks | 3 files |
+| Phase 02 P09 | 25min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -161,6 +162,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase 02]: The historical API uses the same Settings-derived RetentionPolicy as worker cleanup, including its point budget.
 - [Phase ?]: Hourly rollups expire only when their complete half-open bucket ends at or before the retention cutoff.
 - [Phase ?]: Durable pending or failed rollups are admitted only when due; new work stays bounded and succeeded/deferred jobs do not consume capacity.
+- [Phase ?]: Completed rollups exclusively own their exact half-open source intervals; lower-tier fallback remains observable until then.
+- [Phase ?]: Pending aggregation is disclosed separately from observed coverage, with shared raw-host job identity and durable metadata precedence.
 
 ### Pending Todos
 
@@ -180,6 +183,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-11T06:13:06.757Z
-Stopped at: Completed 02-08-PLAN.md
+Last session: 2026-08-11T06:25:35.956Z
+Stopped at: Completed 02-09-PLAN.md
 Resume file: None
