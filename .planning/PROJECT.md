@@ -24,6 +24,9 @@ At a glance, the operator can trust what is running, what is failing, and how th
 - ✓ Phase 1 established explicit web, persistence, monitoring, discovery, preview, scheduling, migration, and recovery boundaries while preserving compatibility — validated in Phase 1
 - ✓ Background work has one durable worker owner with transaction-local fencing, bounded admission/drain, and stale-worker effect rejection — validated in Phase 1
 - ✓ Critical migration, recovery, ownership, outbound-network, mutation, and UI safety contracts have automated regression coverage — validated in Phase 1
+- ✓ Host metrics, service history, and events retain a bounded rolling 90-day record with explicit tiered aggregation and cleanup — validated in Phase 2
+- ✓ Rollups are verified before exact source deletion, with bounded retries, storage-pressure handling, and preserved evidence while compaction is pending — validated in Phase 2
+- ✓ Historical APIs return bounded, server-selected resolution with explicit observed, gap, unknown, expired, and pending states — validated in Phase 2
 
 ### Active
 
@@ -50,7 +53,7 @@ The current system uses a Flask web process and an APScheduler worker sharing SQ
 
 The main architectural concern is concentration of routes, persistence, monitoring, discovery, thumbnail capture, and coordination in `dashboard/app.py`. Import-time lifecycle behavior, cross-process SQLite coordination, embedded schema evolution, large thumbnail blobs, and limited production-concurrency coverage make future analytics harder to add safely.
 
-The first GSD milestone combines foundation work and analytics. Phase 1 completed the behavioral-safety and runtime-ownership foundation, including versioned migration/recovery, tested outbound boundaries, durable worker authority, and exhaustive stale-worker fencing. Phase 2 can now build bounded telemetry and retention on those verified contracts rather than extending accidental coupling.
+The first GSD milestone combines foundation work and analytics. Phase 1 completed the behavioral-safety and runtime-ownership foundation, including versioned migration/recovery, tested outbound boundaries, durable worker authority, and exhaustive stale-worker fencing. Phase 2 completed the bounded 90-day telemetry substrate: tiered rollups, truthful coverage, migration compatibility, storage-pressure behavior, retry safety, and bounded historical APIs. Phase 3 can now build advanced current diagnosis on those verified contracts rather than extending accidental coupling.
 
 ## Constraints
 
@@ -71,8 +74,8 @@ The first GSD milestone combines foundation work and analytics. Phase 1 complete
 | Treat current behavior as the reference while allowing substantial internal restructuring | The product mostly works, but earlier development sessions produced inconsistent architecture and UX | ✓ Validated in Phase 1 |
 | Build foundation and advanced analytics in the first GSD milestone | Analytics needs trustworthy collection, persistence, and UI boundaries | — Pending |
 | Defer remote actions to a later milestone | Control requires a stricter safety and audit model than read-oriented monitoring | — Pending |
-| Retain 90 days of analytics history | Provides meaningful operational trends without turning the Pi into an indefinite monitoring archive | — Pending |
-| Monitor one Raspberry Pi plus configured LAN/web services | Matches the personal local-dashboard mission and avoids fleet-management complexity | — Pending |
+| Retain 90 days of analytics history | Provides meaningful operational trends without turning the Pi into an indefinite monitoring archive | ✓ Validated in Phase 2 |
+| Monitor one Raspberry Pi plus configured LAN/web services | Matches the personal local-dashboard mission and avoids fleet-management complexity | ✓ Validated in Phase 2 telemetry scope |
 | Preserve preview analytics in both themes and add a separate advanced page | Keeps the main dashboard familiar and lightweight while allowing deeper investigation | — Pending |
 | Provide full advanced analytics capability in both themes | Theme choice changes presentation and density, not access to monitoring functionality | — Pending |
 
@@ -94,4 +97,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-07 after Phase 1 completion*
+*Last updated: 2026-08-11 after Phase 2 completion*
