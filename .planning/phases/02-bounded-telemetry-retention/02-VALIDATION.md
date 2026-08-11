@@ -1,123 +1,86 @@
 ---
 phase: 02
 slug: bounded-telemetry-retention
-status: gaps_found
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-08-10
+validated: 2026-08-11
 ---
 
-# Phase 02 — Validation Strategy
+# Phase 02 — Validation Record
 
-> Per-phase validation contract for feedback sampling during execution.
-
----
+Phase 2 has executable coverage for every automated task and all TEL-01 through TEL-05 requirements.  The migration-7 malformed legacy pressure-state gap was closed by Plan 02-12; current verification reports 4/4 roadmap success criteria.
 
 ## Test Infrastructure
 
 | Property | Value |
-|----------|-------|
-| **Framework** | pytest `>=9,<10` over existing unittest-style suites |
-| **Config file** | `dashboard/pyproject.toml` |
-| **Quick run command** | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py tests/test_historical_telemetry_api.py` |
-| **Full suite command** | `uv run --project dashboard python -m pytest -q` |
-| **Estimated runtime** | To be measured during Wave 0; target <60 seconds quick and <180 seconds full |
-
----
-
-## Sampling Rate
-
-- **After every task commit:** Run `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py tests/test_historical_telemetry_api.py`
-- **After every plan wave:** Run `uv run --project dashboard python -m pytest -q`
-- **Before `$gsd-verify-work`:** Full suite must be green
-- **Max feedback latency:** 180 seconds
-
----
+|---|---|
+| Framework | pytest >=9, using unittest-style suites |
+| Focused Phase 2 command | `uv run --project dashboard python -m pytest -q tests/test_migrations.py tests/test_telemetry_retention.py tests/test_historical_telemetry_api.py -x` |
+| Full regression command | `uv run --project dashboard python -m pytest -q` |
+| Focused audit result | 60 passed, 19 subtests passed in 1.51s (2026-08-11) |
+| Full regression result | passed (2026-08-11) |
 
 ## Per-Task Verification Map
 
-| Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
-|---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 02-04-01 / 02-05-02 | 04 / 05 | 4 / 5 | TEL-01 | T-02-12 / T-02-14 | Retention stays bounded and stale workers cannot mutate data | unit + integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
-| 02-04-01 | 04 | 4 | TEL-02 | T-02-10 | Tier boundaries and aggregate fields are deterministic | unit | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
-| 02-04-01 / 02-05-01 | 04 / 05 | 4 / 5 | TEL-03 | T-02-10 / T-02-14 | Raw data is never deleted before verified rollup persistence | integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py` | ❌ W0 via 02-01-02 | ⬜ pending |
-| 02-05-01 / 02-06-02 | 05 / 06 | 5 / 6 | TEL-04 | T-02-17 / T-02-19 | Coverage partitions are exhaustive, selectors use fixed query shapes, and service results map `True` to observed online, `False` to observed offline even with `error_class`, and only `None` to unknown | worker + API integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py tests/test_historical_telemetry_api.py` | ❌ W0 via 02-01-02 | ⬜ pending |
-| 02-01-01 / 02-06-02 | 01 / 06 | 1 / 6 | TEL-05 | T-02-01 / T-02-18 | Range validation and server resolution cap response work | API unit + integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ❌ W0 via 02-01-02 | ⬜ pending |
-| 02-07-01 | 07 | 7 | TEL-04 | T-02-G01 / T-02-G03 | Real worker samples and pressure gaps use the same per-metric stream identity as rollups and history reads | production worker + API integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py -k "host and (stream or pressure or worker or production)" -x` | ✅ existing, extend | ❌ verified gap |
-| 02-07-02 | 07 | 7 | TEL-02, TEL-05 | T-02-G02 | Worker and API use one validated policy for configured tiers, expiry, resolution, repository limits, and response budget | config + API integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py tests/test_telemetry_retention.py -k "policy or settings or budget or configured or production or host" -x` | ✅ existing, extend | ❌ verified gap |
-| 02-08-01 | 08 | 8 | TEL-01 | T-02-G05 | Non-hour-aligned expiry removes only host/service hourly buckets fully closed before the cutoff | SQLite integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py -k "non_aligned or hourly or expiry or cutoff" -x` | ✅ existing, extend | ❌ verified gap |
-| 02-08-02 | 08 | 8 | TEL-03 | T-02-G06 / T-02-G08 | Persisted retry due time filters candidate admission without premature attempts or source deletion | SQLite state-machine integration | `uv run --project dashboard python -m pytest -q tests/test_telemetry_retention.py -k "retry or due or pending or failed or batch or idempotent" -x` | ✅ existing, extend | ❌ verified gap |
-| 02-09-01 / 02-09-02 | 09 | 9 | TEL-02, TEL-03, TEL-04 | T-02-G09 / T-02-G10 / T-02-G11 | Host/service lower-tier evidence remains bounded, non-duplicated, observed, and separately disclosed while compaction is backlogged/pending/failed | repository + API integration | `uv run --project dashboard python -m pytest -q tests/test_historical_telemetry_api.py` | ✅ existing, extend | ❌ verified gap |
+| Task ID | Requirement(s) | Behavioral evidence | Automated command | Status |
+|---|---|---|---|---|
+| 02-01-01 | TEL-04, TEL-05 | Exact bounded host API range; ordered points; empty/single results; invalid selector/range rejection | `pytest -q tests/test_historical_telemetry_api.py -x` | green |
+| 02-01-02 | TEL-04, TEL-05 | Deterministic cutoffs, resolution ladder, and stable half-open coverage coalescing | `pytest -q tests/test_telemetry_retention.py tests/test_migrations.py -x` | green |
+| 02-02-01 | TEL-01, TEL-02, TEL-03 | Approved one-way aggregate/expiry contract is recorded in 02-02-SUMMARY; implementation is exercised by 02-03 through 02-05 | `pytest -q tests/test_migrations.py tests/test_telemetry_retention.py -x` | green (decision + regression) |
+| 02-03-01 | TEL-01, TEL-02, TEL-03 | Migration 5 schema, supported-fixture preservation, rollback, and idempotence | `pytest -q tests/test_migrations.py -x` | green |
+| 02-04-01 | TEL-01, TEL-02, TEL-03 | Verified host/service aggregates precede exact source deletion; tier and event boundaries hold | `pytest -q tests/test_telemetry_retention.py -k 'tier or bucket or aggregate or rollup or retry or event' -x` | green |
+| 02-04-02 | TEL-01 | Storage pressure includes DB/WAL/SHM, reserve, hysteresis, and recovery | `pytest -q tests/test_telemetry_retention.py -k 'pressure or storage or settings or hysteresis' -x` | green |
+| 02-05-01 | TEL-01, TEL-03, TEL-04 | Authority-fenced cleanup, cadence gaps, pressure recovery, and tri-state service evidence | `pytest -q tests/test_telemetry_retention.py -k 'worker or epoch or cadence or gap or suspension or recovery or unknown or indeterminate or service_result' -x` | green |
+| 02-05-02 | TEL-01, TEL-03 | Worker telemetry mutation inventory and authority admission matrix | `pytest -q tests/test_telemetry_retention.py tests/test_worker_ownership_matrix.py tests/test_runtime_ownership.py -k 'telemetry or inventory or registry or callback_coverage or database' -x` | green |
+| 02-06-01 | TEL-02, TEL-04, TEL-05 | Merged raw/five-minute/hourly host and service evidence has one owner at boundaries | `pytest -q tests/test_historical_telemetry_api.py -k 'mixed or tier or aggregate or service or repository or budget' -x` | green |
+| 02-06-02 | TEL-02, TEL-04, TEL-05 | Exhaustive observed/gap/unknown/expired coverage and strict selector/range contracts | `pytest -q tests/test_historical_telemetry_api.py tests/test_release_contract.py -x` | green |
+| 02-07-01 | TEL-02, TEL-04, TEL-05 | Real worker records cpu/ram/disk/temp canonical streams and metric pressure gaps visible through history | `pytest -q tests/test_telemetry_retention.py -k 'host and (stream or pressure or worker or production)' -x` | green |
+| 02-07-02 | TEL-02, TEL-04, TEL-05 | Settings-backed policy controls worker cleanup and API resolution/read budget | `pytest -q tests/test_historical_telemetry_api.py tests/test_telemetry_retention.py -k 'policy or settings or budget or configured or production or host' -x` | green |
+| 02-08-01 | TEL-01, TEL-03 | Non-hour-aligned expiry keeps partial host/service hourly buckets | `pytest -q tests/test_telemetry_retention.py -k 'non_aligned or hourly or expiry or cutoff' -x` | green |
+| 02-08-02 | TEL-03 | Pre-due failed/pending jobs retain sources; due retries and succeeded jobs are idempotent | `pytest -q tests/test_telemetry_retention.py -k 'retry or due or pending or failed or batch or idempotent' -x` | green |
+| 02-09-01 | TEL-02, TEL-03, TEL-04 | Host fallback remains observed until completed replacement owns exact interval | `pytest -q tests/test_historical_telemetry_api.py -k 'host and (backlog or pending or failed or replacement or boundary or fallback)' -x` | green |
+| 02-09-02 | TEL-02, TEL-03, TEL-04 | Service fallback, offline evidence, pending disclosure, and full regression | `uv run --project dashboard python -m pytest -q` | green |
+| 02-10-01 | TEL-04 | Legacy host state canonicalizes through migration 7 and remains visible through four host endpoints | `pytest -q tests/test_migrations.py tests/test_historical_telemetry_api.py -k 'current_v6 or migration_seven or legacy_host_upgrade' -x` | green |
+| 02-11-01 | TEL-04, TEL-05 | Host/service five-minute backlog uses exact `[start, start + 300)` intervals and true adjacency | `pytest -q tests/test_historical_telemetry_api.py -k 'five_minute and pending' -x` | green |
+| 02-12-01 | TEL-04 | Present null, boolean, scalar, list, or object legacy pressure state rejects transactionally with no v7 publication | `pytest -q tests/test_migrations.py -k 'migration_seven or current_v6_legacy_host_state' -x` | green |
 
-*Task IDs, plans, and waves are populated when PLAN.md files are finalized. Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky.*
+Commands abbreviated as `pytest` use `uv run --project dashboard python -m pytest`.
 
----
+## Requirement Coverage
 
-## Wave 0 Requirements
+| Requirement | Automated behavioral tests | Status |
+|---|---|---|
+| TEL-01 | `test_complete_host_bucket_is_verified_before_exact_source_deletion`, storage pressure, epoch-fenced cleanup, non-aligned expiry | green |
+| TEL-02 | tier merge/boundary tests, configured-policy test, host/service fallback ownership tests | green |
+| TEL-03 | verified-before-delete, injected rollup failure/retry, pre-due admission, authority-fenced cleanup | green |
+| TEL-04 | coverage partition tests, real worker metric streams/gaps, migration 7 legacy upgrade and malformed-state rollback | green |
+| TEL-05 | real bounded history route, invalid input tests, configured point budget, five-minute pending interval tests | green |
 
-- [x] `tests/test_telemetry_retention.py` — existing deterministic clock/data, tier, rollup-before-delete, retry, pressure/recovery, epoch, and service-result foundation; Plans 02-07/08 add the verified production identity, non-aligned expiry, and pre-due retry regressions.
-- [x] `tests/test_historical_telemetry_api.py` — existing query/coverage/budget/mixed-tier foundation; Plans 02-07/09 add configured-policy and awaiting-compaction host/service regressions.
-- [x] `tests/test_migrations.py` — existing preservation, telemetry schema/index, rollback, no-op, and migration-6 latency denominator coverage; no new schema is planned for gap closure.
+## Manual-Only Verification
 
-Existing pytest infrastructure and shared test helpers cover framework setup; no new test dependency is required.
+| Behavior | Requirement | Rationale | Procedure |
+|---|---|---|---|
+| Target-Pi storage and WAL thresholds at representative 90-day load | TEL-01 | Hardware capacity and filesystem behavior require a Raspberry Pi acceptance run | Seed representative load, run all retention tiers, and record database/WAL/free-space metrics before production rollout. |
 
----
+This manual operational measurement does not leave an automated correctness gap; all retention semantics, source-deletion ordering, historical disclosure, and response bounding are regression-tested.
 
-## Manual-Only Verifications
+## Audit Trail
 
-| Behavior | Requirement | Why Manual | Test Instructions |
-|----------|-------------|------------|-------------------|
-| Storage thresholds remain suitable on target Raspberry Pi hardware | TEL-01 | Host filesystem behavior and practical database growth require target-hardware observation | Seed representative telemetry, run retention through all tiers, inspect database/WAL/free-space behavior, and record measured thresholds before production rollout |
-
-All retention ordering, tier boundaries, coverage semantics, and response bounding otherwise require automated verification.
-
----
+| Date | Action | Result |
+|---|---|---|
+| 2026-08-11 | Reviewed all 02-01 through 02-12 PLAN and SUMMARY artifacts, requirements, prior verification, implementation seams, and test suite | Every plan task maps to runnable evidence. |
+| 2026-08-11 | Ran focused Phase 2 migration/retention/history matrix | 60 passed, 19 subtests passed in 1.51s. |
+| 2026-08-11 | Ran full project regression | passed. |
+| 2026-08-11 | Nyquist post-verification audit | No untested behavioral gap remains; no test file was added. |
 
 ## Validation Sign-Off
 
-- [x] All tasks have `<automated>` verify or Wave 0 dependencies
-- [x] Sampling continuity: no 3 consecutive tasks without automated verify
-- [x] Wave 0 covers all MISSING references
-- [x] No watch-mode flags
-- [ ] Feedback latency < 180s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] Every executable plan task has a green behavioral command.
+- [x] TEL-01 through TEL-05 each have focused automated evidence.
+- [x] Boundary, retry, failure, ownership, migration rollback, and malformed-input adversarial paths are covered.
+- [x] No implementation files were changed during this audit.
+- [x] Focused and full regression commands pass.
 
-**Approval:** pending gap-closure execution
-
----
-
-## Threat References
-
-| Ref | Threat | Required verification |
-|-----|--------|-----------------------|
-| T-02-01 | Unbounded historical request or WAL growth | Validate maximum range, bounded point count, and short-lived reads |
-| T-02-02 | SQL injection through metric or service selectors | Test allowlisted selectors and bound query values |
-| T-02-03 | Storage exhaustion | Test bounded retention, pressure hysteresis, reserve behavior, and truthful gap recording |
-| T-02-04 | Stale worker mutation after authority takeover | Test transaction-local worker epoch rejection for rollup and cleanup writes |
-| T-02-G01 / T-02-G03 | Canonical host identity and truthful pressure coverage | Invoke the real worker for all four metrics and verify stream/API/gap identity under current and stale epochs |
-| T-02-G02 | Policy/budget drift between worker and API | Load non-default validated settings and assert tier, retention, repository, and response caps use one policy value |
-| T-02-G05 | Partial hourly bucket deletion | Use a non-hour-aligned cutoff and assert host/service bucket-end ownership |
-| T-02-G06 / T-02-G08 | Premature retry or source deletion | Snapshot pending/failed jobs and sources before due, at due, and after idempotent success |
-| T-02-G09 / T-02-G10 / T-02-G11 | Duplicate, unbounded, or mislabeled awaiting-compaction evidence | Exercise host/service raw and five-minute fallback, replacement precedence, pending disclosure, exact boundaries, and configured caps |
-
----
-
-## Gap-Closure Source Coverage Audit
-
-| Source | ID | Gap-closure obligation | Plan | Status |
-|--------|----|------------------------|------|--------|
-| GOAL | — | Accurate bounded 90-day telemetry remains truthful under production wiring and asynchronous retention | 02-07, 02-08, 02-09 | COVERED |
-| REQ | TEL-01 | Rolling retention never deletes the retained portion of an hourly bucket | 02-08 Task 1 | COVERED |
-| REQ | TEL-02 | Configured tiers and retained lower-tier evidence agree during compaction | 02-07 Task 2; 02-09 Tasks 1-2 | COVERED |
-| REQ | TEL-03 | Retry due time is enforced and preserved sources remain visible until verified replacement | 02-08 Task 2; 02-09 Tasks 1-2 | COVERED |
-| REQ | TEL-04 | Per-metric coverage and awaiting-compaction evidence are never mislabeled ordinary unknown | 02-07 Task 1; 02-09 Tasks 1-2 | COVERED |
-| REQ | TEL-05 | Deployed response budget and tier policy govern all history reads | 02-07 Task 2 | COVERED |
-| RESEARCH | closed buckets | Eligibility/expiry uses full UTC bucket end, including non-aligned cutoffs | 02-08 Task 1 | COVERED |
-| RESEARCH | bounded WAL/read work | Candidate and fallback reads remain fixed, grouped, capped, and promptly closed | 02-08 Task 2; 02-09 Tasks 1-2 | COVERED |
-| CONTEXT | D-01, D-02, D-08 | Settings-backed 7/30/90 tiers, requested bounds, and response policy remain coherent | 02-07 Task 2; 02-08 Task 1; 02-09 Tasks 1-2 | COVERED |
-| CONTEXT | D-05, D-06, D-07 | Metric-specific cadence/coverage and non-interpolated preserved evidence remain explicit | 02-07 Task 1; 02-09 Tasks 1-2 | COVERED |
-| CONTEXT | D-09 | Failed/pending rollups preserve sources, respect backoff, and disclose pending work | 02-08 Task 2; 02-09 Tasks 1-2 | COVERED |
-| CONTEXT | D-10, D-11, D-12 | Existing storage policy remains worker-owned; pressure gaps use readable per-metric identities | 02-07 Tasks 1-2 | COVERED |
-| CONTEXT | D-03, D-04 | Existing event and aggregate-field contracts remain protected by focused/full regression | 02-08 Task 1; 02-09 Task 2 | COVERED |
-
-Deferred 365-day retention remains excluded. No confirmed gap, Phase 2 requirement, relevant research constraint, or locked decision is unplanned.
+**Approval:** validated — Phase 2 Nyquist validation is complete.
