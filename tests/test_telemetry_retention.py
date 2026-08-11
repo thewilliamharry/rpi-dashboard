@@ -1,4 +1,7 @@
+import time
+import types
 import unittest
+from unittest import mock
 
 from dashboard.beacon import queues
 from dashboard.beacon import telemetry
@@ -474,6 +477,105 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
+
+    def test_real_worker_samples_use_metric_streams_and_close_pressure_gaps(self):
+        """The worker's four host values must be readable through their API streams."""
+        self.clock = UtcClock(int(time.time()) - 600)
+        authority_a, authority_b = seed_successive_worker_epochs(
+            self.db_path, self.clock, lease_seconds=3_000,
+        )
+        policy = self.appmod._telemetry_policy()
+        normal = telemetry.StorageSnapshot(
+            database_bytes=0,
+            wal_bytes=0,
+            shm_bytes=0,
+            free_bytes=policy.min_free_bytes + policy.backlog_reserve_bytes + 1,
+        )
+        suspended = telemetry.StorageSnapshot(
+            database_bytes=policy.db_max_bytes + policy.backlog_reserve_bytes,
+            wal_bytes=0,
+            shm_bytes=0,
+            free_bytes=policy.min_free_bytes + policy.backlog_reserve_bytes + 1,
+        )
+        memory = types.SimpleNamespace(
+            available=700,
+            total=1_000,
+            used=300,
+        )
+        disk = types.SimpleNamespace(percent=40.0, used=400, total=1_000)
+        with (
+            mock.patch.object(self.appmod.psutil, 'cpu_percent', return_value=12.5),
+            mock.patch.object(self.appmod.psutil, 'virtual_memory', return_value=memory),
+            mock.patch.object(self.appmod.psutil, 'disk_usage', return_value=disk),
+            mock.patch.object(self.appmod, 'get_temp', return_value=55.0),
+            mock.patch.object(self.appmod.beacon_telemetry, 'measure_storage', return_value=normal),
+        ):
+            first_ts = self.clock()
+            self.appmod.worker_collect_system_stats(authority_b, now=first_ts, persist_history=True)
+            self.clock.advance(self.appmod.METRIC_HISTORY_SECONDS)
+            suspend_ts = self.clock()
+            with mock.patch.object(
+                self.appmod.beacon_telemetry, 'measure_storage', return_value=suspended,
+            ):
+                self.appmod.worker_collect_system_stats(
+                    authority_b, now=suspend_ts, persist_history=True,
+                )
+            self.clock.advance(self.appmod.METRIC_HISTORY_SECONDS)
+            recovered_ts = self.clock()
+            self.appmod.worker_collect_system_stats(authority_b, now=recovered_ts, persist_history=True)
+
+            with self.assertRaises(queues.LeaseLost):
+                self.appmod.worker_collect_system_stats(
+                    authority_a, now=recovered_ts + self.appmod.METRIC_HISTORY_SECONDS,
+                    persist_history=True,
+                )
+
+        conn = self.appmod.get_db()
+        try:
+            streams = [tuple(row) for row in conn.execute(
+                "SELECT stream_kind, stream_key FROM telemetry_streams "
+                "WHERE stream_kind='host' ORDER BY stream_key"
+            )]
+            gaps = [tuple(row) for row in conn.execute(
+                "SELECT stream_key, start_ts, end_ts, reason, detail FROM telemetry_coverage "
+                "WHERE stream_kind='host' ORDER BY stream_key"
+            )]
+        finally:
+            conn.close()
+
+        self.assertEqual(
+            streams,
+            [('host', metric) for metric in telemetry.HOST_METRICS],
+        )
+        self.assertEqual(
+            gaps,
+            [
+                (metric, suspend_ts, recovered_ts, 'collection_gap', 'storage_pressure')
+                for metric in telemetry.HOST_METRICS
+            ],
+        )
+
+        client = self.appmod.app.test_client()
+        for metric in telemetry.HOST_METRICS:
+            with self.subTest(metric=metric):
+                response = client.get('/api/telemetry/history', query_string={
+                    'kind': 'host',
+                    'metric': metric,
+                    'start_ts': str(first_ts),
+                    'end_ts': str(recovered_ts + self.appmod.METRIC_HISTORY_SECONDS),
+                })
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertTrue(payload['points'])
+                self.assertIn(
+                    {
+                        'start_ts': suspend_ts,
+                        'end_ts': recovered_ts,
+                        'state': 'collection_gap',
+                        'detail': 'storage_pressure',
+                    },
+                    payload['coverage'],
+                )
 
         with self.assertRaises(queues.LeaseLost):
             self.appmod.worker_cleanup_history(authority_a, now=self.clock())
