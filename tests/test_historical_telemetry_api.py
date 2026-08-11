@@ -659,6 +659,142 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
         self.assertEqual(replaced['source_resolutions_seconds'], [3600])
         self.assertEqual(replaced['points'][0]['online_seconds'], 3600)
 
+    def test_host_five_minute_pending_uses_exact_half_open_intervals_and_true_adjacency(self):
+        """Five-minute host backlog reports only real source intervals."""
+        bucket_start = ((self.now - 31 * 86400) // 300) * 300
+        cutoffs = {'raw_start_ts': bucket_start + 1200, 'five_minute_start_ts': bucket_start + 1200}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                for offset in (900, 300, 0):
+                    conn.execute(
+                        'INSERT INTO host_metric_rollups('
+                        'metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, latest_value, '
+                        'sample_count, observed_seconds, gap_seconds, unknown_seconds) '
+                        'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                        ('cpu', bucket_start + offset, 300, 1.0, 1.0, 1.0, 1.0, 1, 300, 0, 0),
+                    )
+                conn.execute(
+                    'INSERT INTO telemetry_rollup_jobs('
+                    'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+                    'next_retry_ts, last_error_class, updated_ts) VALUES(?,?,?,?,?,?,?,?,?)',
+                    ('host', 'cpu', bucket_start + 900, 300, 'failed', 2, bucket_start + 1800, 'sqlite_busy', bucket_start),
+                )
+                conn.commit()
+                pending = telemetry_repositories.get_pending_aggregation(
+                    conn, 'host', 'cpu', bucket_start, bucket_start + 1200, 300,
+                    telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+            finally:
+                conn.close()
+
+        expected = (
+            {'start_ts': bucket_start, 'end_ts': bucket_start + 600, 'state': 'pending',
+             'attempt_count': 0, 'next_retry_ts': None, 'error_class': None},
+            {'start_ts': bucket_start + 900, 'end_ts': bucket_start + 1200, 'state': 'failed',
+             'attempt_count': 2, 'next_retry_ts': bucket_start + 1800, 'error_class': 'sqlite_busy'},
+        )
+        self.assertEqual(pending, expected)
+        response = self._request('cpu', bucket_start, bucket_start + 1200)
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['aggregation_pending'], list(expected))
+        self.assertNotIn('pending', {interval['state'] for interval in payload['coverage']})
+
+    def test_service_five_minute_pending_uses_exact_half_open_intervals_and_true_adjacency(self):
+        """Five-minute service backlog reports only real source intervals."""
+        bucket_start = ((self.now - 31 * 86400) // 300) * 300
+        cutoffs = {'raw_start_ts': bucket_start + 1200, 'five_minute_start_ts': bucket_start + 1200}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                for offset in (900, 300, 0):
+                    conn.execute(
+                        'INSERT INTO service_rollups('
+                        'service_port, bucket_start, bucket_seconds, online_seconds, offline_seconds, '
+                        'unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, '
+                        'latency_sample_count, check_count, failure_class_counts_json) '
+                        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (8080, bucket_start + offset, 300, 300, 0, 0, 0, 1.0, 1.0, 1.0, 1, 1, '{}'),
+                    )
+                conn.execute(
+                    'INSERT INTO telemetry_rollup_jobs('
+                    'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+                    'next_retry_ts, last_error_class, updated_ts) VALUES(?,?,?,?,?,?,?,?,?)',
+                    ('service', '8080', bucket_start + 900, 300, 'failed', 3, bucket_start + 1800, 'timeout', bucket_start),
+                )
+                conn.commit()
+                pending = telemetry_repositories.get_pending_aggregation(
+                    conn, 'service', '8080', bucket_start, bucket_start + 1200, 300,
+                    telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+            finally:
+                conn.close()
+
+        expected = (
+            {'start_ts': bucket_start, 'end_ts': bucket_start + 600, 'state': 'pending',
+             'attempt_count': 0, 'next_retry_ts': None, 'error_class': None},
+            {'start_ts': bucket_start + 900, 'end_ts': bucket_start + 1200, 'state': 'failed',
+             'attempt_count': 3, 'next_retry_ts': bucket_start + 1800, 'error_class': 'timeout'},
+        )
+        self.assertEqual(pending, expected)
+        response = self.client.get('/api/telemetry/history', query_string={
+            'kind': 'service', 'port': '8080', 'start_ts': str(bucket_start), 'end_ts': str(bucket_start + 1200),
+        })
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['aggregation_pending'], list(expected))
+        self.assertNotIn('pending', {interval['state'] for interval in payload['coverage']})
+
+    def test_empty_and_reverse_seeded_five_minute_pending_ranges_are_deterministic(self):
+        """Both selectors disclose no synthetic range and sort real five-minute work."""
+        bucket_start = ((self.now - 31 * 86400) // 300) * 300
+        cutoffs = {'raw_start_ts': bucket_start + 900, 'five_minute_start_ts': bucket_start + 900}
+        selectors = (('host', 'cpu'), ('service', '8080'))
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                for kind, key in selectors:
+                    self.assertEqual(
+                        telemetry_repositories.get_pending_aggregation(
+                            conn, kind, key, bucket_start, bucket_start + 900, 300,
+                            telemetry.POINT_BUDGET + 1, cutoffs,
+                        ),
+                        (),
+                    )
+                for offset in (600, 0):
+                    conn.execute(
+                        'INSERT INTO host_metric_rollups('
+                        'metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, latest_value, '
+                        'sample_count, observed_seconds, gap_seconds, unknown_seconds) '
+                        'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                        ('cpu', bucket_start + offset, 300, 1.0, 1.0, 1.0, 1.0, 1, 300, 0, 0),
+                    )
+                    conn.execute(
+                        'INSERT INTO service_rollups('
+                        'service_port, bucket_start, bucket_seconds, online_seconds, offline_seconds, '
+                        'unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, '
+                        'latency_sample_count, check_count, failure_class_counts_json) '
+                        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (8080, bucket_start + offset, 300, 300, 0, 0, 0, 1.0, 1.0, 1.0, 1, 1, '{}'),
+                    )
+                conn.commit()
+                for kind, key in selectors:
+                    self.assertEqual(
+                        telemetry_repositories.get_pending_aggregation(
+                            conn, kind, key, bucket_start, bucket_start + 900, 300,
+                            telemetry.POINT_BUDGET + 1, cutoffs,
+                        ),
+                        (
+                            {'start_ts': bucket_start, 'end_ts': bucket_start + 300, 'state': 'pending',
+                             'attempt_count': 0, 'next_retry_ts': None, 'error_class': None},
+                            {'start_ts': bucket_start + 600, 'end_ts': bucket_start + 900, 'state': 'pending',
+                             'attempt_count': 0, 'next_retry_ts': None, 'error_class': None},
+                        ),
+                    )
+            finally:
+                conn.close()
+
 
 class ConfiguredTelemetryPolicyApiTests(unittest.TestCase):
     """The API and worker must consume the one deployed telemetry policy."""
