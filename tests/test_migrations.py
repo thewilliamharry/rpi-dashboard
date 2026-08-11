@@ -271,6 +271,32 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(marker['reason_class'], 'RuntimeError')
             self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
 
+    def test_migration_seven_rejects_malformed_legacy_pressure_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
+            with sqlite3.connect(target) as conn:
+                conn.execute(
+                    "UPDATE runtime_state SET value=? WHERE key='telemetry_retention_state'",
+                    (json.dumps({
+                        'state': 'pressure',
+                        'pressure_gaps': {'host:host': True},
+                        'unrelated': {'keep': 'value'},
+                    }),),
+                )
+                conn.commit()
+
+            with self.assertRaises(MigrationPreparationError):
+                run_migrations(Settings(db_path=str(target)))
+
+            with sqlite3.connect(target) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM telemetry_streams WHERE stream_kind='host' AND stream_key='host'"
+                ).fetchone()[0], 1)
+                self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 6)
+            marker = json.loads((target.parent / 'recovery-required.json').read_text())
+            self.assertEqual(marker['failed_target_version'], 7)
+            self.assertEqual(marker['reason_class'], 'ValueError')
+
     def test_operator_service_port_remains_the_service_rollup_stream_key(self):
         source = OPERATOR_FIXTURE_DIR / 'production.db'
         with sqlite3.connect(source) as before_conn:

@@ -322,7 +322,13 @@ def _subtract_covered_segments(start_ts, end_ts, blockers):
 def _coalesce_coverage_segments(segments):
     """Coalesce only equal-reason/detail canonical coverage segments."""
     merged = []
-    for start_ts, end_ts, reason, detail in sorted(segments):
+    for start_ts, end_ts, reason, detail in sorted(
+        segments,
+        key=lambda segment: (
+            segment[0], segment[1], segment[2],
+            segment[3] is not None, str(segment[3] or ''),
+        ),
+    ):
         if (
             merged
             and merged[-1][2:] == (reason, detail)
