@@ -538,10 +538,16 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
             self.clock.advance(self.appmod.METRIC_HISTORY_SECONDS)
             recovered_ts = self.clock()
             self.appmod.worker_collect_system_stats(authority_b, now=recovered_ts, persist_history=True)
+            self.clock.advance(self.appmod.METRIC_HISTORY_SECONDS)
+            unknown_temp_ts = self.clock()
+            with mock.patch.object(self.appmod, 'get_temp', return_value=None):
+                self.appmod.worker_collect_system_stats(
+                    authority_b, now=unknown_temp_ts, persist_history=True,
+                )
 
             with self.assertRaises(queues.LeaseLost):
                 self.appmod.worker_collect_system_stats(
-                    authority_a, now=recovered_ts + self.appmod.METRIC_HISTORY_SECONDS,
+                    authority_a, now=unknown_temp_ts + self.appmod.METRIC_HISTORY_SECONDS,
                     persist_history=True,
                 )
 
@@ -553,8 +559,12 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
             )]
             gaps = [tuple(row) for row in conn.execute(
                 "SELECT stream_key, start_ts, end_ts, reason, detail FROM telemetry_coverage "
-                "WHERE stream_kind='host' ORDER BY stream_key"
+                "WHERE stream_kind='host' AND reason='collection_gap' ORDER BY stream_key"
             )]
+            unknown_temp = conn.execute(
+                "SELECT start_ts, end_ts, reason FROM telemetry_coverage "
+                "WHERE stream_kind='host' AND stream_key='temp' AND reason='unknown'"
+            ).fetchone()
         finally:
             conn.close()
 
@@ -569,6 +579,11 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
                 for metric in telemetry.HOST_METRICS
             ]),
         )
+        self.assertEqual(tuple(unknown_temp), (
+            unknown_temp_ts,
+            unknown_temp_ts + self.appmod.METRIC_HISTORY_SECONDS,
+            'unknown',
+        ))
 
         client = self.appmod.app.test_client()
         for metric in telemetry.HOST_METRICS:
@@ -577,7 +592,7 @@ class WorkerTelemetryObservationContractTests(unittest.TestCase):
                     'kind': 'host',
                     'metric': metric,
                     'start_ts': str(first_ts),
-                    'end_ts': str(recovered_ts + self.appmod.METRIC_HISTORY_SECONDS),
+                    'end_ts': str(unknown_temp_ts + self.appmod.METRIC_HISTORY_SECONDS),
                 })
                 self.assertEqual(response.status_code, 200)
                 payload = response.get_json()

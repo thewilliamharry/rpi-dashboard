@@ -1736,7 +1736,7 @@ def worker_collect_system_stats(authority, now=None, persist_history=None):
                 beacon_telemetry.record_observation(
                     conn, 'host', stream_key, ts=now,
                     cadence_seconds=METRIC_HISTORY_SECONDS,
-                    state=sample[metric] is not None, expected_cadence=True,
+                    state=True if sample[metric] is not None else None,
                     known_gap=had_pressure_gap,
                 )
             beacon_telemetry.write_retention_state(conn, state, now=now)
