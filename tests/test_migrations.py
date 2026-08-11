@@ -117,6 +117,21 @@ class MigrationTests(unittest.TestCase):
         copy2(FIXTURE_DIR / filename, target)
         return target
 
+    def _migration_seven_evidence_snapshot(self, conn):
+        """Capture all version-6 evidence Migration 7 must preserve on failure."""
+        return (
+            list(conn.execute('SELECT * FROM telemetry_streams ORDER BY stream_kind, stream_key')),
+            list(conn.execute('SELECT * FROM telemetry_coverage ORDER BY id')),
+            conn.execute(
+                "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+            ).fetchone()[0],
+            list(conn.execute(
+                'SELECT * FROM telemetry_rollup_jobs ORDER BY '
+                'stream_kind, stream_key, bucket_start, bucket_seconds'
+            )),
+            list(conn.execute('SELECT * FROM schema_migrations ORDER BY version')),
+        )
+
     def test_support_floor_covers_history_and_confirmed_operator_evidence(self):
         manifest = json.loads((FIXTURE_DIR / 'support-floor.json').read_text(encoding='utf-8'))
         supported = {entry['fingerprint']: entry for entry in manifest['supported_schemas']}
@@ -240,12 +255,7 @@ class MigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
             with sqlite3.connect(target) as conn:
-                before = (
-                    list(conn.execute('SELECT * FROM telemetry_streams ORDER BY stream_kind, stream_key')),
-                    list(conn.execute('SELECT * FROM telemetry_coverage ORDER BY id')),
-                    conn.execute("SELECT value FROM runtime_state WHERE key='telemetry_retention_state'").fetchone()[0],
-                    list(conn.execute('SELECT * FROM telemetry_rollup_jobs')),
-                )
+                before = self._migration_seven_evidence_snapshot(conn)
             original = MIGRATIONS[-1]
 
             def fail_after_transform(conn):
@@ -258,12 +268,7 @@ class MigrationTests(unittest.TestCase):
                     run_migrations(Settings(db_path=str(target)))
 
             with sqlite3.connect(target) as conn:
-                after = (
-                    list(conn.execute('SELECT * FROM telemetry_streams ORDER BY stream_kind, stream_key')),
-                    list(conn.execute('SELECT * FROM telemetry_coverage ORDER BY id')),
-                    conn.execute("SELECT value FROM runtime_state WHERE key='telemetry_retention_state'").fetchone()[0],
-                    list(conn.execute('SELECT * FROM telemetry_rollup_jobs')),
-                )
+                after = self._migration_seven_evidence_snapshot(conn)
                 self.assertEqual(after, before)
                 self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 6)
             marker = json.loads((target.parent / 'recovery-required.json').read_text())
@@ -271,31 +276,93 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(marker['reason_class'], 'RuntimeError')
             self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
 
-    def test_migration_seven_rejects_malformed_legacy_pressure_state(self):
+    def test_migration_seven_rejects_json_null_legacy_pressure_state_without_partial_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
             with sqlite3.connect(target) as conn:
+                state = json.loads(conn.execute(
+                    "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+                ).fetchone()[0])
+                state['pressure_gaps']['host:host'] = None
                 conn.execute(
                     "UPDATE runtime_state SET value=? WHERE key='telemetry_retention_state'",
-                    (json.dumps({
-                        'state': 'pressure',
-                        'pressure_gaps': {'host:host': True},
-                        'unrelated': {'keep': 'value'},
-                    }),),
+                    (json.dumps(state, separators=(',', ':'), sort_keys=True),),
                 )
                 conn.commit()
+                before = self._migration_seven_evidence_snapshot(conn)
 
             with self.assertRaises(MigrationPreparationError):
                 run_migrations(Settings(db_path=str(target)))
 
             with sqlite3.connect(target) as conn:
+                self.assertEqual(self._migration_seven_evidence_snapshot(conn), before)
                 self.assertEqual(conn.execute(
-                    "SELECT COUNT(*) FROM telemetry_streams WHERE stream_kind='host' AND stream_key='host'"
-                ).fetchone()[0], 1)
-                self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 6)
+                    'SELECT MAX(version) FROM schema_migrations'
+                ).fetchone()[0], 6)
             marker = json.loads((target.parent / 'recovery-required.json').read_text())
             self.assertEqual(marker['failed_target_version'], 7)
             self.assertEqual(marker['reason_class'], 'ValueError')
+            self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
+
+    def test_migration_seven_rejects_remaining_malformed_legacy_pressure_values(self):
+        malformed_values = (True, False, '1700000300', 1700000300.5, [], {})
+        for malformed_value in malformed_values:
+            with self.subTest(malformed_value=malformed_value):
+                with tempfile.TemporaryDirectory() as directory:
+                    target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
+                    with sqlite3.connect(target) as conn:
+                        state = json.loads(conn.execute(
+                            "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+                        ).fetchone()[0])
+                        state['pressure_gaps']['host:host'] = malformed_value
+                        conn.execute(
+                            "UPDATE runtime_state SET value=? WHERE key='telemetry_retention_state'",
+                            (json.dumps(state, separators=(',', ':'), sort_keys=True),),
+                        )
+                        conn.commit()
+                        before = self._migration_seven_evidence_snapshot(conn)
+
+                    with self.assertRaises(MigrationPreparationError):
+                        run_migrations(Settings(db_path=str(target)))
+
+                    with sqlite3.connect(target) as conn:
+                        self.assertEqual(self._migration_seven_evidence_snapshot(conn), before)
+                        self.assertEqual(conn.execute(
+                            'SELECT MAX(version) FROM schema_migrations'
+                        ).fetchone()[0], 6)
+                    marker = json.loads((target.parent / 'recovery-required.json').read_text())
+                    self.assertEqual(marker['failed_target_version'], 7)
+                    self.assertEqual(marker['reason_class'], 'ValueError')
+                    self.assertEqual(len(list((target.parent / 'backups').glob('*.db'))), 1)
+
+    def test_migration_seven_absent_legacy_pressure_key_is_a_successful_no_op(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
+            with sqlite3.connect(target) as conn:
+                state = json.loads(conn.execute(
+                    "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+                ).fetchone()[0])
+                del state['pressure_gaps']['host:host']
+                expected_state = json.dumps(state, separators=(',', ':'), sort_keys=True)
+                conn.execute(
+                    "UPDATE runtime_state SET value=? WHERE key='telemetry_retention_state'",
+                    (expected_state,),
+                )
+                conn.commit()
+
+            self.assertEqual(run_migrations(Settings(db_path=str(target))).applied_versions, (7,))
+
+            with sqlite3.connect(target) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM telemetry_streams WHERE stream_kind='host' AND stream_key='host'"
+                ).fetchone()[0], 0)
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM telemetry_coverage WHERE stream_kind='host' AND stream_key='host'"
+                ).fetchone()[0], 0)
+                self.assertEqual(conn.execute(
+                    "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
+                ).fetchone()[0], expected_state)
+                self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 7)
 
     def test_operator_service_port_remains_the_service_rollup_stream_key(self):
         source = OPERATOR_FIXTURE_DIR / 'production.db'
