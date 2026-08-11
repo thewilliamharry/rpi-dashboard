@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 2
-current_phase_name: Bounded Telemetry & Retention
-status: planned
-stopped_at: Gap closure plans 02-07 through 02-09 created
-last_updated: "2026-08-10T16:36:44Z"
-last_activity: 2026-08-10
-last_activity_desc: Phase 2 verification gaps planned for closure
+current_phase_name: Bounded Telemetry & Retention — Gap Closure
+status: executing
+stopped_at: Completed 02-07-PLAN.md
+last_updated: "2026-08-11T06:03:23.061Z"
+last_activity: 2026-08-11
+last_activity_desc: Phase 2 execution started
 progress:
   total_phases: 2
-  completed_phases: 2
+  completed_phases: 1
   total_plans: 32
-  completed_plans: 29
+  completed_plans: 30
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-07)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 2 — Bounded Telemetry & Retention
+**Current focus:** Phase 2 — Bounded Telemetry & Retention — Gap Closure
 
 ## Current Position
 
-Phase: 2 (Bounded Telemetry & Retention) — GAPS PLANNED
-Plan: 6 of 9
-Status: Gap closure plans ready for execution
-Last activity: 2026-08-10 — Phase 2 verification gaps planned for closure
+Phase: 2 (Bounded Telemetry & Retention — Gap Closure) — EXECUTING
+Plan: 2 of 9
+Status: Ready to execute
+Last activity: 2026-08-11 — Phase 2 execution started
 
-Progress: [███████░░░] 67%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -86,6 +86,7 @@ Progress: [███████░░░] 67%
 | Phase 02-bounded-telemetry-retention P04 | 18 min | 2 tasks | 3 files |
 | Phase 02 P05 | 10min | 2 tasks | 5 files |
 | Phase 02 P06 | 21min | 2 tasks | 8 files |
+| Phase 02 P07 | 6min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -155,6 +156,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Historical suspension skips only new rows and records storage_pressure gaps while current host and service state remains live.
 - [Phase ?]: Service rollups retain latency_sample_count so cross-tier latency averages use their real denominator.
 - [Phase ?]: Coverage is an exhaustive five-state partition, while pending and failed rollups remain a separate raw-evidence disclosure.
+- [Phase 02]: Host coverage is metric-specific (cpu, ram, disk, temp); host:host remains only the shared raw-rollup job identity.
+- [Phase 02]: The historical API uses the same Settings-derived RetentionPolicy as worker cleanup, including its point budget.
 
 ### Pending Todos
 
@@ -174,6 +177,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-10T16:36:44Z
-Stopped at: Gap closure plans 02-07 through 02-09 created
+Last session: 2026-08-11T06:03:23.051Z
+Stopped at: Completed 02-07-PLAN.md
 Resume file: None

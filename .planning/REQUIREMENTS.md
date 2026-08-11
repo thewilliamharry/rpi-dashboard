@@ -21,7 +21,7 @@
 - [ ] **TEL-02**: Beacon preserves detailed recent observations and uses documented aggregates for older ranges.
 - [ ] **TEL-03**: Rollups complete successfully before their source observations are deleted.
 - [ ] **TEL-04**: Historical queries explicitly distinguish known values, unknown intervals, collection gaps, and retention expiry.
-- [ ] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
+- [x] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
 - [ ] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
 
 ### Advanced Diagnosis
