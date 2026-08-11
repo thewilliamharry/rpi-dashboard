@@ -256,6 +256,119 @@ class RetentionRollupContractTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_pre_due_host_and_service_jobs_preserve_sources_until_exact_due_time(self):
+        policy = telemetry.RetentionPolicy(rollup_batch_buckets=2)
+        cutoff = self.now - policy.raw_days * 86400
+        start = telemetry.bucket_start(cutoff - 300, 300)
+        due = self.now + 60
+        conn = self._connection()
+        try:
+            seed_host_rows(conn, [(start, 1.0, None, None, None)])
+            seed_service_checks(conn, [(start, 8080, 1, 10.0, None)])
+            conn.executemany(
+                'INSERT INTO telemetry_rollup_jobs('
+                'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+                'next_retry_ts, last_error_class, updated_ts'
+                ') VALUES(?,?,?,?,?,?,?,?,?)',
+                [
+                    ('host', 'host', start, 300, 'pending', 2, due, 'PendingError', self.now),
+                    ('service', '8080', start, 300, 'failed', 3, due, 'RuntimeError', self.now),
+                ],
+            )
+            conn.commit()
+            before_jobs = [tuple(row) for row in conn.execute(
+                'SELECT stream_kind, stream_key, state, attempt_count, next_retry_ts, last_error_class '
+                'FROM telemetry_rollup_jobs ORDER BY stream_kind'
+            )]
+
+            telemetry.run_retention_batch(conn, now=self.now, policy=policy)
+
+            self.assertEqual(
+                [tuple(row) for row in conn.execute(
+                    'SELECT stream_kind, stream_key, state, attempt_count, next_retry_ts, last_error_class '
+                    'FROM telemetry_rollup_jobs ORDER BY stream_kind'
+                )],
+                before_jobs,
+            )
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM stats_history').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_checks').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM host_metric_rollups').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_rollups').fetchone()[0], 0)
+
+            telemetry.run_retention_batch(conn, now=due, policy=policy)
+
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM stats_history').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_checks').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM host_metric_rollups').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_rollups').fetchone()[0], 1)
+            self.assertEqual(
+                [tuple(row) for row in conn.execute(
+                    'SELECT state, attempt_count, next_retry_ts, last_error_class '
+                    'FROM telemetry_rollup_jobs ORDER BY stream_kind'
+                )],
+                [('succeeded', 2, None, None), ('succeeded', 3, None, None)],
+            )
+            telemetry.run_retention_batch(conn, now=due + 1, policy=policy)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM telemetry_rollup_jobs').fetchone()[0], 2)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM host_metric_rollups').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_rollups').fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_deferred_and_succeeded_jobs_do_not_consume_new_work_batch_capacity(self):
+        policy = telemetry.RetentionPolicy(rollup_batch_buckets=1)
+        cutoff = self.now - policy.raw_days * 86400
+        deferred_start = telemetry.bucket_start(cutoff - 900, 300)
+        succeeded_start = deferred_start + 300
+        jobless_start = deferred_start + 600
+        conn = self._connection()
+        try:
+            seed_host_rows(conn, [
+                (deferred_start, 1.0, None, None, None),
+                (jobless_start, 2.0, None, None, None),
+            ])
+            seed_service_checks(conn, [(succeeded_start, 8080, 1, 10.0, None)])
+            conn.executemany(
+                'INSERT INTO telemetry_rollup_jobs('
+                'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+                'next_retry_ts, last_error_class, updated_ts'
+                ') VALUES(?,?,?,?,?,?,?,?,?)',
+                [
+                    ('host', 'host', deferred_start, 300, 'failed', 4, self.now + 600, 'RuntimeError', self.now),
+                    ('service', '8080', succeeded_start, 300, 'succeeded', 1, None, None, self.now),
+                ],
+            )
+            conn.commit()
+
+            result = telemetry.run_retention_batch(conn, now=self.now, policy=policy)
+
+            self.assertEqual(result, {'rolled_buckets': 1, 'failed_buckets': 0})
+            self.assertEqual(
+                [row['ts'] for row in conn.execute('SELECT ts FROM stats_history ORDER BY ts')],
+                [deferred_start],
+            )
+            self.assertEqual(
+                [row['ts'] for row in conn.execute('SELECT ts FROM service_checks ORDER BY ts')],
+                [succeeded_start],
+            )
+            self.assertEqual(
+                conn.execute(
+                    'SELECT COUNT(*) FROM host_metric_rollups WHERE bucket_start=? AND bucket_seconds=300',
+                    (jobless_start,),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                [tuple(row) for row in conn.execute(
+                    'SELECT state, attempt_count, next_retry_ts FROM telemetry_rollup_jobs '
+                    'WHERE bucket_start IN (?, ?) ORDER BY bucket_start',
+                    (deferred_start, succeeded_start),
+                )],
+                [('failed', 4, self.now + 600), ('succeeded', 1, None)],
+            )
+        finally:
+            conn.close()
+
 
 class StoragePressureContractTests(unittest.TestCase):
     """Executable D-10 through D-12 settings and no-flap state contract."""
