@@ -148,7 +148,7 @@ class MigrationTests(unittest.TestCase):
             target = Path(directory) / CURRENT_V4_FIXTURE
             copy2(source, target)
             result = run_migrations(Settings(db_path=str(target)))
-            self.assertEqual(result.applied_versions, (5, 6))
+            self.assertEqual(result.applied_versions, (5, 6, 7))
             with sqlite3.connect(target) as conn:
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self._assert_telemetry_schema(conn)

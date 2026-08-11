@@ -297,6 +297,178 @@ def _migration_6_rollup_latency_counts(conn):
     )
 
 
+_CANONICAL_HOST_METRICS = ('cpu', 'ram', 'disk', 'temp')
+
+
+def _subtract_covered_segments(start_ts, end_ts, blockers):
+    """Return half-open fragments not covered by the supplied half-open blockers."""
+    fragments = [(int(start_ts), int(end_ts))]
+    for blocker_start, blocker_end in sorted(blockers):
+        next_fragments = []
+        for fragment_start, fragment_end in fragments:
+            if blocker_end <= fragment_start or blocker_start >= fragment_end:
+                next_fragments.append((fragment_start, fragment_end))
+                continue
+            if fragment_start < blocker_start:
+                next_fragments.append((fragment_start, blocker_start))
+            if blocker_end < fragment_end:
+                next_fragments.append((blocker_end, fragment_end))
+        fragments = next_fragments
+        if not fragments:
+            break
+    return tuple(fragments)
+
+
+def _coalesce_coverage_segments(segments):
+    """Coalesce only equal-reason/detail canonical coverage segments."""
+    merged = []
+    for start_ts, end_ts, reason, detail in sorted(segments):
+        if (
+            merged
+            and merged[-1][2:] == (reason, detail)
+            and start_ts <= merged[-1][1]
+        ):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end_ts), reason, detail)
+        else:
+            merged.append((start_ts, end_ts, reason, detail))
+    return tuple(merged)
+
+
+def _canonical_host_coverage(conn, metric, legacy_rows):
+    """Return metric-specific coverage with canonical rows taking precedence."""
+    existing_rows = conn.execute(
+        'SELECT id, start_ts, end_ts, reason, detail FROM telemetry_coverage '
+        'WHERE stream_kind=? AND stream_key=? ORDER BY start_ts, end_ts, id',
+        ('host', metric),
+    ).fetchall()
+    segments = []
+    blockers = []
+    for _, start_ts, end_ts, reason, detail in (*existing_rows, *legacy_rows):
+        for fragment_start, fragment_end in _subtract_covered_segments(
+            start_ts, end_ts, blockers,
+        ):
+            segments.append((fragment_start, fragment_end, reason, detail))
+            blockers.append((fragment_start, fragment_end))
+    return _coalesce_coverage_segments(segments)
+
+
+def _migration_7_canonical_host_streams(conn):
+    """Expand the obsolete shared host availability identity into fixed metrics."""
+    legacy_stream = conn.execute(
+        'SELECT started_ts, cadence_seconds, last_observed_ts, consecutive_misses, '
+        'open_gap_start_ts FROM telemetry_streams WHERE stream_kind=? AND stream_key=?',
+        ('host', 'host'),
+    ).fetchone()
+    legacy_coverage = conn.execute(
+        'SELECT id, start_ts, end_ts, reason, detail FROM telemetry_coverage '
+        'WHERE stream_kind=? AND stream_key=? ORDER BY start_ts, end_ts, id',
+        ('host', 'host'),
+    ).fetchall()
+    state_row = conn.execute(
+        'SELECT value FROM runtime_state WHERE key=?', ('telemetry_retention_state',),
+    ).fetchone()
+
+    state = None
+    pressure_gaps = None
+    if state_row is not None:
+        try:
+            state = json.loads(state_row[0])
+        except (TypeError, ValueError) as exc:
+            raise ValueError('invalid telemetry retention state') from exc
+        if not isinstance(state, dict) or not isinstance(state.get('pressure_gaps'), dict):
+            raise ValueError('invalid telemetry retention state')
+        pressure_gaps = dict(state['pressure_gaps'])
+        legacy_pressure_start = pressure_gaps.get('host:host')
+        if legacy_pressure_start is not None and (
+            isinstance(legacy_pressure_start, bool) or not isinstance(legacy_pressure_start, int)
+        ):
+            raise ValueError('invalid legacy host pressure gap')
+    else:
+        legacy_pressure_start = None
+
+    if legacy_stream is not None:
+        for metric in _CANONICAL_HOST_METRICS:
+            existing_stream = conn.execute(
+                'SELECT started_ts, cadence_seconds, last_observed_ts, consecutive_misses, '
+                'open_gap_start_ts FROM telemetry_streams WHERE stream_kind=? AND stream_key=?',
+                ('host', metric),
+            ).fetchone()
+            if existing_stream is None:
+                merged = legacy_stream
+            else:
+                legacy_observed = legacy_stream[2]
+                existing_observed = existing_stream[2]
+                use_legacy_state = (
+                    legacy_observed is not None
+                    and (existing_observed is None or legacy_observed > existing_observed)
+                )
+                state_source = legacy_stream if use_legacy_state else existing_stream
+                observed_candidates = [
+                    value for value in (legacy_observed, existing_observed) if value is not None
+                ]
+                merged = (
+                    min(legacy_stream[0], existing_stream[0]),
+                    state_source[1],
+                    max(observed_candidates) if observed_candidates else None,
+                    state_source[3],
+                    state_source[4],
+                )
+            conn.execute(
+                'INSERT INTO telemetry_streams('
+                'stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, '
+                'consecutive_misses, open_gap_start_ts) VALUES(?,?,?,?,?,?,?) '
+                'ON CONFLICT(stream_kind, stream_key) DO UPDATE SET '
+                'started_ts=excluded.started_ts, cadence_seconds=excluded.cadence_seconds, '
+                'last_observed_ts=excluded.last_observed_ts, '
+                'consecutive_misses=excluded.consecutive_misses, '
+                'open_gap_start_ts=excluded.open_gap_start_ts',
+                ('host', metric, *merged),
+            )
+
+    if legacy_coverage:
+        for metric in _CANONICAL_HOST_METRICS:
+            segments = _canonical_host_coverage(conn, metric, legacy_coverage)
+            conn.execute(
+                'DELETE FROM telemetry_coverage WHERE stream_kind=? AND stream_key=?',
+                ('host', metric),
+            )
+            conn.executemany(
+                'INSERT INTO telemetry_coverage('
+                'stream_kind, stream_key, start_ts, end_ts, reason, detail) '
+                'VALUES(?,?,?,?,?,?)',
+                [
+                    ('host', metric, start_ts, end_ts, reason, detail)
+                    for start_ts, end_ts, reason, detail in segments
+                ],
+            )
+
+    if legacy_pressure_start is not None:
+        for metric in _CANONICAL_HOST_METRICS:
+            key = 'host:{}'.format(metric)
+            existing_start = pressure_gaps.get(key)
+            if existing_start is not None and (
+                isinstance(existing_start, bool) or not isinstance(existing_start, int)
+            ):
+                raise ValueError('invalid canonical host pressure gap')
+            pressure_gaps[key] = min(
+                legacy_pressure_start,
+                existing_start if existing_start is not None else legacy_pressure_start,
+            )
+        pressure_gaps.pop('host:host')
+        state['pressure_gaps'] = pressure_gaps
+        conn.execute(
+            'UPDATE runtime_state SET value=? WHERE key=?',
+            (json.dumps(state, separators=(',', ':'), sort_keys=True), 'telemetry_retention_state'),
+        )
+
+    conn.execute(
+        'DELETE FROM telemetry_streams WHERE stream_kind=? AND stream_key=?', ('host', 'host'),
+    )
+    conn.execute(
+        'DELETE FROM telemetry_coverage WHERE stream_kind=? AND stream_key=?', ('host', 'host'),
+    )
+
+
 MIGRATIONS = (
     Migration(1, 'baseline_schema', True, _migration_1_baseline),
     Migration(2, 'service_diagnostics', True, _migration_2_service_diagnostics),
@@ -304,6 +476,7 @@ MIGRATIONS = (
     Migration(4, 'durable_work_queues', True, _migration_4_durable_work_queues),
     Migration(5, 'bounded_telemetry', True, _migration_5_bounded_telemetry),
     Migration(6, 'rollup_latency_counts', True, _migration_6_rollup_latency_counts),
+    Migration(7, 'canonical_host_streams', True, _migration_7_canonical_host_streams),
 )
 
 
