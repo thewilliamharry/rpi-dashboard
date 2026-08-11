@@ -34,6 +34,24 @@ HOST_QUERY_SHAPES = {
             '0 AS gap_seconds, 0 AS unknown_seconds FROM ranked GROUP BY bucket_start '
             'ORDER BY bucket_start ASC LIMIT ?'
         ),
+        'raw_fallback': (
+            'WITH ranked AS ('
+            f'SELECT ts, ts - (ts % ?) AS bucket_start, {column} AS value, '
+            f'ROW_NUMBER() OVER (PARTITION BY ts - (ts % ?) ORDER BY ts DESC) AS latest_rank '
+            f'FROM stats_history WHERE ts >= ? AND ts < ? AND {column} IS NOT NULL '
+            'AND NOT EXISTS ('
+            'SELECT 1 FROM host_metric_rollups replacement WHERE replacement.metric=? '
+            'AND replacement.bucket_seconds IN (300, 3600) '
+            'AND replacement.bucket_start <= stats_history.ts '
+            'AND replacement.bucket_start + replacement.bucket_seconds > stats_history.ts'
+            ')'
+            ') SELECT bucket_start, MIN(ts) AS first_ts, MIN(value) AS min_value, MAX(value) AS max_value, '
+            'AVG(value) AS avg_value, MAX(CASE WHEN latest_rank=1 THEN value END) AS latest_value, '
+            'MAX(CASE WHEN latest_rank=1 THEN ts END) AS latest_ts, '
+            'COUNT(*) AS sample_count, MIN(COUNT(*) * ?, ?) AS observed_seconds, '
+            '0 AS gap_seconds, 0 AS unknown_seconds FROM ranked GROUP BY bucket_start '
+            'ORDER BY bucket_start ASC LIMIT ?'
+        ),
         'rollup': (
             'WITH ranked AS ('
             'SELECT bucket_start - (bucket_start % ?) AS display_start, min_value, max_value, '
@@ -41,6 +59,28 @@ HOST_QUERY_SHAPES = {
             'ROW_NUMBER() OVER (PARTITION BY bucket_start - (bucket_start % ?) '
             'ORDER BY bucket_start DESC) AS latest_rank FROM host_metric_rollups '
             'WHERE metric=? AND bucket_seconds=? AND bucket_start >= ? AND bucket_start < ?'
+            ') SELECT display_start AS bucket_start, MIN(display_start) AS first_ts, MIN(min_value) AS min_value, '
+            'MAX(max_value) AS max_value, '
+            'SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0) AS avg_value, '
+            'MAX(CASE WHEN latest_rank=1 THEN latest_value END) AS latest_value, '
+            'MAX(CASE WHEN latest_rank=1 THEN display_start END) AS latest_ts, '
+            'SUM(sample_count) AS sample_count, SUM(observed_seconds) AS observed_seconds, '
+            'SUM(gap_seconds) AS gap_seconds, SUM(unknown_seconds) AS unknown_seconds '
+            'FROM ranked GROUP BY display_start ORDER BY display_start ASC LIMIT ?'
+        ),
+        'rollup_fallback': (
+            'WITH ranked AS ('
+            'SELECT bucket_start - (bucket_start % ?) AS display_start, min_value, max_value, '
+            'avg_value, latest_value, sample_count, observed_seconds, gap_seconds, unknown_seconds, '
+            'ROW_NUMBER() OVER (PARTITION BY bucket_start - (bucket_start % ?) '
+            'ORDER BY bucket_start DESC) AS latest_rank FROM host_metric_rollups '
+            'WHERE metric=? AND bucket_seconds=300 AND bucket_start >= ? AND bucket_start < ? '
+            'AND NOT EXISTS ('
+            'SELECT 1 FROM host_metric_rollups replacement WHERE replacement.metric=host_metric_rollups.metric '
+            'AND replacement.bucket_seconds=3600 '
+            'AND replacement.bucket_start <= host_metric_rollups.bucket_start '
+            'AND replacement.bucket_start + replacement.bucket_seconds > host_metric_rollups.bucket_start'
+            ')'
             ') SELECT display_start AS bucket_start, MIN(display_start) AS first_ts, MIN(min_value) AS min_value, '
             'MAX(max_value) AS max_value, '
             'SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0) AS avg_value, '
@@ -101,7 +141,68 @@ SERVICE_QUERY_SHAPES = {
         'FROM buckets b LEFT JOIN durations d ON d.bucket_start=b.bucket_start '
         'LEFT JOIN sample_stats s ON s.bucket_start=b.bucket_start '
         'LEFT JOIN failure_json f ON f.bucket_start=b.bucket_start '
-        'WHERE d.bucket_start IS NOT NULL OR s.bucket_start IS NOT NULL '
+        'WHERE (d.bucket_start IS NOT NULL OR s.bucket_start IS NOT NULL) '
+        'AND EXISTS (SELECT 1 FROM all_rows) '
+        'ORDER BY b.bucket_start ASC LIMIT ?'
+    ),
+    'raw_fallback': (
+        'WITH RECURSIVE source_rows AS ('
+        'SELECT ts, online, latency_ms, error_class FROM service_checks '
+        'WHERE port=? AND ts < ? ORDER BY ts DESC LIMIT 1'
+        '), all_rows AS ('
+        'SELECT * FROM source_rows UNION ALL '
+        'SELECT ts, online, latency_ms, error_class FROM service_checks '
+        'WHERE port=? AND ts >= ? AND ts < ? AND NOT EXISTS ('
+        'SELECT 1 FROM service_rollups replacement WHERE replacement.service_port=service_checks.port '
+        'AND replacement.bucket_seconds IN (300, 3600) '
+        'AND replacement.bucket_start <= service_checks.ts '
+        'AND replacement.bucket_start + replacement.bucket_seconds > service_checks.ts'
+        ')'
+        '), segments AS ('
+        'SELECT MAX(ts, ?) AS start_ts, MIN(LEAD(ts, 1, ?) OVER (ORDER BY ts), ?) AS end_ts, online '
+        'FROM all_rows'
+        '), buckets(bucket_start) AS ('
+        'SELECT ? - (? % ?) UNION ALL SELECT bucket_start + ? FROM buckets '
+        'WHERE bucket_start + ? < ?'
+        '), durations AS ('
+        'SELECT b.bucket_start, '
+        'SUM(CASE WHEN s.online=1 THEN MAX(0, MIN(s.end_ts, b.bucket_start + ?, ?) '
+        '- MAX(s.start_ts, b.bucket_start, ?)) ELSE 0 END) AS online_seconds, '
+        'SUM(CASE WHEN s.online=0 THEN MAX(0, MIN(s.end_ts, b.bucket_start + ?, ?) '
+        '- MAX(s.start_ts, b.bucket_start, ?)) ELSE 0 END) AS offline_seconds, '
+        'SUM(CASE WHEN s.online IS NULL THEN MAX(0, MIN(s.end_ts, b.bucket_start + ?, ?) '
+        '- MAX(s.start_ts, b.bucket_start, ?)) ELSE 0 END) AS unknown_seconds '
+        'FROM buckets b LEFT JOIN segments s ON s.start_ts < MIN(b.bucket_start + ?, ?) '
+        'AND s.end_ts > MAX(b.bucket_start, ?) GROUP BY b.bucket_start'
+        '), sample_rows AS ('
+        'SELECT ts - (ts % ?) AS bucket_start, latency_ms, error_class FROM service_checks '
+        'WHERE port=? AND ts >= ? AND ts < ? AND NOT EXISTS ('
+        'SELECT 1 FROM service_rollups replacement WHERE replacement.service_port=service_checks.port '
+        'AND replacement.bucket_seconds IN (300, 3600) '
+        'AND replacement.bucket_start <= service_checks.ts '
+        'AND replacement.bucket_start + replacement.bucket_seconds > service_checks.ts'
+        ')'
+        '), sample_stats AS ('
+        'SELECT bucket_start, MIN(latency_ms) AS latency_min, MAX(latency_ms) AS latency_max, '
+        'AVG(latency_ms) AS latency_avg, COUNT(*) AS check_count, '
+        'SUM(CASE WHEN latency_ms IS NOT NULL THEN 1 ELSE 0 END) AS latency_sample_count '
+        'FROM sample_rows GROUP BY bucket_start'
+        '), failure_counts AS ('
+        'SELECT bucket_start, error_class, COUNT(*) AS count FROM sample_rows '
+        'WHERE error_class IS NOT NULL GROUP BY bucket_start, error_class'
+        '), failure_json AS ('
+        'SELECT bucket_start, json_group_object(error_class, count) AS failure_class_counts_json '
+        'FROM failure_counts GROUP BY bucket_start'
+        ') SELECT b.bucket_start, COALESCE(d.online_seconds, 0) AS online_seconds, '
+        'COALESCE(d.offline_seconds, 0) AS offline_seconds, COALESCE(d.unknown_seconds, 0) AS unknown_seconds, '
+        '0 AS gap_seconds, s.latency_min, s.latency_max, s.latency_avg, '
+        'COALESCE(s.latency_sample_count, 0) AS latency_sample_count, COALESCE(s.check_count, 0) AS check_count, '
+        "COALESCE(f.failure_class_counts_json, '{}') AS failure_class_counts_json "
+        'FROM buckets b LEFT JOIN durations d ON d.bucket_start=b.bucket_start '
+        'LEFT JOIN sample_stats s ON s.bucket_start=b.bucket_start '
+        'LEFT JOIN failure_json f ON f.bucket_start=b.bucket_start '
+        'WHERE (d.bucket_start IS NOT NULL OR s.bucket_start IS NOT NULL) '
+        'AND EXISTS (SELECT 1 FROM all_rows) '
         'ORDER BY b.bucket_start ASC LIMIT ?'
     ),
     'rollup': (
@@ -112,6 +213,27 @@ SERVICE_QUERY_SHAPES = {
         'PARTITION BY bucket_start - (bucket_start % ?) ORDER BY bucket_start DESC) AS latest_rank '
         'FROM service_rollups WHERE service_port=? AND bucket_seconds=? '
         'AND bucket_start >= ? AND bucket_start < ?'
+        ') SELECT display_start AS bucket_start, SUM(online_seconds) AS online_seconds, '
+        'SUM(offline_seconds) AS offline_seconds, SUM(unknown_seconds) AS unknown_seconds, '
+        'SUM(gap_seconds) AS gap_seconds, MIN(latency_min) AS latency_min, MAX(latency_max) AS latency_max, '
+        'SUM(latency_avg * latency_sample_count) / NULLIF(SUM(latency_sample_count), 0) AS latency_avg, '
+        'SUM(latency_sample_count) AS latency_sample_count, SUM(check_count) AS check_count, '
+        'json_group_array(failure_class_counts_json) AS failure_class_counts_json '
+        'FROM ranked GROUP BY display_start ORDER BY display_start ASC LIMIT ?'
+    ),
+    'rollup_fallback': (
+        'WITH ranked AS ('
+        'SELECT bucket_start - (bucket_start % ?) AS display_start, online_seconds, offline_seconds, '
+        'unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, latency_sample_count, '
+        'check_count, failure_class_counts_json, ROW_NUMBER() OVER ('
+        'PARTITION BY bucket_start - (bucket_start % ?) ORDER BY bucket_start DESC) AS latest_rank '
+        'FROM service_rollups WHERE service_port=? AND bucket_seconds=300 '
+        'AND bucket_start >= ? AND bucket_start < ? AND NOT EXISTS ('
+        'SELECT 1 FROM service_rollups replacement '
+        'WHERE replacement.service_port=service_rollups.service_port AND replacement.bucket_seconds=3600 '
+        'AND replacement.bucket_start <= service_rollups.bucket_start '
+        'AND replacement.bucket_start + replacement.bucket_seconds > service_rollups.bucket_start'
+        ')'
         ') SELECT display_start AS bucket_start, SUM(online_seconds) AS online_seconds, '
         'SUM(offline_seconds) AS offline_seconds, SUM(unknown_seconds) AS unknown_seconds, '
         'SUM(gap_seconds) AS gap_seconds, MIN(latency_min) AS latency_min, MAX(latency_max) AS latency_max, '
@@ -137,6 +259,16 @@ def _tier_ranges(start_ts, end_ts, cutoffs):
         ('hourly', 3600, max(start_ts, -(2 ** 63)), min(end_ts, five_start)),
         ('five_minute', 300, max(start_ts, five_start), min(end_ts, raw_start)),
         ('raw', 60, max(start_ts, raw_start), end_ts),
+    )
+
+
+def _fallback_ranges(start_ts, end_ts, cutoffs):
+    """Return lower-tier ranges that need evidence until a replacement exists."""
+    raw_start = _cutoff(cutoffs, 'raw_start_ts')
+    five_start = _cutoff(cutoffs, 'five_minute_start_ts')
+    return (
+        ('five_minute', 300, int(start_ts), min(int(end_ts), five_start)),
+        ('raw', 60, int(start_ts), min(int(end_ts), raw_start)),
     )
 
 
@@ -169,6 +301,23 @@ def get_host_telemetry(conn, metric, start_ts, end_ts, display_bucket_seconds, l
                 tier_start, tier_end, limit,
             )
             query = HOST_QUERY_SHAPES[metric]['rollup']
+        rows = _checked_rows(conn, query, values, int(limit))
+        if rows:
+            segments.append(SourceSegment(source_resolution, rows))
+    for tier, source_resolution, tier_start, tier_end in _fallback_ranges(start_ts, end_ts, cutoffs):
+        if tier_start >= tier_end:
+            continue
+        if tier == 'raw':
+            values = (
+                display_bucket_seconds, display_bucket_seconds, tier_start, tier_end, metric,
+                source_resolution, display_bucket_seconds, limit,
+            )
+            query = HOST_QUERY_SHAPES[metric]['raw_fallback']
+        else:
+            values = (
+                display_bucket_seconds, display_bucket_seconds, metric, tier_start, tier_end, limit,
+            )
+            query = HOST_QUERY_SHAPES[metric]['rollup_fallback']
         rows = _checked_rows(conn, query, values, int(limit))
         if rows:
             segments.append(SourceSegment(source_resolution, rows))
@@ -205,6 +354,29 @@ def get_service_telemetry(conn, port, start_ts, end_ts, display_bucket_seconds, 
         rows = _checked_rows(conn, query, values, int(limit))
         if rows:
             segments.append(SourceSegment(source_resolution, rows))
+    for tier, source_resolution, tier_start, tier_end in _fallback_ranges(start_ts, end_ts, cutoffs):
+        if tier_start >= tier_end:
+            continue
+        if tier == 'raw':
+            values = (
+                port, tier_start, port, tier_start, tier_end, tier_start, tier_end, tier_end,
+                tier_start, tier_start, display_bucket_seconds, display_bucket_seconds,
+                display_bucket_seconds, tier_end,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, tier_end, tier_start,
+                display_bucket_seconds, port, tier_start, tier_end, limit,
+            )
+            query = SERVICE_QUERY_SHAPES['raw_fallback']
+        else:
+            values = (
+                display_bucket_seconds, display_bucket_seconds, port, tier_start, tier_end, limit,
+            )
+            query = SERVICE_QUERY_SHAPES['rollup_fallback']
+        rows = _checked_rows(conn, query, values, int(limit))
+        if rows:
+            segments.append(SourceSegment(source_resolution, rows))
     return tuple(segments)
 
 
@@ -231,21 +403,114 @@ def get_telemetry_coverage(conn, stream_kind, stream_key, start_ts, end_ts, limi
     }
 
 
-def get_pending_aggregation(conn, stream_kind, stream_key, start_ts, end_ts, limit):
-    """Return bounded pending/failed jobs without hiding preserved raw evidence."""
-    if stream_kind not in ('host', 'service') or int(limit) <= 0:
+def _pending_source_rows(conn, stream_kind, stream_key, start_ts, end_ts, cutoffs, limit):
+    raw_start = _cutoff(cutoffs, 'raw_start_ts')
+    five_start = _cutoff(cutoffs, 'five_minute_start_ts')
+    if stream_kind == 'host':
+        metric = str(stream_key)
+        if metric not in HOST_METRIC_COLUMNS:
+            raise ValueError('invalid host metric')
+        column = HOST_METRIC_COLUMNS[metric]
+        raw_query = (
+            f'SELECT ts - (ts % 300) AS start_ts, ts - (ts % 300) + 300 AS end_ts '
+            f'FROM stats_history WHERE ts < ? AND ts < ? AND ts >= ? AND {column} IS NOT NULL '
+            'AND NOT EXISTS (SELECT 1 FROM host_metric_rollups replacement '
+            'WHERE replacement.metric=? AND replacement.bucket_seconds IN (300, 3600) '
+            'AND replacement.bucket_start <= stats_history.ts '
+            'AND replacement.bucket_start + replacement.bucket_seconds > stats_history.ts) '
+            'GROUP BY start_ts ORDER BY start_ts ASC LIMIT ?'
+        )
+        five_query = (
+            'SELECT bucket_start AS start_ts, bucket_start + 3600 AS end_ts FROM host_metric_rollups '
+            'WHERE metric=? AND bucket_seconds=300 AND bucket_start < ? AND bucket_start < ? '
+            'AND bucket_start + 300 > ? AND NOT EXISTS (SELECT 1 FROM host_metric_rollups replacement '
+            'WHERE replacement.metric=host_metric_rollups.metric AND replacement.bucket_seconds=3600 '
+            'AND replacement.bucket_start <= host_metric_rollups.bucket_start '
+            'AND replacement.bucket_start + replacement.bucket_seconds > host_metric_rollups.bucket_start) '
+            'GROUP BY start_ts ORDER BY start_ts ASC LIMIT ?'
+        )
+        raw_values = (raw_start, int(end_ts), int(start_ts) - 300, metric, int(limit))
+        five_values = (metric, five_start, int(end_ts), int(start_ts), int(limit))
+    else:
+        port = int(stream_key)
+        raw_query = (
+            'SELECT ts - (ts % 300) AS start_ts, ts - (ts % 300) + 300 AS end_ts FROM service_checks '
+            'WHERE port=? AND ts < ? AND ts < ? AND ts >= ? AND NOT EXISTS ('
+            'SELECT 1 FROM service_rollups replacement WHERE replacement.service_port=service_checks.port '
+            'AND replacement.bucket_seconds IN (300, 3600) '
+            'AND replacement.bucket_start <= service_checks.ts '
+            'AND replacement.bucket_start + replacement.bucket_seconds > service_checks.ts) '
+            'GROUP BY start_ts ORDER BY start_ts ASC LIMIT ?'
+        )
+        five_query = (
+            'SELECT bucket_start AS start_ts, bucket_start + 3600 AS end_ts FROM service_rollups '
+            'WHERE service_port=? AND bucket_seconds=300 AND bucket_start < ? AND bucket_start < ? '
+            'AND bucket_start + 300 > ? AND NOT EXISTS (SELECT 1 FROM service_rollups replacement '
+            'WHERE replacement.service_port=service_rollups.service_port AND replacement.bucket_seconds=3600 '
+            'AND replacement.bucket_start <= service_rollups.bucket_start '
+            'AND replacement.bucket_start + replacement.bucket_seconds > service_rollups.bucket_start) '
+            'GROUP BY start_ts ORDER BY start_ts ASC LIMIT ?'
+        )
+        raw_values = (port, raw_start, int(end_ts), int(start_ts) - 300, int(limit))
+        five_values = (port, five_start, int(end_ts), int(start_ts), int(limit))
+    return (
+        _checked_rows(conn, raw_query, raw_values, int(limit))
+        + _checked_rows(conn, five_query, five_values, int(limit))
+    )
+
+
+def _coalesce_pending(rows):
+    result = []
+    for row in sorted(rows, key=lambda item: (item['start_ts'], item['end_ts'], item['state'])):
+        if (
+            result and row['state'] == 'pending' and result[-1]['state'] == 'pending'
+            and row['start_ts'] <= result[-1]['end_ts']
+        ):
+            result[-1]['end_ts'] = max(result[-1]['end_ts'], row['end_ts'])
+        else:
+            result.append(dict(row))
+    return tuple(result)
+
+
+def get_pending_aggregation(
+    conn, stream_kind, stream_key, start_ts, end_ts, display_bucket_seconds, limit, cutoffs,
+):
+    """Disclose bounded durable and derived rollup work without replacing coverage."""
+    if stream_kind not in ('host', 'service') or min(int(display_bucket_seconds), int(limit)) <= 0:
         raise ValueError('invalid telemetry stream')
-    rows = _checked_rows(
-        conn,
+    keys = (('host', str(stream_key)), ('host', 'host')) if stream_kind == 'host' else (
+        ('service', str(int(stream_key))),
+    )
+    durable_query = (
         'SELECT bucket_start AS start_ts, bucket_start + bucket_seconds AS end_ts, state, '
         'attempt_count, next_retry_ts, last_error_class AS error_class '
-        'FROM telemetry_rollup_jobs WHERE stream_kind=? AND stream_key=? '
-        "AND state IN ('pending', 'failed') AND bucket_start < ? AND bucket_start + bucket_seconds > ? "
-        'ORDER BY bucket_start ASC LIMIT ?',
-        (stream_kind, str(stream_key), int(end_ts), int(start_ts), int(limit)),
+        'FROM telemetry_rollup_jobs WHERE ('
+        + ' OR '.join('(stream_kind=? AND stream_key=?)' for _ in keys)
+        + ") AND state IN ('pending', 'failed') AND bucket_start < ? "
+        'AND bucket_start + bucket_seconds > ? ORDER BY bucket_start ASC LIMIT ?'
+    )
+    durable = _checked_rows(
+        conn,
+        durable_query,
+        tuple(value for key in keys for value in key) + (int(end_ts), int(start_ts), int(limit)),
         int(limit),
     )
-    return rows
+    derived = [
+        {
+            'start_ts': row['start_ts'], 'end_ts': row['end_ts'], 'state': 'pending',
+            'attempt_count': 0, 'next_retry_ts': None, 'error_class': None,
+        }
+        for row in _pending_source_rows(
+            conn, stream_kind, stream_key, start_ts, end_ts, cutoffs, limit,
+        )
+    ]
+    durable_keys = {(row['start_ts'], row['end_ts']) for row in durable}
+    rows = [row for row in derived if (row['start_ts'], row['end_ts']) not in durable_keys]
+    rows.extend(durable)
+    result = _coalesce_pending(rows)
+    if len(result) > int(limit) - 1:
+        raise ValueError('telemetry query exceeded point budget')
+    return result
 
 
 def get_host_metric_history(conn, metric, start_ts, end_ts, limit):

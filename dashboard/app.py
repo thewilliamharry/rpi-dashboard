@@ -2218,7 +2218,7 @@ def api_telemetry_history():
                 )
                 pending = beacon_repositories.get_pending_aggregation(
                     conn, kind, stream_key, requested.start_ts, requested.end_ts,
-                    policy.point_budget + 1,
+                    resolution, policy.point_budget + 1, cutoffs,
                 )
             finally:
                 conn.close()

@@ -415,6 +415,82 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
             'error_class': 'sqlite_busy',
         },))
 
+    def test_host_five_minute_fallback_and_exact_cutoffs_have_one_owner(self):
+        cutoffs = {'raw_start_ts': 1000, 'five_minute_start_ts': 500}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    'INSERT INTO host_metric_rollups('
+                    'metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, latest_value, '
+                    'sample_count, observed_seconds, gap_seconds, unknown_seconds) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    ('cpu', 300, 300, 5.0, 5.0, 5.0, 5.0, 1, 300, 0, 0),
+                )
+                conn.commit()
+                fallback = telemetry_repositories.get_host_telemetry(
+                    conn, 'cpu', 0, 1000, 300, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+                conn.execute(
+                    'INSERT INTO host_metric_rollups('
+                    'metric, bucket_start, bucket_seconds, min_value, max_value, avg_value, latest_value, '
+                    'sample_count, observed_seconds, gap_seconds, unknown_seconds) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    ('cpu', 0, 3600, 7.0, 7.0, 7.0, 7.0, 1, 3600, 0, 0),
+                )
+                conn.commit()
+                replacement = telemetry_repositories.get_host_telemetry(
+                    conn, 'cpu', 0, 1000, 300, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+            finally:
+                conn.close()
+
+        self.assertEqual(
+            telemetry.compose_historical_response(fallback, 'host')['source_resolutions_seconds'],
+            [300],
+        )
+        replaced = telemetry.compose_historical_response(replacement, 'host')
+        self.assertEqual(replaced['source_resolutions_seconds'], [3600])
+        self.assertEqual([point['latest_value'] for point in replaced['points']], [7.0])
+
+    def test_host_raw_fallback_is_metric_specific_but_raw_pending_is_shared(self):
+        cutoffs = {'raw_start_ts': 100, 'five_minute_start_ts': 0}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    'INSERT INTO stats_history(ts, cpu, ram, disk, temp) VALUES(?,?,?,?,?)',
+                    (60, 12.0, 22.0, 32.0, 42.0),
+                )
+                conn.commit()
+                histories = {
+                    metric: telemetry.compose_historical_response(
+                        telemetry_repositories.get_host_telemetry(
+                            conn, metric, 0, 100, 60, telemetry.POINT_BUDGET + 1, cutoffs,
+                        ),
+                        'host',
+                    )
+                    for metric in ('cpu', 'ram', 'disk', 'temp')
+                }
+                pending = telemetry_repositories.get_pending_aggregation(
+                    conn, 'host', 'ram', 0, 100, 60, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+            finally:
+                conn.close()
+
+        self.assertEqual(
+            [history['points'][0]['latest_value'] for history in histories.values()],
+            [12.0, 22.0, 32.0, 42.0],
+        )
+        self.assertEqual(pending, ({
+            'start_ts': 0,
+            'end_ts': 300,
+            'state': 'pending',
+            'attempt_count': 0,
+            'next_retry_ts': None,
+            'error_class': None,
+        },))
+
 
 class ConfiguredTelemetryPolicyApiTests(unittest.TestCase):
     """The API and worker must consume the one deployed telemetry policy."""
