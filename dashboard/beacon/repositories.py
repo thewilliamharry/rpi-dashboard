@@ -141,7 +141,8 @@ SERVICE_QUERY_SHAPES = {
         'FROM buckets b LEFT JOIN durations d ON d.bucket_start=b.bucket_start '
         'LEFT JOIN sample_stats s ON s.bucket_start=b.bucket_start '
         'LEFT JOIN failure_json f ON f.bucket_start=b.bucket_start '
-        'WHERE (d.bucket_start IS NOT NULL OR s.bucket_start IS NOT NULL) '
+        'WHERE (COALESCE(d.online_seconds, 0) > 0 OR COALESCE(d.offline_seconds, 0) > 0 '
+        'OR COALESCE(d.unknown_seconds, 0) > 0 OR s.bucket_start IS NOT NULL) '
         'AND EXISTS (SELECT 1 FROM all_rows) '
         'ORDER BY b.bucket_start ASC LIMIT ?'
     ),
@@ -201,7 +202,8 @@ SERVICE_QUERY_SHAPES = {
         'FROM buckets b LEFT JOIN durations d ON d.bucket_start=b.bucket_start '
         'LEFT JOIN sample_stats s ON s.bucket_start=b.bucket_start '
         'LEFT JOIN failure_json f ON f.bucket_start=b.bucket_start '
-        'WHERE (d.bucket_start IS NOT NULL OR s.bucket_start IS NOT NULL) '
+        'WHERE (COALESCE(d.online_seconds, 0) > 0 OR COALESCE(d.offline_seconds, 0) > 0 '
+        'OR COALESCE(d.unknown_seconds, 0) > 0 OR s.bucket_start IS NOT NULL) '
         'AND EXISTS (SELECT 1 FROM all_rows) '
         'ORDER BY b.bucket_start ASC LIMIT ?'
     ),

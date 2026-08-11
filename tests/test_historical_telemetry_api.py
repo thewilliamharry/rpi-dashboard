@@ -491,6 +491,93 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
             'error_class': None,
         },))
 
+    def test_service_raw_fallback_preserves_offline_evidence_and_durable_failure(self):
+        cutoffs = {'raw_start_ts': 100, 'five_minute_start_ts': 0}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online, latency_ms, error_class) VALUES(?,?,?,?,?)',
+                    (60, 8080, 0, 12.5, 'timeout'),
+                )
+                conn.execute(
+                    'INSERT INTO telemetry_streams('
+                    'stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, consecutive_misses) '
+                    'VALUES(?,?,?,?,?,0)',
+                    ('service', '8080', 0, 60, 60),
+                )
+                conn.commit()
+                fallback = telemetry_repositories.get_service_telemetry(
+                    conn, 8080, 0, 100, 60, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+                conn.execute(
+                    'INSERT INTO telemetry_rollup_jobs('
+                    'stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+                    'next_retry_ts, last_error_class, updated_ts) VALUES(?,?,?,?,?,?,?,?,?)',
+                    ('service', '8080', 0, 300, 'failed', 3, 180, 'sqlite_busy', 120),
+                )
+                conn.commit()
+                pending = telemetry_repositories.get_pending_aggregation(
+                    conn, 'service', '8080', 0, 100, 60, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+            finally:
+                conn.close()
+
+        history = telemetry.compose_historical_response(fallback, 'service')
+        self.assertEqual(history['source_resolutions_seconds'], [60])
+        self.assertEqual(history['points'][0]['offline_seconds'], 40)
+        self.assertEqual(history['points'][0]['latency_avg'], 12.5)
+        self.assertEqual(history['points'][0]['check_count'], 1)
+        self.assertEqual(history['points'][0]['failure_class_counts'], {'timeout': 1})
+        self.assertEqual(pending, ({
+            'start_ts': 0,
+            'end_ts': 300,
+            'state': 'failed',
+            'attempt_count': 3,
+            'next_retry_ts': 180,
+            'error_class': 'sqlite_busy',
+        },))
+
+    def test_service_five_minute_fallback_yields_to_hourly_replacement(self):
+        cutoffs = {'raw_start_ts': 1000, 'five_minute_start_ts': 500}
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    'INSERT INTO service_rollups('
+                    'service_port, bucket_start, bucket_seconds, online_seconds, offline_seconds, '
+                    'unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, '
+                    'latency_sample_count, check_count, failure_class_counts_json) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (8080, 300, 300, 0, 300, 0, 0, 10.0, 10.0, 10.0, 1, 1, '{"timeout":1}'),
+                )
+                conn.commit()
+                fallback = telemetry_repositories.get_service_telemetry(
+                    conn, 8080, 0, 1000, 300, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+                conn.execute(
+                    'INSERT INTO service_rollups('
+                    'service_port, bucket_start, bucket_seconds, online_seconds, offline_seconds, '
+                    'unknown_seconds, gap_seconds, latency_min, latency_max, latency_avg, '
+                    'latency_sample_count, check_count, failure_class_counts_json) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (8080, 0, 3600, 3600, 0, 0, 0, 20.0, 20.0, 20.0, 1, 1, '{}'),
+                )
+                conn.commit()
+                replacement = telemetry_repositories.get_service_telemetry(
+                    conn, 8080, 0, 1000, 300, telemetry.POINT_BUDGET + 1, cutoffs,
+                )
+            finally:
+                conn.close()
+
+        self.assertEqual(
+            telemetry.compose_historical_response(fallback, 'service')['source_resolutions_seconds'],
+            [300],
+        )
+        replaced = telemetry.compose_historical_response(replacement, 'service')
+        self.assertEqual(replaced['source_resolutions_seconds'], [3600])
+        self.assertEqual(replaced['points'][0]['online_seconds'], 3600)
+
 
 class ConfiguredTelemetryPolicyApiTests(unittest.TestCase):
     """The API and worker must consume the one deployed telemetry policy."""
