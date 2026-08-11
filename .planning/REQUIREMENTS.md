@@ -17,9 +17,9 @@
 
 ### Telemetry and Retention
 
-- [ ] **TEL-01**: Beacon retains a rolling 90 days of bounded host metrics, service history, and events.
+- [x] **TEL-01**: Beacon retains a rolling 90 days of bounded host metrics, service history, and events.
 - [ ] **TEL-02**: Beacon preserves detailed recent observations and uses documented aggregates for older ranges.
-- [ ] **TEL-03**: Rollups complete successfully before their source observations are deleted.
+- [x] **TEL-03**: Rollups complete successfully before their source observations are deleted.
 - [ ] **TEL-04**: Historical queries explicitly distinguish known values, unknown intervals, collection gaps, and retention expiry.
 - [x] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
 - [ ] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
