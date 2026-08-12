@@ -379,17 +379,15 @@ This aligns manual/automatic refresh with the locked requirement to retain old e
 
 All other implementation facts were verified against the codebase or official documentation in this session.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **How should a non-periodic startup callback appear in job health?**
+1. **RESOLVED — How should a non-periodic startup callback appear in job health?**
    - What we know: `J9` is date-triggered and other callback inventory entries are lifecycle/startup-only. [VERIFIED: dashboard/beacon/worker_main.py]
-   - What's unclear: The UI contract says every background job, while “next expected run” is not meaningful for one-shot work.
-   - Recommendation: Include every inventory item with `schedule_kind: scheduled | startup | lifecycle`; use `next_expected_ts: null` and visible `Not scheduled` wording for non-periodic items, never fabricate a cadence.
+   - Selected answer: Include every inventory item with `schedule_kind: scheduled | startup | lifecycle`; startup and lifecycle callbacks use `next_expected_ts: null` and render `Not scheduled` rather than a fabricated cadence.
 
-2. **What exact default range preference should Settings show before Phase 4 history?**
+2. **RESOLVED — What exact default range preference should Settings show before Phase 4 history?**
    - What we know: The approved contract requires storing a range preference but prohibits history charts in this phase. [VERIFIED: 03-UI-SPEC.md]
-   - What's unclear: The user did not lock the default range.
-   - Recommendation: Default to 24 hours, label it as a local investigation preference, and use it only to explain the effective future display resolution; see A1.
+   - Selected answer: Default to a browser-local 24-hour presentation preference until Phase 4 implements history; label it as a local investigation preference and use it only to explain the effective future display resolution; see A1.
 
 ## Environment Availability
 
