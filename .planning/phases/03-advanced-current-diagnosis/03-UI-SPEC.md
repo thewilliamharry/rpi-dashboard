@@ -1,7 +1,7 @@
 ---
 phase: 03
 slug: advanced-current-diagnosis
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-08-11
@@ -94,8 +94,9 @@ Accent reserved for: selected navigation, focus indicators, selected filters, th
 ### Header and refresh controls
 
 - Preserve the existing static safety-warning cluster at the very top in this exact order: connection unavailable, worker unavailable, recovery required. Each remains independently visible; a healthy item must never suppress another active warning.
-- The workspace header contains: `Dashboard`, page title `Advanced diagnosis`, last successful update in relative time plus its exact timestamp in a native tooltip/detail, refresh interval select, `Pause`, and primary `Refresh now`.
-- Interval choices are 5 seconds, 15 seconds (default), 30 seconds, and 60 seconds. `Pause` stops scheduled browser polling only; `Refresh now` performs one bounded read refresh while paused or running. Show `Updates paused` beside the last-successful-update time when paused.
+- The workspace header contains: `Dashboard`, page title `Advanced diagnosis`, last successful update in relative time plus its exact timestamp in a native tooltip/detail, refresh interval select, `Pause updates`, and primary `Refresh now`.
+- Interval choices are 5 seconds, 15 seconds (default), 30 seconds, and 60 seconds. `Pause updates` stops scheduled browser polling only; `Refresh now` performs one bounded read refresh while paused or running. Show `Updates paused` beside the last-successful-update time when paused.
+- When header controls do not fit, reflow them into additional rows while keeping `Dashboard`, section navigation, last-update evidence, and all refresh actions visible and keyboard reachable. Long warning, navigation, or update text wraps or scrolls within its labelled region; it never overlaps another control.
 - On a refresh failure, retain the last successful screen, show the error state in the affected region, and keep `Refresh now` available. Never imply that displayed data was newly fetched when it was not.
 
 ### Sections
@@ -107,6 +108,10 @@ Accent reserved for: selected navigation, focus indicators, selected filters, th
 | Services | One sortable table of all configured or discovered services with multi-row expansion. Default sort is critical failures, other failures, stale/unknown, then healthy; preserve configured pinned order within each group. The table supports text search on service name, port, or tag and combinable Status, Criticality, Freshness, and Tag filters. |
 | Pipeline | Effective 7-day raw / 5-minute through day 30 / hourly through day 90 retention, displayed resolution, retention expiry, database-pressure state, worker heartbeat/freshness, open and recent actionable collection gaps, resolved historical gaps, and every background job’s last run, next expected run/cadence, state, and error evidence. Pending aggregation is separate from observed coverage. |
 | Settings | Read-only effective monitoring settings plus presentation controls: density, refresh interval, range preference, and service filters. Clearly label controls as local presentation preferences; provide no remote-control, monitoring-mutation, or service-action control. |
+
+- Overview regions load independently. If only some summary evidence is available, retain every available exception and summary, label each unavailable value or summary `Unknown`, and keep its freshness or failure evidence visible.
+- Pipeline never leaves an absent collection blank: use `No active collection gaps` when there are none and `No background jobs are configured` when the effective job collection is empty. Gap and job counts use singular copy for one item and plural copy for zero or many.
+- Settings never renders an empty value cell. Missing effective values use `Unknown`; optional settings that are absent use `Not configured`. Local presentation controls remain explicit and use their documented defaults once loaded.
 
 ### Service diagnosis
 
@@ -135,7 +140,7 @@ Accent reserved for: selected navigation, focus indicators, selected filters, th
 | Element | Copy |
 |---------|------|
 | Primary CTA | `Refresh now` |
-| Pause control | `Pause` when polling; `Resume updates` when paused |
+| Pause control | `Pause updates` when polling; `Resume updates` when paused |
 | Empty services heading | `No services match these filters` |
 | Empty services body | `Clear filters to view every monitored service, or wait for the next discovery result.` |
 | Empty exceptions | `No active exceptions` — `Host, services, and collection pipeline are reporting normally.` |
@@ -150,32 +155,16 @@ Accent reserved for: selected navigation, focus indicators, selected filters, th
 
 ## UI Considerations
 
-Applicable state considerations resolved: 22 covered, 0 backstop, 0 unresolved.
+Applicable state considerations resolved: 36 covered, 0 backstop, 0 unresolved.
 
 | Category | Element(s) | Status | Resolution / Reason |
 |----------|------------|--------|---------------------|
-| loading | Workspace route and section detail | ✅ covered | The initial document uses labelled skeleton cards/rows and `Loading current diagnosis…`; prior values remain visible during refresh. |
-| error | Workspace route and section detail | ✅ covered | A failed bounded read retains last successful values, reports the supplied error copy, and offers `Refresh now`. |
-| empty | Active-exception collection | ✅ covered | Overview renders the documented `No active exceptions` state instead of an empty gap. |
-| populated | Active-exception collection | ✅ covered | Exceptions are ordered by operational urgency, name their affected item, and link to the owning section. |
-| overflow | Active-exception collection | ✅ covered | The collection remains vertically scrollable after the summary viewport; individual evidence wraps without overlap. |
-| zero-one-many | Active-exception collection | ✅ covered | Count language is singular/plural aware; zero uses the empty state, one retains the same exception-card layout, and many preserve priority order. |
-| loading | Host summary and detail | ✅ covered | Four labelled metric skeletons display until a current sample and freshness evidence are received. |
-| error | Host summary and detail | ✅ covered | The Host panel keeps last valid metrics and displays the common error state rather than replacing values with zero. |
-| partial | Host summary and detail | ✅ covered | Missing temperature or identity fields render `Unavailable` with timestamp/cadence evidence while other host fields remain visible. |
-| long-text | Host identity and settings values | ✅ covered | Hostnames/settings wrap at word boundaries; canonical values remain selectable and never overlap labels. |
-| empty | Service table/filter result | ✅ covered | The documented service-empty copy distinguishes a zero match from a loading failure. |
-| loading | Service table | ✅ covered | Skeleton rows preserve the table’s visible column structure while service evidence loads. |
-| error | Service table | ✅ covered | The table retains prior rows on refresh failure and shows the common error state above the filter bar. |
-| populated | Service table and expanded diagnostics | ✅ covered | Rows follow locked operational ordering, expose all required collapsed fields, and support multiple expanded details. |
-| partial | Service table and expanded diagnostics | ✅ covered | A missing latency, probe time, tag, or health rule renders `Unavailable`/`Not configured` in-place without inferring a healthy or failed value. |
-| overflow | Service table and expanded diagnostics | ✅ covered | The table has labelled horizontal scroll below 960px, sticky Name + port, ellipsis in collapsed cells, and full wrapping values in details. |
-| zero-one-many | Service table/filter result | ✅ covered | Result count reads `1 of 1 service` or `N of M services`; zero follows the empty state without changing layout semantics. |
-| long-text | Search, filter chips, tags, failure/effective-rule text, navigation | ✅ covered | Tags wrap only in details; compact labels truncate with accessible full text; chips clip text before their remove/clear control. |
-| loading | Pipeline and Settings | ✅ covered | Labelled skeleton rows show while durable diagnostics load; read-only controls remain disabled until their effective values are known. |
-| error | Pipeline and Settings | ✅ covered | Last known effective settings and pipeline evidence remain visible with a timestamped refresh error. |
-| partial | Pipeline and Settings | ✅ covered | Each unavailable stream/job/pressure value states `Unknown` and retains the available independent evidence. |
-| overflow | Pipeline job list and settings values | ✅ covered | Job lists scroll vertically; cadence/error strings wrap within their value column and never clip a state label. |
+| loading, error, overflow, long-text | Workspace shell and navigation | ✅ covered | Initial load uses the documented skeleton/copy; refresh failure retains prior values and retry. Header controls reflow, horizontal navigation scrolls when needed, and long warnings/labels wrap without hiding controls. |
+| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | Overview exceptions and summaries | ✅ covered | The documented empty/loading/error copy applies; exceptions retain priority order. Partial summaries keep available evidence and label missing summaries `Unknown`; evidence wraps, scrolls, and uses singular/plural counts. |
+| overflow, long-text | Host diagnosis | ✅ covered | Host values wrap at word boundaries within their value region, remain selectable, and never overlap labels or adjacent metrics. |
+| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | Services filters, table, and expanded diagnostics | ✅ covered | The documented states preserve the table structure and prior evidence. Missing values are explicit, narrow tables scroll with sticky identity, long values expand accessibly, and counts distinguish zero/one/many. |
+| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | Pipeline diagnosis | ✅ covered | Empty gaps/jobs use explicit copy; loading/error retain labelled evidence; populated and partial rows remain independent. Lists scroll, long evidence wraps, and counts use singular/plural wording. |
+| empty, loading, error, partial, overflow, long-text | Settings workspace | ✅ covered | The surface uses skeletons while loading and retains timestamped prior values on error. Missing values read `Unknown` or `Not configured`; controls/values reflow and long canonical values wrap without blank cells. |
 
 ---
 
@@ -189,11 +178,11 @@ Applicable state considerations resolved: 22 covered, 0 backstop, 0 unresolved.
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 1 Copywriting: PASS
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** pending
+**Approval:** approved 2026-08-12. The checker’s non-blocking copy flag was resolved by changing `Pause` to `Pause updates`; the post-verification probe confirmed 36 covered state considerations with none backstopped or unresolved.
