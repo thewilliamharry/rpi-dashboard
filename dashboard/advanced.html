@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Advanced diagnosis | Beacon</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/advanced.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" id="advanced-dashboard">Dashboard</a>
+    <h1>Advanced diagnosis</h1>
+    <div>
+      <span id="advanced-last-success" title="No successful update yet">No successful update yet</span>
+      <button type="button" id="advanced-refresh">Refresh now</button>
+    </div>
+  </header>
+
+  <div id="safety-warning-cluster" class="safety-warning-cluster" aria-label="Monitoring status">
+    <div class="connection-banner safety-warning" id="connection-banner" role="alert" hidden>Beacon is disconnected. Displayed data may be stale.</div>
+    <div class="worker-warning safety-warning" id="worker-warning" role="status" aria-live="polite" hidden>Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.</div>
+    <div class="recovery-warning safety-warning" id="recovery-warning" role="alert" hidden>Upgrade recovery is required. Monitoring is paused. Follow the documented recovery command before restarting Beacon.</div>
+  </div>
+
+  <main id="advanced-content" aria-live="polite">
+    <section aria-labelledby="advanced-loading-heading">
+      <h2 id="advanced-loading-heading">Loading current diagnosis…</h2>
+      <p>Current host evidence will appear here when it is available.</p>
+    </section>
+  </main>
+  <div id="advanced-refresh-error" role="alert" hidden></div>
+</body>
+</html>

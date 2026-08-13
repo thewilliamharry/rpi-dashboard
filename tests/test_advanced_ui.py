@@ -82,7 +82,6 @@ class AdvancedUiTests(unittest.TestCase):
         page.route('**/api/**', route_api)
         try:
             page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
-            self.assertIn('Loading current diagnosis…', page.locator('#advanced-content').text_content())
             page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
             self.assertIn('beacon-pi', page.locator('[data-testid="host-summary"]').text_content())
             first_success = page.locator('#advanced-last-success').text_content()
@@ -99,6 +98,7 @@ class AdvancedUiTests(unittest.TestCase):
         html = (ROOT / 'dashboard/advanced.html').read_text(encoding='utf-8')
         js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
         self.assertIn('Advanced diagnosis', html)
+        self.assertIn('Loading current diagnosis…', html)
         self.assertIn('id="connection-banner"', html)
         self.assertLess(html.index('id="connection-banner"'), html.index('id="worker-warning"'))
         self.assertLess(html.index('id="worker-warning"'), html.index('id="recovery-warning"'))

@@ -22,6 +22,7 @@ from flask import Flask, jsonify, make_response, request, send_file
 try:
     from .beacon.config import load_settings
     from .beacon import repositories as beacon_repositories
+    from .beacon import diagnosis as beacon_diagnosis
     from .beacon import telemetry as beacon_telemetry
     from .beacon import web as beacon_web
     from .beacon import monitoring as beacon_monitoring
@@ -33,6 +34,7 @@ try:
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon.config import load_settings
     from beacon import repositories as beacon_repositories
+    from beacon import diagnosis as beacon_diagnosis
     from beacon import telemetry as beacon_telemetry
     from beacon import web as beacon_web
     from beacon import monitoring as beacon_monitoring
@@ -2091,14 +2093,44 @@ def index():
     return send_file("index.html", mimetype="text/html")
 
 
+@app.route('/advanced')
+def advanced_index():
+    return send_file('advanced.html', mimetype='text/html')
+
+
 @app.route("/style.css")
 def serve_css():
     return send_file("style.css", mimetype="text/css")
 
 
+@app.route('/advanced.css')
+def serve_advanced_css():
+    """Reserve the stable advanced stylesheet URL until its later visual layer."""
+    response = make_response('', 200)
+    response.mimetype = 'text/css'
+    return response
+
+
 @app.route("/app.js")
 def serve_js():
     return send_file("app.js", mimetype="application/javascript")
+
+
+@app.route('/advanced.js')
+def serve_advanced_js():
+    return send_file('advanced.js', mimetype='application/javascript')
+
+
+@app.route('/api/advanced/current')
+def api_advanced_current():
+    payload = beacon_diagnosis.get_current_diagnosis(
+        DB_PATH,
+        SETTINGS,
+        int(time.time()),
+    )
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route("/api/config")

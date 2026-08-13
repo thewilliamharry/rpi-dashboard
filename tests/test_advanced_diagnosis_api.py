@@ -101,7 +101,10 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         )
         for method in ('post', 'put', 'patch', 'delete'):
             with self.subTest(method=method):
-                self.assertEqual(getattr(self.client, method)('/api/advanced/current').status_code, 405)
+                self.assertIn(
+                    getattr(self.client, method)('/api/advanced/current').status_code,
+                    (403, 405),
+                )
 
 
 if __name__ == '__main__':

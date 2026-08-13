@@ -11,6 +11,16 @@ from .queues import enqueue_preview_in_transaction
 from .telemetry import SourceSegment
 
 
+def read_current_host(conn):
+    """Return the one current host row without owning transaction lifetime."""
+    row = conn.execute(
+        'SELECT sample_ts, cpu, ram, ram_used, ram_available, ram_total, '
+        'disk, disk_used, disk_total, temp, hostname '
+        'FROM system_stats WHERE id=1'
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
 HOST_METRIC_COLUMNS = {
     'cpu': 'cpu',
     'ram': 'ram',
