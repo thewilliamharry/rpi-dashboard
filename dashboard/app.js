@@ -229,12 +229,13 @@ function buildServiceCard(service) {
   if (service.critical) actions.appendChild(Object.assign(document.createElement('span'), {className: 'svc-critical', textContent: 'critical'}));
   actions.appendChild(Object.assign(document.createElement('span'), {className: 'svc-port-badge', textContent: `:${service.port}`}));
   if (service.tls_unverified) {
-    const tls = Object.assign(document.createElement('span'), {className: 'svc-tls-unverified', textContent: 'TLS unverified'});
+    const tls = Object.assign(document.createElement('span'), {className: 'svc-tls-unverified', textContent: 'TLS'});
     tls.title = 'TLS certificate is not verified for this trusted local service.';
     tls.setAttribute('aria-label', 'TLS certificate is not verified for this trusted local service.');
     actions.appendChild(tls);
   }
-  const edit = Object.assign(document.createElement('button'), {className: 'svc-edit', type: 'button', textContent: 'Edit service'});
+  const edit = Object.assign(document.createElement('button'), {className: 'svc-edit', type: 'button', textContent: 'Edit'});
+  edit.setAttribute('aria-label', 'Edit service');
   edit.dataset.port = String(service.port);
   edit.addEventListener('click', () => openMetaEditor(service, edit));
   actions.appendChild(edit);
