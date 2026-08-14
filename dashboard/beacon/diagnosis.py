@@ -181,7 +181,10 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
     if not isinstance(retention_state, dict):
         retention_state = {'state': 'normal', 'pressure_gaps': {}}
     heartbeat_ts = _runtime_timestamp(evidence['runtime'].get('worker_heartbeat'), 'ts')
-    worker_cadence = settings.metric_sample_seconds
+    heartbeat_callback = next(
+        callback for callback in WORKER_CALLBACK_INVENTORY if callback.identifier == 'J1'
+    )
+    worker_cadence = callback_schedule_evidence(heartbeat_callback, settings)['cadence_seconds']
     stream_records = []
     for stream in evidence['streams']:
         cadence = stream.get('cadence_seconds')
@@ -321,6 +324,9 @@ def get_current_diagnosis(db_path, settings, now):
         'services': services,
         'pipeline': pipeline,
         'settings': _settings_payload(settings),
-        'safety': {'recovery_required': recovery_required},
+        'safety': {
+            'worker_stale': pipeline['worker']['freshness']['state'] in {'stale', 'unknown'},
+            'recovery_required': recovery_required,
+        },
         'exceptions': compose_active_exceptions(services, pipeline, recovery_required=recovery_required),
     }

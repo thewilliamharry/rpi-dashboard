@@ -5,7 +5,7 @@
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
-    expandedPorts: new Set(),
+    expandedPorts: new Set(), connectionUnavailable: false,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -112,7 +112,7 @@
 
   function renderSafety(snapshot) {
     const safety = snapshot.safety || {};
-    $('connection-banner').hidden = !safety.connection;
+    $('connection-banner').hidden = !state.connectionUnavailable;
     $('worker-warning').hidden = !safety.worker_stale;
     $('recovery-warning').hidden = !safety.recovery_required;
   }
@@ -620,6 +620,7 @@
   async function refreshCurrentDiagnosis() {
     try {
       const snapshot = await apiFetch();
+      state.connectionUnavailable = false;
       state.snapshot = snapshot;
       state.serviceSort = null;
       state.lastSuccessLabel = displayTimestamp(snapshot.generated_ts);
@@ -627,6 +628,8 @@
       $('advanced-refresh-error').hidden = true;
       renderSnapshot(snapshot);
     } catch (_) {
+      state.connectionUnavailable = true;
+      renderSafety(state.snapshot || {});
       renderRefreshError();
     }
   }

@@ -134,30 +134,33 @@ class AdvancedUiTests(unittest.TestCase):
             page.close()
 
     def test_safety_combinations_render_in_approved_order(self):
-        page = self.browser.new_page()
-        fixture = {'payload': self._snapshot()}
-
-        def route_api(route):
-            route.fulfill(status=200, json=fixture['payload'])
-
-        page.route('**/api/advanced/current', route_api)
-        try:
-            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
-            page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
-            for connection, worker, recovery in (
-                (False, False, False), (False, False, True), (False, True, False), (False, True, True),
-                (True, False, False), (True, False, True), (True, True, False), (True, True, True),
-            ):
-                with self.subTest(connection=connection, worker=worker, recovery=recovery):
-                    fixture['payload'] = {
-                        **self._snapshot(),
-                        'safety': {'worker_stale': worker, 'recovery_required': recovery},
-                        'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': [],
-                    }
+        for connection, worker, recovery in (
+            (False, False, False), (False, False, True), (False, True, False), (False, True, True),
+            (True, False, False), (True, False, True), (True, True, False), (True, True, True),
+        ):
+            with self.subTest(connection=connection, worker=worker, recovery=recovery):
+                page = self.browser.new_page()
+                fixture = {
+                    **self._snapshot(),
+                    'safety': {'worker_stale': worker, 'recovery_required': recovery},
+                    'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': [],
+                }
+                page.route(
+                    '**/api/advanced/current',
+                    lambda route: route.fulfill(status=200, json=fixture),
+                )
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
+                    page.wait_for_timeout(50)
                     if connection:
-                        page.unroute('**/api/advanced/current', route_api)
-                        page.route('**/api/advanced/current', lambda route: route.fulfill(status=503, json={'error': 'offline'}))
-                    page.locator('#advanced-refresh').click()
+                        page.unroute('**/api/advanced/current')
+                        page.route(
+                            '**/api/advanced/current',
+                            lambda route: route.fulfill(status=503, json={'error': 'offline'}),
+                        )
+                        page.locator('#advanced-refresh').click()
+                        page.locator('#advanced-refresh-error').wait_for(state='visible', timeout=5_000)
                     expected = [connection, worker, recovery]
                     actual = [
                         page.locator('#connection-banner').is_visible(),
@@ -165,11 +168,8 @@ class AdvancedUiTests(unittest.TestCase):
                         page.locator('#recovery-warning').is_visible(),
                     ]
                     self.assertEqual(actual, expected)
-                    if connection:
-                        page.unroute('**/api/advanced/current')
-                        page.route('**/api/advanced/current', route_api)
-        finally:
-            page.close()
+                finally:
+                    page.close()
 
     def test_production_routes_serve_the_advanced_document_bundle(self):
         page = self.browser.new_page()
