@@ -1,5 +1,8 @@
 import unittest
+from types import SimpleNamespace
 
+from dashboard.beacon import migrations, queues, repositories, worker_main
+from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
 
@@ -105,6 +108,137 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                     getattr(self.client, method)('/api/advanced/current').status_code,
                     (403, 405),
                 )
+
+    def test_migration_eight_adds_only_job_health_evidence(self):
+        """The approved Migration 8 remains additive over the supported schema."""
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            tables = {
+                row['name'] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            columns = {
+                row['name'] for row in conn.execute(
+                    'PRAGMA table_info(background_job_health)'
+                )
+            }
+            versions = [
+                row['version'] for row in conn.execute(
+                    'SELECT version FROM schema_migrations ORDER BY version'
+                )
+            ]
+            conn.close()
+
+        self.assertIn('background_job_health', tables)
+        self.assertEqual(
+            columns,
+            {
+                'job_id', 'last_started_ts', 'last_finished_ts',
+                'last_success_ts', 'state', 'error_class', 'updated_ts',
+            },
+        )
+        self.assertEqual(migrations.MIGRATIONS[-1].version, 8)
+        self.assertIn(8, versions)
+
+    def test_job_health_transitions_preserve_success_and_bound_failure_class(self):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            repositories.record_background_job_started(conn, 'J2', now=100)
+            repositories.record_background_job_succeeded(conn, 'J2', now=101)
+            repositories.record_background_job_failed(
+                conn, 'J2', now=102, error_class='SecretError: do not persist this message',
+            )
+            row = conn.execute(
+                'SELECT * FROM background_job_health WHERE job_id=?', ('J2',)
+            ).fetchone()
+            conn.commit()
+            conn.close()
+
+        self.assertEqual(row['state'], 'failed')
+        self.assertEqual(row['last_started_ts'], 100)
+        self.assertEqual(row['last_finished_ts'], 102)
+        self.assertEqual(row['last_success_ts'], 101)
+        self.assertEqual(row['error_class'], 'SecretError')
+
+    def test_callback_outcome_false_and_exception_never_claim_success(self):
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'job-health-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+
+        def services_for(result):
+            return SimpleNamespace(
+                settings=SimpleNamespace(db_path=self.db_path),
+                authority=authority,
+                clock=lambda: now,
+                admission=worker_main.WorkerAdmission(),
+                collect_system_stats=lambda _authority: (
+                    (_ for _ in ()).throw(result)
+                    if isinstance(result, BaseException) else result
+                ),
+            )
+
+        self.assertFalse(worker_main.dispatch_callback(services_for(False), 'J2'))
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            false_row = conn.execute(
+                'SELECT state,last_success_ts,error_class FROM background_job_health WHERE job_id=?',
+                ('J2',),
+            ).fetchone()
+            conn.close()
+        self.assertEqual(tuple(false_row), ('failed', None, 'CallbackReturnedFalse'))
+
+        class DeliberateFailure(RuntimeError):
+            pass
+
+        with self.assertRaises(DeliberateFailure):
+            worker_main.dispatch_callback(services_for(DeliberateFailure('secret message')), 'J2')
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            exception_row = conn.execute(
+                'SELECT state,last_success_ts,error_class FROM background_job_health WHERE job_id=?',
+                ('J2',),
+            ).fetchone()
+            conn.close()
+        self.assertEqual(tuple(exception_row), ('failed', None, 'DeliberateFailure'))
+
+    def test_stale_worker_cannot_change_job_health_evidence(self):
+        now = 100
+        lease_a = queues.acquire_worker_lease(
+            self.db_path, 'job-health-worker-a', now=now, lease_seconds=1,
+        )
+        authority_a = WorkerAuthority.from_lease(lease_a, self.db_path, clock=lambda: now)
+        with self.assertRaises(queues.LeaseLost):
+            worker_main._write_job_health_transition(
+                SimpleNamespace(
+                    settings=SimpleNamespace(db_path=self.db_path),
+                    authority=authority_a,
+                    clock=lambda: now + 2,
+                ),
+                'J2', 'started',
+            )
+
+        lease_b = queues.acquire_worker_lease(
+            self.db_path, 'job-health-worker-b', now=now + 2, lease_seconds=30,
+        )
+        authority_b = WorkerAuthority.from_lease(lease_b, self.db_path, clock=lambda: now + 2)
+        worker_main._write_job_health_transition(
+            SimpleNamespace(
+                settings=SimpleNamespace(db_path=self.db_path),
+                authority=authority_b,
+                clock=lambda: now + 2,
+            ),
+            'J2', 'succeeded',
+        )
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = conn.execute(
+                'SELECT state,last_success_ts FROM background_job_health WHERE job_id=?', ('J2',),
+            ).fetchone()
+            conn.close()
+        self.assertEqual(tuple(row), ('succeeded', now + 2))
 
 
 if __name__ == '__main__':
