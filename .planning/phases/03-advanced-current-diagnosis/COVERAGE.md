@@ -1,0 +1,1 @@
+No external API integration: Phase 03 connects Beacon's own browser UI only to Beacon's internal Flask JSON routes, including GET /api/advanced/current; it does not call an external API, SDK, or service.
