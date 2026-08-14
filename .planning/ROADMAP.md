@@ -16,6 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Behavioral Safety & Runtime Ownership** - Preserve working Beacon behavior while making upgrades, background ownership, and outbound access safe. (completed 2026-08-07)
 - [x] **Phase 2: Bounded Telemetry & Retention** - Establish truthful 90-day host and service history with bounded storage and query contracts. (completed 2026-08-11)
 - [ ] **Phase 3: Advanced Current Diagnosis** - Let the operator open an advanced workspace for fresh host, service, settings, and pipeline-health diagnosis.
+- [ ] **Phase 03.1: Planned Maintenance Recognition (INSERTED)** - Confirm or define expected recurring service restarts without hiding downtime or overruns.
 - [ ] **Phase 4: Historical Investigation** - Turn retained telemetry into honest range-based charts, service history, and incident investigation.
 - [ ] **Phase 5: Theme-Parity Analytics Experience** - Make the dashboard and advanced workspace cohesive, responsive, accessible, and equivalent in both themes.
 - [ ] **Phase 6: Workload Resilience & Pi Acceptance** - Ensure discovery and previews remain bounded best-effort work and prove Beacon holds up under Pi-class load.
@@ -212,10 +213,28 @@ Plans:
 
 **UI hint**: yes
 
+### Phase 03.1: Planned Maintenance Recognition (INSERTED)
+
+**Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
+**Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
+**Depends on:** Phase 3
+**Plans:** 0 plans
+
+**Success Criteria** (what must be TRUE):
+
+  1. Operator can manually add, edit, disable, and remove a recurring per-service local-time maintenance window with an explicit grace period.
+  2. After three similar daily restart outages, Beacon offers an inactive suggested window that requires operator confirmation or adjustment before it changes event or alert behavior.
+  3. Confirmed maintenance suppresses only expected down/recovered event entries and transition alerts; every probe remains stored and planned downtime still lowers service availability.
+  4. A service still down after its window and grace period produces one truthful outage event and alert, while the dashboard distinguishes active maintenance from an unresolved failure.
+
+Plans:
+
+- [ ] TBD (run $gsd-plan-phase 03.1 to break down)
+
 ### Phase 4: Historical Investigation
 
 **Goal**: The operator can investigate a selected time range, service, or incident through correlated history that is detailed, bounded, and candid about what Beacon did and did not observe.
-**Depends on**: Phase 3
+**Depends on**: Phase 03.1
 **Requirements**: DIA-04, DIA-05, DIA-06, DIA-07, HIS-01, HIS-02, HIS-03, HIS-04, HIS-05, HIS-06
 **Success Criteria** (what must be TRUE):
 

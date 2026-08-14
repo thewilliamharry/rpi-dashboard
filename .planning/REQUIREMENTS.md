@@ -24,6 +24,13 @@
 - [x] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
 - [ ] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
 
+### Planned Maintenance
+
+- [ ] **MNT-01**: The operator can manually configure, edit, disable, and remove a bounded recurring local-time maintenance window for an individual service, including an explicit overrun grace period.
+- [ ] **MNT-02**: After three similar daily restart outages, Beacon can suggest a candidate maintenance window that remains inactive until the operator confirms or edits it.
+- [ ] **MNT-03**: During a confirmed maintenance window, Beacon retains every failed probe and continues counting downtime in availability while suppressing only the expected down/recovered event entries and transition alerts.
+- [ ] **MNT-04**: If a service remains unavailable beyond its confirmed maintenance window and grace period, Beacon records and alerts one truthful outage without hiding the continuing failure.
+
 ### Advanced Diagnosis
 
 - [ ] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
@@ -114,6 +121,10 @@ Every v1 requirement maps to exactly one roadmap phase.
 | TEL-04 | Phase 2 | Complete |
 | TEL-05 | Phase 2 | Complete |
 | TEL-06 | Phase 3 | Gaps Found |
+| MNT-01 | Phase 03.1 | Pending |
+| MNT-02 | Phase 03.1 | Pending |
+| MNT-03 | Phase 03.1 | Pending |
+| MNT-04 | Phase 03.1 | Pending |
 | DIA-01 | Phase 3 | Gaps Found |
 | DIA-02 | Phase 3 | Gaps Found |
 | DIA-03 | Phase 3 | Gaps Found |
@@ -145,10 +156,10 @@ Every v1 requirement maps to exactly one roadmap phase.
 
 **Coverage:**
 
-- v1 requirements: 41 total
-- Mapped to phases: 41
+- v1 requirements: 45 total
+- Mapped to phases: 45
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-24*  
-*Last updated: 2026-07-24 after roadmap creation*
+*Last updated: 2026-08-14 after inserting planned-maintenance recognition*
