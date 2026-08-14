@@ -240,6 +240,48 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             conn.close()
         self.assertEqual(tuple(row), ('succeeded', now + 2))
 
+    def test_services_pipeline_and_settings_are_present_in_one_current_snapshot(self):
+        now = 1_700_000_000
+        self._seed_host(sample_ts=now)
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO services(port,title,first_seen,last_seen,is_online,last_latency_ms,last_error,state_since) '
+                'VALUES(?,?,?,?,?,?,?,?)',
+                (8080, 'Service', now - 20, now, 0, None, 'ConnectionRefused', now - 10),
+            )
+            conn.execute(
+                'INSERT INTO service_meta(port,display_name,url,critical,pinned_order,tags,healthy_statuses) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (8080, 'Beacon service', 'http://127.0.0.1:8080', 1, 3, 'core,lan', '200-399'),
+            )
+            conn.execute(
+                'INSERT INTO service_checks(ts,port,online,latency_ms,error_class) VALUES(?,?,?,?,?)',
+                (now, 8080, 0, None, 'ConnectionRefused'),
+            )
+            conn.commit()
+            conn.close()
+        self.appmod.time.time = lambda: now
+
+        payload = self.client.get('/api/advanced/current').get_json()
+
+        self.assertEqual(payload['services'][0]['port'], 8080)
+        self.assertEqual(payload['services'][0]['name'], 'Beacon service')
+        self.assertEqual(payload['services'][0]['availability'], 'offline')
+        self.assertTrue(payload['services'][0]['critical'])
+        self.assertEqual(payload['services'][0]['freshness']['state'], 'fresh')
+        self.assertIn('retention', payload['pipeline'])
+        self.assertIn('worker', payload['pipeline'])
+        self.assertIn('jobs', payload['pipeline'])
+        self.assertNotIn('alert_webhook_url', payload['settings'])
+        self.assertTrue(any(item['kind'] == 'critical_service_offline' for item in payload['exceptions']))
+
+    def test_advanced_snapshot_rejects_query_arguments_before_reading_sqlite(self):
+        response = self.client.get('/api/advanced/current?unexpected=1')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {'error': 'unexpected query parameters'})
+
 
 if __name__ == '__main__':
     unittest.main()
