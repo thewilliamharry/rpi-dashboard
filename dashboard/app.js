@@ -3,6 +3,7 @@
 const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated', 'monitoring_gap']);
 const UI_HEADERS = {'X-Beacon-UI': '1'};
 const WORKER_STALE_COPY = 'Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.';
+const DASHBOARD_SCROLL_KEY = 'beacon-dashboard-scroll-position';
 let servicesByPort = new Map();
 let editingService = null;
 let modalReturnFocus = null;
@@ -416,10 +417,30 @@ function applyTheme(light) {
   localStorage.setItem('beacon-theme', light ? 'light' : 'dark');
 }
 
+function captureDashboardScroll() {
+  const offset = Math.floor(window.scrollY);
+  if (Number.isFinite(offset) && offset >= 0) sessionStorage.setItem(DASHBOARD_SCROLL_KEY, String(offset));
+}
+
+function restoreDashboardScroll() {
+  const stored = sessionStorage.getItem(DASHBOARD_SCROLL_KEY);
+  sessionStorage.removeItem(DASHBOARD_SCROLL_KEY);
+  if (!stored || !/^\d+$/.test(stored)) return;
+  const offset = Number(stored);
+  if (!Number.isFinite(offset) || offset < 0 || !Number.isInteger(offset)) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    window.scrollTo(0, offset);
+    const link = $('advanced-diagnosis-link');
+    try { link.focus({preventScroll: true}); } catch (_) { link.focus(); }
+  }));
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => {
     applyTheme(localStorage.getItem('beacon-theme') === 'light');
+    restoreDashboardScroll();
     $('toggle').addEventListener('click', () => applyTheme(!document.documentElement.classList.contains('light')));
+    $('advanced-diagnosis-link').addEventListener('click', captureDashboardScroll);
     document.querySelector('.btn-scan').addEventListener('click', triggerScan);
     $('meta-form').addEventListener('submit', submitMetaEditor);
     $('meta-cancel').addEventListener('click', closeMetaEditor);
