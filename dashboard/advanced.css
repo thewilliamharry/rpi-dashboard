@@ -23,6 +23,13 @@
 .diagnosis-card a { color: var(--accent); }
 .evidence-row { display: grid; grid-template-columns: minmax(120px, 0.4fr) minmax(0, 1fr); gap: 12px; }
 .evidence-row span { overflow-wrap: anywhere; user-select: text; }
+.pipeline-grid, .settings-grid { display: grid; gap: 24px; }
+.evidence-list { display: grid; gap: 8px; max-height: 360px; overflow: auto; }
+.settings-grid label { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.settings-grid select { min-height: 44px; color: var(--text); background: var(--bg3); border: 1px solid var(--border); font: inherit; }
+.density-comfortable .advanced-detail { gap: 32px; }
+.density-comfortable .diagnosis-card, .density-comfortable .evidence-row { padding: 16px; }
+.density-compact .diagnosis-card, .density-compact .evidence-row { padding: 8px; }
 .advanced-error, .advanced-partial { margin: 12px 24px; padding: 12px; border: 1px solid var(--accent2); color: var(--accent2); overflow-wrap: anywhere; }
 .advanced-partial { margin: 16px 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

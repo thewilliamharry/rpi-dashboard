@@ -1,6 +1,56 @@
 (() => {
-  const state = {snapshot: null, lastSuccessLabel: null, activeSection: 'overview'};
+  const PREFS_KEY = 'beacon-advanced-preferences-v1';
+  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}};
+  const REFRESH_CHOICES = new Set([5, 15, 30, 60]);
+  const state = {
+    snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
+    preferences: {...DEFAULT_PREFERENCES}, filters: {},
+  };
   const $ = (id) => document.getElementById(id);
+
+  function validFilters(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter(([, item]) => typeof item === 'string'));
+  }
+
+  function loadPreferences() {
+    let stored = {};
+    try {
+      const candidate = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      stored = candidate && typeof candidate === 'object' && !Array.isArray(candidate) ? candidate : {};
+    } catch (_) { /* malformed browser-local data uses documented defaults */ }
+    const refreshSeconds = REFRESH_CHOICES.has(stored.refreshSeconds) ? stored.refreshSeconds : DEFAULT_PREFERENCES.refreshSeconds;
+    state.preferences = {
+      refreshSeconds,
+      paused: typeof stored.paused === 'boolean' ? stored.paused : DEFAULT_PREFERENCES.paused,
+      density: stored.density === 'comfortable' || stored.density === 'compact' ? stored.density : null,
+      range: stored.range === '24h' ? stored.range : DEFAULT_PREFERENCES.range,
+      filters: validFilters(stored.filters),
+    };
+    state.filters = state.preferences.filters;
+    return state.preferences;
+  }
+
+  function savePreferences() {
+    const prefs = state.preferences;
+    localStorage.setItem(PREFS_KEY, JSON.stringify({
+      refreshSeconds: prefs.refreshSeconds,
+      paused: prefs.paused,
+      density: prefs.density,
+      range: prefs.range,
+      filters: validFilters(state.filters),
+    }));
+  }
+
+  function applyTheme() {
+    document.documentElement.classList.toggle('light', localStorage.getItem('beacon-theme') === 'light');
+  }
+
+  function applyDensity() {
+    const density = state.preferences.density || (document.documentElement.classList.contains('light') ? 'comfortable' : 'compact');
+    document.body.classList.toggle('density-comfortable', density === 'comfortable');
+    document.body.classList.toggle('density-compact', density === 'compact');
+  }
 
   async function apiFetch() {
     const response = await fetch('/api/advanced/current', {cache: 'no-store'});
@@ -275,10 +325,27 @@
     const localGrid = document.createElement('div');
     localHeading.textContent = 'Local presentation preferences';
     localGrid.className = 'evidence-grid';
-    addEvidence(localGrid, 'Density', 'Theme default');
-    addEvidence(localGrid, 'Refresh interval', `${$('refresh-interval').value} seconds`);
-    addEvidence(localGrid, 'Range', '24 hours');
-    addEvidence(localGrid, 'Service filters', 'Not configured');
+    const densityLabel = document.createElement('label');
+    const densitySelect = document.createElement('select');
+    densityLabel.textContent = 'Density';
+    densitySelect.id = 'density-preference';
+    [['', 'Theme default'], ['comfortable', 'Comfortable'], ['compact', 'Compact']].forEach(([value, text]) => {
+      const option = document.createElement('option'); option.value = value; option.textContent = text; densitySelect.append(option);
+    });
+    densitySelect.value = state.preferences.density || '';
+    densitySelect.addEventListener('change', () => { state.preferences.density = densitySelect.value || null; applyDensity(); savePreferences(); });
+    densityLabel.append(densitySelect);
+    const rangeLabel = document.createElement('label');
+    const rangeSelect = document.createElement('select');
+    rangeLabel.textContent = 'Range';
+    rangeSelect.id = 'range-preference';
+    const rangeOption = document.createElement('option'); rangeOption.value = '24h'; rangeOption.textContent = '24 hours'; rangeSelect.append(rangeOption);
+    rangeSelect.value = state.preferences.range;
+    rangeSelect.addEventListener('change', () => { state.preferences.range = rangeSelect.value; savePreferences(); });
+    rangeLabel.append(rangeSelect);
+    localGrid.append(densityLabel, rangeLabel);
+    addEvidence(localGrid, 'Refresh interval', `${state.preferences.refreshSeconds} seconds`);
+    addEvidence(localGrid, 'Service filters', Object.keys(state.filters).length ? 'Configured locally' : 'Not configured');
     local.append(localHeading, localGrid);
     root.append(local);
     content.replaceChildren(heading, root);
@@ -290,6 +357,28 @@
     renderHost(snapshot.host || {});
     renderPipeline(snapshot.pipeline || {});
     renderSettings(snapshot.settings || {});
+  }
+
+  function updateRefreshEvidence() {
+    const lastSuccess = $('advanced-last-success');
+    const prior = state.lastSuccessLabel || 'No successful update yet';
+    lastSuccess.textContent = `${prior}${state.preferences.paused ? ' — Updates paused' : ''}`;
+    lastSuccess.title = state.lastSuccessLabel || 'No successful update yet';
+    $('pause-updates').textContent = state.preferences.paused ? 'Resume updates' : 'Pause updates';
+    $('refresh-interval').value = String(state.preferences.refreshSeconds);
+  }
+
+  function scheduleRefresh() {
+    if (state.timer !== null) { clearInterval(state.timer); state.timer = null; }
+    if (!state.preferences.paused) state.timer = setInterval(refreshCurrentDiagnosis, state.preferences.refreshSeconds * 1000);
+    updateRefreshEvidence();
+  }
+
+  function togglePause() {
+    state.preferences.paused = !state.preferences.paused;
+    savePreferences();
+    scheduleRefresh();
+    $('advanced-status').textContent = state.preferences.paused ? 'Updates paused' : 'Updates resumed';
   }
 
   function selectSection(section) {
@@ -316,8 +405,7 @@
       const snapshot = await apiFetch();
       state.snapshot = snapshot;
       state.lastSuccessLabel = displayTimestamp(snapshot.generated_ts);
-      $('advanced-last-success').textContent = state.lastSuccessLabel;
-      $('advanced-last-success').title = state.lastSuccessLabel;
+      updateRefreshEvidence();
       $('advanced-refresh-error').hidden = true;
       renderSnapshot(snapshot);
     } catch (_) {
@@ -325,7 +413,19 @@
     }
   }
 
+  applyTheme();
+  loadPreferences();
+  applyDensity();
+  savePreferences();
   document.querySelectorAll('#section-navigation button').forEach((button) => button.addEventListener('click', () => selectSection(button.dataset.section)));
   $('advanced-refresh').addEventListener('click', refreshCurrentDiagnosis);
+  $('pause-updates').addEventListener('click', togglePause);
+  $('refresh-interval').addEventListener('change', () => {
+    const choice = Number($('refresh-interval').value);
+    state.preferences.refreshSeconds = REFRESH_CHOICES.has(choice) ? choice : DEFAULT_PREFERENCES.refreshSeconds;
+    savePreferences();
+    scheduleRefresh();
+  });
+  scheduleRefresh();
   refreshCurrentDiagnosis();
 })();

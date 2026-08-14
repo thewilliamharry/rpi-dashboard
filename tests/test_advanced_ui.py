@@ -236,6 +236,65 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_refresh_pause_and_allowlisted_preferences_are_local_and_defensive(self):
+        payload = self._snapshot()
+        payload.update({'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': []})
+        fixture = {'calls': 0}
+        page = self.browser.new_page()
+        page.add_init_script("""
+            localStorage.setItem('beacon-theme', 'light');
+            localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify({
+              refreshSeconds: 5, paused: true, density: 'comfortable', range: '24h',
+              filters: {status: 'fresh'}, snapshot: {secret: 'must-not-restore'}, extra: 'ignored'
+            }));
+        """)
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                fixture['calls'] += 1
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            self.assertEqual(page.locator('#refresh-interval').input_value(), '5')
+            self.assertEqual(page.locator('#pause-updates').text_content(), 'Resume updates')
+            self.assertIn('Updates paused', page.locator('#advanced-last-success').text_content())
+            self.assertTrue(page.locator('body').evaluate('(node) => node.classList.contains("density-comfortable")'))
+            initial_calls = fixture['calls']
+            page.locator('#advanced-refresh').click()
+            page.wait_for_timeout(100)
+            self.assertEqual(fixture['calls'], initial_calls + 1)
+            stored = page.evaluate("JSON.parse(localStorage.getItem('beacon-advanced-preferences-v1'))")
+            self.assertEqual(set(stored), {'refreshSeconds', 'paused', 'density', 'range', 'filters'})
+            self.assertNotIn('snapshot', stored)
+        finally:
+            page.close()
+
+    def test_corrupt_preferences_use_safe_defaults(self):
+        payload = self._snapshot()
+        payload.update({'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': []})
+        page = self.browser.new_page()
+        page.add_init_script("localStorage.setItem('beacon-advanced-preferences-v1', '{not-json');")
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            self.assertEqual(page.locator('#refresh-interval').input_value(), '15')
+            self.assertEqual(page.locator('#pause-updates').text_content(), 'Pause updates')
+        finally:
+            page.close()
+
 
 if __name__ == '__main__':
     unittest.main()
