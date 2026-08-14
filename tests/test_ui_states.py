@@ -64,9 +64,10 @@ class UiStateTests(unittest.TestCase):
 
     def test_tls_badge_is_independent_from_availability_and_edit_is_explicit(self):
         self.assertIn("service.tls_unverified", self.js)
-        self.assertIn('TLS unverified', self.js)
+        self.assertIn("textContent: 'TLS'", self.js)
         self.assertIn('TLS certificate is not verified for this trusted local service.', self.js)
-        self.assertIn("textContent: 'Edit service'", self.js)
+        self.assertIn("textContent: 'Edit'", self.js)
+        self.assertIn("edit.setAttribute('aria-label', 'Edit service')", self.js)
 
     def test_both_themes_and_narrow_actions_keep_safety_content_readable(self):
         for selector in [
@@ -139,8 +140,11 @@ class UiStateBrowserTests(unittest.TestCase):
             fixture['services'] = [self._service(8100, tls=True)]
             page.reload(wait_until='networkidle')
             self.assertEqual(page.locator('.svc-card').count(), 1)
+            self.assertEqual(page.locator('.svc-tls-unverified').text_content(), 'TLS')
             self.assertEqual(page.locator('.svc-tls-unverified').get_attribute('title'), 'TLS certificate is not verified for this trusted local service.')
-            self.assertEqual(page.locator('.svc-edit').text_content(), 'Edit service')
+            self.assertEqual(page.locator('.svc-tls-unverified').get_attribute('aria-label'), 'TLS certificate is not verified for this trusted local service.')
+            self.assertEqual(page.locator('.svc-edit').text_content(), 'Edit')
+            self.assertEqual(page.locator('.svc-edit').get_attribute('aria-label'), 'Edit service')
             self.assertIn('ONLINE', page.locator('.svc-status-row').text_content())
             self.assertIn('Preview refresh queued', page.locator('.svc-preview-status').text_content())
 
