@@ -1,37 +1,25 @@
-import functools
-import http.server
 import pathlib
 import threading
 import unittest
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
+from werkzeug.serving import make_server
+
+from tests.helpers import cleanup_db, load_app
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 UI_CONSIDERATIONS = tuple(f'UI-{number:02d}' for number in range(1, 37))
 
 
-class _AdvancedFixtureHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(ROOT / 'dashboard'), **kwargs)
-
-    def do_GET(self):
-        if self.path.split('?', 1)[0] == '/advanced':
-            self.path = '/advanced.html'
-        return super().do_GET()
-
-    def log_message(self, format, *args):
-        return
-
-
 class AdvancedUiTests(unittest.TestCase):
-    """Fixture-routed browser tracer for the dependency-free advanced document."""
+    """Production-route browser coverage for the dependency-free advanced document."""
 
     @classmethod
     def setUpClass(cls):
-        handler = functools.partial(_AdvancedFixtureHandler)
-        cls.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        cls.appmod, cls.db_path = load_app({'METRIC_SAMPLE_SECONDS': '5'})
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.playwright = sync_playwright().start()
@@ -47,6 +35,7 @@ class AdvancedUiTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
 
     @staticmethod
     def _snapshot():
@@ -92,6 +81,115 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertIn('Beacon could not refresh current diagnosis.', page.locator('#advanced-refresh-error').text_content())
             self.assertIn('beacon-pi', page.locator('[data-testid="host-summary"]').text_content())
             self.assertEqual(page.locator('#advanced-last-success').text_content(), first_success)
+        finally:
+            page.close()
+
+    def test_connection_warning_retains_last_success_and_keeps_server_safety_independent(self):
+        healthy = self._snapshot()
+        healthy.update({
+            'safety': {'worker_stale': False, 'recovery_required': False},
+            'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': [],
+        })
+        unhealthy = self._snapshot()
+        unhealthy.update({
+            'safety': {'worker_stale': True, 'recovery_required': True},
+            'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': [],
+        })
+        fixture = {'payload': unhealthy, 'fail': False}
+        page = self.browser.new_page()
+
+        def route_api(route):
+            if urlparse(route.request.url).path != '/api/advanced/current':
+                route.fallback()
+                return
+            if fixture['fail']:
+                route.fulfill(status=503, json={'error': 'offline'})
+            else:
+                route.fulfill(status=200, json=fixture['payload'])
+
+        page.route('**/api/advanced/current', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
+            first_success = page.locator('#advanced-last-success').text_content()
+            self.assertTrue(page.locator('#worker-warning').is_visible())
+            self.assertTrue(page.locator('#recovery-warning').is_visible())
+            self.assertFalse(page.locator('#connection-banner').is_visible())
+
+            fixture['fail'] = True
+            page.locator('#advanced-refresh').click()
+            page.locator('#advanced-refresh-error').wait_for(state='visible', timeout=5_000)
+            self.assertTrue(page.locator('#connection-banner').is_visible())
+            self.assertTrue(page.locator('#worker-warning').is_visible())
+            self.assertTrue(page.locator('#recovery-warning').is_visible())
+            self.assertEqual(page.locator('#advanced-last-success').text_content(), first_success)
+            self.assertIn('beacon-pi', page.locator('[data-testid="host-summary"]').text_content())
+
+            fixture.update({'fail': False, 'payload': healthy})
+            page.locator('#advanced-refresh').click()
+            page.locator('#connection-banner').wait_for(state='hidden', timeout=5_000)
+            self.assertFalse(page.locator('#worker-warning').is_visible())
+            self.assertFalse(page.locator('#recovery-warning').is_visible())
+        finally:
+            page.close()
+
+    def test_safety_combinations_render_in_approved_order(self):
+        page = self.browser.new_page()
+        fixture = {'payload': self._snapshot()}
+
+        def route_api(route):
+            route.fulfill(status=200, json=fixture['payload'])
+
+        page.route('**/api/advanced/current', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
+            for connection, worker, recovery in (
+                (False, False, False), (False, False, True), (False, True, False), (False, True, True),
+                (True, False, False), (True, False, True), (True, True, False), (True, True, True),
+            ):
+                with self.subTest(connection=connection, worker=worker, recovery=recovery):
+                    fixture['payload'] = {
+                        **self._snapshot(),
+                        'safety': {'worker_stale': worker, 'recovery_required': recovery},
+                        'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': [],
+                    }
+                    if connection:
+                        page.unroute('**/api/advanced/current', route_api)
+                        page.route('**/api/advanced/current', lambda route: route.fulfill(status=503, json={'error': 'offline'}))
+                    page.locator('#advanced-refresh').click()
+                    expected = [connection, worker, recovery]
+                    actual = [
+                        page.locator('#connection-banner').is_visible(),
+                        page.locator('#worker-warning').is_visible(),
+                        page.locator('#recovery-warning').is_visible(),
+                    ]
+                    self.assertEqual(actual, expected)
+                    if connection:
+                        page.unroute('**/api/advanced/current')
+                        page.route('**/api/advanced/current', route_api)
+        finally:
+            page.close()
+
+    def test_production_routes_serve_the_advanced_document_bundle(self):
+        page = self.browser.new_page()
+        responses = []
+        page.on('response', lambda response: responses.append(response))
+        try:
+            response = page.goto(f'{self.base_url}/advanced', wait_until='networkidle')
+            self.assertEqual(response.status, 200)
+            by_path = {urlparse(item.url).path: item for item in responses}
+            for path, content_type in (
+                ('/advanced', 'text/html'),
+                ('/advanced.js', 'application/javascript'),
+                ('/advanced.css', 'text/css'),
+            ):
+                with self.subTest(path=path):
+                    asset = by_path[path]
+                    self.assertIn(content_type, asset.headers['content-type'])
+                    self.assertGreater(len(asset.body()), 0)
+                    self.assertEqual(asset.headers['x-frame-options'], 'DENY')
+                    self.assertIn("default-src 'self'", asset.headers['content-security-policy'])
         finally:
             page.close()
 

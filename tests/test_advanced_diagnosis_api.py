@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,6 +86,36 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         for sample_ts, cadence, expected in cases:
             with self.subTest(sample_ts=sample_ts, cadence=cadence):
                 self.assertEqual(freshness_state(now, sample_ts, cadence), expected)
+
+    def test_worker_safety_uses_the_immutable_heartbeat_cadence(self):
+        """J1 remains a five-second heartbeat even when host metrics are slower."""
+        appmod, db_path = load_app({'METRIC_SAMPLE_SECONDS': '37'})
+        client = appmod.app.test_client()
+        now = 1_700_000_100
+        try:
+            with appmod._db_lock:
+                conn = appmod.get_db()
+                conn.execute(
+                    'INSERT INTO runtime_state(key,value,updated_ts) VALUES(?,?,?) '
+                    'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts',
+                    ('worker_heartbeat', json.dumps({'ts': now}), now),
+                )
+                conn.commit()
+                conn.close()
+            for age, expected_state, expected_warning in (
+                (5, 'fresh', False),
+                (20, 'aging', False),
+                (21, 'stale', True),
+            ):
+                with self.subTest(age=age):
+                    appmod.time.time = lambda: now + age
+                    payload = client.get('/api/advanced/current').get_json()
+                    worker = payload['pipeline']['worker']
+                    self.assertEqual(worker['expected_cadence_seconds'], 5)
+                    self.assertEqual(worker['freshness'], {'state': expected_state, 'age_seconds': age})
+                    self.assertEqual(payload['safety']['worker_stale'], expected_warning)
+        finally:
+            cleanup_db(db_path)
 
     def test_direct_route_tracer_preserves_middleware_assets_and_get_only_api(self):
         asset_directory = Path(self.appmod.__file__).resolve().parent
