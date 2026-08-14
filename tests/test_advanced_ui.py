@@ -392,6 +392,48 @@ class AdvancedUiTests(unittest.TestCase):
         self.assertIn('@media (max-width: 959px)', css)
         self.assertNotIn('/api/service', js)
 
+    def test_theme_or_return_round_trip_preserves_theme_and_consumes_scroll_once(self):
+        payload = self._snapshot()
+        payload.update({'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': []})
+        page = self.browser.new_page(viewport={'width': 800, 'height': 400})
+        page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(self.base_url, wait_until='domcontentloaded')
+            page.locator('#advanced-diagnosis-link').wait_for(timeout=5_000)
+            page.evaluate('window.scrollTo(0, Math.min(120, document.documentElement.scrollHeight))')
+            page.locator('#advanced-diagnosis-link').click()
+            page.locator('#advanced-dashboard').wait_for(timeout=5_000)
+            self.assertTrue(page.locator('html').evaluate('(node) => node.classList.contains("light")'))
+            page.locator('#advanced-dashboard').click()
+            page.locator('#advanced-diagnosis-link').wait_for(timeout=5_000)
+            page.wait_for_timeout(100)
+            self.assertTrue(page.locator('html').evaluate('(node) => node.classList.contains("light")'))
+            self.assertIsNone(page.evaluate("sessionStorage.getItem('beacon-dashboard-scroll-position')"))
+        finally:
+            page.close()
+
+    def test_dashboard_navigation_source_contract_is_same_tab_and_tab_local(self):
+        html = (ROOT / 'dashboard/index.html').read_text(encoding='utf-8')
+        js = (ROOT / 'dashboard/app.js').read_text(encoding='utf-8')
+        advanced_html = (ROOT / 'dashboard/advanced.html').read_text(encoding='utf-8')
+        self.assertIn('id="advanced-diagnosis-link"', html)
+        self.assertIn('href="/advanced"', html)
+        self.assertIn('Advanced diagnosis', html)
+        self.assertIn('id="advanced-dashboard"', advanced_html)
+        self.assertIn('function captureDashboardScroll', js)
+        self.assertIn('function restoreDashboardScroll', js)
+        self.assertIn("sessionStorage", js)
+        self.assertIn("beacon-dashboard-scroll-position", js)
+        self.assertNotIn('beacon-dashboard-scroll-position', advanced_html)
+
 
 if __name__ == '__main__':
     unittest.main()
