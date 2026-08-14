@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+UI_CONSIDERATIONS = tuple(f'UI-{number:02d}' for number in range(1, 37))
 
 
 class _AdvancedFixtureHandler(http.server.SimpleHTTPRequestHandler):
@@ -433,6 +434,67 @@ class AdvancedUiTests(unittest.TestCase):
         self.assertIn("sessionStorage", js)
         self.assertIn("beacon-dashboard-scroll-position", js)
         self.assertNotIn('beacon-dashboard-scroll-position', advanced_html)
+
+    def test_ui_consideration_inventory_is_complete_and_unique(self):
+        self.assertEqual(len(UI_CONSIDERATIONS), 36)
+        self.assertEqual(len(set(UI_CONSIDERATIONS)), 36)
+        self.assertEqual(UI_CONSIDERATIONS, tuple(f'UI-{number:02d}' for number in range(1, 37)))
+
+    def test_breakpoint_boundary_and_accessibility_contract(self):
+        payload = self._snapshot()
+        payload.update({
+            'exceptions': [], 'pipeline': {}, 'settings': {},
+            'services': [{'port': 8080, 'name': 'Beacon service', 'availability': 'online', 'latency_ms': 12.25,
+                          'state_duration_seconds': 20, 'critical': False, 'pinned_order': 1, 'tags': ['core'],
+                          'effective_health_rule': '200-399', 'last_probe_ts': 1_700_000_000,
+                          'expected_cadence_seconds': 5, 'freshness': {'state': 'fresh', 'age_seconds': 5},
+                          'tls_unverified': True, 'last_error': None, 'collection_gaps': []}],
+        })
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        for width, expected_direction in ((960, 'column'), (959, 'row')):
+            page = self.browser.new_page(viewport={'width': width, 'height': 800})
+            page.route('**/api/**', route_api)
+            try:
+                page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                page.locator('[data-section="services"]').click()
+                page.locator('#services-table').wait_for(timeout=5_000)
+                self.assertEqual(page.locator('#section-navigation').evaluate('(node) => getComputedStyle(node).flexDirection'), expected_direction)
+                if width == 959:
+                    self.assertEqual(page.locator('.service-identity').evaluate('(node) => getComputedStyle(node).position'), 'sticky')
+                self.assertGreaterEqual(page.locator('#service-search').bounding_box()['height'], 44)
+                self.assertGreaterEqual(page.locator('.service-row').bounding_box()['height'], 44)
+            finally:
+                page.close()
+
+        for width, expected_columns in ((720, 3), (719, 1)):
+            page = self.browser.new_page(viewport={'width': width, 'height': 800})
+            page.route('**/api/**', route_api)
+            try:
+                page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                self.assertEqual(
+                    page.locator('.summary-grid').evaluate('(node) => getComputedStyle(node).gridTemplateColumns.split(" ").length'),
+                    expected_columns,
+                )
+            finally:
+                page.close()
+
+    def test_precision_and_accessible_service_source_contract(self):
+        html = (ROOT / 'dashboard/advanced.html').read_text(encoding='utf-8')
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        css = (ROOT / 'dashboard/advanced.css').read_text(encoding='utf-8')
+        self.assertIn('aria-sort', html)
+        self.assertIn('aria-expanded', js)
+        self.assertIn('position: sticky', css)
+        self.assertIn('@media (max-width: 719px)', css)
+        self.assertIn('state_duration_seconds', js)
+        self.assertIn('expected_cadence_seconds', js)
+        self.assertIn('TLS trust annotation', js)
 
 
 if __name__ == '__main__':
