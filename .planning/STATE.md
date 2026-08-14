@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 3
 current_phase_name: Advanced Current Diagnosis
 status: executing
-stopped_at: Completed 03-01-PLAN.md (operator checkpoint approved)
-last_updated: "2026-08-14T10:19:21.918Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-08-14T10:51:41.446Z"
 last_activity: 2026-08-14
 last_activity_desc: completed 03-01 current-host diagnosis tracer
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 39
-  completed_plans: 36
+  completed_plans: 37
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 3 — Advanced Current Diagnosis
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-08-14 — completed 03-01 current-host diagnosis tracer
 
-Progress: [█████████░] 92%
+Progress: [██████████] 95%
 
 ## Performance Metrics
 
@@ -91,6 +91,7 @@ Progress: [█████████░] 92%
 | Phase 02 P08 | 3 min | 2 tasks | 3 files |
 | Phase 02 P09 | 25min | 2 tasks | 3 files |
 | Phase 03 P01 | 3min | 1 tasks | 7 files |
+| Phase 03-advanced-current-diagnosis P02 | 16min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -168,6 +169,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Pending aggregation is disclosed separately from observed coverage, with shared raw-host job identity and durable metadata precedence.
 - [Phase ?]: Phase 03: Current-host freshness is classified server-side from timestamp and cadence; absent or invalid evidence remains unknown.
 - [Phase ?]: Phase 03: The advanced current snapshot is GET-only and effect-free, and refresh failures retain the last successful evidence.
+- [Phase ?]: Approved additive Migration 8 job-health evidence with exact-epoch worker authority fencing.
+- [Phase ?]: Advanced current diagnosis remains a fixed, parameterless GET-only one-read snapshot with separately typed pipeline evidence.
 
 ### Pending Todos
 
@@ -187,6 +190,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T10:18:52.183Z
-Stopped at: Completed 03-01-PLAN.md (operator checkpoint approved)
+Last session: 2026-08-14T10:51:41.434Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
