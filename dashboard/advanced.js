@@ -4,13 +4,15 @@
   const REFRESH_CHOICES = new Set([5, 15, 30, 60]);
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
-    preferences: {...DEFAULT_PREFERENCES}, filters: {},
+    preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
+    expandedPorts: new Set(),
   };
   const $ = (id) => document.getElementById(id);
 
   function validFilters(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-    return Object.fromEntries(Object.entries(value).filter(([, item]) => typeof item === 'string'));
+    const allowed = new Set(['query', 'status', 'criticality', 'freshness', 'tags']);
+    return Object.fromEntries(Object.entries(value).filter(([key, item]) => allowed.has(key) && typeof item === 'string'));
   }
 
   function loadPreferences() {
@@ -351,10 +353,225 @@
     content.replaceChildren(heading, root);
   }
 
+  function serviceAvailability(service) {
+    const value = String(service.availability || service.status || 'unknown').toLowerCase();
+    if (value === 'online' || value === 'up') return 'online';
+    if (value === 'offline' || value === 'down') return 'offline';
+    return 'unknown';
+  }
+
+  function serviceFreshness(service) {
+    const value = String((service.freshness || {}).state || 'unknown').toLowerCase();
+    return ['fresh', 'aging', 'stale', 'unknown'].includes(value) ? value : 'unknown';
+  }
+
+  function serviceDuration(service) {
+    const seconds = Number(service.state_duration_seconds);
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+  }
+
+  function formatDuration(seconds) {
+    if (!Number.isFinite(seconds)) return 'Unknown duration';
+    if (seconds < 60) return `${Math.round(seconds)} seconds`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes`;
+    return `${Math.floor(seconds / 3600)} hours`;
+  }
+
+  function serviceTags(service) {
+    return Array.isArray(service.tags) ? service.tags.filter((tag) => typeof tag === 'string') : [];
+  }
+
+  function operationalServiceCompare(left, right) {
+    const priority = (service) => {
+      const availability = serviceAvailability(service);
+      if (availability === 'offline' && service.critical) return 0;
+      if (availability === 'offline') return 1;
+      if (availability === 'unknown' || ['stale', 'unknown'].includes(serviceFreshness(service))) return 2;
+      return 3;
+    };
+    const leftKey = [priority(left), Number(left.pinned_order) || 0, Number(left.port) || 0];
+    const rightKey = [priority(right), Number(right.pinned_order) || 0, Number(right.port) || 0];
+    for (let index = 0; index < leftKey.length; index += 1) {
+      if (leftKey[index] !== rightKey[index]) return leftKey[index] - rightKey[index];
+    }
+    return 0;
+  }
+
+  function stableServiceSort(services) {
+    const sort = state.serviceSort;
+    const ordering = {
+      status: ['offline', 'unknown', 'online'],
+      freshness: ['stale', 'unknown', 'aging', 'fresh'],
+      criticality: ['critical', 'standard'],
+    };
+    return services.map((service, index) => ({service, index})).sort((left, right) => {
+      if (!sort) {
+        const operational = operationalServiceCompare(left.service, right.service);
+        return operational || left.index - right.index;
+      }
+      const value = (service) => {
+        if (sort.field === 'name') return `${service.name || ''} ${service.port || ''}`.toLowerCase();
+        if (sort.field === 'status') return ordering.status.indexOf(serviceAvailability(service));
+        if (sort.field === 'latency') {
+          const latency = Number(service.latency_ms);
+          return Number.isFinite(latency) ? latency : Number.POSITIVE_INFINITY;
+        }
+        if (sort.field === 'duration') return serviceDuration(service) ?? Number.POSITIVE_INFINITY;
+        if (sort.field === 'criticality') return ordering.criticality.indexOf(service.critical ? 'critical' : 'standard');
+        return ordering.freshness.indexOf(serviceFreshness(service));
+      };
+      const leftValue = value(left.service);
+      const rightValue = value(right.service);
+      let result = typeof leftValue === 'string' ? leftValue.localeCompare(rightValue) : leftValue - rightValue;
+      if (sort.direction === 'descending') result *= -1;
+      return result || left.index - right.index;
+    }).map((item) => item.service);
+  }
+
+  function applyServiceFilters(services = (state.snapshot || {}).services) {
+    const unique = new Map();
+    (Array.isArray(services) ? services : []).forEach((service) => {
+      const port = Number(service && service.port);
+      if (Number.isFinite(port) && !unique.has(port)) unique.set(port, service);
+    });
+    const filters = state.filters;
+    const query = (filters.query || '').trim().toLowerCase();
+    const filtered = [...unique.values()].filter((service) => {
+      const tags = serviceTags(service);
+      const searchable = `${service.name || ''} ${service.port || ''} ${tags.join(' ')}`.toLowerCase();
+      return (!query || searchable.includes(query))
+        && (!filters.status || serviceAvailability(service) === filters.status)
+        && (!filters.criticality || (filters.criticality === 'critical' ? Boolean(service.critical) : !service.critical))
+        && (!filters.freshness || serviceFreshness(service) === filters.freshness)
+        && (!filters.tags || tags.some((tag) => tag.toLowerCase() === filters.tags.toLowerCase()));
+    });
+    return {total: unique.size, services: stableServiceSort(filtered)};
+  }
+
+  function updateMatchingCount(matching, total) {
+    $('matching-service-count').textContent = `${matching} of ${total} services`;
+  }
+
+  function syncServiceFilterControls(services) {
+    const controls = {
+      query: $('service-search'), status: $('service-status-filter'), criticality: $('service-criticality-filter'),
+      freshness: $('service-freshness-filter'), tags: $('service-tag-filter'),
+    };
+    Object.entries(controls).forEach(([key, control]) => { control.value = state.filters[key] || ''; });
+    const tagControl = controls.tags;
+    const current = state.filters.tags || '';
+    const tags = [...new Set((Array.isArray(services) ? services : []).flatMap(serviceTags))].sort((left, right) => left.localeCompare(right));
+    tagControl.replaceChildren(Object.assign(document.createElement('option'), {value: '', textContent: 'Any tag'}));
+    tags.forEach((tag) => tagControl.append(Object.assign(document.createElement('option'), {value: tag, textContent: tag})));
+    if (current && !tags.includes(current)) tagControl.append(Object.assign(document.createElement('option'), {value: current, textContent: current}));
+    tagControl.value = current;
+  }
+
+  function setServiceSort(field) {
+    state.serviceSort = state.serviceSort && state.serviceSort.field === field
+      ? {field, direction: state.serviceSort.direction === 'ascending' ? 'descending' : 'ascending'}
+      : {field, direction: 'ascending'};
+    $('advanced-status').textContent = `Services sorted by ${field} ${state.serviceSort.direction}`;
+    renderServices();
+  }
+
+  function toggleServiceDetails(port) {
+    if (state.expandedPorts.has(port)) state.expandedPorts.delete(port);
+    else state.expandedPorts.add(port);
+    renderServices();
+  }
+
+  function collapseAllDetails() {
+    state.expandedPorts.clear();
+    renderServices();
+    $('advanced-status').textContent = 'All service details collapsed';
+  }
+
+  function resetOperationalOrder() {
+    state.serviceSort = null;
+    renderServices();
+    $('advanced-status').textContent = 'Operational service order restored';
+  }
+
+  function renderServices() {
+    const source = (state.snapshot || {}).services;
+    const body = $('services-table-body');
+    const empty = $('services-empty');
+    const partial = $('services-partial');
+    const {total, services} = applyServiceFilters(source);
+    syncServiceFilterControls(source);
+    updateMatchingCount(services.length, total);
+    partial.hidden = Array.isArray(source);
+    empty.hidden = services.length !== 0;
+    body.setAttribute('aria-label', services.length ? 'Current service diagnosis' : 'No matching service diagnosis');
+    const headers = {
+      name: $('service-sort-name'), status: $('service-sort-status'), latency: $('service-sort-latency'),
+      duration: $('service-sort-duration'), criticality: $('service-sort-criticality'), freshness: $('service-sort-freshness'),
+    };
+    Object.entries(headers).forEach(([field, button]) => {
+      const active = state.serviceSort && state.serviceSort.field === field;
+      const sort = active ? state.serviceSort.direction : 'none';
+      button.setAttribute('aria-sort', sort);
+      button.parentElement.setAttribute('aria-sort', sort);
+    });
+    $('reset-service-order').hidden = !state.serviceSort;
+    $('collapse-service-details').hidden = state.expandedPorts.size === 0;
+    const fragment = document.createDocumentFragment();
+    services.forEach((service) => {
+      const port = Number(service.port);
+      const detailId = `service-detail-${port}`;
+      const expanded = state.expandedPorts.has(port);
+      const row = document.createElement('tr');
+      row.className = 'service-row';
+      const identity = document.createElement('th');
+      identity.scope = 'row';
+      identity.className = 'service-identity';
+      const name = document.createElement('span');
+      name.className = 'service-name';
+      name.textContent = displayValue(service.name);
+      name.title = displayValue(service.name);
+      const portLabel = document.createElement('span');
+      portLabel.className = 'service-port';
+      portLabel.textContent = `:${displayValue(port)}`;
+      const details = document.createElement('button');
+      details.type = 'button'; details.className = 'service-details-toggle';
+      details.textContent = expanded ? 'Hide details' : 'Show details';
+      details.setAttribute('aria-expanded', String(expanded)); details.setAttribute('aria-controls', detailId);
+      details.addEventListener('click', () => toggleServiceDetails(port));
+      identity.append(name, portLabel, details);
+      const status = document.createElement('td');
+      status.textContent = `● ${serviceAvailability(service)}`;
+      const latency = document.createElement('td');
+      const latencyValue = Number(service.latency_ms);
+      latency.textContent = Number.isFinite(latencyValue) ? `${latencyValue} ms` : displayValue(service.failure_class || service.last_error, '');
+      const duration = document.createElement('td'); duration.textContent = formatDuration(serviceDuration(service));
+      const criticality = document.createElement('td'); criticality.textContent = service.critical ? 'Critical' : 'Standard';
+      const freshness = document.createElement('td'); freshness.textContent = `● ${serviceFreshness(service)} — ${relativeAge((service.freshness || {}).age_seconds)}`;
+      row.append(identity, status, latency, duration, criticality, freshness);
+      const detailRow = document.createElement('tr');
+      detailRow.id = detailId; detailRow.className = 'service-detail-row'; detailRow.hidden = !expanded;
+      const detail = document.createElement('td'); detail.colSpan = 6;
+      const evidence = document.createElement('div'); evidence.className = 'service-detail-evidence';
+      addEvidence(evidence, 'Complete service name', displayValue(service.name));
+      addEvidence(evidence, 'Failure class', displayValue(service.failure_class));
+      addEvidence(evidence, 'Tags', serviceTags(service).join(', ') || 'No tags');
+      addEvidence(evidence, 'Effective health rule', displayValue(service.effective_health_rule || service.health_rule));
+      addEvidence(evidence, 'Exact probe timestamp', displayTimestamp(service.last_probe_ts));
+      addEvidence(evidence, 'Selected cadence', displayValue(service.expected_cadence_seconds, ' seconds'));
+      addEvidence(evidence, 'TLS trust annotation', service.tls_unverified ? 'Trusted-LAN TLS; certificate verification disabled' : ((service.tls || {}).posture || 'TLS posture unknown'));
+      addEvidence(evidence, 'Last error', displayValue(service.last_error));
+      addEvidence(evidence, 'Freshness', formatFreshnessEvidence(service.freshness, service.expected_cadence_seconds));
+      addEvidence(evidence, 'Collection-gap evidence', JSON.stringify(service.collection_gaps || service.collection_gap || 'No gap evidence'));
+      detail.append(evidence); detailRow.append(detail); fragment.append(row, detailRow);
+    });
+    body.replaceChildren(fragment);
+  }
+
   function renderSnapshot(snapshot) {
     renderSafety(snapshot);
     renderOverview(snapshot);
     renderHost(snapshot.host || {});
+    renderServices();
     renderPipeline(snapshot.pipeline || {});
     renderSettings(snapshot.settings || {});
   }
@@ -404,6 +621,7 @@
     try {
       const snapshot = await apiFetch();
       state.snapshot = snapshot;
+      state.serviceSort = null;
       state.lastSuccessLabel = displayTimestamp(snapshot.generated_ts);
       updateRefreshEvidence();
       $('advanced-refresh-error').hidden = true;
@@ -426,6 +644,32 @@
     savePreferences();
     scheduleRefresh();
   });
+  const filterControls = {
+    query: $('service-search'), status: $('service-status-filter'), criticality: $('service-criticality-filter'),
+    freshness: $('service-freshness-filter'), tags: $('service-tag-filter'),
+  };
+  Object.entries(filterControls).forEach(([key, control]) => control.addEventListener(key === 'query' ? 'input' : 'change', () => {
+    state.filters = {...state.filters, [key]: control.value};
+    if (!control.value) delete state.filters[key];
+    savePreferences();
+    renderServices();
+  }));
+  $('clear-service-filters').addEventListener('click', () => {
+    state.filters = {};
+    state.serviceSort = null;
+    savePreferences();
+    renderServices();
+    $('advanced-status').textContent = 'All service filters cleared; operational order restored';
+  });
+  $('reset-service-order').addEventListener('click', resetOperationalOrder);
+  $('collapse-service-details').addEventListener('click', collapseAllDetails);
+  {
+    const sortButtons = {
+      name: $('service-sort-name'), status: $('service-sort-status'), latency: $('service-sort-latency'),
+      duration: $('service-sort-duration'), criticality: $('service-sort-criticality'), freshness: $('service-sort-freshness'),
+    };
+    Object.entries(sortButtons).forEach(([field, button]) => button.addEventListener('click', () => setServiceSort(field)));
+  }
   scheduleRefresh();
   refreshCurrentDiagnosis();
 })();

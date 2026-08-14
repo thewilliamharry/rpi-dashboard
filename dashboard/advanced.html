@@ -45,7 +45,35 @@
         <h2 id="host-heading" tabindex="-1">Host</h2>
         <div id="host-content" class="advanced-loading" aria-label="Loading host evidence"><p>Loading current diagnosis…</p><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
       </section>
-      <section id="services-section" aria-labelledby="services-heading" hidden><h2 id="services-heading" tabindex="-1">Services</h2><p>Service diagnosis is loading.</p></section>
+      <section id="services-section" aria-labelledby="services-heading" hidden>
+        <h2 id="services-heading" tabindex="-1">Services</h2>
+        <p id="services-partial" class="advanced-partial" hidden>Some current-state evidence is unavailable. Available values are shown; see freshness and pipeline details for timestamps and cadence.</p>
+        <form id="service-filters" class="service-filters" aria-label="Filter current service diagnosis">
+          <label>Search name, port, or tag <input id="service-search" type="search" autocomplete="off"></label>
+          <label>Status <select id="service-status-filter"><option value="">All statuses</option><option value="online">Online</option><option value="offline">Offline</option><option value="unknown">Unknown</option></select></label>
+          <label>Criticality <select id="service-criticality-filter"><option value="">All criticality</option><option value="critical">Critical</option><option value="standard">Standard</option></select></label>
+          <label>Freshness <select id="service-freshness-filter"><option value="">All freshness</option><option value="fresh">Fresh</option><option value="aging">Aging</option><option value="stale">Stale</option><option value="unknown">Unknown</option></select></label>
+          <label>Tag <select id="service-tag-filter"><option value="">Any tag</option></select></label>
+          <button type="button" id="clear-service-filters">Clear all filters</button>
+          <button type="button" id="reset-service-order" hidden>Reset operational order</button>
+          <button type="button" id="collapse-service-details" hidden>Collapse all details</button>
+        </form>
+        <p id="matching-service-count" aria-live="polite">0 of 0 services</p>
+        <div class="services-table-scroll" role="region" aria-label="Current service diagnosis table" tabindex="0">
+          <table id="services-table">
+            <thead><tr>
+              <th scope="col" aria-sort="none"><button type="button" id="service-sort-name">Name + port</button></th>
+              <th scope="col" aria-sort="none"><button type="button" id="service-sort-status">Status</button></th>
+              <th scope="col" aria-sort="none"><button type="button" id="service-sort-latency">Latency / failure</button></th>
+              <th scope="col" aria-sort="none"><button type="button" id="service-sort-duration">State duration</button></th>
+              <th scope="col" aria-sort="none"><button type="button" id="service-sort-criticality">Criticality</button></th>
+              <th scope="col" aria-sort="none"><button type="button" id="service-sort-freshness">Freshness</button></th>
+            </tr></thead>
+            <tbody id="services-table-body" aria-label="Loading current service diagnosis"><tr class="service-skeleton"><td><span class="sr-only">Loading service name and port</span></td><td><span class="sr-only">Loading status</span></td><td><span class="sr-only">Loading latency or failure</span></td><td><span class="sr-only">Loading state duration</span></td><td><span class="sr-only">Loading criticality</span></td><td><span class="sr-only">Loading freshness</span></td></tr><tr class="service-skeleton"><td><span class="sr-only">Loading service name and port</span></td><td><span class="sr-only">Loading status</span></td><td><span class="sr-only">Loading latency or failure</span></td><td><span class="sr-only">Loading state duration</span></td><td><span class="sr-only">Loading criticality</span></td><td><span class="sr-only">Loading freshness</span></td></tr></tbody>
+          </table>
+        </div>
+        <div id="services-empty" class="services-empty" hidden><p>No services match these filters</p><p>Clear filters to view every monitored service, or wait for the next discovery result.</p></div>
+      </section>
       <section id="pipeline-section" aria-labelledby="pipeline-heading" hidden><h2 id="pipeline-heading" tabindex="-1">Pipeline</h2><p>Loading current diagnosis…</p></section>
       <section id="settings-section" aria-labelledby="settings-heading" hidden><h2 id="settings-heading" tabindex="-1">Settings</h2><p>Loading current diagnosis…</p></section>
     </div>
