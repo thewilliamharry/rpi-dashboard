@@ -263,6 +263,12 @@ def dispatch_callback(services, callback_id):
     with services.admission.admit(callback.admission_category) as admitted:
         if not admitted:
             return None
+        # Compatibility/inventory tests may exercise dispatch with a skeletal
+        # collaborator before a real epoch exists.  Production WorkerServices
+        # always carries the immutable authority after acquisition; only that
+        # path may publish durable job health.
+        if not isinstance(getattr(services, 'authority', None), WorkerAuthority):
+            return _invoke_callback(services, callback)
         try:
             _write_job_health_transition(services, callback_id, 'started')
             result = _invoke_callback(services, callback)
