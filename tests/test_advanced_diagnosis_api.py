@@ -310,6 +310,120 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertNotIn('alert_webhook_url', payload['settings'])
         self.assertTrue(any(item['kind'] == 'critical_service_offline' for item in payload['exceptions']))
 
+    def test_service_cadence_uses_down_recheck_only_for_definitive_offline_state(self):
+        now = 1_700_000_000
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for port, online in ((8100, None), (8101, 1), (8102, 0)):
+                conn.execute(
+                    'INSERT INTO services(port,title,first_seen,last_seen,is_online,last_latency_ms,last_error,state_since) '
+                    'VALUES(?,?,?,?,?,?,?,?)',
+                    (port, f'Service {port}', now - 20, now, online, None, None, now - 10),
+                )
+                conn.execute(
+                    'INSERT INTO service_meta(port,display_name,url,critical,pinned_order,tags,healthy_statuses) '
+                    'VALUES(?,?,?,?,?,?,?)',
+                    (port, f'Service {port}', f'http://127.0.0.1:{port}', 0, port, '', '200-399'),
+                )
+                if online is not None:
+                    conn.execute(
+                        'INSERT INTO service_checks(ts,port,online,latency_ms,error_class) VALUES(?,?,?,?,?)',
+                        (now, port, online, None, None),
+                    )
+            conn.commit()
+            conn.close()
+        self.appmod.time.time = lambda: now
+
+        services = {service['port']: service for service in self.client.get('/api/advanced/current').get_json()['services']}
+
+        self.assertEqual(services[8100]['availability'], 'unknown')
+        self.assertEqual(services[8100]['expected_cadence_seconds'], 300)
+        self.assertEqual(services[8100]['freshness'], {'state': 'unknown', 'age_seconds': None})
+        self.assertEqual(services[8101]['expected_cadence_seconds'], 300)
+        self.assertEqual(services[8102]['expected_cadence_seconds'], 60)
+
+    def test_pinned_order_corruption_is_safe_and_get_only(self):
+        now = 1_700_000_000
+        fixtures = (
+            (8200, 0, 0),
+            (8201, 65535, 65535),
+            (8202, None, 8202),
+            (8203, 65536, 8203),
+            (8204, 'not-an-order', 8204),
+        )
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for port, pinned_order, _expected in fixtures:
+                conn.execute(
+                    'INSERT INTO services(port,title,first_seen,last_seen,is_online,last_latency_ms,last_error,state_since) '
+                    'VALUES(?,?,?,?,?,?,?,?)',
+                    (port, f'Service {port}', now - 20, now, 1, 1.0, None, now - 10),
+                )
+                conn.execute(
+                    'INSERT INTO service_meta(port,display_name,url,critical,pinned_order,tags,healthy_statuses) '
+                    'VALUES(?,?,?,?,?,?,?)',
+                    (port, f'Service {port}', f'http://127.0.0.1:{port}', 0, pinned_order, '', '200-399'),
+                )
+                conn.execute(
+                    'INSERT INTO service_checks(ts,port,online,latency_ms,error_class) VALUES(?,?,?,?,?)',
+                    (now, port, 1, 1.0, None),
+                )
+            before = [tuple(row) for row in conn.execute(
+                'SELECT port,pinned_order,typeof(pinned_order) FROM service_meta ORDER BY port'
+            )]
+            conn.commit()
+            conn.close()
+        self.appmod.time.time = lambda: now
+
+        response = self.client.get('/api/advanced/current')
+
+        self.assertEqual(response.status_code, 200)
+        services = {service['port']: service for service in response.get_json()['services']}
+        self.assertEqual(
+            {port: services[port]['pinned_order'] for port, _value, _expected in fixtures},
+            {port: expected for port, _value, expected in fixtures},
+        )
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            after = [tuple(row) for row in conn.execute(
+                'SELECT port,pinned_order,typeof(pinned_order) FROM service_meta ORDER BY port'
+            )]
+            conn.close()
+        self.assertEqual(after, before)
+        safe_pinned_order = self.appmod.beacon_diagnosis._safe_pinned_order
+        for value in (True, False, -1, 65536, '12', 'bad'):
+            with self.subTest(value=value):
+                self.assertEqual(safe_pinned_order(value, 8205), 8205)
+
+    def test_gap_truncation_uses_one_sentinel_beyond_the_response_cap(self):
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        for count in (0, 1, 48, 49):
+            with self.subTest(count=count):
+                with self.appmod._db_lock:
+                    conn = self.appmod.get_db()
+                    conn.execute('DELETE FROM telemetry_coverage')
+                    conn.executemany(
+                        'INSERT INTO telemetry_coverage(stream_kind,stream_key,start_ts,end_ts,reason,detail) '
+                        'VALUES(?,?,?,?,?,?)',
+                        [
+                            ('host', 'cpu', now - 1_000 - index, now - index, 'collection_gap', f'gap-{index}')
+                            for index in range(count)
+                        ],
+                    )
+                    conn.commit()
+                    conn.close()
+
+                gaps = self.client.get('/api/advanced/current').get_json()['pipeline']['gaps']
+
+                self.assertEqual(len(gaps['items']), min(count, 48))
+                self.assertEqual(gaps['count'], min(count, 48))
+                self.assertEqual(gaps['truncated'], count > 48)
+                self.assertEqual(
+                    [item['detail'] for item in gaps['items']],
+                    [f'gap-{index}' for index in range(min(count, 48))],
+                )
+
     def test_advanced_snapshot_rejects_query_arguments_before_reading_sqlite(self):
         response = self.client.get('/api/advanced/current?unexpected=1')
 
