@@ -47,7 +47,7 @@
 ### Experience and Themes
 
 - [ ] **UX-01**: Existing compact analytics previews remain on the main dashboard in both light and dark modes.
-- [ ] **UX-02**: The operator can move clearly between the main dashboard and advanced analytics without losing theme choice.
+- [x] **UX-02**: The operator can move clearly between the main dashboard and advanced analytics without losing theme choice.
 - [ ] **UX-03**: Advanced analytics exposes the same data, filters, settings, and investigations in both themes.
 - [ ] **UX-04**: Light mode presents analytics with calmer grouping and progressive disclosure, while dark mode may present denser simultaneous context.
 - [ ] **UX-05**: Advanced analytics remains usable at supported narrow and desktop viewport widths.
@@ -129,7 +129,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | HIS-05 | Phase 4 | Pending |
 | HIS-06 | Phase 4 | Pending |
 | UX-01 | Phase 5 | Pending |
-| UX-02 | Phase 3 | Pending |
+| UX-02 | Phase 3 | Complete |
 | UX-03 | Phase 5 | Pending |
 | UX-04 | Phase 5 | Pending |
 | UX-05 | Phase 5 | Pending |

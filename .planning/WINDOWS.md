@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 5
+open_count: 6
 waived_count: 0
 fixed_count: 3
-total_count: 8
-last_updated: 2026-08-10T15:25:37.905Z
+total_count: 9
+last_updated: 2026-08-14T11:25:44.416Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,7 @@ last_updated: 2026-08-10T15:25:37.905Z
 | 6 | 02 | deviation | dashboard/beacon/migrations.py |  | Added latency_sample_count migration to preserve exact cross-tier latency averages. | fixed |  | 2026-08-10T15:24:57.532Z | 2026-08-10T15:25:37.783Z |
 | 7 | 02 | deviation | dashboard/beacon/repositories.py |  | Corrected raw-host timestamp and service display-bucket query details. | fixed |  | 2026-08-10T15:24:57.593Z | 2026-08-10T15:25:37.844Z |
 | 8 | 02 | deviation | dashboard/beacon/support_floor.json |  | Advanced migration support-floor metadata for additive migration 6. | fixed |  | 2026-08-10T15:24:57.655Z | 2026-08-10T15:25:37.905Z |
+| 9 | 03 | unrun-verify | .planning/phases/03-advanced-current-diagnosis/03-04-SUMMARY.md |  | Raspberry Pi-class 15-minute refresh/load observation remains manual target-hardware validation | open |  | 2026-08-14T11:25:44.416Z |  |
 
 ````json
 [
@@ -121,6 +122,18 @@ last_updated: 2026-08-10T15:25:37.905Z
     "reason": "",
     "recorded_at": "2026-08-10T15:24:57.655Z",
     "resolved_at": "2026-08-10T15:25:37.905Z"
+  },
+  {
+    "id": 9,
+    "kind": "unrun-verify",
+    "phase": "03",
+    "file": ".planning/phases/03-advanced-current-diagnosis/03-04-SUMMARY.md",
+    "line": null,
+    "description": "Raspberry Pi-class 15-minute refresh/load observation remains manual target-hardware validation",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-14T11:25:44.416Z",
+    "resolved_at": null
   }
 ]
 ````
