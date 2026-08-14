@@ -72,6 +72,81 @@ def read_background_job_health(conn, *, limit=32):
     )]
 
 
+def read_current_services(conn, *, cutoff_ts):
+    """Read active service facts without thumbnails or uptime-history scans."""
+    tls_row = conn.execute(
+        'SELECT value FROM runtime_state WHERE key=?', ('service_tls_posture',),
+    ).fetchone()
+    try:
+        tls_by_port = json.loads(tls_row['value']) if tls_row else {}
+    except (TypeError, ValueError):
+        tls_by_port = {}
+    if not isinstance(tls_by_port, dict):
+        tls_by_port = {}
+    rows = conn.execute(
+        'SELECT s.port, s.title, s.is_online, s.last_latency_ms, s.last_error, s.state_since, '
+        's.first_seen, s.last_seen, m.display_name, m.critical, m.pinned_order, m.tags, '
+        'm.healthy_statuses, '
+        '(SELECT c.ts FROM service_checks c WHERE c.port=s.port ORDER BY c.ts DESC LIMIT 1) '
+        'AS last_probe_ts, '
+        '(SELECT c.online FROM service_checks c WHERE c.port=s.port ORDER BY c.ts DESC LIMIT 1) '
+        'AS last_probe_online, '
+        '(SELECT c.latency_ms FROM service_checks c WHERE c.port=s.port ORDER BY c.ts DESC LIMIT 1) '
+        'AS probe_latency_ms, '
+        '(SELECT c.error_class FROM service_checks c WHERE c.port=s.port ORDER BY c.ts DESC LIMIT 1) '
+        'AS probe_error_class '
+        'FROM services s LEFT JOIN service_meta m ON m.port=s.port '
+        'WHERE s.last_seen >= ? ORDER BY s.port ASC',
+        (int(cutoff_ts),),
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item['tls_unverified'] = bool(tls_by_port.get(str(item['port']), False))
+        result.append(item)
+    return result
+
+
+def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_limit=32):
+    """Read fixed, capped pipeline inputs; callers compose presentation meaning."""
+    runtime_rows = conn.execute(
+        'SELECT key, value, updated_ts FROM runtime_state '
+        'WHERE key IN (\'worker_owner\', \'worker_heartbeat\', \'telemetry_retention_state\') '
+        'ORDER BY key ASC'
+    ).fetchall()
+    runtime = {}
+    for row in runtime_rows:
+        try:
+            runtime[row['key']] = json.loads(row['value'])
+        except (TypeError, ValueError):
+            runtime[row['key']] = None
+    streams = [dict(row) for row in conn.execute(
+        'SELECT stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, '
+        'consecutive_misses, open_gap_start_ts FROM telemetry_streams '
+        'ORDER BY stream_kind ASC, stream_key ASC LIMIT ?',
+        (max(1, min(int(stream_limit), 128)),),
+    )]
+    gaps = [dict(row) for row in conn.execute(
+        'SELECT stream_kind, stream_key, start_ts, end_ts, reason, detail FROM telemetry_coverage '
+        'ORDER BY end_ts DESC, start_ts DESC LIMIT ?',
+        (max(1, min(int(gap_limit), 128)),),
+    )]
+    pending = [dict(row) for row in conn.execute(
+        'SELECT stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
+        'next_retry_ts, last_error_class, updated_ts FROM telemetry_rollup_jobs '
+        'WHERE state != \'succeeded\' ORDER BY updated_ts DESC, bucket_start ASC LIMIT ?',
+        (max(1, min(int(pending_limit), 128)),),
+    )]
+    return {
+        'runtime': runtime,
+        'streams': streams,
+        'gaps': gaps,
+        'pending': pending,
+        'jobs': read_background_job_health(conn),
+        'read_ts': int(now),
+    }
+
+
 def read_current_host(conn):
     """Return the one current host row without owning transaction lifetime."""
     row = conn.execute(

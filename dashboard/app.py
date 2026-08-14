@@ -2123,6 +2123,8 @@ def serve_advanced_js():
 
 @app.route('/api/advanced/current')
 def api_advanced_current():
+    if request.args:
+        return jsonify({'error': 'unexpected query parameters'}), 400
     payload = beacon_diagnosis.get_current_diagnosis(
         DB_PATH,
         SETTINGS,
