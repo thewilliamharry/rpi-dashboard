@@ -5,14 +5,17 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Advanced diagnosis | Beacon</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/advanced.css">
   <script src="/advanced.js" defer></script>
 </head>
-<body>
-  <header class="topbar">
+<body class="advanced-page">
+  <header class="topbar advanced-header" id="advanced-header">
     <a href="/" id="advanced-dashboard">Dashboard</a>
     <h1>Advanced diagnosis</h1>
-    <div>
+    <div class="advanced-header-controls" aria-label="Current diagnosis controls">
       <span id="advanced-last-success" title="No successful update yet">No successful update yet</span>
+      <label for="refresh-interval">Refresh interval <select id="refresh-interval" aria-label="Refresh interval"><option value="5">5 seconds</option><option value="15" selected>15 seconds</option><option value="30">30 seconds</option><option value="60">60 seconds</option></select></label>
+      <button type="button" id="pause-updates">Pause updates</button>
       <button type="button" id="advanced-refresh">Refresh now</button>
     </div>
   </header>
@@ -22,13 +25,30 @@
     <div class="worker-warning safety-warning" id="worker-warning" role="status" aria-live="polite" hidden>Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.</div>
     <div class="recovery-warning safety-warning" id="recovery-warning" role="alert" hidden>Upgrade recovery is required. Monitoring is paused. Follow the documented recovery command before restarting Beacon.</div>
   </div>
+  <div id="advanced-refresh-error" class="advanced-error" role="alert" hidden></div>
+  <p id="advanced-status" class="sr-only" aria-live="polite"></p>
 
-  <main id="advanced-content" aria-live="polite">
-    <section aria-labelledby="advanced-loading-heading">
-      <h2 id="advanced-loading-heading">Loading current diagnosis…</h2>
-      <p>Current host evidence will appear here when it is available.</p>
-    </section>
+  <main class="advanced-workspace" id="advanced-content">
+    <nav id="section-navigation" class="section-navigation" aria-label="Advanced diagnosis sections">
+      <button type="button" data-section="overview" aria-controls="overview-section" aria-selected="true">Overview</button>
+      <button type="button" data-section="host" aria-controls="host-section" aria-selected="false">Host</button>
+      <button type="button" data-section="services" aria-controls="services-section" aria-selected="false">Services</button>
+      <button type="button" data-section="pipeline" aria-controls="pipeline-section" aria-selected="false">Pipeline</button>
+      <button type="button" data-section="settings" aria-controls="settings-section" aria-selected="false">Settings</button>
+    </nav>
+    <div class="advanced-detail">
+      <section id="overview-section" aria-labelledby="overview-heading">
+        <h2 id="overview-heading" tabindex="-1">Overview</h2>
+        <div id="overview-content" class="advanced-loading" aria-label="Loading overview evidence"><p>Loading current diagnosis…</p><div class="skeleton-row"></div><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
+      </section>
+      <section id="host-section" aria-labelledby="host-heading" hidden>
+        <h2 id="host-heading" tabindex="-1">Host</h2>
+        <div id="host-content" class="advanced-loading" aria-label="Loading host evidence"><p>Loading current diagnosis…</p><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
+      </section>
+      <section id="services-section" aria-labelledby="services-heading" hidden><h2 id="services-heading" tabindex="-1">Services</h2><p>Service diagnosis is loading.</p></section>
+      <section id="pipeline-section" aria-labelledby="pipeline-heading" hidden><h2 id="pipeline-heading" tabindex="-1">Pipeline</h2><p>Loading current diagnosis…</p></section>
+      <section id="settings-section" aria-labelledby="settings-heading" hidden><h2 id="settings-heading" tabindex="-1">Settings</h2><p>Loading current diagnosis…</p></section>
+    </div>
   </main>
-  <div id="advanced-refresh-error" role="alert" hidden></div>
 </body>
 </html>

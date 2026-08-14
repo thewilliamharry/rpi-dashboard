@@ -1,0 +1,30 @@
+.advanced-page { min-width: 0; }
+.advanced-header { gap: 16px; flex-wrap: wrap; height: auto; min-height: 54px; padding: 8px 20px; box-sizing: border-box; }
+.advanced-header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.advanced-header a { color: var(--accent); min-height: 44px; display: inline-flex; align-items: center; }
+.advanced-header-controls { display: flex; flex: 1 1 300px; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; min-width: 0; }
+.advanced-header-controls > span { min-width: 0; overflow-wrap: anywhere; }
+.advanced-header-controls label, .advanced-header-controls button, .advanced-header-controls select { min-height: 44px; }
+.advanced-header-controls label { display: inline-flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.advanced-header-controls button, .advanced-header-controls select { color: var(--text); background: var(--bg3); border: 1px solid var(--border); padding: 0 12px; font: inherit; }
+.advanced-workspace { display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: 24px; max-width: 1440px; margin: 0 auto; padding: 24px; }
+.section-navigation { display: flex; flex-direction: column; gap: 4px; align-self: start; position: sticky; top: 16px; }
+.section-navigation button { min-height: 44px; color: var(--text); background: transparent; border: 1px solid transparent; padding: 8px 12px; text-align: left; font: inherit; overflow-wrap: anywhere; }
+.section-navigation button[aria-selected="true"] { color: var(--accent); background: var(--bg3); border-color: var(--border); }
+.advanced-detail { min-width: 0; }
+.advanced-detail > section { min-width: 0; }
+.advanced-detail h2 { margin: 0 0 20px; font-size: 18px; font-weight: 600; }
+.advanced-detail h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.advanced-loading, .evidence-grid, .summary-grid { display: grid; gap: 12px; }
+.skeleton-row { min-height: 42px; background: linear-gradient(90deg, var(--bg3), var(--border2), var(--bg3)); border: 1px solid var(--border); }
+.summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 20px; }
+.diagnosis-card, .evidence-row { min-width: 0; border: 1px solid var(--border); background: var(--bg3); padding: 14px; overflow-wrap: anywhere; }
+.diagnosis-card p, .diagnosis-card a { overflow-wrap: anywhere; }
+.diagnosis-card a { color: var(--accent); }
+.evidence-row { display: grid; grid-template-columns: minmax(120px, 0.4fr) minmax(0, 1fr); gap: 12px; }
+.evidence-row span { overflow-wrap: anywhere; user-select: text; }
+.advanced-error, .advanced-partial { margin: 12px 24px; padding: 12px; border: 1px solid var(--accent2); color: var(--accent2); overflow-wrap: anywhere; }
+.advanced-partial { margin: 16px 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (max-width: 959px) { .advanced-workspace { grid-template-columns: minmax(0, 1fr); padding: 16px; } .section-navigation { position: static; flex-direction: row; overflow-x: auto; scrollbar-width: thin; } .section-navigation button { flex: 0 0 auto; } }
+@media (max-width: 720px) { .advanced-header { padding: 8px 12px; } .advanced-header h1 { flex: 1 1 160px; } .advanced-header-controls { flex-basis: 100%; justify-content: flex-start; } .advanced-header-controls > span { flex-basis: 100%; } .summary-grid { grid-template-columns: minmax(0, 1fr); } .evidence-row { grid-template-columns: minmax(0, 1fr); gap: 4px; } .advanced-error { margin: 12px; } }

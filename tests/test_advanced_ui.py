@@ -109,6 +109,79 @@ class AdvancedUiTests(unittest.TestCase):
         for forbidden in ('POST', 'PUT', 'PATCH', 'DELETE', 'thumbnail', 'history', 'http://', 'https://', 'worker_', 'run_discovery'):
             self.assertNotIn(forbidden, js)
 
+    def test_workspace_sections_overview_and_host_states(self):
+        payload = self._snapshot()
+        payload.update({
+            'safety': {'connection': False, 'worker_stale': False, 'recovery_required': False},
+            'exceptions': [],
+            'services': [],
+            'pipeline': {},
+            'settings': {},
+        })
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            self.assertEqual(
+                [link.text_content() for link in page.locator('#section-navigation button').all()],
+                ['Overview', 'Host', 'Services', 'Pipeline', 'Settings'],
+            )
+            self.assertIn('No active exceptions', page.locator('#overview-section').text_content())
+            self.assertIn(
+                'Host, services, and collection pipeline are reporting normally.',
+                page.locator('#overview-section').text_content(),
+            )
+            page.locator('[data-section="host"]').click()
+            self.assertEqual(page.locator('#host-heading').evaluate('(node) => document.activeElement === node'), True)
+            host_text = page.locator('#host-section').text_content()
+            for label in ('beacon-pi', 'CPU', 'Memory', 'Disk', 'Temperature', 'Expected cadence', 'fresh'):
+                self.assertIn(label, host_text)
+        finally:
+            page.close()
+
+    def test_workspace_loading_and_partial_overview_use_truthful_evidence(self):
+        payload = self._snapshot()
+        payload.update({
+            'exceptions': [
+                {'kind': 'service', 'label': 'Critical web service down', 'section': 'services', 'priority': 1},
+                {'kind': 'stream', 'label': 'very-long-stream-' + ('evidence-' * 18), 'section': 'pipeline', 'priority': 2},
+            ],
+            'services': None,
+            'pipeline': None,
+            'settings': {},
+        })
+        page = self.browser.new_page(viewport={'width': 360, 'height': 800})
+        seen_loading = {'value': False}
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                seen_loading['value'] = True
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            self.assertTrue(seen_loading['value'])
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('2 active exceptions', overview)
+            self.assertIn('Critical web service down', overview)
+            self.assertIn('Unknown', overview)
+            self.assertIn('Some current-state evidence is unavailable.', overview)
+            self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 360)
+        finally:
+            page.close()
+
 
 if __name__ == '__main__':
     unittest.main()
