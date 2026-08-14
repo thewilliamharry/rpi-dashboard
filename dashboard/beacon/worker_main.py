@@ -14,6 +14,8 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from .config import load_settings
 from . import queues
+from . import repositories
+from .db import write_transaction
 from .worker_authority import WorkerAuthority
 
 
@@ -230,6 +232,29 @@ def _invoke_callback(services, callback):
     raise ValueError(f'callback {callback.identifier} cannot be dispatched')
 
 
+def _job_error_class(error):
+    """Keep durable failure evidence free of messages and opaque authority data."""
+    return type(error).__name__[:96] or 'CallbackFailed'
+
+
+def _write_job_health_transition(services, callback_id, transition, *, error_class=None):
+    """Publish one outcome only while the exact worker epoch still owns SQLite."""
+    now = int(services.clock())
+    with write_transaction(services.settings.db_path) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        queues.assert_current_worker_authority(conn, services.authority, now)
+        if transition == 'started':
+            repositories.record_background_job_started(conn, callback_id, now=now)
+        elif transition == 'succeeded':
+            repositories.record_background_job_succeeded(conn, callback_id, now=now)
+        elif transition == 'failed':
+            repositories.record_background_job_failed(
+                conn, callback_id, now=now, error_class=error_class,
+            )
+        else:
+            raise ValueError(f'unknown background job transition: {transition}')
+
+
 def dispatch_callback(services, callback_id):
     """Admit one real callback and revoke all work on durable lease loss."""
     callback = _CALLBACKS_BY_ID[callback_id]
@@ -239,12 +264,31 @@ def dispatch_callback(services, callback_id):
         if not admitted:
             return None
         try:
-            return _invoke_callback(services, callback)
+            _write_job_health_transition(services, callback_id, 'started')
+            result = _invoke_callback(services, callback)
+            if result is False:
+                _write_job_health_transition(
+                    services, callback_id, 'failed', error_class='CallbackReturnedFalse',
+                )
+                return False
+            _write_job_health_transition(services, callback_id, 'succeeded')
+            return result
         except queues.LeaseLost:
             log.error('Beacon worker lease lost; stopping stale scheduler')
             services.admission.close_admission()
             stop_worker()
             return False
+        except Exception as exc:
+            try:
+                _write_job_health_transition(
+                    services, callback_id, 'failed', error_class=_job_error_class(exc),
+                )
+            except queues.LeaseLost:
+                log.error('Beacon worker lease lost while recording callback failure')
+                services.admission.close_admission()
+                stop_worker()
+                return False
+            raise
 
 
 # Compatibility exports retain their former call shapes, but all post-acquisition

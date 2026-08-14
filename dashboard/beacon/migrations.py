@@ -476,6 +476,34 @@ def _migration_7_canonical_host_streams(conn):
     )
 
 
+def _migration_8_background_job_health(conn):
+    """Add durable, bounded worker callback outcome evidence.
+
+    The migration is intentionally additive: existing telemetry and service
+    evidence remains untouched, while the primary key preserves one current
+    row for each immutable worker callback identifier.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS background_job_health ("
+        "job_id TEXT PRIMARY KEY, "
+        "last_started_ts INTEGER, "
+        "last_finished_ts INTEGER, "
+        "last_success_ts INTEGER, "
+        "state TEXT NOT NULL CHECK (state IN ('running', 'succeeded', 'failed')), "
+        "error_class TEXT, "
+        "updated_ts INTEGER NOT NULL"
+        ")"
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_background_job_health_state_updated '
+        'ON background_job_health(state, updated_ts DESC)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_background_job_health_updated '
+        'ON background_job_health(updated_ts DESC)'
+    )
+
+
 MIGRATIONS = (
     Migration(1, 'baseline_schema', True, _migration_1_baseline),
     Migration(2, 'service_diagnostics', True, _migration_2_service_diagnostics),
@@ -484,6 +512,7 @@ MIGRATIONS = (
     Migration(5, 'bounded_telemetry', True, _migration_5_bounded_telemetry),
     Migration(6, 'rollup_latency_counts', True, _migration_6_rollup_latency_counts),
     Migration(7, 'canonical_host_streams', True, _migration_7_canonical_host_streams),
+    Migration(8, 'background_job_health', True, _migration_8_background_job_health),
 )
 
 

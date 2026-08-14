@@ -6,9 +6,70 @@ not own Flask request state, network clients, browsers, or connection lifetime.
 
 import json
 import time
+import re
 
 from .queues import enqueue_preview_in_transaction
 from .telemetry import SourceSegment
+
+
+_JOB_ERROR_CLASS_MAX_LENGTH = 96
+
+
+def _safe_job_error_class(error_class):
+    """Return only a bounded exception-class-shaped diagnostic token."""
+    value = str(error_class or '').split(':', 1)[0]
+    value = re.sub(r'[^A-Za-z0-9_.]', '', value)[:_JOB_ERROR_CLASS_MAX_LENGTH]
+    return value or 'CallbackFailed'
+
+
+def record_background_job_started(conn, job_id, *, now):
+    """Record an admitted callback start inside the caller's transaction."""
+    conn.execute(
+        'INSERT INTO background_job_health('
+        'job_id, last_started_ts, last_finished_ts, last_success_ts, state, error_class, updated_ts'
+        ') VALUES(?,?,NULL,NULL,\'running\',NULL,?) '
+        'ON CONFLICT(job_id) DO UPDATE SET '
+        'last_started_ts=excluded.last_started_ts, state=excluded.state, '
+        'error_class=NULL, updated_ts=excluded.updated_ts',
+        (str(job_id), int(now), int(now)),
+    )
+
+
+def record_background_job_succeeded(conn, job_id, *, now):
+    """Record success only after a callback returned a non-false outcome."""
+    conn.execute(
+        'INSERT INTO background_job_health('
+        'job_id, last_started_ts, last_finished_ts, last_success_ts, state, error_class, updated_ts'
+        ') VALUES(?,NULL,?,?,\'succeeded\',NULL,?) '
+        'ON CONFLICT(job_id) DO UPDATE SET '
+        'last_finished_ts=excluded.last_finished_ts, last_success_ts=excluded.last_success_ts, '
+        'state=excluded.state, error_class=NULL, updated_ts=excluded.updated_ts',
+        (str(job_id), int(now), int(now), int(now)),
+    )
+
+
+def record_background_job_failed(conn, job_id, *, now, error_class):
+    """Record a failed outcome without replacing the last known success."""
+    safe_error_class = _safe_job_error_class(error_class)
+    conn.execute(
+        'INSERT INTO background_job_health('
+        'job_id, last_started_ts, last_finished_ts, last_success_ts, state, error_class, updated_ts'
+        ') VALUES(?,NULL,?,NULL,\'failed\',?,?) '
+        'ON CONFLICT(job_id) DO UPDATE SET '
+        'last_finished_ts=excluded.last_finished_ts, state=excluded.state, '
+        'error_class=excluded.error_class, updated_ts=excluded.updated_ts',
+        (str(job_id), int(now), safe_error_class, int(now)),
+    )
+
+
+def read_background_job_health(conn, *, limit=32):
+    """Return a deterministic, bounded projection of durable job outcomes."""
+    return [dict(row) for row in conn.execute(
+        'SELECT job_id, last_started_ts, last_finished_ts, last_success_ts, '
+        'state, error_class, updated_ts FROM background_job_health '
+        'ORDER BY job_id ASC LIMIT ?',
+        (max(1, min(int(limit), 128)),),
+    )]
 
 
 def read_current_host(conn):
