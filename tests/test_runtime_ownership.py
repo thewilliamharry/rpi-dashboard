@@ -534,6 +534,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
             allow_preview_exit.wait(timeout=2)
             calls.append(('preview_exit', None))
 
+        lease = queues.acquire_worker_lease(self.db_path, 'worker-a', lease_seconds=30)
         services = worker_main.WorkerServices(
             settings=SimpleNamespace(db_path=self.db_path),
             prepare_database=lambda _settings: None,
@@ -551,7 +552,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
             acquire_worker_lease=lambda *_args: None,
             renew_worker_lease=renew,
             release_worker_lease=lambda *_args: calls.append(('release', None)),
-            authority=WorkerAuthority(self.db_path, 'worker-a', 'epoch-a'),
+            authority=WorkerAuthority.from_lease(lease, self.db_path),
             admission=admission,
         )
 
