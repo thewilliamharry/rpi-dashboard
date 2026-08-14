@@ -105,6 +105,24 @@ class ModuleBoundaryTests(unittest.TestCase):
         self.assertIn('beacon/', dockerfile)
         self.assertIn('"app:app"', dockerfile)
 
+    def test_production_image_manifest_includes_the_advanced_document_bundle(self):
+        """Keep every Flask-served Advanced asset in the production image."""
+        dockerfile = Path('dashboard/Dockerfile').read_text(encoding='utf-8')
+        copied_assets = set()
+        for line in dockerfile.splitlines():
+            if not line.startswith('COPY '):
+                continue
+            source_and_destination = line.split()
+            copied_assets.update(
+                item for item in source_and_destination[1:-1]
+                if not item.startswith('--')
+            )
+
+        self.assertTrue(
+            {'advanced.html', 'advanced.js', 'advanced.css'} <= copied_assets,
+            'the production image must include the complete Advanced document bundle',
+        )
+
     def test_sqlite_connection_entrypoints_use_the_managed_database_seam(self):
         app_source = Path('dashboard/app.py').read_text(encoding='utf-8')
         queue_source = Path('dashboard/beacon/queues.py').read_text(encoding='utf-8')

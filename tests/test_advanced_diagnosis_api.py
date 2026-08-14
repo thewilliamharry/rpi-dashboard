@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from dashboard.beacon import migrations, queues, repositories, worker_main
@@ -86,15 +87,17 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 self.assertEqual(freshness_state(now, sample_ts, cadence), expected)
 
     def test_direct_route_tracer_preserves_middleware_assets_and_get_only_api(self):
-        for path, mimetype in [
-            ('/advanced', 'text/html'),
-            ('/advanced.js', 'application/javascript'),
-            ('/advanced.css', 'text/css'),
+        asset_directory = Path(self.appmod.__file__).resolve().parent
+        for path, mimetype, filename in [
+            ('/advanced', 'text/html', 'advanced.html'),
+            ('/advanced.js', 'application/javascript', 'advanced.js'),
+            ('/advanced.css', 'text/css', 'advanced.css'),
         ]:
             with self.subTest(path=path):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(mimetype, response.content_type)
+                self.assertEqual(response.data, (asset_directory / filename).read_bytes())
                 self.assertEqual(response.headers['X-Frame-Options'], 'DENY')
                 self.assertIn("default-src 'self'", response.headers['Content-Security-Policy'])
 

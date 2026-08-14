@@ -18,7 +18,7 @@ RUN groupadd --gid 10001 beacon && \
     useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin beacon && \
     mkdir -p /data /tmp && chown -R beacon:beacon /data /app
 
-COPY --chown=beacon:beacon app.py worker.py runtime_smoke.py index.html app.js style.css ./
+COPY --chown=beacon:beacon app.py worker.py runtime_smoke.py index.html app.js style.css advanced.html advanced.js advanced.css ./
 COPY --chown=beacon:beacon beacon/ ./beacon/
 
 USER 10001:10001

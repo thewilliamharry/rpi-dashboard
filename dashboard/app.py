@@ -2105,10 +2105,7 @@ def serve_css():
 
 @app.route('/advanced.css')
 def serve_advanced_css():
-    """Reserve the stable advanced stylesheet URL until its later visual layer."""
-    response = make_response('', 200)
-    response.mimetype = 'text/css'
-    return response
+    return send_file('advanced.css', mimetype='text/css')
 
 
 @app.route("/app.js")
