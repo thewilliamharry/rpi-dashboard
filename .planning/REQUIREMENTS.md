@@ -26,8 +26,8 @@
 
 ### Advanced Diagnosis
 
-- [ ] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
-- [ ] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
+- [x] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
+- [x] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
 - [ ] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
 - [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
 - [ ] **DIA-05**: The operator can select a validated custom range within retained history.
@@ -114,8 +114,8 @@ Every v1 requirement maps to exactly one roadmap phase.
 | TEL-04 | Phase 2 | Complete |
 | TEL-05 | Phase 2 | Complete |
 | TEL-06 | Phase 3 | Pending |
-| DIA-01 | Phase 3 | Pending |
-| DIA-02 | Phase 3 | Pending |
+| DIA-01 | Phase 3 | Complete |
+| DIA-02 | Phase 3 | Complete |
 | DIA-03 | Phase 3 | Pending |
 | DIA-04 | Phase 4 | Pending |
 | DIA-05 | Phase 4 | Pending |
