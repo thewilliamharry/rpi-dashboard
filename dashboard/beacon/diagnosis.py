@@ -107,6 +107,13 @@ def _tags(value):
     return [tag.strip() for tag in value.split(',') if tag.strip()]
 
 
+def _safe_pinned_order(value, fallback):
+    """Project only validated durable ordering evidence into the read model."""
+    if type(value) is int and 0 <= value <= 65535:
+        return value
+    return fallback
+
+
 def compose_service_diagnosis(rows, *, now):
     """Project current service evidence without conflating TLS or freshness with availability."""
     services = []
@@ -116,7 +123,7 @@ def compose_service_diagnosis(rows, *, now):
             online = row.get('is_online')
         availability = 'online' if online == 1 else 'offline' if online == 0 else 'unknown'
         probe_ts = row.get('last_probe_ts')
-        cadence = 300 if availability == 'online' else 60
+        cadence = 60 if availability == 'offline' else 300
         service = {
             'port': row['port'],
             'name': row.get('display_name') or row.get('title') or f"Port {row['port']}",
@@ -133,7 +140,7 @@ def compose_service_diagnosis(rows, *, now):
             ),
             'critical': bool(row.get('critical')),
             'tags': _tags(row.get('tags')),
-            'pinned_order': int(row.get('pinned_order') or 0),
+            'pinned_order': _safe_pinned_order(row.get('pinned_order'), row['port']),
             'effective_health_rule': row.get('healthy_statuses') or '200-399',
             'last_probe_ts': probe_ts,
             'expected_cadence_seconds': cadence,
@@ -243,7 +250,11 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
             'lease_until': _runtime_timestamp(evidence['runtime'].get('worker_owner'), 'lease_until'),
         },
         'streams': stream_records,
-        'gaps': {'items': gaps, 'count': len(gaps), 'truncated': len(gaps) >= 48},
+        'gaps': {
+            'items': gaps,
+            'count': len(gaps),
+            'truncated': bool(evidence.get('gaps_truncated', False)),
+        },
         'aggregation_pending': {
             'items': evidence['pending'], 'count': len(evidence['pending']),
             'truncated': len(evidence['pending']) >= 32,

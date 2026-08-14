@@ -109,6 +109,7 @@ def read_current_services(conn, *, cutoff_ts):
 
 def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_limit=32):
     """Read fixed, capped pipeline inputs; callers compose presentation meaning."""
+    normalized_gap_limit = max(1, min(int(gap_limit), 128))
     runtime_rows = conn.execute(
         'SELECT key, value, updated_ts FROM runtime_state '
         'WHERE key IN (\'worker_owner\', \'worker_heartbeat\', \'telemetry_retention_state\') '
@@ -126,11 +127,13 @@ def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_
         'ORDER BY stream_kind ASC, stream_key ASC LIMIT ?',
         (max(1, min(int(stream_limit), 128)),),
     )]
-    gaps = [dict(row) for row in conn.execute(
+    gap_rows = [dict(row) for row in conn.execute(
         'SELECT stream_kind, stream_key, start_ts, end_ts, reason, detail FROM telemetry_coverage '
         'ORDER BY end_ts DESC, start_ts DESC LIMIT ?',
-        (max(1, min(int(gap_limit), 128)),),
+        (normalized_gap_limit + 1,),
     )]
+    gaps_truncated = len(gap_rows) > normalized_gap_limit
+    gaps = gap_rows[:normalized_gap_limit]
     pending = [dict(row) for row in conn.execute(
         'SELECT stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
         'next_retry_ts, last_error_class, updated_ts FROM telemetry_rollup_jobs '
@@ -141,6 +144,7 @@ def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_
         'runtime': runtime,
         'streams': streams,
         'gaps': gaps,
+        'gaps_truncated': gaps_truncated,
         'pending': pending,
         'jobs': read_background_job_health(conn),
         'read_ts': int(now),
