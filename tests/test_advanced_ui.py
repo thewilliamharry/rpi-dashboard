@@ -295,6 +295,103 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_services_filters_sort_and_multi_disclosure_contract(self):
+        payload = self._snapshot()
+        payload.update({
+            'exceptions': [],
+            'pipeline': {},
+            'settings': {},
+            'services': [
+                {
+                    'port': 443,
+                    'name': 'Critical gateway with an intentionally long diagnostic name',
+                    'status': 'down',
+                    'failure_class': 'connection refused',
+                    'latency_ms': None,
+                    'state_since_ts': 1_699_999_900,
+                    'critical': True,
+                    'pinned_order': 2,
+                    'tags': ['edge', 'critical'],
+                    'health_rule': '200-399',
+                    'last_probe_ts': 1_700_000_000,
+                    'expected_cadence_seconds': 5,
+                    'freshness': {'state': 'fresh', 'age_seconds': 5},
+                    'tls': {'posture': 'trusted LAN; certificate verification disabled'},
+                    'last_error': 'connection refused',
+                    'collection_gap': {'state': 'none'},
+                },
+                {
+                    'port': 80,
+                    'name': 'Healthy web',
+                    'status': 'up',
+                    'latency_ms': 12.5,
+                    'state_since_ts': 1_699_999_950,
+                    'critical': False,
+                    'pinned_order': 1,
+                    'tags': ['web'],
+                    'health_rule': '200-399',
+                    'last_probe_ts': 1_700_000_000,
+                    'expected_cadence_seconds': 5,
+                    'freshness': {'state': 'fresh', 'age_seconds': 5},
+                    'tls': {'posture': 'not applicable'},
+                    'last_error': None,
+                    'collection_gap': {'state': 'none'},
+                },
+            ],
+        })
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="services"]').click()
+            page.locator('#services-table').wait_for(timeout=5_000)
+            self.assertEqual(page.locator('#matching-service-count').text_content(), '2 of 2 services')
+            self.assertEqual(page.locator('#services-table tbody > tr.service-row').count(), 2)
+            self.assertIn('443', page.locator('#services-table tbody > tr.service-row').first.text_content())
+            page.locator('#service-search').fill('web')
+            self.assertEqual(page.locator('#matching-service-count').text_content(), '1 of 2 services')
+            self.assertEqual(page.locator('#services-table tbody > tr.service-row').count(), 1)
+            page.locator('#clear-service-filters').click()
+            details = page.locator('.service-details-toggle')
+            details.nth(0).click()
+            details.nth(1).click()
+            self.assertEqual(page.locator('.service-details-toggle[aria-expanded="true"]').count(), 2)
+            self.assertTrue(page.locator('#collapse-service-details').is_visible())
+            page.locator('#collapse-service-details').click()
+            self.assertEqual(page.locator('.service-details-toggle[aria-expanded="true"]').count(), 0)
+            page.locator('#service-sort-latency').press('Enter')
+            self.assertEqual(page.locator('#service-sort-latency').get_attribute('aria-sort'), 'ascending')
+        finally:
+            page.close()
+
+    def test_services_source_contract_uses_a_real_table_and_local_only_controls(self):
+        html = (ROOT / 'dashboard/advanced.html').read_text(encoding='utf-8')
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        css = (ROOT / 'dashboard/advanced.css').read_text(encoding='utf-8')
+        for hook in (
+            'id="service-search"', 'id="service-status-filter"',
+            'id="service-criticality-filter"', 'id="service-freshness-filter"',
+            'id="service-tag-filter"', 'id="services-table"',
+            'id="matching-service-count"', 'id="clear-service-filters"',
+        ):
+            self.assertIn(hook, html)
+        for function_name in (
+            'applyServiceFilters', 'operationalServiceCompare', 'stableServiceSort',
+            'renderServices', 'toggleServiceDetails', 'collapseAllDetails',
+            'resetOperationalOrder', 'updateMatchingCount',
+        ):
+            self.assertIn(f'function {function_name}', js)
+        self.assertIn('position: sticky', css)
+        self.assertIn('@media (max-width: 959px)', css)
+        self.assertNotIn('/api/service', js)
+
 
 if __name__ == '__main__':
     unittest.main()
