@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 Phase: 3 — Advanced Current Diagnosis
 Plan: 4 of 4
 Status: Phase complete — ready for verification
-Last activity: 2026-08-14 — completed 03-01 current-host diagnosis tracer
+Last activity: 2026-08-14 — Completed quick task 260814-kfc: Shorten TLS unverified badge to TLS and Edit service action to Edit
 
 Progress: [██████████] 100%
 
@@ -187,6 +187,12 @@ None yet.
 - Before Phase 1 planning, inventory representative production database variants and verify backup/restore outcomes.
 - Before Phase 2 planning, validate legacy service identity, retention resolution, capacity limits, and SQLite query plans on target storage.
 - Before Phase 6 planning, measure Chromium and representative-load resource budgets on Raspberry Pi-class hardware.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260814-kfc | Shorten TLS unverified badge to TLS and Edit service action to Edit | 2026-08-14 | 003d3af | [260814-kfc-shorten-tls-unverified-badge-to-tls-and-](./quick/260814-kfc-shorten-tls-unverified-badge-to-tls-and-/) |
 
 ## Deferred Items
 
