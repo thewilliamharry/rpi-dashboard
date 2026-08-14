@@ -92,11 +92,14 @@ console.log(JSON.stringify({
         for token in [
             'data-init:', 'image: beacon:2.0.1', 'user: "0:0"',
             'command: ["chown", "-R", "10001:10001", "/data"]',
-            'network_mode: none', 'cap_drop: [ALL]', 'cap_add: [CHOWN]',
+            'network_mode: none', 'cap_drop: [ALL]',
+            'cap_add: [CHOWN, DAC_READ_SEARCH]',
             'condition: service_completed_successfully', 'pull_policy: never',
             '192.168.0.0/16',
         ]:
             self.assertIn(token, compose)
+        data_init_block = compose.split('\n  data-init:\n', 1)[1].split('\n  worker:\n', 1)[0]
+        self.assertNotIn('DAC_OVERRIDE', data_init_block)
 
     def test_compose_recovery_is_isolated_and_web_starts_without_worker_health(self):
         compose = pathlib.Path('docker-compose.yml').read_text(encoding='utf-8')
@@ -114,11 +117,12 @@ console.log(JSON.stringify({
 
     def test_readme_has_one_offline_recovery_command_and_safe_ordering(self):
         readme = pathlib.Path('README.md').read_text(encoding='utf-8')
-        restore = 'docker compose run --rm --no-deps recovery restore --latest'
+        status = 'docker compose run --rm --no-deps recovery python -m beacon.recovery status'
+        restore = 'docker compose run --rm --no-deps recovery python -m beacon.recovery restore --latest'
+        self.assertEqual(readme.count(status), 1)
         self.assertEqual(readme.count(restore), 1)
         for token in [
             'docker compose stop web worker',
-            'docker compose run --rm --no-deps recovery status',
             'The restore command refuses a fresh worker',
             'never accepts a backup path',
             'upgrade lock followed by the exclusive database-maintenance barrier',

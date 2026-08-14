@@ -6,7 +6,7 @@ Beacon is a self-contained Raspberry Pi dashboard for system pressure, HTTP-serv
 
 Compose runs one immutable image as two non-root services sharing `/data/dashboard.db`:
 
-- `data-init` is a one-shot, network-isolated ownership migration. It receives only `CAP_CHOWN`, repairs legacy `/data` ownership for UID 10001, and exits before the worker starts.
+- `data-init` is a one-shot, network-isolated ownership migration. It receives only `CAP_CHOWN` and `CAP_DAC_READ_SEARCH`, so it can traverse legacy worker-owned 0700 backup directories while repairing `/data` ownership for UID 10001, then exits before the worker starts.
 - `web` uses bridge networking and exposes container port 8080 on host port 80. It serves cached data and queues mutations.
 - `worker` uses host networking so it can probe the Pi. APScheduler collects metrics, checks uptime, discovers services, captures previews, cleans history, and sends alerts.
 
@@ -71,13 +71,13 @@ If an upgrade reports that recovery is required, use this single supported offli
 2. Inspect the safe recovery status:
 
    ```bash
-   docker compose run --rm --no-deps recovery status
+   docker compose run --rm --no-deps recovery python -m beacon.recovery status
    ```
 
 3. Restore the newest verified automatic backup:
 
    ```bash
-   docker compose run --rm --no-deps recovery restore --latest
+   docker compose run --rm --no-deps recovery python -m beacon.recovery restore --latest
    ```
 
 4. Confirm the command reports `"completed": true`, then start only the compatible web service to inspect the restored data. Restart worker only after deploying a migration-fixed or prior compatible image.

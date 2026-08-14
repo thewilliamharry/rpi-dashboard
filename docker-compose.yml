@@ -38,7 +38,7 @@ services:
     network_mode: none
     read_only: true
     cap_drop: [ALL]
-    cap_add: [CHOWN]
+    cap_add: [CHOWN, DAC_READ_SEARCH]
     security_opt:
       - no-new-privileges:true
     pids_limit: 32

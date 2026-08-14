@@ -38,6 +38,7 @@ FIXTURES = {
 }
 CURRENT_V4_FIXTURE = 'current-v4.db'
 CURRENT_V6_FIXTURE = 'current-v6.db'
+OPERATOR_V7_FINGERPRINT = '3f88834a2cfacc2bbecac2424a3bc36955f7a81727132ba18cbc88c7bb85f7f7'
 EXPECTED_FINGERPRINTS = {
     'initial-2026-04.db': '4330feaa6a22043681d7d55fec900b3279fec9302f68e41417df29653c7cf906',
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
@@ -139,6 +140,7 @@ class MigrationTests(unittest.TestCase):
             json.loads((OPERATOR_FIXTURE_DIR / 'production.json').read_text())['schema_fingerprint'],
             collect_inventory(FIXTURE_DIR / CURRENT_V4_FIXTURE)['schema_fingerprint'],
             collect_inventory(FIXTURE_DIR / CURRENT_V6_FIXTURE)['schema_fingerprint'],
+            OPERATOR_V7_FINGERPRINT,
         }
         self.assertEqual(set(supported), expected)
         for entry in supported.values():
@@ -151,6 +153,54 @@ class MigrationTests(unittest.TestCase):
             Path('dashboard/beacon/support_floor.json').read_text(encoding='utf-8')
         )
         self.assertEqual(packaged_manifest, manifest)
+
+    def test_operator_production_path_to_v7_is_admitted_and_migration_eight_preserves_rows(self):
+        """The exact deployed V7 shape comes only from canonical migrations 2-7."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'operator-production-v7.db'
+            copy2(OPERATOR_FIXTURE_DIR / 'production.db', target)
+            settings = Settings(db_path=str(target))
+
+            with mock.patch('dashboard.beacon.migrations.MIGRATIONS', MIGRATIONS[:7]):
+                self.assertEqual(
+                    run_migrations(settings).applied_versions,
+                    (2, 3, 4, 5, 6, 7),
+                )
+
+            self.assertEqual(
+                collect_inventory(target)['schema_fingerprint'],
+                OPERATOR_V7_FINGERPRINT,
+            )
+            with sqlite3.connect(target) as conn:
+                conn.execute(
+                    'INSERT INTO services(port, title, first_seen, last_seen, is_online) '
+                    'VALUES(?,?,?,?,?)',
+                    (8100, 'Canonical operator service', 1_700_000_000, 1_700_000_010, 1),
+                )
+                conn.execute(
+                    'INSERT INTO service_meta(port, display_name, url, critical, pinned_order, tags) '
+                    'VALUES(?,?,?,?,?,?)',
+                    (8100, 'Operator service', 'http://127.0.0.1:8100', 1, 1, 'operator'),
+                )
+                conn.execute(
+                    'INSERT INTO events(ts, port, event_type, online, previous_online) '
+                    'VALUES(?,?,?,?,?)',
+                    (1_700_000_010, 8100, 'state_change', 1, 0),
+                )
+                conn.commit()
+                before_rows = snapshot_legacy_rows(conn)
+
+            self.assertEqual(run_migrations(settings).applied_versions, (8,))
+            with sqlite3.connect(target) as conn:
+                assert_legacy_rows_preserved(self, before_rows, conn)
+                self.assertEqual(
+                    conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
+                    8,
+                )
+                self.assertEqual(
+                    conn.execute('SELECT COUNT(*) FROM background_job_health').fetchone()[0],
+                    0,
+                )
 
     def test_current_v4_fixture_is_canonical_and_migrates_preserving_rows(self):
         source = FIXTURE_DIR / CURRENT_V4_FIXTURE

@@ -42,6 +42,13 @@
       "source": "canonical Phase 2 migrations 1-6",
       "minimum_schema_version": 6,
       "target_version": 8
+    },
+    {
+      "fingerprint": "3f88834a2cfacc2bbecac2424a3bc36955f7a81727132ba18cbc88c7bb85f7f7",
+      "fixture": "operator/production.db",
+      "source": "canonical migrations 2-7 applied to operator/production.db",
+      "minimum_schema_version": 7,
+      "target_version": 8
     }
   ]
 }
