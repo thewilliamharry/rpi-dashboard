@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 8
 waived_count: 0
 fixed_count: 4
-total_count: 10
-last_updated: 2026-08-14T15:25:18.072Z
+total_count: 12
+last_updated: 2026-08-14T19:05:14.014Z
 ---
 
 # Broken Windows Ledger
@@ -25,6 +25,8 @@ last_updated: 2026-08-14T15:25:18.072Z
 | 8 | 02 | deviation | dashboard/beacon/support_floor.json |  | Advanced migration support-floor metadata for additive migration 6. | fixed |  | 2026-08-10T15:24:57.655Z | 2026-08-10T15:25:37.905Z |
 | 9 | 03 | unrun-verify | .planning/phases/03-advanced-current-diagnosis/03-04-SUMMARY.md |  | Raspberry Pi-class 15-minute refresh/load observation remains manual target-hardware validation | open |  | 2026-08-14T11:25:44.416Z |  |
 | 10 | 03 | deviation | tests/test_advanced_diagnosis_api.py |  | Corrected the exact-cap fixture to use the schema-valid collection_gap reason. | fixed |  | 2026-08-14T15:25:01.736Z | 2026-08-14T15:25:18.072Z |
+| 11 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md |  | Operator-approved combined 6/11/20-minute samples replace exact pre-start/midpoint/end timing after corrected host-port command. | open |  | 2026-08-14T19:05:13.868Z |  |
+| 12 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md |  | Docker cgroup memory was unavailable (0B); recorded host-process RSS as the explicit RAM fallback. | open |  | 2026-08-14T19:05:14.014Z |  |
 
 ````json
 [
@@ -147,6 +149,30 @@ last_updated: 2026-08-14T15:25:18.072Z
     "reason": "",
     "recorded_at": "2026-08-14T15:25:01.736Z",
     "resolved_at": "2026-08-14T15:25:18.072Z"
+  },
+  {
+    "id": 11,
+    "kind": "deviation",
+    "phase": "03",
+    "file": ".planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md",
+    "line": null,
+    "description": "Operator-approved combined 6/11/20-minute samples replace exact pre-start/midpoint/end timing after corrected host-port command.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-14T19:05:13.868Z",
+    "resolved_at": null
+  },
+  {
+    "id": 12,
+    "kind": "deviation",
+    "phase": "03",
+    "file": ".planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md",
+    "line": null,
+    "description": "Docker cgroup memory was unavailable (0B); recorded host-process RSS as the explicit RAM fallback.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-14T19:05:14.014Z",
+    "resolved_at": null
   }
 ]
 ````

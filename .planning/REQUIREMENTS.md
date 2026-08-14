@@ -34,7 +34,7 @@
 ### Advanced Diagnosis
 
 - [x] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
-- [ ] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
+- [x] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
 - [x] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
 - [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
 - [ ] **DIA-05**: The operator can select a validated custom range within retained history.

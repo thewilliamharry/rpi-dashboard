@@ -117,7 +117,10 @@ None.
 
 Phase 03's only target-hardware behavior gate is approved. The Advanced current-diagnosis path has both automated safety/freshness regression coverage and a recorded production observation; no follow-up gap plan is required from this checkpoint.
 
-## Self-Check: PENDING
+## Self-Check: PASSED
+
+- Found `.planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md`.
+- Found task-record commit `b476a3d` in git history.
 
 *Phase: 03-advanced-current-diagnosis*
 *Completed: 2026-08-14*
