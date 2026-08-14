@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 6
 waived_count: 0
-fixed_count: 3
-total_count: 9
-last_updated: 2026-08-14T11:25:44.416Z
+fixed_count: 4
+total_count: 10
+last_updated: 2026-08-14T15:25:18.072Z
 ---
 
 # Broken Windows Ledger
@@ -24,6 +24,7 @@ last_updated: 2026-08-14T11:25:44.416Z
 | 7 | 02 | deviation | dashboard/beacon/repositories.py |  | Corrected raw-host timestamp and service display-bucket query details. | fixed |  | 2026-08-10T15:24:57.593Z | 2026-08-10T15:25:37.844Z |
 | 8 | 02 | deviation | dashboard/beacon/support_floor.json |  | Advanced migration support-floor metadata for additive migration 6. | fixed |  | 2026-08-10T15:24:57.655Z | 2026-08-10T15:25:37.905Z |
 | 9 | 03 | unrun-verify | .planning/phases/03-advanced-current-diagnosis/03-04-SUMMARY.md |  | Raspberry Pi-class 15-minute refresh/load observation remains manual target-hardware validation | open |  | 2026-08-14T11:25:44.416Z |  |
+| 10 | 03 | deviation | tests/test_advanced_diagnosis_api.py |  | Corrected the exact-cap fixture to use the schema-valid collection_gap reason. | fixed |  | 2026-08-14T15:25:01.736Z | 2026-08-14T15:25:18.072Z |
 
 ````json
 [
@@ -134,6 +135,18 @@ last_updated: 2026-08-14T11:25:44.416Z
     "reason": "",
     "recorded_at": "2026-08-14T11:25:44.416Z",
     "resolved_at": null
+  },
+  {
+    "id": 10,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "tests/test_advanced_diagnosis_api.py",
+    "line": null,
+    "description": "Corrected the exact-cap fixture to use the schema-valid collection_gap reason.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-14T15:25:01.736Z",
+    "resolved_at": "2026-08-14T15:25:18.072Z"
   }
 ]
 ````

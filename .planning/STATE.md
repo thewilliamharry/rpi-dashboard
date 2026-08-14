@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 3
-current_phase_name: Advanced Current Diagnosis
+current_phase: 03
+current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-08-14T14:54:16.529Z"
+stopped_at: Completed 03-05-PLAN.md
+last_updated: "2026-08-14T15:25:01.587Z"
 last_activity: 2026-08-14
-last_activity_desc: "Completed quick task 260814-kfc: Shorten TLS unverified badge to TLS and Edit service action to Edit"
+last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 41
-  completed_plans: 39
+  completed_plans: 40
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 3 — Advanced Current Diagnosis
+**Current focus:** Phase 03 — advanced-current-diagnosis
 
 ## Current Position
 
-Phase: 3 — Advanced Current Diagnosis
-Plan: 4 of 4
+Phase: 03 (advanced-current-diagnosis) — EXECUTING
+Plan: 6 of 6
 Status: Ready to execute
-Last activity: 2026-08-14 — Completed quick task 260814-kfc: Shorten TLS unverified badge to TLS and Edit service action to Edit
+Last activity: 2026-08-14 — Phase 03 execution started
 
-Progress: [██████████] 100%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -94,6 +94,7 @@ Progress: [██████████] 100%
 | Phase 03-advanced-current-diagnosis P02 | 16min | 2 tasks | 10 files |
 | Phase 03 P03 | 18min | 3 tasks | 4 files |
 | Phase 03 P04 | 10min | 3 tasks | 6 files |
+| Phase 03 P05 | 14min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -177,6 +178,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Only validated presentation preferences are persisted under beacon-advanced-preferences-v1.
 - [Phase ?]: Service filters, sorting, and detail disclosures remain local to the bounded current snapshot.
 - [Phase ?]: Dashboard return consumes one validated tab-local scroll offset while retaining the existing beacon-theme contract.
+- [Phase ?]: Connection availability remains browser-local while worker and recovery safety remain server-derived.
+- [Phase ?]: Worker freshness derives from J1's immutable five-second heartbeat cadence, not metric sampling.
+- [Phase ?]: Gap truncation uses one sentinel row beyond the cap rather than returned-list length.
 
 ### Pending Todos
 
@@ -206,6 +210,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T11:25:45.242Z
-Stopped at: Completed 03-04-PLAN.md
+Last session: 2026-08-14T15:24:47.278Z
+Stopped at: Completed 03-05-PLAN.md
 Resume file: None

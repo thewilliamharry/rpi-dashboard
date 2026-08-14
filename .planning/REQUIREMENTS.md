@@ -22,7 +22,7 @@
 - [x] **TEL-03**: Rollups complete successfully before their source observations are deleted.
 - [x] **TEL-04**: Historical queries explicitly distinguish known values, unknown intervals, collection gaps, and retention expiry.
 - [x] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
-- [ ] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
+- [x] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
 
 ### Planned Maintenance
 
@@ -33,14 +33,14 @@
 
 ### Advanced Diagnosis
 
-- [ ] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
+- [x] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
 - [ ] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
-- [ ] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
+- [x] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
 - [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
 - [ ] **DIA-05**: The operator can select a validated custom range within retained history.
 - [ ] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
 - [ ] **DIA-07**: Correlated views present observed evidence without asserting an unsupported root cause.
-- [ ] **DIA-08**: The operator can view effective monitoring settings and change supported analytics presentation, refresh, range, and filtering preferences without exposing remote-control actions.
+- [x] **DIA-08**: The operator can view effective monitoring settings and change supported analytics presentation, refresh, range, and filtering preferences without exposing remote-control actions.
 
 ### Historical Investigation
 
@@ -54,7 +54,7 @@
 ### Experience and Themes
 
 - [ ] **UX-01**: Existing compact analytics previews remain on the main dashboard in both light and dark modes.
-- [ ] **UX-02**: The operator can move clearly between the main dashboard and advanced analytics without losing theme choice.
+- [x] **UX-02**: The operator can move clearly between the main dashboard and advanced analytics without losing theme choice.
 - [ ] **UX-03**: Advanced analytics exposes the same data, filters, settings, and investigations in both themes.
 - [ ] **UX-04**: Light mode presents analytics with calmer grouping and progressive disclosure, while dark mode may present denser simultaneous context.
 - [ ] **UX-05**: Advanced analytics remains usable at supported narrow and desktop viewport widths.
