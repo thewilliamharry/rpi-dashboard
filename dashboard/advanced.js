@@ -125,10 +125,171 @@
     content.replaceChildren(grid);
   }
 
+  function countLabel(count, noun) {
+    return `${Number.isFinite(count) ? count : 0} ${noun}${count === 1 ? '' : 's'}`;
+  }
+
+  function addCollectionRegion(parent, title, collection, emptyCopy, renderItem) {
+    const region = document.createElement('section');
+    const heading = document.createElement('h3');
+    const items = Array.isArray(collection) ? collection : null;
+    heading.textContent = title;
+    region.append(heading);
+    if (!items) {
+      const unknown = document.createElement('p');
+      unknown.textContent = 'Unknown';
+      region.append(unknown);
+    } else if (items.length === 0) {
+      const empty = document.createElement('p');
+      empty.textContent = emptyCopy;
+      region.append(empty);
+    } else {
+      const list = document.createElement('div');
+      list.className = 'evidence-list';
+      items.forEach((item) => renderItem(list, item));
+      region.append(list);
+    }
+    parent.append(region);
+  }
+
+  function renderPipeline(pipeline) {
+    const content = $('pipeline-section');
+    const heading = document.createElement('h2');
+    const root = document.createElement('div');
+    const retention = pipeline.retention || {};
+    const pressure = pipeline.database_pressure || {};
+    const worker = pipeline.worker || {};
+    const streams = Array.isArray(pipeline.streams) ? pipeline.streams : null;
+    const gaps = pipeline.gaps || {};
+    const pending = pipeline.aggregation_pending || {};
+    const jobs = Array.isArray(pipeline.jobs) ? pipeline.jobs : null;
+    heading.id = 'pipeline-heading';
+    heading.tabIndex = -1;
+    heading.textContent = 'Pipeline';
+    root.className = 'pipeline-grid';
+
+    const retentionRegion = document.createElement('section');
+    const retentionHeading = document.createElement('h3');
+    const retentionGrid = document.createElement('div');
+    retentionHeading.textContent = 'Retention and resolution';
+    retentionGrid.className = 'evidence-grid';
+    addEvidence(retentionGrid, '7-day raw', displayValue(retention.raw_days, ' days'));
+    addEvidence(retentionGrid, '5-minute through day 30', displayValue(retention.five_minute_days, ' days'));
+    addEvidence(retentionGrid, 'hourly through day 90', displayValue(retention.retention_days, ' days'));
+    addEvidence(retentionGrid, 'Point budget', displayValue(retention.point_budget));
+    retentionRegion.append(retentionHeading, retentionGrid);
+    root.append(retentionRegion);
+
+    const pressureRegion = document.createElement('section');
+    const pressureHeading = document.createElement('h3');
+    const pressureGrid = document.createElement('div');
+    pressureHeading.textContent = 'Database pressure';
+    pressureGrid.className = 'evidence-grid';
+    addEvidence(pressureGrid, 'State', displayValue(pressure.state));
+    addEvidence(pressureGrid, 'Reason', displayValue(pressure.reason));
+    addEvidence(pressureGrid, 'Snapshot', pressure.snapshot ? JSON.stringify(pressure.snapshot) : 'Unknown');
+    pressureRegion.append(pressureHeading, pressureGrid);
+    root.append(pressureRegion);
+
+    const workerRegion = document.createElement('section');
+    const workerHeading = document.createElement('h3');
+    const workerGrid = document.createElement('div');
+    workerHeading.textContent = 'Worker heartbeat';
+    workerGrid.className = 'evidence-grid';
+    addEvidence(workerGrid, 'Timestamp', displayTimestamp(worker.heartbeat_ts));
+    addEvidence(workerGrid, 'Freshness', formatFreshnessEvidence(worker.freshness, worker.expected_cadence_seconds));
+    addEvidence(workerGrid, 'Lease until', displayTimestamp(worker.lease_until));
+    workerRegion.append(workerHeading, workerGrid);
+    root.append(workerRegion);
+
+    addCollectionRegion(root, 'Streams', streams, 'No pipeline streams are configured', (list, stream) => {
+      const item = document.createElement('article');
+      const name = `${displayValue(stream.stream_kind)}: ${displayValue(stream.stream_key)}`;
+      const freshness = stream.freshness || {};
+      item.className = 'diagnosis-card';
+      item.textContent = `${name} — ${formatFreshnessEvidence(freshness, stream.cadence_seconds)}. Last sample: ${displayTimestamp(stream.last_observed_ts)}.`;
+      if (freshness.state === 'stale') {
+        const stale = document.createElement('p');
+        stale.textContent = `This stream is stale. Its last sample was ${relativeAge(freshness.age_seconds)}; expected every ${displayValue(stream.cadence_seconds, ' seconds')}.`;
+        item.append(stale);
+        if ((worker.freshness || {}).state === 'fresh') {
+          const comparison = document.createElement('p');
+          comparison.textContent = 'The worker heartbeat is fresh, but this stream is stale. Review its cadence and background-job evidence.';
+          item.append(comparison);
+        }
+      }
+      list.append(item);
+    });
+
+    addCollectionRegion(root, `Collection gaps (${countLabel(gaps.count, 'gap')}${gaps.truncated ? ', truncated' : ''})`, gaps.items, 'No active collection gaps', (list, gap) => {
+      const item = document.createElement('article');
+      item.className = 'diagnosis-card';
+      item.textContent = `${displayValue(gap.stream_kind)}: ${displayValue(gap.stream_key)} — ${gap.open ? 'Open' : 'Resolved'} ${gap.actionable ? 'actionable' : 'historical'} gap.`;
+      list.append(item);
+    });
+
+    addCollectionRegion(root, `Pending aggregation (${countLabel(pending.count, 'item')}${pending.truncated ? ', truncated' : ''})`, pending.items, 'No pending aggregation', (list, item) => {
+      const row = document.createElement('p');
+      row.textContent = displayValue(item.stream_key || item.job_id || item.key);
+      list.append(row);
+    });
+
+    addCollectionRegion(root, `Background jobs (${countLabel(jobs ? jobs.length : null, 'job')})`, jobs, 'No background jobs are configured', (list, job) => {
+      const item = document.createElement('article');
+      item.className = 'diagnosis-card';
+      item.textContent = `${displayValue(job.job_id)} — ${displayValue(job.state)}; last start ${displayTimestamp(job.last_started_ts)}; last finish ${displayTimestamp(job.last_finished_ts)}; last success ${displayTimestamp(job.last_success_ts)}; ${job.not_scheduled ? 'Not scheduled' : `expected every ${displayValue(job.cadence_seconds, ' seconds')}`}; error ${displayValue(job.error_class)}.`;
+      list.append(item);
+    });
+    content.replaceChildren(heading, root);
+  }
+
+  function addSettingsGroup(parent, title, settings, optionalKeys = []) {
+    const region = document.createElement('section');
+    const heading = document.createElement('h3');
+    const grid = document.createElement('div');
+    heading.textContent = title;
+    grid.className = 'evidence-grid';
+    const entries = Object.entries(settings || {});
+    if (entries.length === 0) addEvidence(grid, 'Effective value', 'Unknown');
+    entries.forEach(([key, value]) => addEvidence(grid, key.replaceAll('_', ' '), value === null || value === undefined ? (optionalKeys.includes(key) ? 'Not configured' : 'Unknown') : String(value)));
+    region.append(heading, grid);
+    parent.append(region);
+  }
+
+  function renderSettings(settings) {
+    const content = $('settings-section');
+    const heading = document.createElement('h2');
+    const root = document.createElement('div');
+    heading.id = 'settings-heading';
+    heading.tabIndex = -1;
+    heading.textContent = 'Settings';
+    root.className = 'settings-grid';
+    addSettingsGroup(root, 'Effective monitoring', settings.sampling);
+    addSettingsGroup(root, 'Effective probes', settings.probes);
+    addSettingsGroup(root, 'Effective discovery and cleanup', settings.discovery_cleanup);
+    addSettingsGroup(root, 'Effective retention', settings.retention);
+    addSettingsGroup(root, 'Effective pressure', settings.pressure, ['alert_webhook_url']);
+    addSettingsGroup(root, 'Effective alerting', {alerting: settings.alerting_enabled ? 'Configured' : 'Not configured'}, ['alerting']);
+    const local = document.createElement('section');
+    const localHeading = document.createElement('h3');
+    const localGrid = document.createElement('div');
+    localHeading.textContent = 'Local presentation preferences';
+    localGrid.className = 'evidence-grid';
+    addEvidence(localGrid, 'Density', 'Theme default');
+    addEvidence(localGrid, 'Refresh interval', `${$('refresh-interval').value} seconds`);
+    addEvidence(localGrid, 'Range', '24 hours');
+    addEvidence(localGrid, 'Service filters', 'Not configured');
+    local.append(localHeading, localGrid);
+    root.append(local);
+    content.replaceChildren(heading, root);
+  }
+
   function renderSnapshot(snapshot) {
     renderSafety(snapshot);
     renderOverview(snapshot);
     renderHost(snapshot.host || {});
+    renderPipeline(snapshot.pipeline || {});
+    renderSettings(snapshot.settings || {});
   }
 
   function selectSection(section) {

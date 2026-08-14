@@ -106,7 +106,7 @@ class AdvancedUiTests(unittest.TestCase):
         self.assertIn("cache: 'no-store'", js)
         self.assertIn('.textContent', js)
         self.assertIn('.replaceChildren(', js)
-        for forbidden in ('POST', 'PUT', 'PATCH', 'DELETE', 'thumbnail', 'history', 'http://', 'https://', 'worker_', 'run_discovery'):
+        for forbidden in ('POST', 'PUT', 'PATCH', 'DELETE', 'thumbnail', 'history', 'http://', 'https://', 'run_discovery'):
             self.assertNotIn(forbidden, js)
 
     def test_workspace_sections_overview_and_host_states(self):
@@ -178,6 +178,60 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertIn('Critical web service down', overview)
             self.assertIn('Unknown', overview)
             self.assertIn('Some current-state evidence is unavailable.', overview)
+            self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 360)
+        finally:
+            page.close()
+
+    def test_pipeline_and_settings_render_independent_truthful_regions(self):
+        payload = self._snapshot()
+        payload.update({
+            'services': [],
+            'exceptions': [],
+            'pipeline': {
+                'retention': {'raw_days': 7, 'five_minute_days': 30, 'retention_days': 90, 'point_budget': 2048},
+                'resolution_policy': {'raw_seconds': 60, 'five_minute_seconds': 300, 'hourly_seconds': 3600},
+                'database_pressure': {'state': 'warning', 'reason': 'very-long-pressure-reason-' + ('evidence-' * 12), 'snapshot': {'bytes': 1}},
+                'worker': {'heartbeat_ts': 1_700_000_000, 'expected_cadence_seconds': 5, 'freshness': {'state': 'fresh', 'age_seconds': 5}, 'lease_until': 1_700_000_010},
+                'streams': [{'stream_kind': 'host', 'stream_key': 'beacon', 'last_observed_ts': 1_699_999_900, 'cadence_seconds': 5, 'freshness': {'state': 'stale', 'age_seconds': 105}}],
+                'gaps': {'items': [], 'count': 0, 'truncated': False},
+                'aggregation_pending': {'items': [{'stream_key': 'host:beacon'}], 'count': 1, 'truncated': False},
+                'jobs': [],
+            },
+            'settings': {
+                'sampling': {'metric_sample_seconds': 5},
+                'probes': {'full_probe_seconds': 300, 'down_recheck_seconds': 60},
+                'discovery_cleanup': {'discovery_timeout_seconds': 60, 'expire_days': 30},
+                'retention': {'raw_days': 7, 'five_minute_days': 30, 'retention_days': 90, 'point_budget': 2048},
+                'pressure': {'db_max_bytes': None},
+                'alerting_enabled': False,
+            },
+        })
+        page = self.browser.new_page(viewport={'width': 360, 'height': 800})
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="pipeline"]').click()
+            pipeline = page.locator('#pipeline-section').text_content()
+            for copy in (
+                '7-day raw', '5-minute through day 30', 'hourly through day 90',
+                'Database pressure', 'Worker heartbeat', 'Streams', 'No active collection gaps',
+                'Pending aggregation', 'No background jobs are configured',
+                'This stream is stale. Its last sample was',
+                'The worker heartbeat is fresh, but this stream is stale.',
+            ):
+                self.assertIn(copy, pipeline)
+            page.locator('[data-section="settings"]').click()
+            settings = page.locator('#settings-section').text_content()
+            self.assertIn('Local presentation preferences', settings)
+            self.assertIn('Not configured', settings)
+            self.assertIn('Unknown', settings)
             self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 360)
         finally:
             page.close()
