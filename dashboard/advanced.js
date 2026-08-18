@@ -683,13 +683,17 @@
   }
 
   function selectSection(section) {
+    // A section value can arrive from the server on an exception card. Resolve and
+    // validate its heading before any visibility mutation, so an unrecognised value
+    // can neither hide every section nor reach a null dereference.
+    const heading = $(`${section}-heading`);
+    if (!heading) return;
     state.activeSection = section;
     document.querySelectorAll('#section-navigation button').forEach((button) => {
       const selected = button.dataset.section === section;
       button.setAttribute('aria-selected', String(selected));
     });
     document.querySelectorAll('.advanced-detail > section').forEach((node) => { node.hidden = node.id !== `${section}-section`; });
-    const heading = $(`${section}-heading`);
     heading.focus();
     $('advanced-status').textContent = `${heading.textContent} selected`;
   }
@@ -709,7 +713,6 @@
       if (requestId !== state.requestGeneration) return;
       state.connectionUnavailable = false;
       state.snapshot = snapshot;
-      state.serviceSort = null;
       state.lastSuccessLabel = displayTimestamp(snapshot.generated_ts);
       updateRefreshEvidence();
       $('advanced-refresh-error').hidden = true;

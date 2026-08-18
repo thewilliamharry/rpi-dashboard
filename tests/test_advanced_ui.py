@@ -1004,7 +1004,7 @@ class AdvancedUiTests(unittest.TestCase):
         try:
             page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
             page.locator('#overview-section').wait_for(timeout=5_000)
-            page.locator('a:has-text("View nowhere")').click()
+            page.locator('#overview-content > section a:has-text("View nowhere")').click()
             page.wait_for_timeout(250)
             self.assertEqual(errors, [])
             self.assertTrue(page.locator('#overview-section').is_visible())
@@ -1015,7 +1015,7 @@ class AdvancedUiTests(unittest.TestCase):
                 'Overview',
             )
 
-            page.locator('a:has-text("View host")').click()
+            page.locator('#overview-content > section a:has-text("View host")').click()
             page.locator('#host-section').wait_for(state='visible', timeout=5_000)
             self.assertFalse(page.locator('#overview-section').is_visible())
             self.assertEqual(page.locator('#host-heading').evaluate('(node) => document.activeElement === node'), True)

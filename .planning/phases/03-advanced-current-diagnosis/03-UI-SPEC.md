@@ -117,7 +117,7 @@ Accent reserved for: selected navigation, focus indicators, selected filters, th
 
 - Collapsed service rows show Name + port, textual status with marker, latency when healthy or failure class when not, `up/down since` duration, criticality, and freshness. All rows expose an explicit `Show details` / `Hide details` control with `aria-expanded`.
 - Expanded rows show tags, full effective health rule, exact last probe timestamp, expected probe cadence, TLS posture as a trust annotation separate from availability, last error evidence, and any applicable freshness or collection-gap evidence. Multiple rows may remain expanded; `Collapse all details` appears when at least one is open.
-- Column sorting is keyboard operable. Activating a sortable column toggles ascending/descending order and announces the field/direction. A user sort supersedes default operational ordering until filters are cleared, the table is refreshed, or the user chooses `Reset operational order`.
+- Column sorting is keyboard operable. Activating a sortable column toggles ascending/descending order and announces the field/direction. A user sort supersedes default operational ordering until filters are cleared or the user chooses `Reset operational order`; neither an automatic poll nor `Refresh now` clears it.
 - Filters apply immediately without a network mutation, always expose `N of M services`, and include `Clear all filters`. Persist filter values, not expanded rows or transient exception selections.
 
 ### Freshness and evidence vocabulary
