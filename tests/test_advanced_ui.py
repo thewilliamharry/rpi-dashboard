@@ -533,6 +533,53 @@ class AdvancedUiTests(unittest.TestCase):
         self.assertIn("beacon-dashboard-scroll-position", js)
         self.assertNotIn('beacon-dashboard-scroll-position', advanced_html)
 
+    def test_open_stream_gap_renders_as_pipeline_and_overview_evidence(self):
+        """A synthesized open-stream gap must replace the false 'reporting normally' claim."""
+        gap = {
+            'stream_kind': 'host', 'stream_key': 'cpu',
+            'start_ts': 1_699_999_900, 'end_ts': 1_700_000_005,
+            'reason': 'collection_gap', 'detail': None,
+            'open': True, 'actionable': True,
+        }
+        payload = self._snapshot()
+        payload.update({
+            'services': [],
+            'settings': {},
+            'exceptions': [{'kind': 'collection_gap', 'section': 'pipeline', 'priority': 5, **gap}],
+            'pipeline': {
+                'retention': {}, 'database_pressure': {}, 'worker': {},
+                'gaps': {'items': [gap], 'count': 1, 'truncated': False},
+                'aggregation_pending': {'items': [], 'count': 0, 'truncated': False},
+                'jobs': [],
+            },
+        })
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('1 active exception', overview)
+            self.assertIn('collection_gap', overview)
+            self.assertNotIn('No active exceptions', overview)
+            self.assertNotIn(
+                'Host, services, and collection pipeline are reporting normally.', overview,
+            )
+            page.locator('[data-section="pipeline"]').click()
+            pipeline = page.locator('#pipeline-section').text_content()
+            self.assertIn('Collection gaps (1 gap)', pipeline)
+            self.assertIn('host: cpu \u2014 Open actionable gap.', pipeline)
+            self.assertNotIn('No active collection gaps', pipeline)
+        finally:
+            page.close()
+
     def test_ui_consideration_inventory_is_complete_and_unique(self):
         self.assertEqual(len(UI_CONSIDERATIONS), 36)
         self.assertEqual(len(set(UI_CONSIDERATIONS)), 36)

@@ -424,6 +424,125 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                     [f'gap-{index}' for index in range(min(count, 48))],
                 )
 
+    def _seed_stream(
+        self, conn, stream_kind, stream_key, *, now,
+        cadence=60, open_gap_start_ts=None, last_observed_ts=None,
+    ):
+        """Seed one durable telemetry stream row without inventing coverage evidence."""
+        conn.execute(
+            'INSERT INTO telemetry_streams('
+            'stream_kind,stream_key,started_ts,cadence_seconds,last_observed_ts,'
+            'consecutive_misses,open_gap_start_ts) VALUES(?,?,?,?,?,?,?)',
+            (
+                stream_kind, stream_key, now - 10_000, cadence,
+                now if last_observed_ts is None else last_observed_ts,
+                0 if open_gap_start_ts is None else 2,
+                open_gap_start_ts,
+            ),
+        )
+
+    def test_open_stream_gap_is_synthesized_merged_and_promoted(self):
+        """An active stream gap is durable evidence even with zero coverage rows."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        cases = (
+            ('open_gap_without_any_coverage_row', now - 100, ()),
+            ('no_open_gap_and_no_coverage_row', None, ()),
+            (
+                'open_gap_merged_with_closed_historical_coverage',
+                now - 100,
+                ((now - 5_000, now - 4_000, 'collection_gap', 'historical-gap'),),
+            ),
+        )
+        for label, open_gap_start_ts, coverage in cases:
+            with self.subTest(case=label):
+                with self.appmod._db_lock:
+                    conn = self.appmod.get_db()
+                    conn.execute('DELETE FROM telemetry_streams')
+                    conn.execute('DELETE FROM telemetry_coverage')
+                    self._seed_stream(
+                        conn, 'host', 'cpu', now=now, open_gap_start_ts=open_gap_start_ts,
+                    )
+                    conn.executemany(
+                        'INSERT INTO telemetry_coverage('
+                        'stream_kind,stream_key,start_ts,end_ts,reason,detail) '
+                        'VALUES(?,?,?,?,?,?)',
+                        [('host', 'cpu', *row) for row in coverage],
+                    )
+                    conn.commit()
+                    conn.close()
+
+                payload = self.client.get('/api/advanced/current').get_json()
+                gaps = payload['pipeline']['gaps']
+                collection_gaps = [
+                    item for item in payload['exceptions'] if item['kind'] == 'collection_gap'
+                ]
+
+                if open_gap_start_ts is None:
+                    self.assertEqual(gaps['items'], [])
+                    self.assertEqual(gaps['count'], 0)
+                    self.assertEqual(collection_gaps, [])
+                    continue
+
+                synthesized = [item for item in gaps['items'] if item['start_ts'] == now - 100]
+                self.assertEqual(len(synthesized), 1)
+                self.assertEqual(
+                    synthesized[0],
+                    {
+                        'stream_kind': 'host', 'stream_key': 'cpu',
+                        'start_ts': now - 100, 'end_ts': now,
+                        'reason': 'collection_gap', 'detail': None,
+                        'open': True, 'actionable': True,
+                    },
+                )
+                self.assertEqual(len(gaps['items']), 1 + len(coverage))
+                self.assertEqual(gaps['count'], 1 + len(coverage))
+                self.assertEqual(gaps['items'][-1]['start_ts'], now - 100)
+                self.assertEqual(len(collection_gaps), 1 + len(coverage))
+                self.assertTrue(any(
+                    item['start_ts'] == now - 100 and item['open'] and item['actionable']
+                    for item in collection_gaps
+                ))
+                for start_ts, end_ts, reason, detail in coverage:
+                    historical = [
+                        item for item in gaps['items'] if item['detail'] == detail
+                    ]
+                    self.assertEqual(len(historical), 1)
+                    self.assertEqual(
+                        (
+                            historical[0]['start_ts'], historical[0]['end_ts'],
+                            historical[0]['reason'], historical[0]['detail'],
+                        ),
+                        (start_ts, end_ts, reason, detail),
+                    )
+
+    def test_open_stream_gap_is_reported_per_stream_without_borrowing_evidence(self):
+        """Only the stream that actually carries an open gap gets a synthesized item."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute('DELETE FROM telemetry_streams')
+            conn.execute('DELETE FROM telemetry_coverage')
+            self._seed_stream(conn, 'host', 'cpu', now=now, open_gap_start_ts=now - 300)
+            self._seed_stream(conn, 'host', 'ram', now=now, open_gap_start_ts=None)
+            conn.commit()
+            conn.close()
+
+        payload = self.client.get('/api/advanced/current').get_json()
+        gaps = payload['pipeline']['gaps']
+
+        self.assertEqual(
+            [(item['stream_kind'], item['stream_key']) for item in gaps['items']],
+            [('host', 'cpu')],
+        )
+        self.assertEqual(gaps['count'], 1)
+        self.assertFalse(gaps['truncated'])
+        self.assertEqual(
+            [item['stream_key'] for item in payload['exceptions'] if item['kind'] == 'collection_gap'],
+            ['cpu'],
+        )
+
     def test_advanced_snapshot_rejects_query_arguments_before_reading_sqlite(self):
         response = self.client.get('/api/advanced/current?unexpected=1')
 
