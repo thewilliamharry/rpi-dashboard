@@ -204,12 +204,18 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 7/7 plans executed
+**Plans**: 10 plans (7 executed, 3 gap-closure plans pending)
 
 - [x] 03-07-PLAN.md
 
 - [x] 03-05-PLAN.md
 - [x] 03-06-PLAN.md
+
+**Gap closure (after 03-VERIFICATION.md, status gaps_found, 3/4)**
+
+- [ ] 03-08-PLAN.md — Truthful gap projection: per-row `open`, reason→exception-kind mapping, and one bounded population for `gaps.count`/`gaps.truncated` (wave 1)
+- [ ] 03-09-PLAN.md — Operator-readable exception cards, a service sort that survives refresh, and a guarded section selector (wave 2)
+- [ ] 03-10-PLAN.md — Legible route failure modes, a test module that restores the global clock, and the corrected requirements traceability record (wave 3)
 
 **Wave 1**
 
