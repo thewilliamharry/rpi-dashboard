@@ -626,6 +626,85 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 self.assertFalse(gaps['items'][0]['open'])
                 self.assertEqual(gaps['items'][0]['actionable'], expected_actionable)
 
+    def test_coverage_reason_maps_to_its_own_exception_kind(self):
+        """Each durable coverage reason promotes as itself, or as lifecycle evidence not at all."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        cases = (
+            ('collection_gap', 'collection_gap', True),
+            ('unknown', 'coverage_unknown', True),
+            ('expired', None, False),
+            ('not_yet_monitored', None, False),
+        )
+        for reason, expected_kind, expected_actionable in cases:
+            with self.subTest(reason=reason):
+                with self.appmod._db_lock:
+                    conn = self.appmod.get_db()
+                    conn.execute('DELETE FROM telemetry_streams')
+                    conn.execute('DELETE FROM telemetry_coverage')
+                    self._seed_stream(conn, 'host', 'cpu', now=now, cadence=60)
+                    conn.execute(
+                        'INSERT INTO telemetry_coverage('
+                        'stream_kind,stream_key,start_ts,end_ts,reason,detail) '
+                        'VALUES(?,?,?,?,?,?)',
+                        ('host', 'cpu', now - 700, now - 100, reason, 'recent-interval'),
+                    )
+                    conn.commit()
+                    conn.close()
+
+                payload = self.client.get('/api/advanced/current').get_json()
+                gaps = payload['pipeline']['gaps']
+                pipeline_exceptions = [
+                    item for item in payload['exceptions'] if item['section'] == 'pipeline'
+                    and item['kind'] in {'collection_gap', 'coverage_unknown'}
+                ]
+
+                self.assertEqual(len(gaps['items']), 1)
+                self.assertEqual(gaps['items'][0]['reason'], reason)
+                self.assertFalse(gaps['items'][0]['open'])
+                self.assertEqual(gaps['items'][0]['actionable'], expected_actionable)
+                if expected_kind is None:
+                    self.assertEqual(pipeline_exceptions, [])
+                    continue
+                self.assertEqual(len(pipeline_exceptions), 1)
+                self.assertEqual(pipeline_exceptions[0]['kind'], expected_kind)
+                self.assertEqual(pipeline_exceptions[0]['reason'], reason)
+
+    def test_coverage_reason_outside_the_durable_enum_surfaces_as_indeterminate(self):
+        """An unrecognised reason must never be dropped nor reported as a collection failure."""
+        diagnosis = self.appmod.beacon_diagnosis
+        unmapped = 'schema_skew_reason'
+
+        self.assertEqual(diagnosis.gap_exception_kind(unmapped), 'coverage_unknown')
+        self.assertEqual(diagnosis.gap_exception_kind('collection_gap'), 'collection_gap')
+        self.assertEqual(diagnosis.gap_exception_kind('unknown'), 'coverage_unknown')
+        self.assertIsNone(diagnosis.gap_exception_kind('expired'))
+        self.assertIsNone(diagnosis.gap_exception_kind('not_yet_monitored'))
+
+        pipeline = {
+            'worker': {'freshness': {'state': 'fresh', 'age_seconds': 1}},
+            'gaps': {
+                'items': [{
+                    'stream_kind': 'host', 'stream_key': 'cpu',
+                    'start_ts': 1_699_999_400, 'end_ts': 1_699_999_900,
+                    'reason': unmapped, 'detail': None,
+                    'open': False, 'actionable': True,
+                }],
+                'count': 1, 'truncated': False,
+            },
+            'jobs': [],
+            'database_pressure': {'state': 'normal'},
+        }
+        host = {'freshness': {'state': 'fresh', 'age_seconds': 1}}
+
+        exceptions = diagnosis.compose_active_exceptions(
+            host, [], pipeline, recovery_required=False,
+        )
+
+        self.assertEqual(len(exceptions), 1)
+        self.assertEqual(exceptions[0]['kind'], 'coverage_unknown')
+        self.assertEqual(exceptions[0]['reason'], unmapped)
+
     def test_host_freshness_becomes_an_active_exception_when_evidence_is_not_fresh(self):
         """Missing or stale host evidence must never be summarised as normal."""
         now = 1_700_000_000
