@@ -1,15 +1,15 @@
 ---
 schema_version: 1
-open_count: 8
+open_count: 9
 waived_count: 0
 fixed_count: 4
-total_count: 12
-last_updated: 2026-08-14T19:05:14.014Z
+total_count: 13
+last_updated: 2026-08-18T16:30:56.949Z
 ---
 
 # Broken Windows Ledger
 
-> Cross-phase defect register. `/gsd-ship` blocks while `open_count > 0`.
+> Cross-phase defect register. With `workflow.windows_enforce` enabled, `/gsd-ship` blocks while `open_count > 0`.
 > Waive with `gsd-tools windows waive <id> "<reason>"` (reason required).
 > Mark fixed with `gsd-tools windows fixed <id>`.
 
@@ -27,6 +27,7 @@ last_updated: 2026-08-14T19:05:14.014Z
 | 10 | 03 | deviation | tests/test_advanced_diagnosis_api.py |  | Corrected the exact-cap fixture to use the schema-valid collection_gap reason. | fixed |  | 2026-08-14T15:25:01.736Z | 2026-08-14T15:25:18.072Z |
 | 11 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md |  | Operator-approved combined 6/11/20-minute samples replace exact pre-start/midpoint/end timing after corrected host-port command. | open |  | 2026-08-14T19:05:13.868Z |  |
 | 12 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md |  | Docker cgroup memory was unavailable (0B); recorded host-process RSS as the explicit RAM fallback. | open |  | 2026-08-14T19:05:14.014Z |  |
+| 13 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-07-SUMMARY.md |  | Tracer interactive human-verify gate deferred to end-of-phase per human_verify_mode; automated tracer verify and full regression passed before expansion | open |  | 2026-08-18T16:30:56.949Z |  |
 
 ````json
 [
@@ -172,6 +173,18 @@ last_updated: 2026-08-14T19:05:14.014Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-14T19:05:14.014Z",
+    "resolved_at": null
+  },
+  {
+    "id": 13,
+    "kind": "deviation",
+    "phase": "03",
+    "file": ".planning/phases/03-advanced-current-diagnosis/03-07-SUMMARY.md",
+    "line": null,
+    "description": "Tracer interactive human-verify gate deferred to end-of-phase per human_verify_mode; automated tracer verify and full regression passed before expansion",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-18T16:30:56.949Z",
     "resolved_at": null
   }
 ]

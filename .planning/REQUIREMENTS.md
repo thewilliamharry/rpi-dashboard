@@ -120,19 +120,19 @@ Every v1 requirement maps to exactly one roadmap phase.
 | TEL-03 | Phase 2 | Complete |
 | TEL-04 | Phase 2 | Complete |
 | TEL-05 | Phase 2 | Complete |
-| TEL-06 | Phase 3 | Gaps Found |
+| TEL-06 | Phase 3 | Complete |
 | MNT-01 | Phase 03.1 | Pending |
 | MNT-02 | Phase 03.1 | Pending |
 | MNT-03 | Phase 03.1 | Pending |
 | MNT-04 | Phase 03.1 | Pending |
 | DIA-01 | Phase 3 | Gaps Found |
-| DIA-02 | Phase 3 | Gaps Found |
-| DIA-03 | Phase 3 | Gaps Found |
+| DIA-02 | Phase 3 | Complete |
+| DIA-03 | Phase 3 | Complete |
 | DIA-04 | Phase 4 | Pending |
 | DIA-05 | Phase 4 | Pending |
 | DIA-06 | Phase 4 | Pending |
 | DIA-07 | Phase 4 | Pending |
-| DIA-08 | Phase 3 | Gaps Found |
+| DIA-08 | Phase 3 | Complete |
 | HIS-01 | Phase 4 | Pending |
 | HIS-02 | Phase 4 | Pending |
 | HIS-03 | Phase 4 | Pending |

@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-06-PLAN.md
-last_updated: "2026-08-18T15:58:37.671Z"
-last_activity: 2026-08-14
+stopped_at: Completed 03-07-PLAN.md
+last_updated: "2026-08-18T16:28:46.706Z"
+last_activity: 2026-08-18
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 42
-  completed_plans: 41
+  completed_plans: 42
 ---
 
 # Project State
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 6 of 6
+Plan: 2 of 7
 Status: Ready to execute
-Last activity: 2026-08-14 — Phase 03 execution started
+Last activity: 2026-08-18 — Phase 03 execution started
 
 Progress: [██████████] 100%
 
@@ -96,6 +96,7 @@ Progress: [██████████] 100%
 | Phase 03 P04 | 10min | 3 tasks | 6 files |
 | Phase 03 P05 | 14min | 2 tasks | 5 files |
 | Phase 03 P06 | 20min | 1 tasks | 1 files |
+| Phase 03 P07 | 21min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -184,6 +185,11 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Gap truncation uses one sentinel row beyond the cap rather than returned-list length.
 - [Phase ?]: Accepted the operator-approved combined 6/11/20-minute samples because browser polling remained continuously successful for more than 20 minutes.
 - [Phase ?]: Used host-process RSS as the RAM record because the target Docker/cgroup memory field was unavailable (0B).
+- [Phase ?]: Phase 03: An open telemetry_streams gap is durable active-gap evidence synthesized into one open, actionable pipeline gap item and promoted to exceptions.
+- [Phase ?]: Phase 03: Stream and pending truncation are sentinel-measured, replacing the inferred length >= cap derivation outright.
+- [Phase ?]: Phase 03: Stale or unknown host evidence is its own host_freshness exception, never merged with worker freshness or recovery.
+- [Phase ?]: Phase 03: Bounded stream reads rank open-gap then stale streams ahead of quiet ones so the cap never hides actionable evidence.
+- [Phase ?]: Phase 03: Refresh ordering uses a memory-only monotonic request generation guard rather than AbortController.
 
 ### Pending Todos
 
@@ -213,6 +219,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T19:05:14.569Z
-Stopped at: Completed 03-06-PLAN.md
+Last session: 2026-08-18T16:28:46.691Z
+Stopped at: Completed 03-07-PLAN.md
 Resume file: None
