@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 10/10 plans executed (7 executed, 3 gap-closure plans pending)
+**Plans**: 14 plans (10 executed; 4 gap-closure plans pending after re-verification)
 
 - [x] 03-07-PLAN.md
 
@@ -216,6 +216,13 @@ Plans:
 - [x] 03-08-PLAN.md — Truthful gap projection: per-row `open`, reason→exception-kind mapping, and one bounded population for `gaps.count`/`gaps.truncated` (wave 1)
 - [x] 03-09-PLAN.md — Operator-readable exception cards, a service sort that survives refresh, and a guarded section selector (wave 2)
 - [x] 03-10-PLAN.md — Legible route failure modes, a test module that restores the global clock, and the corrected requirements traceability record (wave 3)
+
+**Gap closure round 2 (after 03-VERIFICATION.md re-verification, status gaps_found, 3/4 — prior gaps 1-3 confirmed closed, three new gaps found)**
+
+- [ ] 03-11-PLAN.md — Services surface stops fabricating measurements: reject absent before coercing to zero in the latency cell, the latency sort key, and the state-duration reader (wave 1)
+- [ ] 03-12-PLAN.md — Worker job health reports what the job did: decide the outcome outside the scope that records it, and give a failed bookkeeping write its own named condition (wave 1)
+- [ ] 03-13-PLAN.md — Per-service collection-gap evidence joined from composed pipeline gaps with explicit completeness, rendered as operator copy instead of a serialized container (wave 2)
+- [ ] 03-14-PLAN.md — REQUIREMENTS.md reconciled in one pass so its traceability table and body checklist agree at the statuses independent verification established (wave 3)
 
 **Wave 1**
 
