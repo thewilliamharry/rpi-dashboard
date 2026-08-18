@@ -1,6 +1,6 @@
 ---
 phase: 03-advanced-current-diagnosis
-reviewed: 2026-08-18T16:51:42Z
+reviewed: 2026-08-18T22:40:00Z
 depth: standard
 files_reviewed: 12
 files_reviewed_list:
@@ -17,314 +17,433 @@ files_reviewed_list:
   - tests/test_advanced_diagnosis_api.py
   - tests/test_advanced_ui.py
 findings:
-  critical: 2
+  critical: 3
   warning: 10
-  info: 5
-  total: 17
+  info: 8
+  total: 21
 status: issues_found
 ---
 
 # Phase 3: Code Review Report
 
-**Reviewed:** 2026-08-18T16:51:42Z
+**Reviewed:** 2026-08-18T22:40:00Z
 **Depth:** standard
 **Files Reviewed:** 12
 **Status:** issues_found
 
 ## Summary
 
-The five 03-07 gap-closure fixes were re-verified against the boundaries they claim, and **four of the five hold**:
+This review replaces the pre-gap-closure `03-REVIEW.md` at this path and describes the code as it stands after plans 03-08, 03-09 and 03-10.
 
-- **CR-03 / CR-04 (sentinel truncation) — holds.** `read_pipeline_evidence` fetches `cap + 1` and slices back for streams, gaps, and pending. Verified through the production HTTP route at 0/31/32/33 pending (`truncated` flips only at 33) and 0/64/65 streams (`truncated` flips only at 65). The `ORDER BY` that ranks open-gap then stale streams ahead of quiet ones is correct and keeps the open-gap stream inside the cap.
-- **CR-02 (`host_freshness`) — holds** for the host branch: missing `system_stats` yields `unknown`, stale yields `stale`, fresh yields no exception.
-- **WR-01 (`state.requestGeneration`) — holds.** The counter is incremented before the await and checked on both the success and failure branches; a superseded older response cannot overwrite newer evidence or raise a stale connection warning.
-- **CR-01 (open-stream gap synthesis) — holds for the synthesized item, but the surrounding gap projection it plugs into is broken.** The synthetic item itself is correct. The pre-existing `open`/`actionable` derivation that CR-01 wired itself into mislabels *every other* coverage interval belonging to the same stream, and the `reason` field is discarded when gaps are promoted to exceptions. Both were reproduced end-to-end through `GET /api/advanced/current`.
+The gap-closure round did land its stated fixes. Verified as genuinely closed by reading the current code (not the SUMMARYs): per-row gap openness (`open: false` on every persisted `telemetry_coverage` row, `diagnosis.py:236`), per-reason exception kinds (`GAP_REASON_EXCEPTION_KINDS` + `gap_exception_kind`, `diagnosis.py:20-37`), one-population gap bounding (`diagnosis.py:264-273` + `open_gap_streams_truncated`, `repositories.py:140-142`), operator copy for every emitted exception kind (`EXCEPTION_COPY`, `advanced.js:131-183`), sort survival across refresh, the `selectSection` guard (`advanced.js:685-699`), the `SCHEMA_VERSION` bump to 2, and the leaked test clock (`_freeze_clock` with `addCleanup`). `tests/test_advanced_diagnosis_api.py` passes locally (30 tests, 60 subtests, 1.01 s).
 
-Two BLOCKERs follow from that last point: the "Active exceptions" list — the single operator-facing safety surface of this phase — reports 30-day-old *resolved* gaps and *retention-deleted* intervals as open, actionable collection gaps, and labels indeterminate (`unknown`) evidence as a collection gap. The phase's own test locks the first behavior in as expected. Beyond the gap projection, the test suite globally and permanently patches `time.time`, which undermines the evidence base for the whole phase.
+What the round did not close, and what it introduced, is the substance of this report.
 
-There are no injection, XSS, secret-leak, or authz findings: all DOM writes go through `textContent`, all SQL is parameterized, and `_settings_payload` correctly reduces `alert_webhook_url` to a boolean.
+The dominant theme is unchanged from the last review and is the phase's own stated contract — **the workspace still displays fabricated evidence where the server said "unknown"**:
+
+- Every service's expanded detail row claims there is no collection-gap evidence, because the server hardcodes `collection_gaps: []` while `service:<port>` telemetry streams demonstrably do accumulate coverage rows and open gaps (CR-01).
+- Every offline service renders `0 ms` latency and never shows its failure class, because `latency_ms` is `None` by construction for all non-online services and `Number(null) === 0` passes `Number.isFinite` (CR-02). This is item 1 of `deferred-items.md`, but its recorded scope ("a service whose `latency_ms` is null") understates it: this is not an edge case, it is every offline and every unknown service — precisely the rows the operator opened the page for. The failure-class fallback at `advanced.js:630` is unreachable from any real server payload.
+- The same coercion bug reaches `state_duration_seconds` (WR-06), which the deferred item does not cover.
+
+New in the gap-closure and phase-03 worker changes: `dispatch_callback` can write durable `failed` job evidence for a callback that actually succeeded (CR-03), and the API route's new `sqlite3.OperationalError` handler discards the very detail its comment promises to log (WR-02).
+
+Two known items are deliberately not re-argued here: `DIA-01`'s traceability/checklist mismatch (documentation, not source), and the `latency_ms` deferral, which is reported only because my own reading enlarges its scope.
+
+## Structural Findings (fallow)
+
+No `<structural_findings>` block was supplied with this review. All findings below are narrative.
+
+## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01: Any unrelated open gap marks every historical interval on that stream as open and actionable
+### CR-01: Per-service collection-gap evidence is hardcoded empty and reads as "no gaps"
 
-**File:** `dashboard/beacon/diagnosis.py:205-217` (and the promotion at `dashboard/beacon/diagnosis.py:308-310`)
+**File:** `dashboard/beacon/diagnosis.py:172`, `dashboard/advanced.js:648`
 
-**Issue:** `open_gap` is derived from the *stream's* `open_gap_start_ts`, not from the gap row being processed:
-
-```python
-open_gap = bool(stream and stream.get('open_gap_start_ts') is not None)
-item = {**gap, 'open': open_gap, 'actionable': open_gap or gap['end_ts'] >= now - recent_window}
-```
-
-Every durable `telemetry_coverage` row for that stream — including intervals resolved months ago and intervals whose `reason` is `expired` (data deleted by retention) — inherits `open: True` and therefore `actionable: True`, and each one is then promoted into a separate `collection_gap` exception.
-
-Reproduced through the production route (`GET /api/advanced/current`) with one stream carrying an open gap plus two unrelated historical rows:
-
-```
-GAP retention-deleted     reason=expired         open=True actionable=True
-GAP resolved-30-days-ago  reason=collection_gap  open=True actionable=True
-GAP (synthesized)         reason=collection_gap  open=True actionable=True
-EXCEPTIONS: host_freshness, worker_freshness, collection_gap x3
-```
-
-Impact: the operator's exception list inflates with historical noise the moment a single real gap opens; the UI literally renders "Open actionable gap" for a gap that closed a month ago (`dashboard/advanced.js:280`). This is exactly the causal-inference the module docstring forbids. It also means a stream can never return to a clean gap view without its whole coverage history aging out.
-
-**Fix:** decide `open` per row, not per stream. The synthesized item (lines 218-233) already carries `open: True` explicitly, so durable rows should always be closed:
+**Issue:** `compose_service_diagnosis` builds every service row with a literal empty list:
 
 ```python
-for gap in evidence['gaps']:
-    stream = stream_index.get((gap['stream_kind'], str(gap['stream_key'])))
-    cadence = stream.get('cadence_seconds') if stream else None
-    recent_window = max(3600, 4 * cadence) if isinstance(cadence, int) and cadence > 0 else 3600
-    item = {
-        **gap,
-        # A persisted coverage row is, by construction, a closed interval:
-        # telemetry.record_observation only writes it once the gap ends.
-        'open': False,
-        'actionable': gap['end_ts'] >= now - recent_window,
-    }
+'collection_gaps': [],
 ```
 
-Then update `tests/test_advanced_diagnosis_api.py::test_open_stream_gap_is_synthesized_merged_and_promoted` (see WR-06) — it currently asserts the defect.
-
-### CR-02: Non-gap coverage reasons are promoted as `collection_gap` exceptions
-
-**File:** `dashboard/beacon/diagnosis.py:308-310`
-
-**Issue:** `compose_active_exceptions` hard-codes the kind and discards `gap['reason']`:
-
-```python
-for gap in pipeline['gaps']['items']:
-    if gap['actionable']:
-        exceptions.append({'kind': 'collection_gap', 'section': 'pipeline', 'priority': 5, **gap})
-```
-
-`telemetry_coverage.reason` is a constrained enum of `collection_gap | unknown | expired | not_yet_monitored` (`dashboard/beacon/migrations.py:260-262`). `unknown` intervals are written by `record_observation(..., state=None)` for every sample where a metric is unavailable (`dashboard/app.py:1739-1743` passes `state=True if sample[metric] is not None else None`), and `record_coverage_interval` coalesces consecutive ones into a single interval whose `end_ts` keeps advancing to `ts + cadence`. On any host where a metric is permanently unreadable (for example no thermal sensor, so `temp` is `None`), that interval's `end_ts` is always within `recent_window`, so it is permanently `actionable`.
-
-Reproduced through the production route with a single `reason='unknown'` interval and **no** open gap on the stream:
-
-```
-GAP reason=unknown open=False actionable=True
-EXCEPTION KINDS: ['host_freshness', 'worker_freshness', 'collection_gap']
-```
-
-Impact: an indeterminate observation is reported to the operator as a collection gap, and the workspace can never legitimately display "No active exceptions / reporting normally" on such a host. Retention-`expired` intervals get the same mislabel via CR-01.
-
-**Fix:** carry the reason into the exception kind, and stop promoting reasons that are not collection failures:
-
-```python
-GAP_EXCEPTION_KINDS = {
-    'collection_gap': 'collection_gap',
-    'unknown': 'indeterminate_evidence',
-    # 'expired' and 'not_yet_monitored' are expected retention/lifecycle
-    # evidence, not active exceptions.
-}
-for gap in pipeline['gaps']['items']:
-    kind = GAP_EXCEPTION_KINDS.get(gap['reason'])
-    if gap['actionable'] and kind is not None:
-        exceptions.append({'kind': kind, 'section': 'pipeline', 'priority': 5, **gap})
-```
-
-Add coverage asserting each `reason` value maps to its own kind (or to no exception at all).
-
-## Warnings
-
-### WR-01: `gaps.truncated` reports `false` while synthesized open gaps are silently dropped
-
-**File:** `dashboard/beacon/diagnosis.py:218-233, 273-277`
-
-**Issue:** Open gaps are synthesized only from `stream_records`, which is already capped at 64. `gaps.truncated` is sourced solely from `evidence['gaps_truncated']`, which measures the `telemetry_coverage` read. With 65 streams all carrying an open gap and no coverage rows, the API returns:
-
-```
-gaps.count = 64  gaps.truncated = False   (65 open gaps exist)
-streams.truncated = True
-```
-
-This is the same false-completeness claim CR-04 was raised to eliminate, just relocated to the `gaps` collection. The operator only learns something is missing by cross-referencing a different section.
-
-**Fix:** propagate stream truncation into the gaps disclosure:
-
-```python
-'truncated': bool(
-    evidence.get('gaps_truncated', False)
-    or evidence.get('streams_truncated', False)
-),
-```
-
-### WR-02: `gaps.count` can exceed its documented 48-row cap and no longer matches the bounded read
-
-**File:** `dashboard/beacon/diagnosis.py:273-277`
-
-**Issue:** Synthesized open gaps are appended *after* `read_pipeline_evidence` truncated the durable read to `gap_limit` (48). `count` is `len(gaps)`, so the payload can carry up to 48 + 64 = 112 gap items while `truncated` still describes only the 48-row durable slice. The `count`/`truncated` pair therefore describes two different populations.
-
-**Fix:** either bound the combined list explicitly after synthesis (slice to `gap_limit`, setting `truncated` when synthesis overflows), or return the synthesized set as a separately typed field (e.g. `open_gaps`) with its own count/truncated pair, matching the phase's "separately typed" convention.
-
-### WR-03: Auto-refresh discards the operator's chosen service sort every cycle
-
-**File:** `dashboard/advanced.js:628`
-
-**Issue:** `refreshCurrentDiagnosis` unconditionally executes `state.serviceSort = null;` on every successful poll. With the default 15-second interval (and a supported 5-second interval), any sort the operator selects via the column-header buttons is silently reverted within seconds, the "Reset operational order" button re-hides itself, and the `aria-sort` attributes reset — while `state.filters` and `state.expandedPorts` are correctly preserved. There is no test covering sort persistence across a refresh, so this is invisible to the suite.
-
-**Fix:** remove the reset from the refresh path. If a snapshot must invalidate the sort, do it only when the sorted field is no longer present:
+Nothing ever populates it — `get_current_diagnosis` (`diagnosis.py:386-409`) composes `services` and `pipeline` independently and never joins them. The client then renders that literal as evidence:
 
 ```javascript
-state.connectionUnavailable = false;
-state.snapshot = snapshot;
-state.lastSuccessLabel = displayTimestamp(snapshot.generated_ts);
+addEvidence(evidence, 'Collection-gap evidence', JSON.stringify(service.collection_gaps || service.collection_gap || 'No gap evidence'));
 ```
 
-### WR-04: Breaking payload shape change shipped without bumping `SCHEMA_VERSION`
+`[]` is truthy in JavaScript, so the `'No gap evidence'` fallback never fires and the row always prints `[]`.
 
-**File:** `dashboard/beacon/diagnosis.py:15, 268-272`
+Service streams are real: `dashboard/app.py:1406-1410` calls `record_observation(conn, 'service', str(port), ..., cadence_seconds=300)` on every probe, `telemetry.py:661` opens and closes `telemetry_coverage` rows for those streams, and `compose_pipeline_diagnosis` already attaches those very gaps to the matching stream record (`diagnosis.py:244`, `diagnosis.py:260`). So a port can simultaneously carry an open collection gap in the Pipeline section and a service detail row asserting `[]`. `03-UI-SPEC.md:119` and `03-02-PLAN.md:171` both require this field to carry real evidence.
 
-**Issue:** `pipeline.streams` changed from a bare array to `{items, count, truncated}`, but `SCHEMA_VERSION` remains `1` and the response still advertises `schema_version: 1`. Any cached client, bookmarked response, or future consumer written against the old shape cannot detect the change from the payload itself. The phase summary explicitly labels this a "contract change for downstream consumers".
+This is the exact class of defect CR-01/CR-02 of the previous round closed for the pipeline: asserting a fact the durable evidence does not support.
 
-**Fix:** bump `SCHEMA_VERSION = 2` and assert the new value in `tests/test_advanced_diagnosis_api.py` (currently `self.assertEqual(payload['schema_version'], 1)` at line 45).
-
-### WR-05: Tests permanently replace the process-global `time.time`, leaking a frozen clock into every later test
-
-**File:** `tests/test_advanced_diagnosis_api.py:18-19, 39, 61, 111, 298, 335, 376, 400, 447, 522, 549, 585, 614, 641`
-
-**Issue:** `self.appmod.time.time = lambda: ...` mutates the **`time` module object**, not the app module — `appmod.time` *is* `sys.modules['time']`. `tearDown` only calls `cleanup_db`, and `importlib.reload(dashboard.app)` in `tests/helpers.load_app` does not restore it. The patch therefore survives for the remainder of the pytest process. Demonstrated with a two-test file:
-
-```
-LEAKED time.time() = 1700000005
-AssertionError: GLOBAL CLOCK LEAKED FROM PREVIOUS TEST
-  where 1700000005 = <function A.test_a_patch.<locals>.<lambda>> = time.time
-```
-
-Impact: every test module that runs after `test_advanced_diagnosis_api.py` sees a frozen November-2023 wall clock. Retention cutoffs, lease expiry, `expire_days` filtering, and rate-limit windows in other suites are all computed from `time.time()`. Results become order-dependent, and real regressions can be masked.
-
-**Fix:** use `unittest.mock.patch` with automatic teardown, and patch the boundary the code calls rather than the stdlib module:
+**Fix:** join the already-computed stream gaps onto the service rows, and make the client's empty case explicit rather than JSON-dumping a container:
 
 ```python
-def setUp(self):
-    ...
-    self._clock = {'now': 1_700_000_005}
-    patcher = unittest.mock.patch('time.time', lambda: self._clock['now'])
-    patcher.start()
-    self.addCleanup(patcher.stop)
+# diagnosis.py, inside get_current_diagnosis after pipeline is composed
+gaps_by_port = {}
+for stream in pipeline['streams']['items']:
+    if stream['stream_kind'] == 'service':
+        gaps_by_port[str(stream['stream_key'])] = stream['gaps']
+for service in services:
+    service['collection_gaps'] = gaps_by_port.get(str(service['port']), [])
 ```
 
-### WR-06: The phase's own test asserts the CR-01 defect as expected behavior
+```javascript
+const gaps = Array.isArray(service.collection_gaps) ? service.collection_gaps : null;
+addEvidence(evidence, 'Collection-gap evidence',
+  gaps === null ? 'Unknown'
+  : gaps.length === 0 ? 'No collection-gap evidence for this service'
+  : gaps.map((gap) => `${gap.open ? 'Open' : 'Resolved'} ${gapInterval(gap)}`).join(' '));
+```
 
-**File:** `tests/test_advanced_diagnosis_api.py:487-506`
+If populating the field is out of scope for this phase, the honest interim is to remove the field from the payload and render `Unknown` — never `[]`.
 
-**Issue:** The `open_gap_merged_with_closed_historical_coverage` case seeds a gap that closed at `now - 4000` (well outside the 3600-second `recent_window`) and then asserts `len(collection_gaps) == 1 + len(coverage)` — i.e. it requires the resolved historical gap to appear as an active exception. It also asserts only `start_ts`/`end_ts`/`reason`/`detail` for the historical row, deliberately omitting `open` and `actionable`, so the mislabel is unasserted. Fixing CR-01 will fail this test, which is the correct signal but means the test currently protects the bug.
+### CR-02: Every offline service renders "0 ms" latency and its failure class is unreachable
 
-**Fix:** assert the full historical item, including the corrected flags:
+**File:** `dashboard/beacon/diagnosis.py:154`, `dashboard/advanced.js:629-630`, `dashboard/advanced.js:499-502`
+
+**Issue:** Known and recorded as `deferred-items.md` item 1; reported here because my reading **enlarges its scope from an edge case to the default path**, which changes its severity.
+
+The server sets latency to `None` for *every* non-online service by construction:
 
 ```python
-self.assertEqual(historical[0]['open'], False)
-self.assertEqual(historical[0]['actionable'], False)
-self.assertEqual(len(collection_gaps), 1)
+'latency_ms': row.get('probe_latency_ms') if availability == 'online' else None,
 ```
 
-### WR-07: `test_refresh_generation_guard_is_declared_in_the_advanced_controller` asserts source text, not behavior
+The client then does:
 
-**File:** `tests/test_advanced_ui.py:754-761`
-
-**Issue:** The test greps `advanced.js` for exact literals (`'requestGeneration: 0'`, `'const requestId = ++state.requestGeneration;'`, a count of `2` for the guard line) and asserts `assertNotIn('AbortController', js)`. It verifies nothing about ordering behavior — the two adjacent Playwright regressions already do that properly — and it actively forbids replacing the counter with `AbortController`, which is the standard fix for this class of race. A whitespace change or a refactor into a helper breaks the test without changing behavior.
-
-**Fix:** delete this test. The behavioral coverage in `test_reverse_order_refresh_success_never_regresses_newer_evidence` and `..._failure_never_raises_a_superseded_warning` is sufficient and implementation-agnostic.
-
-### WR-08: `/api/advanced/current` has no error handling and bypasses the app's `_db_lock`
-
-**File:** `dashboard/app.py:2121-2132`
-
-**Issue:** Two problems in one handler:
-
-1. No exception handling. `get_current_diagnosis` opens its own connection via `read_transaction`; `connect_db` blocks up to 30 s on the maintenance flock and then raises `MaintenanceBusy` (`dashboard/beacon/db.py:56-88`). `sqlite3.OperationalError` is equally reachable. Either escapes as a Flask 500 with an HTML body, which `apiFetch` cannot parse (`dashboard/advanced.js:59-63`), so the operator sees "Check the connection warning, then try again" for what is actually a scheduled maintenance window.
-2. Every other read route (`/api/history`, `/api/telemetry/history`, `/api/stats`) serializes on `_db_lock` before touching SQLite. This handler does not, so it is the only route that can hold a SQLite read outside the app's connection discipline — on a page that polls as fast as every 5 seconds, from up to 8 Gunicorn threads. `journal_mode` is never set to WAL anywhere in the codebase, so readers and the worker's writers contend directly.
-
-**Fix:** model the maintenance case explicitly and match the surrounding lock discipline:
-
-```python
-@app.route('/api/advanced/current')
-def api_advanced_current():
-    if request.args:
-        return jsonify({'error': 'unexpected query parameters'}), 400
-    try:
-        with _db_lock:
-            payload = beacon_diagnosis.get_current_diagnosis(DB_PATH, SETTINGS, int(time.time()))
-    except MaintenanceBusy:
-        return jsonify({'error': 'database maintenance in progress'}), 503
-    response = jsonify(payload)
-    response.headers['Cache-Control'] = 'no-store'
-    return response
+```javascript
+const latencyValue = Number(service.latency_ms);
+latency.textContent = Number.isFinite(latencyValue) ? `${latencyValue} ms` : displayValue(service.failure_class || service.last_error, '');
 ```
 
-and surface the 503 body in `renderRefreshError` so the copy names the real cause.
+`Number(null)` is `0` and `Number.isFinite(0)` is `true` (verified in node). So the "Latency / failure" column shows **`0 ms` for every offline and every unknown service**, and the `failure_class` / `last_error` branch is dead for any payload this server can emit (it can only fire if the key is absent entirely, yielding `NaN`).
 
-### WR-09: Overview exception cards render raw machine identifiers through dead fallback fields
+Consequences: the failure class — the single most useful cell for a down service — is never shown in the collapsed table; `0 ms` is fabricated evidence that reads as "fastest service"; and `stableServiceSort`'s latency branch (`advanced.js:499-502`) sorts every down service ahead of every healthy one, with its `Number.POSITIVE_INFINITY` guard equally unreachable.
 
-**File:** `dashboard/advanced.js:138`
+The deferred rationale ("pre-existing behaviour... belongs with 03-02/03-04") is a scheduling argument, not a severity argument. The phase's requirement is a truthful current diagnosis; this defeats it on the rows that matter most.
+
+**Fix:** stop coercing null. One helper, used by both the cell and the sort:
+
+```javascript
+function serviceLatency(service) {
+  const value = service.latency_ms;
+  if (value === null || value === undefined) return null;
+  const latency = Number(value);
+  return Number.isFinite(latency) ? latency : null;
+}
+// cell
+const latency = serviceLatency(service);
+latencyCell.textContent = latency === null
+  ? displayValue(service.failure_class || service.last_error)
+  : `${latency} ms`;
+// sort
+if (sort.field === 'latency') return serviceLatency(service) ?? Number.POSITIVE_INFINITY;
+```
+
+Add a regression fixture with `latency_ms: null` + a non-null `failure_class` asserting the cell shows the failure class and never the string `0 ms` — `SORTABLE_SERVICES` in `tests/test_advanced_ui.py` already carries such a row and currently asserts nothing about its latency cell.
+
+### CR-03: A callback that succeeded can be recorded as `failed` and re-raised
+
+**File:** `dashboard/beacon/worker_main.py:272-297`
 
 **Issue:**
 
-```javascript
-addCard(exceptionRegion, item.label || item.kind || 'Unknown exception',
-        item.evidence || item.detail || 'Unknown evidence', item.section);
+```python
+try:
+    _write_job_health_transition(services, callback_id, 'started')
+    result = _invoke_callback(services, callback)
+    if result is False:
+        ...
+    _write_job_health_transition(services, callback_id, 'succeeded')   # <-- can raise
+    return result
+except queues.LeaseLost:
+    ...
+except Exception as exc:
+    _write_job_health_transition(services, callback_id, 'failed', error_class=_job_error_class(exc))
+    raise
 ```
 
-`compose_active_exceptions` never emits `label` or `evidence` — both branches are dead. Every card therefore falls through to `item.kind` and, for most kinds, to `'Unknown evidence'`. The operator's primary safety surface reads `host_freshness`, `critical_service_offline`, `worker_freshness` with "Unknown evidence" beneath. `tests/test_advanced_ui.py:626` cements this by asserting `assertIn('host_freshness', overview)`.
+The success bookkeeping write is inside the same `try` as the real work. `_write_job_health_transition` opens its own connection through `write_transaction` → `connect_db`, which blocks up to 30 s on the maintenance flock and then raises `MaintenanceBusy`, and can raise `sqlite3.OperationalError` on `BEGIN IMMEDIATE` after the 30 s busy timeout (`dashboard/beacon/db.py:56-89`). When that happens **after** `_invoke_callback` has already completed its durable work, the broad `except Exception` writes `state='failed'` with `error_class='MaintenanceBusy'` (or `OperationalError`) for a callback that succeeded, and then re-raises into APScheduler so the scheduler log also records a failure.
 
-**Fix:** either add `label`/`evidence` to the server projection (the server already holds `state`, `port`, `name`, `job_id`, and the gap timestamps needed to compose them), or map kind → operator copy in the client. Then remove whichever fallback becomes dead.
+That false row is not inert: `read_background_job_health` feeds `compose_pipeline_diagnosis`, and `compose_active_exceptions` (`diagnosis.py:355-357`) promotes any `state == 'failed'` into an operator-facing `job_failed` exception rendered as "Background job failed — J2". The durable record also loses the true `last_success_ts` for that run.
 
-### WR-10: `selectSection` dereferences a server-supplied section id with no guard
+Second-order effect from the same block: if the **`started`** write fails, the callback's real work is skipped entirely (metrics, probes, cleanup) because bookkeeping now runs first and aborts the dispatch.
 
-**File:** `dashboard/advanced.js:602-612`
+**Fix:** scope the failure record to failures of the work itself, and never let bookkeeping failure rewrite a known-good outcome:
 
-**Issue:** `addCard` passes `item.section` straight from the API into `selectSection`, which does `document.querySelectorAll('.advanced-detail > section').forEach((node) => { node.hidden = node.id !== `${section}-section`; })` and then `$(`${section}-heading`).focus()`. If the server ever emits a `section` value with no matching element — a new exception category, a schema skew between a cached page and an upgraded backend — every section is hidden **and then** `heading.focus()` throws on `null`, leaving a blank workspace with an uncaught `TypeError`. The hide loop runs before the null dereference, so the failure is not atomic.
+```python
+try:
+    _write_job_health_transition(services, callback_id, 'started')
+except queues.LeaseLost:
+    raise
+except Exception:
+    log.warning('could not record start of %s; running it anyway', callback_id)
 
-**Fix:** validate before mutating:
+try:
+    result = _invoke_callback(services, callback)
+except queues.LeaseLost:
+    ...
+except Exception as exc:
+    _record_outcome(services, callback_id, 'failed', error_class=_job_error_class(exc))
+    raise
+
+_record_outcome(services, callback_id, 'failed' if result is False else 'succeeded',
+                error_class='CallbackReturnedFalse' if result is False else None)
+return result
+```
+
+where `_record_outcome` swallows and logs non-`LeaseLost` bookkeeping errors. Add a test that makes only the `succeeded` write raise `MaintenanceBusy` and asserts the durable row is not `failed` and no `job_failed` exception reaches `/api/advanced/current`.
+
+## Warnings
+
+### WR-01: `/api/advanced/current` still bypasses `_db_lock`, and no journal mode is ever set
+
+**File:** `dashboard/app.py:2121-2141`
+
+**Issue:** Reported in the previous review as part of WR-08; 03-10 fixed only the error-handling half. Every other read route in `app.py` serializes on `_db_lock` (`app.py:131, 187, 2156, 2301, 2452, ...` — 27 call sites). This handler still does not, so it remains the only route that holds a SQLite read outside the app's connection discipline, on a page that polls as fast as every 5 s from up to 8 Gunicorn threads. `grep -rn journal_mode dashboard/` finds only `inventory.py` *reading* the pragma — WAL is never enabled anywhere, so these readers contend directly with the worker's `BEGIN IMMEDIATE` writers, which CR-03's change just made three times more frequent per callback.
+
+**Fix:** either wrap the call in `with _db_lock:` to match the surrounding discipline, or set `PRAGMA journal_mode=WAL` in `connect_db` and document the deliberate divergence. Do not leave it undecided.
+
+### WR-02: The 503 handler discards the detail its own comment promises to log, and mislabels permanent failures
+
+**File:** `dashboard/app.py:2135-2138`
+
+**Issue:**
+
+```python
+except sqlite3.OperationalError as exc:
+    # The detail belongs in the server log, never in the response body.
+    log.warning('advanced diagnosis read unavailable (%s)', exc.__class__.__name__)
+    return jsonify({'error': 'diagnosis database is temporarily unavailable'}), 503
+```
+
+The comment says the detail goes to the log; the code logs only `exc.__class__.__name__`, which is always the constant string `OperationalError`. The message — `no such table: telemetry_streams`, `database is locked`, `attempt to write a readonly database` — is discarded at both ends, so an operator has no way to distinguish a transient lock from a broken schema. `tests/test_advanced_diagnosis_api.py` asserts only that the message does not reach the *response*; nothing asserts it reaches the log, which is why the omission survived.
+
+Related: `sqlite3.OperationalError` also covers permanent conditions (missing table after a partial migration, read-only filesystem). Reporting those as "temporarily unavailable" tells the operator to wait for a state that will never arrive, and the UI has no retry ceiling.
+
+**Fix:**
+
+```python
+except sqlite3.OperationalError as exc:
+    log.warning('advanced diagnosis read unavailable: %s', exc)   # server-side only
+    return jsonify({'error': 'diagnosis database is temporarily unavailable'}), 503
+```
+
+and assert the log record in the test with `assertLogs`. Consider `Retry-After` on the 503, and consider narrowing the "temporarily" claim (e.g. treat `no such table` / `readonly database` as 500-class configuration faults).
+
+### WR-03: Polling has no in-flight guard or abort, and a test forbids adding one
+
+**File:** `dashboard/advanced.js:57-65, 672-676, 709-726`; `tests/test_advanced_ui.py:1146`
+
+**Issue:** `scheduleRefresh` installs `setInterval(refreshCurrentDiagnosis, refreshSeconds * 1000)` and `refreshCurrentDiagnosis` neither checks for a pending request nor carries an `AbortSignal` or timeout. `state.requestGeneration` only discards a stale *render*; the HTTP request itself continues.
+
+Server-side, a single request can legitimately hang ~30 s (`_acquire_lock(..., timeout_seconds=30)`) plus a 30 s SQLite busy timeout before it returns 503. At the 5 s cadence the workspace offers, that is up to a dozen stacked requests per tab, each pinned to one of the 8 Gunicorn threads, and each consuming one of the browser's ~6 connections per origin — which also stalls the main dashboard in another tab. During a recovery or maintenance window, i.e. exactly when the operator needs the page, the page and the API can starve each other.
+
+Compounding this, `test_refresh_generation_guard_is_declared_in_the_advanced_controller` asserts `self.assertNotIn('AbortController', js)` — the test suite actively forbids the standard fix.
+
+**Fix:** skip or supersede an in-flight request and bound it:
 
 ```javascript
-function selectSection(section) {
-  const heading = $(`${section}-heading`);
-  if (!heading) return;
-  state.activeSection = section;
-  ...
+let inFlight = null;
+async function refreshCurrentDiagnosis() {
+  if (inFlight) inFlight.abort();
+  const controller = new AbortController();
+  inFlight = controller;
+  const timer = setTimeout(() => controller.abort(), Math.max(4000, state.preferences.refreshSeconds * 1000 - 500));
+  try { /* fetch with {signal: controller.signal} */ }
+  finally { clearTimeout(timer); if (inFlight === controller) inFlight = null; }
 }
 ```
 
+and delete the `assertNotIn('AbortController', js)` assertion — a test must not prohibit a mechanism.
+
+### WR-04: An unwritable `localStorage` kills the whole workspace at load
+
+**File:** `dashboard/advanced.js:36-45, 731`
+
+**Issue:** `loadPreferences` guards its read with `try/catch`, but `savePreferences` calls `localStorage.setItem(...)` bare, and the module-level bootstrap calls it unconditionally at `advanced.js:731` — **before** any event listener is bound and before `scheduleRefresh()` / the first `refreshCurrentDiagnosis()`. In any context where `setItem` throws (Safari private browsing, quota exhausted, storage blocked by policy), the IIFE aborts and the operator is left with the static loading skeleton forever: no refresh, no nav, no error message, and the page looks like a hung backend. The same throw path exists on every filter keystroke, density change and pause toggle.
+
+**Fix:**
+
+```javascript
+function savePreferences() {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({...}));
+  } catch (_) { /* presentation preferences are best-effort browser-local state */ }
+}
+```
+
+### WR-05: `streams.items[].gaps` is a second, differently-bounded copy of the gap population
+
+**File:** `dashboard/beacon/diagnosis.py:218-273, 308-317`
+
+**Issue:** Plan 03-08's goal was that `gaps.count` and `gaps.truncated` describe exactly one population. They now do — but the same items are also pushed into `stream['gaps']` (`diagnosis.py:244, 260`) **before** the priority sort and the `gaps[:gaps_limit]` slice, and `stream_records` is emitted verbatim as `streams.items`. So:
+
+1. A gap dropped from `gaps.items` by the cap is still present, in full, under `streams.items[].gaps` — the response simultaneously claims truncation and ships the truncated item.
+2. `streams.items[].gaps` is bounded by the *stream* limit and the coverage read, not by `gaps_limit`, so it is a second population with no disclosure of its own.
+3. Every gap is serialized twice (they are the same dict object in memory, but JSON has no aliasing), inflating a payload polled every 5 s.
+4. Nothing consumes it: neither `advanced.js` nor any test reads `streams.items[].gaps`.
+
+**Fix:** drop the per-stream copy and let the Pipeline gap region be the single disclosure, or populate it from `bounded_gaps` after the slice and give it its own `truncated` flag. Dropping it is preferable — CR-01 needs a *service*-keyed join, not a per-stream duplicate.
+
+### WR-06: `state_duration_seconds: null` renders as "0 seconds" and sorts as most-recent
+
+**File:** `dashboard/advanced.js:452-455, 503, 631`
+
+**Issue:** Same root cause as CR-02, not covered by `deferred-items.md`. The server deliberately emits `None` when it cannot establish a state transition timestamp:
+
+```python
+'state_duration_seconds': (max(0, now - row['state_since']) if isinstance(row.get('state_since'), int) else None),
+```
+
+The client coerces it back to a number:
+
+```javascript
+const seconds = Number(service.state_duration_seconds);   // Number(null) === 0
+return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+```
+
+So an unknown duration prints "0 seconds" — which an operator reads as "this service just changed state right now" — and sorts ahead of every real duration, while `formatDuration`'s `'Unknown duration'` branch and the `?? Number.POSITIVE_INFINITY` sort guard are both unreachable. Reachability is lower than CR-02 (`state_since` is backfilled by migration and set on insert), which is why this is a warning rather than a blocker, but the client must not contradict an explicit server `null`.
+
+**Fix:** null-check before coercion, exactly as in CR-02:
+
+```javascript
+function serviceDuration(service) {
+  const value = service.state_duration_seconds;
+  if (value === null || value === undefined) return null;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+```
+
+### WR-07: `aria-selected` on plain buttons gives assistive technology no section state
+
+**File:** `dashboard/advanced.html:32-38`, `dashboard/advanced.js:692-695`
+
+**Issue:** The section navigation is a `<nav>` of plain `<button>` elements carrying `aria-selected="true|false"`. `aria-selected` is only defined for `role="tab" | option | row | gridcell | treeitem | columnheader | rowheader`; on an implicit `role="button"` it is invalid and ignored. The selected section is therefore conveyed **only** by CSS (`.section-navigation button[aria-selected="true"]` sets colour and background), so a screen-reader user gets no indication of which of the five sections is active. `tests/test_advanced_ui.py` asserts the invalid attribute, cementing it.
+
+**Fix:** either adopt the tab pattern properly (`role="tablist"` on the nav, `role="tab"` + `aria-selected` + roving `tabindex` on the buttons, `role="tabpanel"` + `aria-labelledby` on the sections), or keep plain buttons and use `aria-current="true"` (valid on any element) plus `aria-expanded`. Update the assertions to the chosen valid attribute.
+
+### WR-08: Tautological and source-text tests give coverage credit for nothing
+
+**File:** `tests/test_advanced_ui.py:1149-1152, 1140-1147, 196-209, 481-499, 1198-1207`
+
+**Issue:** Several tests assert properties of the test file or of source *text* rather than behavior, so they cannot fail on a regression:
+
+- `test_ui_consideration_inventory_is_complete_and_unique` (1149-1152) asserts that `UI_CONSIDERATIONS` — a module constant built by `tuple(f'UI-{n:02d}' for n in range(1, 37))` at line 13 — has 36 unique members and equals the identical comprehension. It is a tautology; it can never fail, and it asserts nothing about the product. It reads in a coverage roll-up as if UI-01..UI-36 were verified.
+- `test_precision_and_accessible_service_source_contract` (1198-1207) and `test_services_source_contract_...` (481-499) grep the shipped files for `'position: sticky'`, `'aria-expanded'`, `'state_duration_seconds'`, `f'function {name}'`. A rule can be deleted from the matching selector, or a function renamed at its call sites, without failing.
+- `test_advanced_controller_tracer_...` (196-209) bans the bare substrings `'history'` and `'POST'` in `advanced.js`. Brittle: any future identifier containing "history" fails the suite for no behavioral reason.
+
+Real behavioral coverage does exist elsewhere in this file (the `getComputedStyle` breakpoint checks, the exception-copy tests), which makes the grep tests pure noise.
+
+**Fix:** delete the tautology, and replace each source grep with the browser assertion it was standing in for (e.g. assert `getComputedStyle(identity).position === 'sticky'` — already done at line 1181 — and assert the toggle's `aria-expanded` flips on click rather than that the string exists).
+
+### WR-09: `next(...)` over the callback inventory raises `StopIteration` into the request path
+
+**File:** `dashboard/beacon/diagnosis.py:213-216`
+
+**Issue:**
+
+```python
+heartbeat_callback = next(
+    callback for callback in WORKER_CALLBACK_INVENTORY if callback.identifier == 'J1'
+)
+```
+
+If `J1` is ever renamed or removed from the inventory, this raises a bare `StopIteration` from inside a web request. The route catches only `MaintenanceBusy` and `sqlite3.OperationalError`, so the operator gets an unparseable HTML 500 — the exact failure mode plan 03-10 set out to eliminate. `worker_main.py` already maintains `_CALLBACKS_BY_ID` for precisely this lookup, and `diagnosis.py` already imports from that module.
+
+**Fix:**
+
+```python
+from .worker_main import WORKER_CALLBACK_INVENTORY, _CALLBACKS_BY_ID  # or a public accessor
+heartbeat_callback = _CALLBACKS_BY_ID.get('J1')
+worker_cadence = (
+    callback_schedule_evidence(heartbeat_callback, settings)['cadence_seconds']
+    if heartbeat_callback is not None else None
+)
+```
+
+`freshness_state` already degrades a `None` cadence to `{'state': 'unknown'}`, which is the truthful outcome.
+
+### WR-10: Exception dicts are spread from a database row, so a new column can silently rewrite the classification
+
+**File:** `dashboard/beacon/diagnosis.py:354, 360`
+
+**Issue:**
+
+```python
+exceptions.append({'kind': kind, 'section': 'pipeline', 'priority': 5, **gap})
+```
+
+`gap` is built from `SELECT ... FROM telemetry_coverage` (`repositories.py:143-147`) plus the composer's own keys. Because `**gap` is spread **last**, any future `telemetry_coverage` column named `kind`, `section` or `priority` silently overrides the classification this line just computed. The sort key immediately below (`item['priority'], item['kind'], item.get('port', -1), item.get('job_id', '')`) will then either mis-order or raise a `TypeError` comparing a str priority to an int. The fix is one character of ordering and costs nothing.
+
+**Fix:**
+
+```python
+exceptions.append({**gap, 'kind': kind, 'section': 'pipeline', 'priority': 5})
+```
+
+Apply the same ordering discipline wherever server rows are spread into composed payloads.
+
 ## Info
 
-### IN-01: Every poll rebuilds the whole DOM, destroying focus and open selects
+### IN-01: Every successful poll rebuilds the entire DOM
 
-**File:** `dashboard/advanced.js:571-578, 456-469`
+**File:** `dashboard/advanced.js:654-661, 539-552`
 
-`renderSnapshot` calls `replaceChildren` on the overview, host, services table body, pipeline section, and settings section on every successful refresh, and `syncServiceFilterControls` calls `tagControl.replaceChildren(...)` plus reassigns `control.value` for all five filter inputs. At the default 15-second cadence (5 seconds is selectable) this drops keyboard focus from any "Show details" toggle or sort button and closes an open tag dropdown. Consider diffing the service rows by port, or skipping the rebuild when `document.activeElement` is inside the region being replaced.
+Unchanged from the previous review. `renderSnapshot` calls `replaceChildren` on the overview, host, services table body, pipeline section and settings section; `syncServiceFilterControls` rebuilds the tag `<select>` and reassigns all five filter inputs. At the default 15 s cadence (5 s selectable) this drops keyboard focus from any Show details / sort button and closes an open dropdown. Consider skipping the rebuild while `document.activeElement` is inside the region, or diffing service rows by port.
 
-### IN-02: Client and server duplicate the D-06 ordering rule with divergent `pinned_order` fallbacks
+### IN-02: The D-06 ordering rule is implemented twice
 
-**File:** `dashboard/advanced.js:385-399` vs `dashboard/beacon/diagnosis.py:90-101, 110-114`
+**File:** `dashboard/advanced.js:468-482` vs `dashboard/beacon/diagnosis.py:112-123`
 
-The server falls back to `port` for an invalid or missing `pinned_order` (`_safe_pinned_order(value, fallback=row['port'])`); the client falls back to `0` (`Number(left.pinned_order) || 0`). With a mix of set and unset `pinned_order` values, the client's "default operational order" differs from the order the API already sorted. Since the client re-sorts an already-sorted list, the simplest fix is to trust the server order when `state.serviceSort` is null.
+The client re-sorts a list the server already sorted, using a parallel implementation. The previously reported `pinned_order` fallback divergence is **not** currently reachable — `_safe_pinned_order` guarantees an int in `0..65535`, and `Number(0) || 0` is `0` — so the two agree today. It remains a maintenance hazard: any change to one side silently desynchronizes the operator's "default operational order". Simplest resolution is to trust the server order when `state.serviceSort` is null.
 
-### IN-03: A service with `unknown` availability but fresh probe evidence produces no exception
+### IN-03: `unknown` availability with fresh probe evidence yields no exception
 
-**File:** `dashboard/beacon/diagnosis.py:296-307`
+**File:** `dashboard/beacon/diagnosis.py:336-347`
 
-`operational_service_key` ranks `availability == 'unknown'` into notable group 2, but `compose_active_exceptions` only emits for `offline` or for stale/unknown *freshness*. A service whose availability is unknown while its probe timestamp is fresh yields no exception, so the workspace can claim "reporting normally". This is the same truthfulness gap class that CR-02 closed for the host; low reachability today because `_legacy_probe_http` only returns `True`/`False`.
+Unchanged. `operational_service_key` ranks `availability == 'unknown'` into notable group 2, but `compose_active_exceptions` only emits for `offline` or for stale/unknown *freshness*. A service whose availability is unknown while its probe timestamp is fresh produces no exception, so the overview can still claim "Host, services, and collection pipeline are reporting normally."
 
-### IN-04: `restoreDashboardScroll` consumes a sessionStorage key that can outlive its navigation
+### IN-04: The dashboard scroll key can outlive its navigation
 
-**File:** `dashboard/app.js:420-435`
+**File:** `dashboard/app.js:421-437`
 
-`captureDashboardScroll` fires on any click of the advanced link, including middle-click and ctrl-click (where the user stays on the dashboard), and `restoreDashboardScroll` only runs on `DOMContentLoaded` — which bfcache back-navigation skips. In both cases the key survives, so a later unrelated dashboard load scroll-jumps and steals focus to the advanced link. Consider clearing the key on `pagehide`, or storing a navigation nonce alongside the offset.
+Unchanged. `captureDashboardScroll` fires on any click of the advanced link (including middle-click and ctrl-click, where the user stays put), and `restoreDashboardScroll` runs only on `DOMContentLoaded`, which bfcache back-navigation skips. The key survives, so a later unrelated dashboard load scroll-jumps and steals focus to the advanced link. Clear it on `pagehide`, or store a navigation nonce alongside the offset.
 
-### IN-05: Dead and always-null job/settings fields
+### IN-05: Dead and always-constant fields
 
-**Files:** `dashboard/beacon/diagnosis.py:172, 173`, `dashboard/advanced.js:324`
+**Files:** `dashboard/beacon/diagnosis.py:194-195`, `dashboard/advanced.js:407`, `dashboard/beacon/worker_main.py:237`
 
 - `callback_schedule_evidence` always returns `'next_expected_ts': None`; nothing populates it and the UI never reads it.
-- `'not_scheduled': callback.scheduler_id is None` is `True` for `P0`, `S1`, `S2`, `S3`, and `L1` — startup and lifecycle callbacks that do run — so the Background jobs region labels them "Not scheduled".
-- `addSettingsGroup(root, 'Effective pressure', settings.pressure, ['alert_webhook_url'])` passes an `optionalKeys` entry that is not a key of the pressure group (`_settings_payload` puts alerting in its own group as a boolean). The argument has no effect.
+- `'not_scheduled': callback.scheduler_id is None` is `True` for `P0`, `S1`, `S2`, `S3` and `L1` — startup and lifecycle callbacks that do run — so the Background jobs region labels five real callbacks "Not scheduled".
+- `addSettingsGroup(root, 'Effective pressure', settings.pressure, ['alert_webhook_url'])` passes an `optionalKeys` entry that is not a key of the pressure group; the argument has no effect.
+- `_job_error_class` ends with `type(error).__name__[:96] or 'CallbackFailed'`; `__name__` is never empty, so the fallback is dead (and `repositories._safe_job_error_class` already provides one).
+
+### IN-06: Three duplicated element-id maps and two freshness allow-lists
+
+**File:** `dashboard/advanced.js:540-543, 591-594, 741-744, 761-764, 113-117, 447-450`
+
+The filter-control map is built twice (`syncServiceFilterControls`, bootstrap) and the sort-button map twice (`renderServices`, bootstrap), with the ids repeated verbatim in each — a rename in `advanced.html` must be mirrored in four places, and a miss throws only at click time. Separately, the freshness allow-list exists as both `FRESHNESS_WORDS` (a `Set`) and an inline array in `serviceFreshness`. Hoist each to a single module constant.
+
+### IN-07: A collection region can print "0 gaps" above the word "Unknown"
+
+**File:** `dashboard/advanced.js:263-288, 360`
+
+`countLabel` maps a missing count to `0`, while `addCollectionRegion` renders `Unknown` when the collection is not an array. With `pipeline.gaps` absent the heading reads "Collection gaps (0 gaps)" over a body reading "Unknown" — two different claims about the same evidence. Make `countLabel` return `Unknown` for a non-finite count.
+
+### IN-08: `schedule_kind` reports the admission category
+
+**File:** `dashboard/beacon/diagnosis.py:191`
+
+`'schedule_kind': callback.admission_category` emits `'scheduled'`, `'startup'`, `'pre_epoch_preparation'`, `'lifecycle_finalization'`. The value is defensible but the name implies the trigger kind (which is reported separately as `trigger`), and nothing in the UI reads the field. Either rename it or drop it from the payload.
 
 ---
 
-_Reviewed: 2026-08-18T16:51:42Z_
+_Reviewed: 2026-08-18T22:40:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
