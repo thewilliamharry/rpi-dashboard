@@ -125,9 +125,9 @@ Every v1 requirement maps to exactly one roadmap phase.
 | MNT-02 | Phase 03.1 | Pending |
 | MNT-03 | Phase 03.1 | Pending |
 | MNT-04 | Phase 03.1 | Pending |
-| DIA-01 | Phase 3 | Gaps Found |
-| DIA-02 | Phase 3 | Gaps Found |
-| DIA-03 | Phase 3 | Gaps Found |
+| DIA-01 | Phase 3 | Complete |
+| DIA-02 | Phase 3 | Complete |
+| DIA-03 | Phase 3 | Complete |
 | DIA-04 | Phase 4 | Pending |
 | DIA-05 | Phase 4 | Pending |
 | DIA-06 | Phase 4 | Pending |
@@ -140,7 +140,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | HIS-05 | Phase 4 | Pending |
 | HIS-06 | Phase 4 | Pending |
 | UX-01 | Phase 5 | Pending |
-| UX-02 | Phase 3 | Gaps Found |
+| UX-02 | Phase 3 | Complete |
 | UX-03 | Phase 5 | Pending |
 | UX-04 | Phase 5 | Pending |
 | UX-05 | Phase 5 | Pending |
