@@ -864,6 +864,165 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # Sort is session-local memory state (D-14 does not persist it), so these
+    # fixtures set only the documented preference keys and never a sort.
+    SORTABLE_SERVICES = (
+        {
+            'port': 443, 'name': 'Critical gateway', 'status': 'down',
+            'failure_class': 'connection refused', 'latency_ms': None,
+            'state_duration_seconds': 900, 'critical': True, 'pinned_order': 2,
+            'tags': ['edge'], 'effective_health_rule': '200-399',
+            'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+            'freshness': {'state': 'fresh', 'age_seconds': 5},
+            'tls': {'posture': 'not applicable'}, 'last_error': 'connection refused',
+            'collection_gaps': [],
+        },
+        {
+            'port': 80, 'name': 'Healthy web', 'status': 'up', 'latency_ms': 12.5,
+            'state_duration_seconds': 60, 'critical': False, 'pinned_order': 1,
+            'tags': ['web'], 'effective_health_rule': '200-399',
+            'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+            'freshness': {'state': 'fresh', 'age_seconds': 5},
+            'tls': {'posture': 'not applicable'}, 'last_error': None,
+            'collection_gaps': [],
+        },
+    )
+
+    def _sortable_services_page(self, refresh_seconds=5):
+        counter = {'value': 0}
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+        page.add_init_script(
+            "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+            f"{{refreshSeconds: {refresh_seconds}, paused: false, density: null, "
+            "range: '24h', filters: {}}))"
+        )
+
+        def route_api(route):
+            if urlparse(route.request.url).path != '/api/advanced/current':
+                route.fallback()
+                return
+            counter['value'] += 1
+            payload = self._snapshot()
+            payload['generated_ts'] = 1_700_000_005 + counter['value'] * 60
+            payload.update({
+                'exceptions': [], 'pipeline': {}, 'settings': {},
+                'services': [dict(service) for service in self.SORTABLE_SERVICES],
+            })
+            route.fulfill(status=200, json=payload)
+
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="services"]').click()
+        page.locator('#services-table').wait_for(timeout=5_000)
+        return page
+
+    @staticmethod
+    def _first_service_row(page):
+        return page.locator('#services-table tbody > tr.service-row').first.text_content()
+
+    @staticmethod
+    def _await_new_snapshot(page, prior):
+        page.wait_for_function(
+            "(prior) => document.getElementById('advanced-last-success').textContent !== prior",
+            arg=prior, timeout=15_000,
+        )
+
+    def test_service_sort_survives_automatic_poll_and_manual_refresh(self):
+        """An automatic poll must never discard the operator's chosen presentation order."""
+        page = self._sortable_services_page()
+        try:
+            self.assertIn('443', self._first_service_row(page))
+            page.locator('#service-sort-duration').click()
+            self.assertEqual(page.locator('#service-sort-duration').get_attribute('aria-sort'), 'ascending')
+            self.assertIn(':80', self._first_service_row(page))
+            self.assertTrue(page.locator('#reset-service-order').is_visible())
+
+            prior = page.locator('#advanced-last-success').text_content()
+            self._await_new_snapshot(page, prior)
+            self.assertIn(':80', self._first_service_row(page))
+            self.assertEqual(page.locator('#service-sort-duration').get_attribute('aria-sort'), 'ascending')
+            self.assertTrue(page.locator('#reset-service-order').is_visible())
+
+            prior = page.locator('#advanced-last-success').text_content()
+            page.locator('#advanced-refresh').click()
+            self._await_new_snapshot(page, prior)
+            self.assertIn(':80', self._first_service_row(page))
+            self.assertEqual(page.locator('#service-sort-duration').get_attribute('aria-sort'), 'ascending')
+            self.assertTrue(page.locator('#reset-service-order').is_visible())
+
+            page.locator('#service-sort-duration').click()
+            self.assertEqual(page.locator('#service-sort-duration').get_attribute('aria-sort'), 'descending')
+            self.assertIn('443', self._first_service_row(page))
+        finally:
+            page.close()
+
+    def test_deliberate_controls_still_clear_the_service_sort(self):
+        """Reset operational order and Clear all filters remain the only clearing paths."""
+        page = self._sortable_services_page(refresh_seconds=60)
+        try:
+            page.locator('#service-sort-duration').click()
+            self.assertIn(':80', self._first_service_row(page))
+            page.locator('#reset-service-order').click()
+            self.assertIn('443', self._first_service_row(page))
+            self.assertEqual(page.locator('#service-sort-duration').get_attribute('aria-sort'), 'none')
+            self.assertFalse(page.locator('#reset-service-order').is_visible())
+
+            page.locator('#service-sort-duration').click()
+            self.assertIn(':80', self._first_service_row(page))
+            page.locator('#clear-service-filters').click()
+            self.assertIn('443', self._first_service_row(page))
+            self.assertEqual(page.locator('#service-sort-duration').get_attribute('aria-sort'), 'none')
+            self.assertFalse(page.locator('#reset-service-order').is_visible())
+
+            stored = page.evaluate("localStorage.getItem('beacon-advanced-preferences-v1')")
+            self.assertNotIn('serviceSort', stored)
+            self.assertNotIn('sort', stored)
+        finally:
+            page.close()
+
+    def test_unknown_section_value_never_blanks_the_workspace(self):
+        """A server section with no matching heading must not hide every section."""
+        payload = self._snapshot()
+        payload.update({
+            'services': [], 'pipeline': {}, 'settings': {},
+            'exceptions': [
+                {'kind': 'host_freshness', 'section': 'nowhere', 'priority': 1, 'state': 'stale'},
+                {'kind': 'worker_freshness', 'section': 'host', 'priority': 1, 'state': 'stale'},
+            ],
+        })
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+        errors = []
+        page.on('pageerror', lambda failure: errors.append(str(failure)))
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            page.locator('a:has-text("View nowhere")').click()
+            page.wait_for_timeout(250)
+            self.assertEqual(errors, [])
+            self.assertTrue(page.locator('#overview-section').is_visible())
+            self.assertTrue(page.locator('#overview-content').is_visible())
+            self.assertIn('2 active exceptions', page.locator('#overview-section').text_content())
+            self.assertEqual(
+                page.locator('#section-navigation button[aria-selected="true"]').text_content(),
+                'Overview',
+            )
+
+            page.locator('a:has-text("View host")').click()
+            page.locator('#host-section').wait_for(state='visible', timeout=5_000)
+            self.assertFalse(page.locator('#overview-section').is_visible())
+            self.assertEqual(page.locator('#host-heading').evaluate('(node) => document.activeElement === node'), True)
+            self.assertEqual(errors, [])
+        finally:
+            page.close()
+
     # Test-owned instrumentation: holds only the first in-flight request so a
     # slower older refresh can be released after a faster newer one has applied.
     REVERSE_ORDER_HARNESS = """
