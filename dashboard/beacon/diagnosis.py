@@ -215,6 +215,22 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
         gaps.append(item)
         if stream:
             stream['gaps'].append(item)
+    for stream in stream_records:
+        open_gap_start_ts = stream.get('open_gap_start_ts')
+        if open_gap_start_ts is None:
+            continue
+        item = {
+            'stream_kind': stream['stream_kind'],
+            'stream_key': stream['stream_key'],
+            'start_ts': open_gap_start_ts,
+            'end_ts': max(now, open_gap_start_ts),
+            'reason': 'collection_gap',
+            'detail': None,
+            'open': True,
+            'actionable': True,
+        }
+        gaps.append(item)
+        stream['gaps'].append(item)
     durable_jobs = {row['job_id']: row for row in evidence['jobs']}
     jobs = []
     for callback in WORKER_CALLBACK_INVENTORY:
