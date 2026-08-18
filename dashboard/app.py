@@ -28,7 +28,7 @@ try:
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
     from .beacon import queues as beacon_queues
-    from .beacon.db import connect_db
+    from .beacon.db import connect_db, MaintenanceBusy
     from .beacon.migrations import RECOVERY_MARKER
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
@@ -40,7 +40,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
     from beacon import queues as beacon_queues
-    from beacon.db import connect_db
+    from beacon.db import connect_db, MaintenanceBusy
     from beacon.migrations import RECOVERY_MARKER
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 
@@ -2122,11 +2122,20 @@ def serve_advanced_js():
 def api_advanced_current():
     if request.args:
         return jsonify({'error': 'unexpected query parameters'}), 400
-    payload = beacon_diagnosis.get_current_diagnosis(
-        DB_PATH,
-        SETTINGS,
-        int(time.time()),
-    )
+    try:
+        payload = beacon_diagnosis.get_current_diagnosis(
+            DB_PATH,
+            SETTINGS,
+            int(time.time()),
+        )
+    except MaintenanceBusy:
+        # Name the real cause: without this the browser reports a connection
+        # failure for what is actually a scheduled maintenance window.
+        return jsonify({'error': 'database maintenance in progress'}), 503
+    except sqlite3.OperationalError as exc:
+        # The detail belongs in the server log, never in the response body.
+        log.warning('advanced diagnosis read unavailable (%s)', exc.__class__.__name__)
+        return jsonify({'error': 'diagnosis database is temporarily unavailable'}), 503
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response
