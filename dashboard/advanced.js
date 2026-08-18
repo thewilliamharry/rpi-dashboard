@@ -5,7 +5,7 @@
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
-    expandedPorts: new Set(), connectionUnavailable: false,
+    expandedPorts: new Set(), connectionUnavailable: false, requestGeneration: 0,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -619,8 +619,10 @@
   }
 
   async function refreshCurrentDiagnosis() {
+    const requestId = ++state.requestGeneration;
     try {
       const snapshot = await apiFetch();
+      if (requestId !== state.requestGeneration) return;
       state.connectionUnavailable = false;
       state.snapshot = snapshot;
       state.serviceSort = null;
@@ -629,6 +631,7 @@
       $('advanced-refresh-error').hidden = true;
       renderSnapshot(snapshot);
     } catch (_) {
+      if (requestId !== state.requestGeneration) return;
       state.connectionUnavailable = true;
       renderSafety(state.snapshot || {});
       renderRefreshError();
