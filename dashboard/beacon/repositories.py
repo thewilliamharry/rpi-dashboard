@@ -110,6 +110,8 @@ def read_current_services(conn, *, cutoff_ts):
 def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_limit=32):
     """Read fixed, capped pipeline inputs; callers compose presentation meaning."""
     normalized_gap_limit = max(1, min(int(gap_limit), 128))
+    normalized_stream_limit = max(1, min(int(stream_limit), 128))
+    normalized_pending_limit = max(1, min(int(pending_limit), 128))
     runtime_rows = conn.execute(
         'SELECT key, value, updated_ts FROM runtime_state '
         'WHERE key IN (\'worker_owner\', \'worker_heartbeat\', \'telemetry_retention_state\') '
@@ -121,12 +123,17 @@ def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_
             runtime[row['key']] = json.loads(row['value'])
         except (TypeError, ValueError):
             runtime[row['key']] = None
-    streams = [dict(row) for row in conn.execute(
+    stream_rows = [dict(row) for row in conn.execute(
         'SELECT stream_kind, stream_key, started_ts, cadence_seconds, last_observed_ts, '
         'consecutive_misses, open_gap_start_ts FROM telemetry_streams '
-        'ORDER BY stream_kind ASC, stream_key ASC LIMIT ?',
-        (max(1, min(int(stream_limit), 128)),),
+        'ORDER BY (CASE WHEN open_gap_start_ts IS NOT NULL THEN 0 ELSE 1 END), '
+        '(CASE WHEN last_observed_ts IS NULL '
+        'OR (? - last_observed_ts) > 4 * cadence_seconds THEN 0 ELSE 1 END), '
+        'stream_kind ASC, stream_key ASC LIMIT ?',
+        (int(now), normalized_stream_limit + 1),
     )]
+    streams_truncated = len(stream_rows) > normalized_stream_limit
+    streams = stream_rows[:normalized_stream_limit]
     gap_rows = [dict(row) for row in conn.execute(
         'SELECT stream_kind, stream_key, start_ts, end_ts, reason, detail FROM telemetry_coverage '
         'ORDER BY end_ts DESC, start_ts DESC LIMIT ?',
@@ -134,18 +141,22 @@ def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_
     )]
     gaps_truncated = len(gap_rows) > normalized_gap_limit
     gaps = gap_rows[:normalized_gap_limit]
-    pending = [dict(row) for row in conn.execute(
+    pending_rows = [dict(row) for row in conn.execute(
         'SELECT stream_kind, stream_key, bucket_start, bucket_seconds, state, attempt_count, '
         'next_retry_ts, last_error_class, updated_ts FROM telemetry_rollup_jobs '
         'WHERE state != \'succeeded\' ORDER BY updated_ts DESC, bucket_start ASC LIMIT ?',
-        (max(1, min(int(pending_limit), 128)),),
+        (normalized_pending_limit + 1,),
     )]
+    pending_truncated = len(pending_rows) > normalized_pending_limit
+    pending = pending_rows[:normalized_pending_limit]
     return {
         'runtime': runtime,
         'streams': streams,
+        'streams_truncated': streams_truncated,
         'gaps': gaps,
         'gaps_truncated': gaps_truncated,
         'pending': pending,
+        'pending_truncated': pending_truncated,
         'jobs': read_background_job_health(conn),
         'read_ts': int(now),
     }

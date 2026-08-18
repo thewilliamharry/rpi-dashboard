@@ -265,7 +265,11 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
             'freshness': freshness_state(now, heartbeat_ts, worker_cadence),
             'lease_until': _runtime_timestamp(evidence['runtime'].get('worker_owner'), 'lease_until'),
         },
-        'streams': stream_records,
+        'streams': {
+            'items': stream_records,
+            'count': len(stream_records),
+            'truncated': bool(evidence.get('streams_truncated', False)),
+        },
         'gaps': {
             'items': gaps,
             'count': len(gaps),
@@ -273,17 +277,19 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
         },
         'aggregation_pending': {
             'items': evidence['pending'], 'count': len(evidence['pending']),
-            'truncated': len(evidence['pending']) >= 32,
+            'truncated': bool(evidence.get('pending_truncated', False)),
         },
         'jobs': jobs,
     }
 
 
-def compose_active_exceptions(services, pipeline, *, recovery_required):
+def compose_active_exceptions(host, services, pipeline, *, recovery_required):
     """Produce a safety-first deterministic exception projection without causal inference."""
     exceptions = []
     if recovery_required:
         exceptions.append({'kind': 'recovery_required', 'section': 'pipeline', 'priority': 0})
+    if host['freshness']['state'] in {'stale', 'unknown'}:
+        exceptions.append({'kind': 'host_freshness', 'section': 'host', 'priority': 1, 'state': host['freshness']['state']})
     worker = pipeline['worker']
     if worker['freshness']['state'] in {'stale', 'unknown'}:
         exceptions.append({'kind': 'worker_freshness', 'section': 'pipeline', 'priority': 1, 'state': worker['freshness']['state']})
@@ -355,5 +361,5 @@ def get_current_diagnosis(db_path, settings, now):
             'worker_stale': pipeline['worker']['freshness']['state'] in {'stale', 'unknown'},
             'recovery_required': recovery_required,
         },
-        'exceptions': compose_active_exceptions(services, pipeline, recovery_required=recovery_required),
+        'exceptions': compose_active_exceptions(host, services, pipeline, recovery_required=recovery_required),
     }

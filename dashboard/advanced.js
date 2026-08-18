@@ -211,7 +211,8 @@
     const retention = pipeline.retention || {};
     const pressure = pipeline.database_pressure || {};
     const worker = pipeline.worker || {};
-    const streams = Array.isArray(pipeline.streams) ? pipeline.streams : null;
+    const streamsField = pipeline.streams || {};
+    const streams = Array.isArray(streamsField.items) ? streamsField.items : null;
     const gaps = pipeline.gaps || {};
     const pending = pipeline.aggregation_pending || {};
     const jobs = Array.isArray(pipeline.jobs) ? pipeline.jobs : null;
@@ -254,7 +255,7 @@
     workerRegion.append(workerHeading, workerGrid);
     root.append(workerRegion);
 
-    addCollectionRegion(root, 'Streams', streams, 'No pipeline streams are configured', (list, stream) => {
+    addCollectionRegion(root, `Streams (${countLabel(streamsField.count, 'stream')}${streamsField.truncated ? ', truncated' : ''})`, streams, 'No pipeline streams are configured', (list, stream) => {
       const item = document.createElement('article');
       const name = `${displayValue(stream.stream_kind)}: ${displayValue(stream.stream_key)}`;
       const freshness = stream.freshness || {};
