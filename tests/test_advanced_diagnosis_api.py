@@ -1,7 +1,9 @@
 import json
+import sqlite3
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from dashboard.beacon import migrations, queues, repositories, worker_main
 from dashboard.beacon.worker_authority import WorkerAuthority
@@ -965,6 +967,57 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json(), {'error': 'unexpected query parameters'})
 
+
+    def test_maintenance_window_reaches_the_operator_as_a_named_cause(self):
+        """A maintenance lease failure is parseable JSON naming its cause, not an HTML 500."""
+        with mock.patch.object(
+            self.appmod.beacon_diagnosis,
+            'get_current_diagnosis',
+            side_effect=self.appmod.MaintenanceBusy('database maintenance lease is busy'),
+        ):
+            response = self.client.get('/api/advanced/current')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('application/json', response.content_type)
+        payload = response.get_json()
+        self.assertEqual(set(payload), {'error'})
+        self.assertIn('maintenance', payload['error'].lower())
+        self.assertNotIn('lease is busy', response.get_data(as_text=True))
+
+    def test_database_unavailable_never_reveals_exception_detail(self):
+        """An operational SQLite failure returns a fixed message with nothing leaked."""
+        leaky = sqlite3.OperationalError(
+            'no such table: telemetry_streams in /home/pi/beacon/dashboard.db '
+            'while running SELECT stream_key FROM telemetry_streams'
+        )
+        with mock.patch.object(
+            self.appmod.beacon_diagnosis, 'get_current_diagnosis', side_effect=leaky,
+        ):
+            response = self.client.get('/api/advanced/current')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('application/json', response.content_type)
+        payload = response.get_json()
+        self.assertEqual(set(payload), {'error'})
+        body = response.get_data(as_text=True)
+        for fragment in (
+            'no such table', 'telemetry_streams', '/home/pi', 'SELECT',
+            'OperationalError', 'Traceback', 'dashboard.db',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, body)
+
+    def test_unexpected_failure_stays_loud_instead_of_becoming_a_service_unavailable(self):
+        """No catch-all: an unmodelled failure class must not hide behind a 503."""
+        self.appmod.app.config['PROPAGATE_EXCEPTIONS'] = False
+        with mock.patch.object(
+            self.appmod.beacon_diagnosis,
+            'get_current_diagnosis',
+            side_effect=ValueError('a real defect'),
+        ):
+            response = self.client.get('/api/advanced/current')
+
+        self.assertEqual(response.status_code, 500)
 
 if __name__ == '__main__':
     unittest.main()
