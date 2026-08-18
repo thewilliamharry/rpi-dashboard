@@ -134,6 +134,12 @@ def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_
     )]
     streams_truncated = len(stream_rows) > normalized_stream_limit
     streams = stream_rows[:normalized_stream_limit]
+    # The ORDER BY above places every open-gap stream strictly ahead of every quiet
+    # one, so a truncated read whose last retained row carries no open gap provably
+    # dropped no open gap. Only the narrower fact may reach the gaps disclosure.
+    open_gap_streams_truncated = bool(
+        streams_truncated and streams and streams[-1]['open_gap_start_ts'] is not None
+    )
     gap_rows = [dict(row) for row in conn.execute(
         'SELECT stream_kind, stream_key, start_ts, end_ts, reason, detail FROM telemetry_coverage '
         'ORDER BY end_ts DESC, start_ts DESC LIMIT ?',
@@ -153,7 +159,9 @@ def read_pipeline_evidence(conn, *, now, gap_limit=48, stream_limit=64, pending_
         'runtime': runtime,
         'streams': streams,
         'streams_truncated': streams_truncated,
+        'open_gap_streams_truncated': open_gap_streams_truncated,
         'gaps': gaps,
+        'gaps_limit': normalized_gap_limit,
         'gaps_truncated': gaps_truncated,
         'pending': pending,
         'pending_truncated': pending_truncated,

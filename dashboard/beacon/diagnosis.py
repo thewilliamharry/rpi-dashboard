@@ -12,7 +12,7 @@ from .telemetry import RetentionPolicy
 from .worker_main import WORKER_CALLBACK_INVENTORY
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Each telemetry_coverage.reason value in the migrations.py CHECK enum maps to the
 # one exception kind it may be promoted as, or to None for lifecycle evidence that
@@ -258,6 +258,19 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
         }
         gaps.append(item)
         stream['gaps'].append(item)
+    # Stable priority sort: open evidence first, then actionable evidence. Python's
+    # sort is stable, so items of equal priority keep the durable read's existing
+    # end_ts DESC / start_ts DESC order.
+    gaps.sort(key=lambda item: (not item['open'], not item['actionable']))
+    gaps_limit = evidence.get('gaps_limit')
+    if not isinstance(gaps_limit, int) or gaps_limit < 0:
+        gaps_limit = 48
+    bounded_gaps = gaps[:gaps_limit]
+    gaps_truncated = bool(
+        evidence.get('gaps_truncated', False)
+        or evidence.get('open_gap_streams_truncated', False)
+        or len(gaps) > gaps_limit
+    )
     durable_jobs = {row['job_id']: row for row in evidence['jobs']}
     jobs = []
     for callback in WORKER_CALLBACK_INVENTORY:
@@ -298,9 +311,9 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
             'truncated': bool(evidence.get('streams_truncated', False)),
         },
         'gaps': {
-            'items': gaps,
-            'count': len(gaps),
-            'truncated': bool(evidence.get('gaps_truncated', False)),
+            'items': bounded_gaps,
+            'count': len(bounded_gaps),
+            'truncated': gaps_truncated,
         },
         'aggregation_pending': {
             'items': evidence['pending'], 'count': len(evidence['pending']),
