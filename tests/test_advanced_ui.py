@@ -636,6 +636,129 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # Test-owned instrumentation: holds only the first in-flight request so a
+    # slower older refresh can be released after a faster newer one has applied.
+    REVERSE_ORDER_HARNESS = """
+        localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify({
+          refreshSeconds: 60, paused: true, density: null, range: '24h', filters: {}
+        }));
+        window.__heldReleases = [];
+        window.__fetchCount = 0;
+        const realFetch = window.fetch.bind(window);
+        window.fetch = (...args) => {
+          const index = window.__fetchCount++;
+          const pending = realFetch(...args);
+          if (index !== 0) return pending;
+          return new Promise((resolve, reject) => {
+            window.__heldReleases.push(() => pending.then(resolve, reject));
+          });
+        };
+    """
+
+    def test_reverse_order_refresh_success_never_regresses_newer_evidence(self):
+        """A slower older success must never overwrite already-applied newer evidence."""
+        older = self._snapshot()
+        older['generated_ts'] = 1_700_000_001
+        older['host']['identity']['hostname'] = 'beacon-older'
+        older['host']['freshness'] = {'state': 'stale', 'age_seconds': 900}
+        older.update({
+            'services': [], 'pipeline': {}, 'settings': {},
+            'safety': {'worker_stale': True, 'recovery_required': False},
+            'exceptions': [
+                {'kind': 'host_freshness', 'section': 'host', 'priority': 1, 'state': 'stale'},
+            ],
+        })
+        newer = self._snapshot()
+        newer['generated_ts'] = 1_700_009_000
+        newer['host']['identity']['hostname'] = 'beacon-newer'
+        newer.update({
+            'services': [], 'pipeline': {}, 'settings': {},
+            'safety': {'worker_stale': False, 'recovery_required': False},
+            'exceptions': [],
+        })
+        fixture = {'payload': older}
+        page = self.browser.new_page()
+        page.add_init_script(self.REVERSE_ORDER_HARNESS)
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=fixture['payload'])
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.wait_for_function('window.__heldReleases.length === 1', timeout=5_000)
+            fixture['payload'] = newer
+            page.locator('#advanced-refresh').click()
+            page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
+            self.assertIn('beacon-newer', page.locator('[data-testid="host-summary"]').text_content())
+            newer_success = page.locator('#advanced-last-success').text_content()
+            self.assertFalse(page.locator('#worker-warning').is_visible())
+
+            page.evaluate('window.__heldReleases.forEach((release) => release())')
+            page.wait_for_timeout(250)
+
+            self.assertIn('beacon-newer', page.locator('[data-testid="host-summary"]').text_content())
+            self.assertNotIn('beacon-older', page.locator('#overview-section').text_content())
+            self.assertEqual(page.locator('#advanced-last-success').text_content(), newer_success)
+            self.assertIn('No active exceptions', page.locator('#overview-section').text_content())
+            self.assertFalse(page.locator('#worker-warning').is_visible())
+            self.assertEqual(page.evaluate('window.__fetchCount'), 2)
+        finally:
+            page.close()
+
+    def test_reverse_order_refresh_failure_never_raises_a_superseded_warning(self):
+        """A slower older failure must never flip the connection or refresh-error evidence."""
+        newer = self._snapshot()
+        newer['generated_ts'] = 1_700_009_000
+        newer['host']['identity']['hostname'] = 'beacon-newer'
+        newer.update({
+            'services': [], 'pipeline': {}, 'settings': {},
+            'safety': {'worker_stale': False, 'recovery_required': False},
+            'exceptions': [],
+        })
+        fixture = {'fail': True}
+        page = self.browser.new_page()
+        page.add_init_script(self.REVERSE_ORDER_HARNESS)
+
+        def route_api(route):
+            if urlparse(route.request.url).path != '/api/advanced/current':
+                route.fallback()
+            elif fixture['fail']:
+                route.fulfill(status=503, json={'error': 'offline'})
+            else:
+                route.fulfill(status=200, json=newer)
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.wait_for_function('window.__heldReleases.length === 1', timeout=5_000)
+            fixture['fail'] = False
+            page.locator('#advanced-refresh').click()
+            page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
+            newer_success = page.locator('#advanced-last-success').text_content()
+
+            page.evaluate('window.__heldReleases.forEach((release) => release())')
+            page.wait_for_timeout(250)
+
+            self.assertFalse(page.locator('#connection-banner').is_visible())
+            self.assertFalse(page.locator('#advanced-refresh-error').is_visible())
+            self.assertIn('beacon-newer', page.locator('[data-testid="host-summary"]').text_content())
+            self.assertEqual(page.locator('#advanced-last-success').text_content(), newer_success)
+        finally:
+            page.close()
+
+    def test_refresh_generation_guard_is_declared_in_the_advanced_controller(self):
+        """The ordering guard is memory-only state applied on both refresh branches."""
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        self.assertIn('requestGeneration: 0', js)
+        self.assertIn('const requestId = ++state.requestGeneration;', js)
+        self.assertEqual(js.count('if (requestId !== state.requestGeneration) return;'), 2)
+        self.assertNotIn('AbortController', js)
+        self.assertEqual(js.count("fetch('/api/advanced/current'"), 1)
+
     def test_ui_consideration_inventory_is_complete_and_unique(self):
         self.assertEqual(len(UI_CONSIDERATIONS), 36)
         self.assertEqual(len(set(UI_CONSIDERATIONS)), 36)
