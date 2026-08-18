@@ -205,12 +205,14 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
     for gap in evidence['gaps']:
         stream = stream_index.get((gap['stream_kind'], str(gap['stream_key'])))
         cadence = stream.get('cadence_seconds') if stream else None
-        open_gap = bool(stream and stream.get('open_gap_start_ts') is not None)
         recent_window = max(3600, 4 * cadence) if isinstance(cadence, int) and cadence > 0 else 3600
         item = {
             **gap,
-            'open': open_gap,
-            'actionable': open_gap or gap['end_ts'] >= now - recent_window,
+            # A persisted telemetry_coverage row is a closed interval by construction
+            # (its DDL enforces end_ts > start_ts and it is written only once bounded).
+            # The stream's open_gap_start_ts describes the stream, never this row.
+            'open': False,
+            'actionable': gap['end_ts'] >= now - recent_window,
         }
         gaps.append(item)
         if stream:
