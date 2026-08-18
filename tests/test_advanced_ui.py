@@ -583,6 +583,60 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_resolved_history_never_renders_as_an_open_collection_gap(self):
+        """Resolved and retention-expired intervals must read as history, never as open faults."""
+        open_gap = {
+            'stream_kind': 'host', 'stream_key': 'cpu',
+            'start_ts': 1_699_999_900, 'end_ts': 1_700_000_005,
+            'reason': 'collection_gap', 'detail': None,
+            'open': True, 'actionable': True,
+        }
+        resolved_gap = {
+            'stream_kind': 'host', 'stream_key': 'cpu',
+            'start_ts': 1_697_400_000, 'end_ts': 1_697_400_600,
+            'reason': 'collection_gap', 'detail': 'resolved-30-days-ago',
+            'open': False, 'actionable': False,
+        }
+        payload = self._snapshot()
+        payload.update({
+            'services': [],
+            'settings': {},
+            'exceptions': [
+                {'kind': 'collection_gap', 'section': 'pipeline', 'priority': 5, **open_gap},
+            ],
+            'pipeline': {
+                'retention': {}, 'database_pressure': {}, 'worker': {},
+                'gaps': {'items': [open_gap, resolved_gap], 'count': 2, 'truncated': False},
+                'aggregation_pending': {'items': [], 'count': 0, 'truncated': False},
+                'jobs': [],
+            },
+        })
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('1 active exception', overview)
+            self.assertNotIn('2 active exceptions', overview)
+            page.locator('[data-section="pipeline"]').click()
+            pipeline = page.locator('#pipeline-section').text_content()
+            self.assertIn('Collection gaps (2 gaps)', pipeline)
+            self.assertIn('host: cpu \u2014 Open actionable gap.', pipeline)
+            self.assertIn('host: cpu \u2014 Resolved historical gap.', pipeline)
+            self.assertEqual(
+                pipeline.count('Open actionable gap.'), 1,
+            )
+        finally:
+            page.close()
+
     def test_stream_truncation_and_host_exception_replace_the_normal_claim(self):
         """A capped stream read and a stale host must both be disclosed, never summarised as normal."""
         payload = self._snapshot()

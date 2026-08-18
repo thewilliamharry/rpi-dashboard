@@ -498,7 +498,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 self.assertEqual(len(gaps['items']), 1 + len(coverage))
                 self.assertEqual(gaps['count'], 1 + len(coverage))
                 self.assertEqual(gaps['items'][-1]['start_ts'], now - 100)
-                self.assertEqual(len(collection_gaps), 1 + len(coverage))
+                self.assertEqual(len(collection_gaps), 1)
                 self.assertTrue(any(
                     item['start_ts'] == now - 100 and item['open'] and item['actionable']
                     for item in collection_gaps
@@ -512,8 +512,9 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                         (
                             historical[0]['start_ts'], historical[0]['end_ts'],
                             historical[0]['reason'], historical[0]['detail'],
+                            historical[0]['open'], historical[0]['actionable'],
                         ),
-                        (start_ts, end_ts, reason, detail),
+                        (start_ts, end_ts, reason, detail, False, False),
                     )
 
     def test_open_stream_gap_is_reported_per_stream_without_borrowing_evidence(self):
@@ -542,6 +543,88 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             [item['stream_key'] for item in payload['exceptions'] if item['kind'] == 'collection_gap'],
             ['cpu'],
         )
+
+    def test_persisted_coverage_rows_are_never_open_regardless_of_stream_state(self):
+        """A persisted coverage row is a closed interval; a stream-level open gap is not its own."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute('DELETE FROM telemetry_streams')
+            conn.execute('DELETE FROM telemetry_coverage')
+            self._seed_stream(conn, 'host', 'cpu', now=now, open_gap_start_ts=now - 100)
+            conn.executemany(
+                'INSERT INTO telemetry_coverage('
+                'stream_kind,stream_key,start_ts,end_ts,reason,detail) VALUES(?,?,?,?,?,?)',
+                [
+                    (
+                        'host', 'cpu', now - 30 * 86_400 - 600, now - 30 * 86_400,
+                        'collection_gap', 'resolved-30-days-ago',
+                    ),
+                    (
+                        'host', 'cpu', now - 40 * 86_400 - 600, now - 40 * 86_400,
+                        'expired', 'retention-expired',
+                    ),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+        payload = self.client.get('/api/advanced/current').get_json()
+        gaps = payload['pipeline']['gaps']
+
+        self.assertEqual(gaps['count'], 3)
+        self.assertEqual(len(gaps['items']), 3)
+        open_items = [item for item in gaps['items'] if item['open']]
+        self.assertEqual(len(open_items), 1)
+        self.assertEqual(open_items[0]['start_ts'], now - 100)
+        self.assertTrue(open_items[0]['actionable'])
+        historical = {
+            item['detail']: item for item in gaps['items'] if item['detail'] is not None
+        }
+        self.assertEqual(
+            sorted(historical), ['resolved-30-days-ago', 'retention-expired'],
+        )
+        for detail, item in historical.items():
+            with self.subTest(detail=detail):
+                self.assertFalse(item['open'])
+                self.assertFalse(item['actionable'])
+        collection_gaps = [
+            item for item in payload['exceptions'] if item['kind'] == 'collection_gap'
+        ]
+        self.assertEqual(len(collection_gaps), 1)
+        self.assertEqual(collection_gaps[0]['start_ts'], now - 100)
+
+    def test_persisted_coverage_actionability_boundary_is_the_recent_window(self):
+        """A coverage row exactly on the recent-window edge is actionable; one second older is not."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        recent_window = 3_600
+        cases = (
+            ('exactly_on_the_recent_window_boundary', now - recent_window, True),
+            ('one_second_beyond_the_recent_window', now - recent_window - 1, False),
+        )
+        for label, end_ts, expected_actionable in cases:
+            with self.subTest(case=label):
+                with self.appmod._db_lock:
+                    conn = self.appmod.get_db()
+                    conn.execute('DELETE FROM telemetry_streams')
+                    conn.execute('DELETE FROM telemetry_coverage')
+                    self._seed_stream(conn, 'host', 'cpu', now=now, cadence=60)
+                    conn.execute(
+                        'INSERT INTO telemetry_coverage('
+                        'stream_kind,stream_key,start_ts,end_ts,reason,detail) '
+                        'VALUES(?,?,?,?,?,?)',
+                        ('host', 'cpu', end_ts - 600, end_ts, 'collection_gap', 'boundary'),
+                    )
+                    conn.commit()
+                    conn.close()
+
+                gaps = self.client.get('/api/advanced/current').get_json()['pipeline']['gaps']
+
+                self.assertEqual(len(gaps['items']), 1)
+                self.assertFalse(gaps['items'][0]['open'])
+                self.assertEqual(gaps['items'][0]['actionable'], expected_actionable)
 
     def test_host_freshness_becomes_an_active_exception_when_evidence_is_not_fresh(self):
         """Missing or stale host evidence must never be summarised as normal."""
