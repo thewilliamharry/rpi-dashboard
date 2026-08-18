@@ -543,6 +543,126 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             ['cpu'],
         )
 
+    def test_host_freshness_becomes_an_active_exception_when_evidence_is_not_fresh(self):
+        """Missing or stale host evidence must never be summarised as normal."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        cases = (
+            ('missing_system_stats_row', None, 'unknown'),
+            ('stale_beyond_four_cadences', now - 21, 'stale'),
+            ('fresh_within_one_cadence', now - 5, None),
+        )
+        for label, sample_ts, expected_state in cases:
+            with self.subTest(case=label):
+                with self.appmod._db_lock:
+                    conn = self.appmod.get_db()
+                    conn.execute('DELETE FROM system_stats')
+                    conn.commit()
+                    conn.close()
+                if sample_ts is not None:
+                    self._seed_host(sample_ts=sample_ts)
+
+                payload = self.client.get('/api/advanced/current').get_json()
+                host_exceptions = [
+                    item for item in payload['exceptions'] if item['kind'] == 'host_freshness'
+                ]
+
+                if expected_state is None:
+                    self.assertEqual(host_exceptions, [])
+                    continue
+                self.assertEqual(
+                    host_exceptions,
+                    [{
+                        'kind': 'host_freshness', 'section': 'host',
+                        'priority': 1, 'state': expected_state,
+                    }],
+                )
+                self.assertEqual(payload['host']['freshness']['state'], expected_state)
+
+    def test_pending_truncation_uses_one_sentinel_beyond_the_response_cap(self):
+        """Pending aggregation must not claim truncation at exactly its cap."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        for count in (0, 31, 32, 33):
+            with self.subTest(count=count):
+                with self.appmod._db_lock:
+                    conn = self.appmod.get_db()
+                    conn.execute('DELETE FROM telemetry_rollup_jobs')
+                    conn.executemany(
+                        'INSERT INTO telemetry_rollup_jobs('
+                        'stream_kind,stream_key,bucket_start,bucket_seconds,state,'
+                        'attempt_count,next_retry_ts,last_error_class,updated_ts) '
+                        'VALUES(?,?,?,?,?,?,?,?,?)',
+                        [
+                            ('host', 'cpu', now - 3600 * (index + 1), 3600, 'pending',
+                             0, None, None, now - index)
+                            for index in range(count)
+                        ],
+                    )
+                    conn.commit()
+                    conn.close()
+
+                pending = self.client.get('/api/advanced/current').get_json()['pipeline']['aggregation_pending']
+
+                self.assertEqual(len(pending['items']), min(count, 32))
+                self.assertEqual(pending['count'], min(count, 32))
+                self.assertEqual(pending['truncated'], count > 32)
+
+    def test_stream_truncation_uses_a_sentinel_and_keeps_active_evidence(self):
+        """Stream reads disclose truncation exactly at the cap and never drop an open gap."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        for count in (0, 64, 65):
+            with self.subTest(count=count):
+                with self.appmod._db_lock:
+                    conn = self.appmod.get_db()
+                    conn.execute('DELETE FROM telemetry_streams')
+                    conn.execute('DELETE FROM telemetry_coverage')
+                    for index in range(count):
+                        self._seed_stream(
+                            conn, 'host', f'stream-{index:02d}', now=now,
+                            open_gap_start_ts=(now - 100 if index == count - 1 else None),
+                        )
+                    conn.commit()
+                    conn.close()
+
+                streams = self.client.get('/api/advanced/current').get_json()['pipeline']['streams']
+                keys = [item['stream_key'] for item in streams['items']]
+
+                self.assertEqual(len(keys), min(count, 64))
+                self.assertEqual(streams['count'], min(count, 64))
+                self.assertEqual(streams['truncated'], count > 64)
+                if count:
+                    self.assertIn(f'stream-{count - 1:02d}', keys)
+
+    def test_stream_truncation_ranks_stale_evidence_ahead_of_quiet_streams(self):
+        """A stale stream must survive the cap ahead of alphabetically earlier quiet ones."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute('DELETE FROM telemetry_streams')
+            conn.execute('DELETE FROM telemetry_coverage')
+            for index in range(65):
+                self._seed_stream(
+                    conn, 'host', f'stream-{index:02d}', now=now,
+                    cadence=60,
+                    last_observed_ts=(now - 1_000 if index == 64 else now),
+                )
+            conn.commit()
+            conn.close()
+
+        streams = self.client.get('/api/advanced/current').get_json()['pipeline']['streams']
+        keys = [item['stream_key'] for item in streams['items']]
+
+        self.assertTrue(streams['truncated'])
+        self.assertEqual(len(keys), 64)
+        self.assertEqual(keys[0], 'stream-64')
+        self.assertEqual(
+            [item['freshness']['state'] for item in streams['items'] if item['stream_key'] == 'stream-64'],
+            ['stale'],
+        )
+
     def test_advanced_snapshot_rejects_query_arguments_before_reading_sqlite(self):
         response = self.client.get('/api/advanced/current?unexpected=1')
 

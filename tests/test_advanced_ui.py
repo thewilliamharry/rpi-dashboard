@@ -291,7 +291,10 @@ class AdvancedUiTests(unittest.TestCase):
                 'resolution_policy': {'raw_seconds': 60, 'five_minute_seconds': 300, 'hourly_seconds': 3600},
                 'database_pressure': {'state': 'warning', 'reason': 'very-long-pressure-reason-' + ('evidence-' * 12), 'snapshot': {'bytes': 1}},
                 'worker': {'heartbeat_ts': 1_700_000_000, 'expected_cadence_seconds': 5, 'freshness': {'state': 'fresh', 'age_seconds': 5}, 'lease_until': 1_700_000_010},
-                'streams': [{'stream_kind': 'host', 'stream_key': 'beacon', 'last_observed_ts': 1_699_999_900, 'cadence_seconds': 5, 'freshness': {'state': 'stale', 'age_seconds': 105}}],
+                'streams': {
+                    'items': [{'stream_kind': 'host', 'stream_key': 'beacon', 'last_observed_ts': 1_699_999_900, 'cadence_seconds': 5, 'freshness': {'state': 'stale', 'age_seconds': 105}}],
+                    'count': 1, 'truncated': False,
+                },
                 'gaps': {'items': [], 'count': 0, 'truncated': False},
                 'aggregation_pending': {'items': [{'stream_key': 'host:beacon'}], 'count': 1, 'truncated': False},
                 'jobs': [],
@@ -320,7 +323,7 @@ class AdvancedUiTests(unittest.TestCase):
             pipeline = page.locator('#pipeline-section').text_content()
             for copy in (
                 '7-day raw', '5-minute through day 30', 'hourly through day 90',
-                'Database pressure', 'Worker heartbeat', 'Streams', 'No active collection gaps',
+                'Database pressure', 'Worker heartbeat', 'Streams (1 stream)', 'No active collection gaps',
                 'Pending aggregation', 'No background jobs are configured',
                 'This stream is stale. Its last sample was',
                 'The worker heartbeat is fresh, but this stream is stale.',
@@ -577,6 +580,59 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertIn('Collection gaps (1 gap)', pipeline)
             self.assertIn('host: cpu \u2014 Open actionable gap.', pipeline)
             self.assertNotIn('No active collection gaps', pipeline)
+        finally:
+            page.close()
+
+    def test_stream_truncation_and_host_exception_replace_the_normal_claim(self):
+        """A capped stream read and a stale host must both be disclosed, never summarised as normal."""
+        payload = self._snapshot()
+        payload.update({
+            'services': [],
+            'settings': {},
+            'exceptions': [
+                {'kind': 'host_freshness', 'section': 'host', 'priority': 1, 'state': 'stale'},
+            ],
+            'pipeline': {
+                'retention': {}, 'database_pressure': {}, 'worker': {},
+                'streams': {
+                    'items': [
+                        {'stream_kind': 'host', 'stream_key': 'cpu', 'last_observed_ts': 1_700_000_000,
+                         'cadence_seconds': 5, 'freshness': {'state': 'fresh', 'age_seconds': 5}},
+                        {'stream_kind': 'host', 'stream_key': 'ram', 'last_observed_ts': 1_700_000_000,
+                         'cadence_seconds': 5, 'freshness': {'state': 'fresh', 'age_seconds': 5}},
+                    ],
+                    'count': 2, 'truncated': True,
+                },
+                'gaps': {'items': [], 'count': 0, 'truncated': False},
+                'aggregation_pending': {'items': [], 'count': 0, 'truncated': False},
+                'jobs': [],
+            },
+        })
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('#overview-section').wait_for(timeout=5_000)
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('1 active exception', overview)
+            self.assertIn('host_freshness', overview)
+            self.assertNotIn('No active exceptions', overview)
+            self.assertNotIn(
+                'Host, services, and collection pipeline are reporting normally.', overview,
+            )
+            page.locator('[data-section="pipeline"]').click()
+            pipeline = page.locator('#pipeline-section').text_content()
+            self.assertIn('Streams (2 streams, truncated)', pipeline)
+            self.assertIn('host: cpu', pipeline)
+            self.assertIn('host: ram', pipeline)
+            self.assertNotIn('No pipeline streams are configured', pipeline)
         finally:
             page.close()
 
