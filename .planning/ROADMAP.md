@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 10 plans (7 executed, 3 gap-closure plans pending)
+**Plans**: 7/10 plans executed (7 executed, 3 gap-closure plans pending)
 
 - [x] 03-07-PLAN.md
 
@@ -309,7 +309,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
-| 3. Advanced Current Diagnosis | 7/7 | In Progress|  |
+| 3. Advanced Current Diagnosis | 7/10 | In Progress|  |
 | 4. Historical Investigation | 0/TBD | Not started | - |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |

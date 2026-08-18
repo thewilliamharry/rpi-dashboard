@@ -5,13 +5,13 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-07-PLAN.md
-last_updated: "2026-08-18T18:05:04.999Z"
+stopped_at: Completed 03-08-PLAN.md
+last_updated: "2026-08-18T18:22:47.384Z"
 last_activity: 2026-08-18
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 45
   completed_plans: 42
 ---
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 2 of 7
+Plan: 2 of 10
 Status: Ready to execute
 Last activity: 2026-08-18 — Phase 03 execution started
 
-Progress: [██████████] 100%
+Progress: [█████████░] 93%
 
 ## Performance Metrics
 
@@ -97,6 +97,7 @@ Progress: [██████████] 100%
 | Phase 03 P05 | 14min | 2 tasks | 5 files |
 | Phase 03 P06 | 20min | 1 tasks | 1 files |
 | Phase 03 P07 | 21min | 3 tasks | 5 files |
+| Phase 03 P08 | 12 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -190,6 +191,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: Phase 03: Stale or unknown host evidence is its own host_freshness exception, never merged with worker freshness or recovery.
 - [Phase ?]: Phase 03: Bounded stream reads rank open-gap then stale streams ahead of quiet ones so the cap never hides actionable evidence.
 - [Phase ?]: Phase 03: Refresh ordering uses a memory-only monotonic request generation guard rather than AbortController.
+- [Phase 03]: Coverage-derived gap items report open=false unconditionally; only the telemetry_streams synthesis pass may emit open=true — A persisted telemetry_coverage row is a closed interval by construction (DDL enforces end_ts > start_ts); open_gap_start_ts is a stream-level fact and applying it per row produced false open/actionable labels
+- [Phase 03]: Each telemetry_coverage reason maps to exactly one outcome via GAP_REASON_EXCEPTION_KINDS; an unrecognised reason surfaces as coverage_unknown — D-11 forbids inferring a cause from an observation: dropping would hide evidence, and collection_gap would assert a cause the row does not carry
+- [Phase 03]: The gaps disclosure consumes the narrow open_gap_streams_truncated predicate, never the broad streams_truncated — A false incompleteness claim is the mirror of the defect being fixed; the stream ORDER BY places open-gap streams strictly first, which makes the narrow predicate sound
 
 ### Pending Todos
 
@@ -219,6 +223,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-18T16:28:46.691Z
-Stopped at: Completed 03-07-PLAN.md
+Last session: 2026-08-18T18:22:47.370Z
+Stopped at: Completed 03-08-PLAN.md
 Resume file: None
