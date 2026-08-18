@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-09-PLAN.md
-last_updated: "2026-08-18T18:36:44.066Z"
+stopped_at: Completed 03-10-PLAN.md
+last_updated: "2026-08-18T18:48:10.254Z"
 last_activity: 2026-08-18
-last_activity_desc: Phase 03 execution started
+last_activity_desc: Phase 03 gap closure complete (03-08, 03-09, 03-10)
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 45
-  completed_plans: 43
+  completed_plans: 45
 ---
 
 # Project State
@@ -27,12 +27,12 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 ## Current Position
 
-Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 3 of 10
-Status: Ready to execute
-Last activity: 2026-08-18 — Phase 03 execution started
+Phase: 03 (advanced-current-diagnosis) — EXECUTED, AWAITING RE-VERIFICATION
+Plan: 10 of 10
+Status: All 10 plans complete; gap closure done. TEL-06 and DIA-08 stay open until re-verification.
+Last activity: 2026-08-18 — Phase 03 gap-closure plans 03-08..03-10 executed
 
-Progress: [██████████] 96%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -99,6 +99,7 @@ Progress: [██████████] 96%
 | Phase 03 P07 | 21min | 3 tasks | 5 files |
 | Phase 03 P08 | 12 min | 3 tasks | 4 files |
 | Phase 03 P09 | 10 min | 2 tasks | 3 files |
+| Phase 03 P10 | 14 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -198,6 +199,10 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: [Phase 03]: A client-side EXCEPTION_COPY map is the sole source of exception card text; an unrecognised kind renders an explicit counted card rather than being dropped — the dead item.label/item.evidence fallbacks made every card read as a machine identifier over a placeholder
 - [Phase ?]: [Phase 03]: The service sort is session-local memory state that survives every automatic poll and manual refresh; only Reset operational order and Clear all filters clear it — D-14 does not list sort among the persisted preferences, and the UI-SPEC refresh clause was reconciled rather than left contradicting the shipped behaviour
 - [Phase ?]: [Phase 03]: Only a reason the server itself supplied through apiFetch's own thrown Error is appended to the contracted refresh-error copy; browser-raised TypeError/SyntaxError failures are never shown
+- [Phase ?]: [Phase 03]: /api/advanced/current catches only MaintenanceBusy and sqlite3.OperationalError and returns a 503 JSON body — a maintenance window must reach the operator as a named cause, and an unmodelled failure must stay a loud 500 rather than hide behind a catch-all
+- [Phase ?]: [Phase 03]: The advanced-diagnosis read is deliberately left outside _db_lock (threat T-03-62 accepted) — placing a 30-second maintenance-flock wait inside the process-global lock would stall every DB route on a 5-second poll
+- [Phase ?]: [Phase 03]: Test clocks are frozen through one addCleanup-unwound patch of the stdlib time.time per test — a fixture that mutates process-global state makes suite greenness order-dependent and unusable as verification evidence
+- [Phase ?]: [Phase 03]: Only independently verified requirements are promoted in REQUIREMENTS.md; TEL-06 and DIA-08 stay at Gaps Found until a re-verification of the gap-closure round, never on the strength of a plan summary
 
 ### Pending Todos
 
@@ -227,6 +232,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-18T18:36:33.368Z
-Stopped at: Completed 03-09-PLAN.md
+Last session: 2026-08-18T18:47:57.190Z
+Stopped at: Completed 03-10-PLAN.md
 Resume file: None
