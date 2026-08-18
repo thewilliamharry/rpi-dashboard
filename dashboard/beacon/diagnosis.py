@@ -14,6 +14,28 @@ from .worker_main import WORKER_CALLBACK_INVENTORY
 
 SCHEMA_VERSION = 1
 
+# Each telemetry_coverage.reason value in the migrations.py CHECK enum maps to the
+# one exception kind it may be promoted as, or to None for lifecycle evidence that
+# is never an operator-facing fault.
+GAP_REASON_EXCEPTION_KINDS = {
+    'collection_gap': 'collection_gap',
+    'unknown': 'coverage_unknown',
+    'expired': None,
+    'not_yet_monitored': None,
+}
+
+# A reason the code does not recognise is indeterminate coverage: reporting it as a
+# collection failure would assert a cause the row does not carry (D-11), and dropping
+# it would hide evidence from the operator.
+UNMAPPED_GAP_EXCEPTION_KIND = 'coverage_unknown'
+
+
+def gap_exception_kind(reason):
+    """Resolve a durable coverage reason to its own exception kind, or to no exception."""
+    if reason in GAP_REASON_EXCEPTION_KINDS:
+        return GAP_REASON_EXCEPTION_KINDS[reason]
+    return UNMAPPED_GAP_EXCEPTION_KIND
+
 
 def freshness_state(now, sample_ts, cadence_seconds):
     """Classify durable sampling evidence without inferring its cause."""
@@ -212,7 +234,10 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
             # (its DDL enforces end_ts > start_ts and it is written only once bounded).
             # The stream's open_gap_start_ts describes the stream, never this row.
             'open': False,
-            'actionable': gap['end_ts'] >= now - recent_window,
+            'actionable': (
+                gap_exception_kind(gap['reason']) is not None
+                and gap['end_ts'] >= now - recent_window
+            ),
         }
         gaps.append(item)
         if stream:
@@ -308,8 +333,12 @@ def compose_active_exceptions(host, services, pipeline, *, recovery_required):
                 'port': service['port'], 'state': service['freshness']['state'],
             })
     for gap in pipeline['gaps']['items']:
-        if gap['actionable']:
-            exceptions.append({'kind': 'collection_gap', 'section': 'pipeline', 'priority': 5, **gap})
+        if not gap['actionable']:
+            continue
+        kind = gap_exception_kind(gap.get('reason'))
+        if kind is None:
+            continue
+        exceptions.append({'kind': kind, 'section': 'pipeline', 'priority': 5, **gap})
     for job in pipeline['jobs']:
         if job['state'] == 'failed':
             exceptions.append({'kind': 'job_failed', 'section': 'pipeline', 'priority': 6, 'job_id': job['job_id']})
