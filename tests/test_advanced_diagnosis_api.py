@@ -15,11 +15,33 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     """Tracer coverage for the bounded current-host advanced diagnosis API."""
 
     def setUp(self):
+        self._clock = {'now': None}
+        self._clock_patcher = None
         self.appmod, self.db_path = load_app({'METRIC_SAMPLE_SECONDS': '5'})
         self.client = self.appmod.app.test_client()
 
     def tearDown(self):
         cleanup_db(self.db_path)
+
+    def _freeze_clock(self, value):
+        """Freeze the process-global ``time.time`` for this test only.
+
+        The patch is installed once per test and unwound by ``addCleanup`` even
+        when the test fails, so no frozen instant can outlive the test that set
+        it.  Calling this again inside the same test re-points the instant
+        rather than stacking a second patcher.
+        """
+        self._clock['now'] = value
+        if self._clock_patcher is None:
+            real_time = time.time
+            patcher = mock.patch(
+                'time.time',
+                lambda: real_time() if self._clock['now'] is None else self._clock['now'],
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            self._clock_patcher = patcher
+        return value
 
     def _seed_host(self, sample_ts=1_700_000_000):
         with self.appmod._db_lock:
@@ -39,7 +61,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
 
     def test_host_tracer_returns_one_current_snapshot_with_server_freshness(self):
         self._seed_host(sample_ts=1_700_000_000)
-        self.appmod.time.time = lambda: 1_700_000_005
+        self._freeze_clock(1_700_000_005)
 
         response = self.client.get('/api/advanced/current')
 
@@ -61,7 +83,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         )
 
     def test_host_tracer_returns_truthful_unknown_host_evidence(self):
-        self.appmod.time.time = lambda: 1_700_000_005
+        self._freeze_clock(1_700_000_005)
 
         response = self.client.get('/api/advanced/current')
 
@@ -111,7 +133,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 (21, 'stale', True),
             ):
                 with self.subTest(age=age):
-                    appmod.time.time = lambda: now + age
+                    self._freeze_clock(now + age)
                     payload = client.get('/api/advanced/current').get_json()
                     worker = payload['pipeline']['worker']
                     self.assertEqual(worker['expected_cadence_seconds'], 5)
@@ -298,7 +320,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             )
             conn.commit()
             conn.close()
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
 
         payload = self.client.get('/api/advanced/current').get_json()
 
@@ -335,7 +357,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                     )
             conn.commit()
             conn.close()
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
 
         services = {service['port']: service for service in self.client.get('/api/advanced/current').get_json()['services']}
 
@@ -376,7 +398,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             )]
             conn.commit()
             conn.close()
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
 
         response = self.client.get('/api/advanced/current')
 
@@ -400,7 +422,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
 
     def test_gap_truncation_uses_one_sentinel_beyond_the_response_cap(self):
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         for count in (0, 1, 48, 49):
             with self.subTest(count=count):
                 with self.appmod._db_lock:
@@ -447,7 +469,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_open_stream_gap_is_synthesized_merged_and_promoted(self):
         """An active stream gap is durable evidence even with zero coverage rows."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         cases = (
             ('open_gap_without_any_coverage_row', now - 100, ()),
             ('no_open_gap_and_no_coverage_row', None, ()),
@@ -523,7 +545,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_open_stream_gap_is_reported_per_stream_without_borrowing_evidence(self):
         """Only the stream that actually carries an open gap gets a synthesized item."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute('DELETE FROM telemetry_streams')
@@ -550,7 +572,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_persisted_coverage_rows_are_never_open_regardless_of_stream_state(self):
         """A persisted coverage row is a closed interval; a stream-level open gap is not its own."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute('DELETE FROM telemetry_streams')
@@ -601,7 +623,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_persisted_coverage_actionability_boundary_is_the_recent_window(self):
         """A coverage row exactly on the recent-window edge is actionable; one second older is not."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         recent_window = 3_600
         cases = (
             ('exactly_on_the_recent_window_boundary', now - recent_window, True),
@@ -632,7 +654,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_coverage_reason_maps_to_its_own_exception_kind(self):
         """Each durable coverage reason promotes as itself, or as lifecycle evidence not at all."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         cases = (
             ('collection_gap', 'collection_gap', True),
             ('unknown', 'coverage_unknown', True),
@@ -715,7 +737,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_gap_count_and_truncated_describe_the_same_population(self):
         """The gaps disclosure must never claim a completeness or an incompleteness it lacks."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         gap_limit = 48
 
         with self.subTest(case='no_streams_and_no_coverage'):
@@ -810,7 +832,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_gap_ordering_puts_open_and_actionable_evidence_first(self):
         """Open evidence outranks actionable history, which outranks resolved history."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             self._reset_gap_evidence(conn)
@@ -845,7 +867,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_host_freshness_becomes_an_active_exception_when_evidence_is_not_fresh(self):
         """Missing or stale host evidence must never be summarised as normal."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         cases = (
             ('missing_system_stats_row', None, 'unknown'),
             ('stale_beyond_four_cadences', now - 21, 'stale'),
@@ -881,7 +903,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_pending_truncation_uses_one_sentinel_beyond_the_response_cap(self):
         """Pending aggregation must not claim truncation at exactly its cap."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         for count in (0, 31, 32, 33):
             with self.subTest(count=count):
                 with self.appmod._db_lock:
@@ -910,7 +932,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_stream_truncation_uses_a_sentinel_and_keeps_active_evidence(self):
         """Stream reads disclose truncation exactly at the cap and never drop an open gap."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         for count in (0, 64, 65):
             with self.subTest(count=count):
                 with self.appmod._db_lock:
@@ -937,7 +959,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
     def test_stream_truncation_ranks_stale_evidence_ahead_of_quiet_streams(self):
         """A stale stream must survive the cap ahead of alphabetically earlier quiet ones."""
         now = 1_700_000_000
-        self.appmod.time.time = lambda: now
+        self._freeze_clock(now)
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute('DELETE FROM telemetry_streams')
