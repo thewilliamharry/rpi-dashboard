@@ -43,7 +43,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
         payload = response.get_json()
-        self.assertEqual(payload['schema_version'], 1)
+        self.assertEqual(payload['schema_version'], 2)
         self.assertEqual(payload['generated_ts'], 1_700_000_005)
         self.assertEqual(payload['host']['identity']['hostname'], 'beacon-pi')
         self.assertEqual(payload['host']['metrics']['cpu'], {'value': 21.5, 'unit': 'percent'})
@@ -497,7 +497,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 )
                 self.assertEqual(len(gaps['items']), 1 + len(coverage))
                 self.assertEqual(gaps['count'], 1 + len(coverage))
-                self.assertEqual(gaps['items'][-1]['start_ts'], now - 100)
+                self.assertEqual(gaps['items'][0]['start_ts'], now - 100)
                 self.assertEqual(len(collection_gaps), 1)
                 self.assertTrue(any(
                     item['start_ts'] == now - 100 and item['open'] and item['actionable']
@@ -704,6 +704,140 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertEqual(len(exceptions), 1)
         self.assertEqual(exceptions[0]['kind'], 'coverage_unknown')
         self.assertEqual(exceptions[0]['reason'], unmapped)
+
+    def _reset_gap_evidence(self, conn):
+        conn.execute('DELETE FROM telemetry_streams')
+        conn.execute('DELETE FROM telemetry_coverage')
+
+    def test_gap_count_and_truncated_describe_the_same_population(self):
+        """The gaps disclosure must never claim a completeness or an incompleteness it lacks."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        gap_limit = 48
+
+        with self.subTest(case='no_streams_and_no_coverage'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                conn.commit()
+                conn.close()
+
+            gaps = self.client.get('/api/advanced/current').get_json()['pipeline']['gaps']
+
+            self.assertEqual(gaps, {'items': [], 'count': 0, 'truncated': False})
+
+        with self.subTest(case='sixty_five_open_gap_streams_and_no_coverage'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                for index in range(65):
+                    self._seed_stream(
+                        conn, 'host', f'stream-{index:02d}', now=now,
+                        open_gap_start_ts=now - 100 - index,
+                    )
+                conn.commit()
+                conn.close()
+
+            payload = self.client.get('/api/advanced/current').get_json()
+            gaps = payload['pipeline']['gaps']
+
+            self.assertTrue(gaps['truncated'])
+            self.assertLessEqual(gaps['count'], gap_limit)
+            self.assertEqual(gaps['count'], len(gaps['items']))
+            self.assertTrue(all(item['open'] for item in gaps['items']))
+
+        with self.subTest(case='sixty_five_streams_with_only_two_open_gaps'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                for index in range(65):
+                    self._seed_stream(
+                        conn, 'host', f'stream-{index:02d}', now=now,
+                        open_gap_start_ts=(now - 100 if index < 2 else None),
+                    )
+                conn.executemany(
+                    'INSERT INTO telemetry_coverage('
+                    'stream_kind,stream_key,start_ts,end_ts,reason,detail) '
+                    'VALUES(?,?,?,?,?,?)',
+                    [
+                        ('host', 'stream-00', now - 1_000 - index, now - index,
+                         'collection_gap', f'coverage-{index}')
+                        for index in range(5)
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+            pipeline = self.client.get('/api/advanced/current').get_json()['pipeline']
+
+            self.assertEqual(pipeline['gaps']['count'], 7)
+            self.assertEqual(len(pipeline['gaps']['items']), 7)
+            self.assertFalse(pipeline['gaps']['truncated'])
+            self.assertTrue(pipeline['streams']['truncated'])
+
+        with self.subTest(case='sixty_four_open_gap_streams_and_sixty_coverage_rows'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                for index in range(64):
+                    self._seed_stream(
+                        conn, 'host', f'stream-{index:02d}', now=now,
+                        open_gap_start_ts=now - 100 - index,
+                    )
+                conn.executemany(
+                    'INSERT INTO telemetry_coverage('
+                    'stream_kind,stream_key,start_ts,end_ts,reason,detail) '
+                    'VALUES(?,?,?,?,?,?)',
+                    [
+                        ('host', 'stream-00', now - 1_000 - index, now - index,
+                         'collection_gap', f'coverage-{index}')
+                        for index in range(60)
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+            gaps = self.client.get('/api/advanced/current').get_json()['pipeline']['gaps']
+
+            self.assertLessEqual(gaps['count'], gap_limit)
+            self.assertEqual(gaps['count'], len(gaps['items']))
+            self.assertTrue(gaps['truncated'])
+            self.assertTrue(all(item['open'] for item in gaps['items']))
+
+    def test_gap_ordering_puts_open_and_actionable_evidence_first(self):
+        """Open evidence outranks actionable history, which outranks resolved history."""
+        now = 1_700_000_000
+        self.appmod.time.time = lambda: now
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            self._reset_gap_evidence(conn)
+            self._seed_stream(
+                conn, 'host', 'cpu', now=now, cadence=60, open_gap_start_ts=now - 100,
+            )
+            conn.executemany(
+                'INSERT INTO telemetry_coverage('
+                'stream_kind,stream_key,start_ts,end_ts,reason,detail) VALUES(?,?,?,?,?,?)',
+                [
+                    ('host', 'cpu', now - 800, now - 200, 'collection_gap', 'recent-a'),
+                    ('host', 'cpu', now - 900, now - 300, 'collection_gap', 'recent-b'),
+                    ('host', 'cpu', now - 100_600, now - 100_000, 'collection_gap', 'old-c'),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+        gaps = self.client.get('/api/advanced/current').get_json()['pipeline']['gaps']
+
+        self.assertEqual(gaps['count'], 4)
+        self.assertFalse(gaps['truncated'])
+        self.assertEqual(
+            [item['detail'] for item in gaps['items']],
+            [None, 'recent-a', 'recent-b', 'old-c'],
+        )
+        self.assertEqual(
+            [(item['open'], item['actionable']) for item in gaps['items']],
+            [(True, True), (False, True), (False, True), (False, False)],
+        )
 
     def test_host_freshness_becomes_an_active_exception_when_evidence_is_not_fresh(self):
         """Missing or stale host evidence must never be summarised as normal."""

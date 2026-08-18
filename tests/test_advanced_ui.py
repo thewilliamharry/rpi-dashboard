@@ -40,7 +40,7 @@ class AdvancedUiTests(unittest.TestCase):
     @staticmethod
     def _snapshot():
         return {
-            'schema_version': 1,
+            'schema_version': 2,
             'generated_ts': 1_700_000_005,
             'host': {
                 'identity': {'hostname': 'beacon-pi'},
