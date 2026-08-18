@@ -110,6 +110,86 @@
     return article;
   }
 
+  const FRESHNESS_WORDS = new Set(['fresh', 'aging', 'stale', 'unknown']);
+
+  function freshnessWord(state) {
+    return FRESHNESS_WORDS.has(state) ? state : 'unknown';
+  }
+
+  function streamName(item) {
+    return `${displayValue(item.stream_kind)}: ${displayValue(item.stream_key)}`;
+  }
+
+  function gapInterval(item) {
+    return `Interval ${displayTimestamp(item.start_ts)} to ${displayTimestamp(item.end_ts)}; detail ${displayValue(item.detail)}.`;
+  }
+
+  // One entry per kind compose_active_exceptions emits, built only from the fields
+  // that kind actually carries. A Map is used so an exception kind can never resolve
+  // through Object.prototype. Copy states the observation and directs the operator to
+  // the owning section; it never asserts a cause.
+  const EXCEPTION_COPY = new Map([
+    ['recovery_required', () => ({
+      title: 'Database recovery required',
+      evidence: 'Beacon reports that database recovery is required. See Pipeline for worker heartbeat and recovery evidence.',
+    })],
+    ['host_freshness', (item) => ({
+      title: `Host evidence is ${freshnessWord(item.state)}`,
+      evidence: `The current host sample is ${freshnessWord(item.state)}. See Host for its exact sample timestamp and expected cadence.`,
+    })],
+    ['worker_freshness', (item) => ({
+      title: `Worker heartbeat is ${freshnessWord(item.state)}`,
+      evidence: `The worker heartbeat is ${freshnessWord(item.state)}. See Pipeline for its exact timestamp and expected cadence.`,
+    })],
+    ['critical_service_offline', (item) => ({
+      title: `Critical service offline \u2014 ${displayValue(item.name)} on port ${displayValue(item.port)}`,
+      evidence: `${displayValue(item.name)} is offline and is marked critical. See Services for its failure class and probe evidence.`,
+    })],
+    ['service_offline', (item) => ({
+      title: `Service offline \u2014 ${displayValue(item.name)} on port ${displayValue(item.port)}`,
+      evidence: `${displayValue(item.name)} is offline. See Services for its failure class and probe evidence.`,
+    })],
+    ['service_freshness', (item) => ({
+      title: `Service evidence is ${freshnessWord(item.state)} \u2014 port ${displayValue(item.port)}`,
+      evidence: `The probe evidence for port ${displayValue(item.port)} is ${freshnessWord(item.state)}. See Services for its exact probe timestamp and expected cadence.`,
+    })],
+    ['collection_gap', (item) => ({
+      title: `${item.open ? 'Open' : 'Recently resolved'} collection gap \u2014 ${streamName(item)}`,
+      evidence: gapInterval(item),
+    })],
+    ['coverage_unknown', (item) => ({
+      title: `Coverage could not be determined \u2014 ${streamName(item)}`,
+      evidence: `Beacon could not determine coverage for the interval ${displayTimestamp(item.start_ts)} to ${displayTimestamp(item.end_ts)}; this is recorded coverage evidence, not a confirmed fault. Detail ${displayValue(item.detail)}.`,
+    })],
+    ['job_failed', (item) => ({
+      title: `Background job failed \u2014 ${displayValue(item.job_id)}`,
+      evidence: `The background job ${displayValue(item.job_id)} reported state failed. See Pipeline for its last start, last finish, and error class.`,
+    })],
+    ['database_pressure', () => ({
+      title: 'Database pressure is not normal',
+      evidence: 'Storage pressure is outside its normal state. See Pipeline for its state, reason, and snapshot.',
+    })],
+  ]);
+
+  function exceptionCopy(item) {
+    const exception = item || {};
+    const builder = EXCEPTION_COPY.get(exception.kind);
+    if (builder) return builder(exception);
+    const kind = displayValue(exception.kind);
+    return {
+      title: `Unrecognised exception \u2014 ${kind}`,
+      evidence: `This page does not recognise the exception kind ${kind}. See ${exception.section || 'its owning section'} for the evidence the server supplied.`,
+    };
+  }
+
+  // apiFetch throws a plain Error carrying the server's own structured `error` field
+  // or its bounded status line. Browser-raised failures -- a TypeError from the
+  // network, a SyntaxError from an unparseable body -- are not server-supplied
+  // reasons and are never shown to the operator.
+  function serverSuppliedReason(error) {
+    return error instanceof Error && error.constructor === Error ? error.message : null;
+  }
+
   function renderSafety(snapshot) {
     const safety = snapshot.safety || {};
     $('connection-banner').hidden = !state.connectionUnavailable;
@@ -135,7 +215,10 @@
       const count = document.createElement('p');
       count.textContent = `${exceptions.length} active exception${exceptions.length === 1 ? '' : 's'}`;
       exceptionRegion.append(count);
-      exceptions.forEach((item) => addCard(exceptionRegion, item.label || item.kind || 'Unknown exception', item.evidence || item.detail || 'Unknown evidence', item.section));
+      exceptions.forEach((item) => {
+        const copy = exceptionCopy(item);
+        addCard(exceptionRegion, copy.title, copy.evidence, item.section);
+      });
     }
     fragment.append(exceptionRegion);
     if (!snapshot.services || !snapshot.pipeline) {
@@ -611,10 +694,11 @@
     $('advanced-status').textContent = `${heading.textContent} selected`;
   }
 
-  function renderRefreshError() {
+  function renderRefreshError(reason) {
     const error = $('advanced-refresh-error');
     const prior = state.lastSuccessLabel || 'no successful update yet';
-    error.textContent = `Beacon could not refresh current diagnosis. Showing data from ${prior}. Check the connection warning, then try again.`;
+    const contracted = `Beacon could not refresh current diagnosis. Showing data from ${prior}. Check the connection warning, then try again.`;
+    error.textContent = reason ? `${contracted} Server reported: ${reason}` : contracted;
     error.hidden = false;
   }
 
@@ -630,11 +714,11 @@
       updateRefreshEvidence();
       $('advanced-refresh-error').hidden = true;
       renderSnapshot(snapshot);
-    } catch (_) {
+    } catch (error) {
       if (requestId !== state.requestGeneration) return;
       state.connectionUnavailable = true;
       renderSafety(state.snapshot || {});
-      renderRefreshError();
+      renderRefreshError(serverSuppliedReason(error));
     }
   }
 
