@@ -250,8 +250,12 @@ class AdvancedUiTests(unittest.TestCase):
         payload = self._snapshot()
         payload.update({
             'exceptions': [
-                {'kind': 'service', 'label': 'Critical web service down', 'section': 'services', 'priority': 1},
-                {'kind': 'stream', 'label': 'very-long-stream-' + ('evidence-' * 18), 'section': 'pipeline', 'priority': 2},
+                {'kind': 'critical_service_offline', 'section': 'services', 'priority': 2,
+                 'port': 443, 'name': 'Critical web service'},
+                {'kind': 'collection_gap', 'section': 'pipeline', 'priority': 5,
+                 'stream_kind': 'host', 'stream_key': 'very-long-stream-' + ('evidence-' * 18),
+                 'start_ts': 1_699_999_900, 'end_ts': 1_700_000_005,
+                 'reason': 'collection_gap', 'detail': None, 'open': True, 'actionable': True},
             ],
             'services': None,
             'pipeline': None,
@@ -274,7 +278,8 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertTrue(seen_loading['value'])
             overview = page.locator('#overview-section').text_content()
             self.assertIn('2 active exceptions', overview)
-            self.assertIn('Critical web service down', overview)
+            self.assertIn('Critical service offline \u2014 Critical web service on port 443', overview)
+            self.assertIn('Open collection gap \u2014 host: very-long-stream-', overview)
             self.assertIn('Unknown', overview)
             self.assertIn('Some current-state evidence is unavailable.', overview)
             self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 360)
@@ -570,7 +575,9 @@ class AdvancedUiTests(unittest.TestCase):
             page.locator('#overview-section').wait_for(timeout=5_000)
             overview = page.locator('#overview-section').text_content()
             self.assertIn('1 active exception', overview)
-            self.assertIn('collection_gap', overview)
+            self.assertIn('Open collection gap \u2014 host: cpu', overview)
+            self.assertNotIn('collection_gap', overview)
+            self.assertNotIn('Unknown evidence', overview)
             self.assertNotIn('No active exceptions', overview)
             self.assertNotIn(
                 'Host, services, and collection pipeline are reporting normally.', overview,
@@ -676,7 +683,9 @@ class AdvancedUiTests(unittest.TestCase):
             page.locator('#overview-section').wait_for(timeout=5_000)
             overview = page.locator('#overview-section').text_content()
             self.assertIn('1 active exception', overview)
-            self.assertIn('host_freshness', overview)
+            self.assertIn('Host evidence is stale', overview)
+            self.assertNotIn('host_freshness', overview)
+            self.assertNotIn('Unknown evidence', overview)
             self.assertNotIn('No active exceptions', overview)
             self.assertNotIn(
                 'Host, services, and collection pipeline are reporting normally.', overview,
@@ -687,6 +696,171 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertIn('host: cpu', pipeline)
             self.assertIn('host: ram', pipeline)
             self.assertNotIn('No pipeline streams are configured', pipeline)
+        finally:
+            page.close()
+
+    # Every kind compose_active_exceptions can emit, with exactly the fields
+    # each one carries. Kept beside the renderer regressions so a new server
+    # kind that arrives without operator copy fails here.
+    EMITTED_EXCEPTIONS = (
+        {'kind': 'recovery_required', 'section': 'pipeline', 'priority': 0},
+        {'kind': 'host_freshness', 'section': 'host', 'priority': 1, 'state': 'stale'},
+        {'kind': 'worker_freshness', 'section': 'pipeline', 'priority': 1, 'state': 'unknown'},
+        {'kind': 'critical_service_offline', 'section': 'services', 'priority': 2,
+         'port': 443, 'name': 'Critical gateway'},
+        {'kind': 'service_offline', 'section': 'services', 'priority': 3,
+         'port': 8080, 'name': 'Media server'},
+        {'kind': 'service_freshness', 'section': 'services', 'priority': 4,
+         'port': 9090, 'state': 'stale'},
+        {'kind': 'collection_gap', 'section': 'pipeline', 'priority': 5,
+         'stream_kind': 'host', 'stream_key': 'cpu',
+         'start_ts': 1_699_999_900, 'end_ts': 1_700_000_005,
+         'reason': 'collection_gap', 'detail': None, 'open': True, 'actionable': True},
+        {'kind': 'coverage_unknown', 'section': 'pipeline', 'priority': 5,
+         'stream_kind': 'host', 'stream_key': 'ram',
+         'start_ts': 1_699_998_000, 'end_ts': 1_699_999_000,
+         'reason': 'indeterminate', 'detail': None, 'open': False, 'actionable': True},
+        {'kind': 'job_failed', 'section': 'pipeline', 'priority': 6, 'job_id': 'J8-cleanup'},
+        {'kind': 'database_pressure', 'section': 'pipeline', 'priority': 7},
+    )
+
+    def _overview_page(self, exceptions):
+        payload = self._snapshot()
+        payload.update({
+            'services': [], 'settings': {},
+            'pipeline': {
+                'retention': {}, 'database_pressure': {}, 'worker': {},
+                'gaps': {'items': [], 'count': 0, 'truncated': False},
+                'aggregation_pending': {'items': [], 'count': 0, 'truncated': False},
+                'jobs': [],
+            },
+            'exceptions': exceptions,
+        })
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('#overview-section').wait_for(timeout=5_000)
+        return page
+
+    def test_every_emitted_exception_kind_renders_operator_copy(self):
+        """Each server kind must read as a sentence naming its host, service, stream or job."""
+        page = self._overview_page(list(self.EMITTED_EXCEPTIONS))
+        try:
+            cards = page.locator('#overview-content > section article.diagnosis-card')
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('10 active exceptions', overview)
+            self.assertEqual(cards.count(), len(self.EMITTED_EXCEPTIONS))
+            headings = [
+                cards.nth(index).locator('h3').text_content()
+                for index in range(cards.count())
+            ]
+            bare_kinds = {item['kind'] for item in self.EMITTED_EXCEPTIONS}
+            for heading in headings:
+                with self.subTest(heading=heading):
+                    self.assertNotIn(heading, bare_kinds)
+                    self.assertNotEqual(heading.strip(), '')
+            for expected in (
+                'Database recovery required',
+                'Host evidence is stale',
+                'Worker heartbeat is unknown',
+                'Critical service offline \u2014 Critical gateway on port 443',
+                'Service offline \u2014 Media server on port 8080',
+                'Service evidence is stale \u2014 port 9090',
+                'Open collection gap \u2014 host: cpu',
+                'Coverage could not be determined \u2014 host: ram',
+                'Background job failed \u2014 J8-cleanup',
+                'Database pressure is not normal',
+            ):
+                with self.subTest(expected=expected):
+                    self.assertIn(expected, headings)
+            self.assertNotIn('Unknown evidence', overview)
+            self.assertNotIn('Unknown exception', overview)
+            self.assertNotIn('Unrecognised exception', overview)
+            for item in self.EMITTED_EXCEPTIONS:
+                with self.subTest(kind=item['kind']):
+                    self.assertNotIn(item['kind'], overview)
+            bodies = [
+                cards.nth(index).locator('p').first.text_content()
+                for index in range(cards.count())
+            ]
+            for body in bodies:
+                with self.subTest(body=body):
+                    self.assertNotEqual(body.strip(), '')
+                    self.assertNotIn('Unknown evidence', body)
+        finally:
+            page.close()
+
+    def test_indeterminate_coverage_exception_is_never_worded_as_a_failure(self):
+        """coverage_unknown states that coverage is undetermined, never that collection failed."""
+        page = self._overview_page([
+            item for item in self.EMITTED_EXCEPTIONS if item['kind'] == 'coverage_unknown'
+        ])
+        try:
+            card = page.locator('#overview-content > section article.diagnosis-card').first
+            heading = card.locator('h3').text_content()
+            body = card.locator('p').first.text_content()
+            self.assertIn('Coverage could not be determined', heading)
+            self.assertIn('host: ram', heading)
+            self.assertIn('could not determine coverage', body)
+            for forbidden in ('gap', 'fail', 'lost', 'missing'):
+                with self.subTest(forbidden=forbidden):
+                    self.assertNotIn(forbidden, f'{heading} {body}'.lower())
+        finally:
+            page.close()
+
+    def test_unrecognised_exception_kind_still_renders_and_is_counted(self):
+        """A kind the page has never seen must be visible, counted, and non-fatal."""
+        page = self._overview_page([
+            {'kind': 'host_freshness', 'section': 'host', 'priority': 1, 'state': 'stale'},
+            {'kind': 'quantum_flux', 'section': 'pipeline', 'priority': 9,
+             'detail': 'server-supplied evidence'},
+        ])
+        try:
+            cards = page.locator('#overview-content > section article.diagnosis-card')
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('2 active exceptions', overview)
+            self.assertEqual(cards.count(), 2)
+            self.assertIn('Unrecognised exception \u2014 quantum_flux', overview)
+            self.assertIn('quantum_flux', overview)
+            self.assertIn('Host evidence is stale', overview)
+            self.assertNotIn('No active exceptions', overview)
+            self.assertNotIn('Unknown evidence', overview)
+        finally:
+            page.close()
+
+    def test_refresh_error_names_the_server_supplied_reason(self):
+        """A non-ok JSON body carrying an error must not read as a connection problem alone."""
+        payload = self._snapshot()
+        payload.update({'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': []})
+        fixture = {'fail': False}
+        page = self.browser.new_page()
+
+        def route_api(route):
+            if urlparse(route.request.url).path != '/api/advanced/current':
+                route.fallback()
+            elif fixture['fail']:
+                route.fulfill(status=503, json={'error': 'scheduled maintenance in progress'})
+            else:
+                route.fulfill(status=200, json=payload)
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-testid="host-summary"]').wait_for(timeout=5_000)
+            fixture['fail'] = True
+            page.locator('#advanced-refresh').click()
+            page.locator('#advanced-refresh-error').wait_for(state='visible', timeout=5_000)
+            message = page.locator('#advanced-refresh-error').text_content()
+            self.assertIn('Beacon could not refresh current diagnosis.', message)
+            self.assertIn('Check the connection warning, then try again.', message)
+            self.assertIn('scheduled maintenance in progress', message)
         finally:
             page.close()
 
