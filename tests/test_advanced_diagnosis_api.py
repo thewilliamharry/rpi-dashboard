@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1018,6 +1019,25 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             response = self.client.get('/api/advanced/current')
 
         self.assertEqual(response.status_code, 500)
+
+class ClockIsolationTests(unittest.TestCase):
+    """The phase module must leave the process-global clock exactly as it found it."""
+
+    def test_a_frozen_clock_never_outlives_the_test_that_froze_it(self):
+        """WR-05: a frozen November-2023 clock must not survive into any later module."""
+        probe = AdvancedDiagnosisApiTests(
+            'test_host_tracer_returns_truthful_unknown_host_evidence'
+        )
+        result = unittest.TestResult()
+        probe.run(result)
+
+        self.assertEqual([], result.errors + result.failures)
+        self.assertGreater(
+            time.time(),
+            1_750_000_000,
+            'the frozen test clock leaked past the test that installed it',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
