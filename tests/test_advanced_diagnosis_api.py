@@ -304,6 +304,94 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             [],
         )
 
+    def test_the_real_scan_and_preview_pollers_record_a_genuine_failure_as_failed(self):
+        """A genuinely failed scan or preview is durably failed, through production's own adapters.
+
+        The mirror of the idle-queue regression above.  Five verification rounds
+        stayed green while a real, durably recorded failure was reported to the
+        operator as succeeded, because every prior J5/J6 outcome test drove an
+        empty queue or a synthetic stand-in for the poller itself.  Here the work
+        genuinely fails at the collaborator boundary -- ``run_discovery`` actually
+        raises and the preview capture actually warns -- while the poller under
+        test stays the exact callable ``dashboard/worker.py`` wires into
+        production.  Both halves are asserted: the durable queue-table row and the
+        durable job-health row must agree on failure for the same dispatch, and
+        the operator-facing exception must say so too.
+        """
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'genuine-failure-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        # The same two production callables the idle-queue sibling binds, driven
+        # here for the opposite polarity.
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            process_scan_requests=self.appmod.worker_process_scan_requests,
+            process_preview_requests=self.appmod.worker_process_preview_requests,
+        )
+
+        with self.subTest(job_id='J5'):
+            queues.enqueue_scan(self.db_path, 'genuine-failure', now=now)
+            # A genuine raise, not a synthetic 'failed' return, so the caught
+            # ``except Exception`` path the gap names explicitly is the one
+            # exercised.
+            with mock.patch.object(
+                self.appmod, 'run_discovery',
+                side_effect=RuntimeError('discovery hit a real error'),
+            ):
+                self.assertIs(worker_main.dispatch_callback(services, 'J5'), False)
+            row = self._job_health_row('J5')
+            self.assertEqual(row['state'], 'failed')
+            self.assertEqual(row['error_class'], 'CallbackReturnedFalse')
+            queue_row = self._latest_queue_row('scan_requests')
+            self.assertEqual(queue_row['status'], 'failed')
+            self.assertIn('discovery hit a real error', queue_row['error'])
+
+        with self.subTest(job_id='J6'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._seed_service(conn, 8080, now=now)
+                conn.commit()
+                conn.close()
+            queues.enqueue_preview(self.db_path, 8080, now=now)
+            with mock.patch.object(
+                self.appmod, '_legacy_refresh_service_preview',
+                return_value=(None, None, None, None, None, 'preview capture failed'),
+            ):
+                self.assertIs(worker_main.dispatch_callback(services, 'J6'), False)
+            row = self._job_health_row('J6')
+            self.assertEqual(row['state'], 'failed')
+            self.assertEqual(row['error_class'], 'CallbackReturnedFalse')
+            queue_row = self._latest_queue_row('preview_requests')
+            self.assertEqual(queue_row['status'], 'failed')
+            self.assertEqual(queue_row['error'], 'preview capture failed')
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        self.assertEqual(
+            sorted(
+                item['job_id'] for item in payload['exceptions']
+                if item['kind'] == 'job_failed'
+            ),
+            ['J5', 'J6'],
+        )
+
+    def _latest_queue_row(self, table):
+        """Read the newest durable queue row so its verdict can be compared."""
+        if table not in {'scan_requests', 'preview_requests'}:
+            raise ValueError(f'unknown queue table: {table}')
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = conn.execute(
+                f'SELECT status,error FROM {table} ORDER BY id DESC LIMIT 1'
+            ).fetchone()
+            conn.close()
+        return row
+
     def test_a_succeeded_callback_never_records_durable_failed_evidence(self):
         """Gap B: a failed bookkeeping write must never become a verdict on the work."""
         now = 100
