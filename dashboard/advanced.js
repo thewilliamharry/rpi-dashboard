@@ -456,8 +456,8 @@
   }
 
   function serviceDuration(service) {
-    const seconds = Number(service.state_duration_seconds);
-    return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+    const seconds = finiteMeasurement(service.state_duration_seconds);
+    return seconds !== null && seconds >= 0 ? seconds : null;
   }
 
   function formatDuration(seconds) {
@@ -503,8 +503,8 @@
         if (sort.field === 'name') return `${service.name || ''} ${service.port || ''}`.toLowerCase();
         if (sort.field === 'status') return ordering.status.indexOf(serviceAvailability(service));
         if (sort.field === 'latency') {
-          const latency = Number(service.latency_ms);
-          return Number.isFinite(latency) ? latency : Number.POSITIVE_INFINITY;
+          const latency = finiteMeasurement(service.latency_ms);
+          return latency === null ? Number.POSITIVE_INFINITY : latency;
         }
         if (sort.field === 'duration') return serviceDuration(service) ?? Number.POSITIVE_INFINITY;
         if (sort.field === 'criticality') return ordering.criticality.indexOf(service.critical ? 'critical' : 'standard');
