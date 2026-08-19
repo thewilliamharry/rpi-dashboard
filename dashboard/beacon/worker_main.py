@@ -497,12 +497,22 @@ def run_worker(operations, settings=None):
             )
     try:
         with _worker_start_lock:
-            if dispatch_callback(services, 'S1') is False:
-                return
-            if dispatch_callback(services, 'S2') is False:
-                return
-            if dispatch_callback(services, 'S3') is False:
-                return
+            for startup_callback_id in ('S1', 'S2', 'S3'):
+                try:
+                    if dispatch_callback(services, startup_callback_id) is False:
+                        return
+                except JobHealthBookkeepingError as bookkeeping_error:
+                    # A failure to record that a startup job began is a fact about
+                    # the recording, never a verdict on whether Beacon should run.
+                    # Left unhandled, a transient database lock could stop the
+                    # worker from starting at all, which is strictly worse for the
+                    # operator than an unrecorded start.  Lease loss still aborts
+                    # startup through the `is False` return above.
+                    log.warning(
+                        'Beacon worker could not record a startup job; continuing '
+                        'startup: callback=%s error_class=%s',
+                        startup_callback_id, bookkeeping_error.error_class,
+                    )
             scheduler = build_scheduler(services)
             _active_services = services
             _active_worker_id = services.authority.worker_id
