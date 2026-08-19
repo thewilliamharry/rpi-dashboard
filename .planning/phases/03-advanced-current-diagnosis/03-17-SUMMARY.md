@@ -206,6 +206,10 @@ None — no external service configuration required.
 - Ready for round-5 independent re-verification. The verifier owns the TEL-06 promotion decision; this plan deliberately left the record open.
 - Two human checks (D4, D5 in `coverage:`) remain outstanding for the end-of-phase human checkpoint on real Pi hardware — specifically the idle-Pi Overview check that is the round-4 verifier's own confirmation gate for Task 1.
 
+## Self-Check: PASSED
+
+All 7 files claimed created/modified exist on disk. All 7 commits (`6be0bb4`, `7100600`, `30fd532`, `d2423ab`, `f36c2d8`, `25a176a`, `c762d23`) resolve in `git log --all`. `.planning/REQUIREMENTS.md` shows an empty diff against the pre-plan commit `43c3727`.
+
 ---
 *Phase: 03-advanced-current-diagnosis*
 *Completed: 2026-08-19*
