@@ -1,4 +1,5 @@
 import json
+import logging
 import sqlite3
 import time
 import unittest
@@ -404,6 +405,130 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             self.assertIsNone(row['last_success_ts'])
             with lease_admission.admit('scheduled') as admitted:
                 self.assertFalse(admitted, 'lease loss must leave admission closed')
+
+    def test_a_failed_callback_survives_a_failing_outcome_write(self):
+        """B5: a work failure and the failure to record it must both be reported."""
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'job-health-compound', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+
+        class WorkBlewUp(RuntimeError):
+            pass
+
+        work_message = 'the real cause nobody was told about'
+        write_message = 'database is locked'
+
+        def services_for(outcome):
+            def operation(_authority):
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+
+            return SimpleNamespace(
+                settings=SimpleNamespace(db_path=self.db_path),
+                authority=authority,
+                clock=lambda: now,
+                admission=worker_main.WorkerAdmission(),
+                collect_system_stats=operation,
+                process_preview_requests=operation,
+            )
+
+        real_write = worker_main._write_job_health_transition
+        recorded = []
+
+        def recorder_failing_on(blocked_transition):
+            def recording_write(write_services, callback_id, transition, *, error_class=None):
+                recorded.append((transition, error_class))
+                if transition == blocked_transition:
+                    raise sqlite3.OperationalError(write_message)
+                return real_write(
+                    write_services, callback_id, transition, error_class=error_class,
+                )
+
+            return recording_write
+
+        self.addCleanup(
+            setattr, worker_main, '_write_job_health_transition', real_write,
+        )
+
+        def reachable(error):
+            """Every exception the raised condition's own chain still reaches."""
+            found, pending, seen = [], [error], set()
+            while pending:
+                current = pending.pop()
+                if current is None or id(current) in seen:
+                    continue
+                seen.add(id(current))
+                found.append(current)
+                pending.extend([current.__cause__, current.__context__])
+            return found
+
+        worker_main._write_job_health_transition = recorder_failing_on('failed')
+        with self.assertLogs('beacon.worker', level='ERROR') as captured:
+            with self.assertRaises(worker_main.JobHealthBookkeepingError) as raised:
+                worker_main.dispatch_callback(services_for(WorkBlewUp(work_message)), 'J2')
+
+        condition = raised.exception
+
+        # Channel 1: the condition carries the work's own bounded class.
+        self.assertEqual(condition.work_error_class, 'WorkBlewUp')
+        self.assertEqual(condition.error_class, 'OperationalError')
+
+        # Channel 2: the object graph, not the message string, still reaches both.
+        self.assertIsInstance(condition.__cause__, WorkBlewUp)
+        chain = reachable(condition)
+        self.assertTrue(
+            any(isinstance(link, WorkBlewUp) for link in chain),
+            'the work failure must stay reachable through the raised chain',
+        )
+        self.assertTrue(
+            any(isinstance(link, sqlite3.OperationalError) for link in chain),
+            'the bookkeeping failure must stay reachable through the raised chain',
+        )
+
+        message = str(condition)
+        self.assertIn('J2', message)
+        self.assertIn('WorkBlewUp', message)
+        self.assertIn('OperationalError', message)
+        self.assertNotIn(work_message, message)
+        self.assertNotIn(write_message, message)
+
+        # Channel 3: the container log states the work failure before the raise.
+        work_records = [
+            record.getMessage() for record in captured.records
+            if record.levelno == logging.ERROR and 'WorkBlewUp' in record.getMessage()
+        ]
+        self.assertTrue(
+            work_records, 'the work failure must be logged at error level',
+        )
+        for text in work_records:
+            self.assertNotIn(work_message, text)
+            self.assertNotIn(write_message, text)
+
+        self.assertEqual([transition for transition, _ in recorded], ['started', 'failed'])
+
+        # The false positive 03-12 closed stays closed: no durable verdict either way.
+        row = self._job_health_row('J2')
+        self.assertNotEqual(row['state'], 'failed')
+        self.assertNotEqual(row['state'], 'succeeded')
+
+        with self.subTest(case='work_returned_and_outcome_write_failed'):
+            recorded.clear()
+            worker_main._write_job_health_transition = recorder_failing_on('succeeded')
+            with self.assertRaises(worker_main.JobHealthBookkeepingError) as control:
+                worker_main.dispatch_callback(services_for(True), 'J6')
+
+            self.assertIsNone(control.exception.work_error_class)
+            self.assertEqual(control.exception.error_class, 'OperationalError')
+            self.assertNotIn('work_error_class', str(control.exception))
+            self.assertEqual(
+                [transition for transition, _ in recorded], ['started', 'succeeded'],
+            )
+            control_row = self._job_health_row('J6')
+            self.assertNotEqual(control_row['state'], 'failed')
+            self.assertNotEqual(control_row['state'], 'succeeded')
 
     def test_stale_worker_cannot_change_job_health_evidence(self):
         now = 100
