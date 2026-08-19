@@ -305,7 +305,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         )
 
     def test_the_real_scan_and_preview_pollers_record_a_genuine_failure_as_failed(self):
-        """A genuinely failed scan or preview is durably failed, through production's own adapters.
+        """A genuine worker fault is durably failed; a per-service warning is not.
 
         The mirror of the idle-queue regression above.  Five verification rounds
         stayed green while a real, durably recorded failure was reported to the
@@ -314,9 +314,16 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         genuinely fails at the collaborator boundary -- ``run_discovery`` actually
         raises and the preview capture actually warns -- while the poller under
         test stays the exact callable ``dashboard/worker.py`` wires into
-        production.  Both halves are asserted: the durable queue-table row and the
-        durable job-health row must agree on failure for the same dispatch, and
-        the operator-facing exception must say so too.
+        production.
+
+        The two halves are asymmetric by design, per the user's decision recorded
+        in 03-19-REVIEW.md CR-01.  J5's fault is the discovery job's own execution
+        raising, so it reads ``failed`` at both the queue-table and job-health
+        layers.  J6's ``warning`` describes the previewed service's own health,
+        not the poller's, so it reads ``failed`` at the queue-table layer only
+        while J6's job health reads ``succeeded`` -- the poll itself did claim,
+        capture, and durably record.  Collapsing those two signals into one is
+        exactly the defect CR-01 named.
         """
         now = 100
         lease = queues.acquire_worker_lease(
@@ -362,10 +369,10 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 self.appmod, '_legacy_refresh_service_preview',
                 return_value=(None, None, None, None, None, 'preview capture failed'),
             ):
-                self.assertIs(worker_main.dispatch_callback(services, 'J6'), False)
+                self.assertIs(worker_main.dispatch_callback(services, 'J6'), True)
             row = self._job_health_row('J6')
-            self.assertEqual(row['state'], 'failed')
-            self.assertEqual(row['error_class'], 'CallbackReturnedFalse')
+            self.assertEqual(row['state'], 'succeeded')
+            self.assertIsNone(row['error_class'])
             queue_row = self._latest_queue_row('preview_requests')
             self.assertEqual(queue_row['status'], 'failed')
             self.assertEqual(queue_row['error'], 'preview capture failed')
@@ -377,7 +384,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 item['job_id'] for item in payload['exceptions']
                 if item['kind'] == 'job_failed'
             ),
-            ['J5', 'J6'],
+            ['J5'],
         )
     def test_a_titleless_service_never_fails_j6s_job_health(self):
         """A page with no <title> is the service's condition, never J6's own job fault.

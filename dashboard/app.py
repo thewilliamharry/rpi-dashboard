@@ -2014,11 +2014,17 @@ def worker_process_preview_requests(authority):
             )
     except beacon_queues.LeaseLost:
         raise
-    # Return the verdict this function itself just computed and durably recorded
-    # -- see worker_process_scan_requests for the full reasoning. warning is
-    # already set whenever finish_preview_for_worker_in_transaction above
-    # recorded status='failed'.
-    return not warning
+    # J6's job outcome answers one question only: did the poller claim a
+    # request, attempt a capture, and durably record its own verdict inside an
+    # authority-asserted transaction? Reaching this line means yes, regardless
+    # of what the capture found. warning is already durable on
+    # preview_requests.status and on the preview_complete event above -- it
+    # describes the monitored service's own health, not the poller's, and must
+    # never again decide this return value (03-19-REVIEW.md CR-01). A genuine
+    # J6 job fault -- the claim or the transaction itself failing -- already
+    # propagates as LeaseLost above or as an uncaught exception dispatch_callback
+    # converts to a real failed row.
+    return True
 
 
 def _check_scan_rate_limit(client_key):
