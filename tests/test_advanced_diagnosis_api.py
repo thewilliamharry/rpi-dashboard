@@ -594,6 +594,67 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             ],
             [],
         )
+    def test_a_busy_discovery_lock_with_a_lost_lease_does_not_report_success(self):
+        """A lease confirmed lost on the busy path is fatal, exactly as on every other path.
+
+        03-19-REVIEW.md WR-04: the discovery-busy branch returned before
+        reaching the ``if heartbeat.lost: raise`` guard every other terminal
+        path in ``worker_process_scan_requests`` already applies.  With a lost
+        lease that meant the claim was left at ``status='running'`` with a dead
+        lease while ``dispatch_callback`` recorded J5 as *succeeded* -- a
+        fabricated clean poll.  ``renew_scan_lease`` raises on request-level
+        loss too, not only epoch loss, so the worker epoch can still be entirely
+        valid here and ``assert_current_worker_authority`` will not intercept.
+        The heartbeat is injected through the function's own
+        ``heartbeat_factory`` keyword rather than stubbing the poller, so the
+        real production callable and the real ``dispatch_callback`` are driven.
+        """
+        # The LeaseLost path below reaches stop_worker, which mutates the worker
+        # scheduler module globals; own the reset rather than leaking it.
+        self.addCleanup(self._reset_worker_globals)
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'busy-lost-lease-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+
+        class LostHeartbeat:
+            """A heartbeat that has already confirmed the request lease is gone."""
+
+            lost = True
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+        heartbeat = LostHeartbeat()
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            process_scan_requests=lambda _authority: self.appmod.worker_process_scan_requests(
+                _authority, now_fn=lambda: now,
+                heartbeat_factory=lambda *_a, **_kw: heartbeat,
+            ),
+        )
+
+        queues.enqueue_scan(self.db_path, 'busy-lost-lease', now=now)
+        with mock.patch.object(self.appmod, 'run_discovery', return_value='busy'):
+            self.assertIs(worker_main.dispatch_callback(services, 'J5'), False)
+
+        # LeaseLost short-circuits dispatch before any outcome is written, so the
+        # row stays at the 'started' transition -- never fabricated as succeeded.
+        row = self._job_health_row('J5')
+        self.assertEqual(row['state'], 'running')
+
+        # The claim is not ours to return once the lease is confirmed lost, so no
+        # requeue was attempted and the row was left exactly as it was claimed.
+        queue_row = self._latest_queue_row('scan_requests')
+        self.assertEqual(queue_row['status'], 'running')
+        self.assertIsNone(queue_row['error'])
 
     def test_an_uptime_lock_collision_is_not_reported_as_a_failure(self):
         """A J3/J4 overlap yields to the holder; yielding is not a fault.
