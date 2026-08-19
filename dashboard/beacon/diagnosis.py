@@ -385,7 +385,14 @@ def attach_service_collection_gaps(services, pipeline):
         service['collection_gaps'] = {
             'items': items,
             'count': len(items),
-            'open_count': sum(1 for item in items if item.get('open') is True),
+            # The element-level guard the enclosing containers already get: a
+            # non-dictionary item here would raise out of the composition and
+            # into a request path that catches only database conditions, so the
+            # operator would get an unparseable error page instead of the
+            # workspace's own bounded error copy.
+            'open_count': sum(
+                1 for item in items if isinstance(item, dict) and item.get('open') is True
+            ),
             'evidence': _service_gap_evidence_state(stream, streams_block),
         }
     return services

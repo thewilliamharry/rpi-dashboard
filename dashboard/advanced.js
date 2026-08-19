@@ -68,8 +68,16 @@
     return value === null || value === undefined || value === '' ? 'Unknown' : `${value}${suffix}`;
   }
 
+  // The single absent-value rule for every surface that turns a server value into
+  // a number: the latency cell, the latency sort key and the state duration. The
+  // decision is made on type, not on a list of observed values, because anything
+  // this accepts becomes an assertion Beacon is making about the Pi. A boolean, an
+  // array, an object and a blank string are absences — Number() would coerce them
+  // to a measurement of zero, which is exactly the fabricated copy this workspace
+  // must never show. A genuine zero from either accepted type is a measurement.
   function finiteMeasurement(value) {
-    if (value === null || value === undefined || value === '') return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value !== 'string' || value.trim() === '') return null;
     const measurement = Number(value);
     return Number.isFinite(measurement) ? measurement : null;
   }
