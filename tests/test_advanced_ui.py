@@ -1246,6 +1246,10 @@ class AdvancedUiTests(unittest.TestCase):
         Singular and plural count copy follow the same rule the Pipeline
         collection-gaps region already uses, and a state the server never
         established reads differently from an absence it derived.
+
+        The two absences also read differently from each other: a service the
+        pipeline has established no collection stream for is not a service that
+        was collected and found clean, so the two states carry two sentences.
         """
         page = self._gap_evidence_page()
         try:
@@ -1257,7 +1261,7 @@ class AdvancedUiTests(unittest.TestCase):
 
             expected = {
                 9001: 'Gap evidence unavailable',
-                9002: 'No gap evidence',
+                9002: 'No collection stream established for this service',
                 9003: 'No gap evidence',
                 9004: '1 gap (1 open)',
                 9005: '3 gaps (2 open)',
@@ -1270,6 +1274,13 @@ class AdvancedUiTests(unittest.TestCase):
                 for port in expected
             }
             self.assertEqual(rendered, expected)
+
+            # An absence the pipeline established and an absence it never looked
+            # for produce the same empty list, so only the copy can tell them
+            # apart. Asserted on its own statement, read from the live DOM by
+            # port, so a future edit that rewords both map entries together
+            # cannot re-collapse the distinction and stay green.
+            self.assertNotEqual(rendered[9002], rendered[9003])
 
             # No serialized container may reach the operator on this surface.
             for port, line in rendered.items():
