@@ -514,6 +514,21 @@ def run_worker(operations, settings=None):
                         return
                 except JobHealthBookkeepingError as bookkeeping_error:
                     if bookkeeping_error.work_error_class is not None:
+                        # The startup work itself failed and the first attempt to
+                        # record that failure also failed. Make
+                        # one bounded, best-effort attempt to leave durable
+                        # evidence the /advanced workspace can read before failing
+                        # loudly; this attempt's own failure changes nothing about
+                        # the outcome -- the raised condition and the ERROR log
+                        # already emitted by dispatch_callback remain the evidence
+                        # channel either way.
+                        try:
+                            _write_job_health_transition(
+                                services, startup_callback_id, 'failed',
+                                error_class=bookkeeping_error.work_error_class,
+                            )
+                        except Exception:
+                            pass
                         # The startup work itself failed and the write that would
                         # have recorded that failure also failed, so nothing has
                         # confirmed the state Beacon would carry forward.  Continuing
