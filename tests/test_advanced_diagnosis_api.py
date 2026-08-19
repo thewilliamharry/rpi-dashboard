@@ -326,6 +326,85 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertNotIn('database is locked', message)
         self.assertIsInstance(raised.exception.__cause__, sqlite3.OperationalError)
 
+    def _job_health_row(self, job_id):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = conn.execute(
+                'SELECT state,last_success_ts,error_class FROM background_job_health '
+                'WHERE job_id=?',
+                (job_id,),
+            ).fetchone()
+            conn.close()
+        return row
+
+    def test_outcome_paths_survive_the_bookkeeping_split(self):
+        """The three outcomes that were already correct must not have moved."""
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'job-health-outcomes', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+
+        class DeliberateOutcomeFailure(RuntimeError):
+            pass
+
+        def services_with(admission, **operations):
+            return SimpleNamespace(
+                settings=SimpleNamespace(db_path=self.db_path),
+                authority=authority,
+                clock=lambda: now,
+                admission=admission,
+                **operations,
+            )
+
+        def raiser(error):
+            return lambda _authority: (_ for _ in ()).throw(error)
+
+        admission = worker_main.WorkerAdmission()
+        services = services_with(
+            admission,
+            collect_system_stats=lambda _authority: False,
+            cleanup_history=raiser(DeliberateOutcomeFailure('secret message')),
+            process_preview_requests=lambda _authority: True,
+        )
+
+        with self.subTest(outcome='returned_false'):
+            self.assertFalse(worker_main.dispatch_callback(services, 'J2'))
+            self.assertEqual(
+                tuple(self._job_health_row('J2')),
+                ('failed', None, 'CallbackReturnedFalse'),
+            )
+
+        with self.subTest(outcome='raised'):
+            with self.assertRaises(DeliberateOutcomeFailure):
+                worker_main.dispatch_callback(services, 'J8')
+            self.assertEqual(
+                tuple(self._job_health_row('J8')),
+                ('failed', None, 'DeliberateOutcomeFailure'),
+            )
+
+        with self.subTest(outcome='succeeded'):
+            self.assertTrue(worker_main.dispatch_callback(services, 'J6'))
+            self.assertEqual(
+                tuple(self._job_health_row('J6')), ('succeeded', now, None),
+            )
+
+        with self.subTest(outcome='lease_lost'):
+            lease_admission = worker_main.WorkerAdmission()
+            lease_services = services_with(
+                lease_admission,
+                process_scan_requests=raiser(queues.LeaseLost('lost')),
+            )
+
+            self.assertFalse(worker_main.dispatch_callback(lease_services, 'J5'))
+
+            row = self._job_health_row('J5')
+            self.assertNotEqual(row['state'], 'failed')
+            self.assertIsNone(row['error_class'])
+            self.assertIsNone(row['last_success_ts'])
+            with lease_admission.admit('scheduled') as admitted:
+                self.assertFalse(admitted, 'lease loss must leave admission closed')
+
     def test_stale_worker_cannot_change_job_health_evidence(self):
         now = 100
         lease_a = queues.acquire_worker_lease(
