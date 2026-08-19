@@ -33,8 +33,8 @@
 
 ### Advanced Diagnosis
 
-- [ ] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
-- [ ] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
+- [x] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
+- [x] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
 - [ ] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
 - [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
 - [ ] **DIA-05**: The operator can select a validated custom range within retained history.
@@ -54,7 +54,7 @@
 ### Experience and Themes
 
 - [ ] **UX-01**: Existing compact analytics previews remain on the main dashboard in both light and dark modes.
-- [ ] **UX-02**: The operator can move clearly between the main dashboard and advanced analytics without losing theme choice.
+- [x] **UX-02**: The operator can move clearly between the main dashboard and advanced analytics without losing theme choice.
 - [ ] **UX-03**: Advanced analytics exposes the same data, filters, settings, and investigations in both themes.
 - [ ] **UX-04**: Light mode presents analytics with calmer grouping and progressive disclosure, while dark mode may present denser simultaneous context.
 - [ ] **UX-05**: Advanced analytics remains usable at supported narrow and desktop viewport widths.
@@ -125,8 +125,8 @@ Every v1 requirement maps to exactly one roadmap phase.
 | MNT-02 | Phase 03.1 | Pending |
 | MNT-03 | Phase 03.1 | Pending |
 | MNT-04 | Phase 03.1 | Pending |
-| DIA-01 | Phase 3 | Gaps Found |
-| DIA-02 | Phase 3 | Gaps Found |
+| DIA-01 | Phase 3 | Complete |
+| DIA-02 | Phase 3 | Complete |
 | DIA-03 | Phase 3 | Gaps Found |
 | DIA-04 | Phase 4 | Pending |
 | DIA-05 | Phase 4 | Pending |
@@ -140,7 +140,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | HIS-05 | Phase 4 | Pending |
 | HIS-06 | Phase 4 | Pending |
 | UX-01 | Phase 5 | Pending |
-| UX-02 | Phase 3 | Gaps Found |
+| UX-02 | Phase 3 | Complete |
 | UX-03 | Phase 5 | Pending |
 | UX-04 | Phase 5 | Pending |
 | UX-05 | Phase 5 | Pending |
