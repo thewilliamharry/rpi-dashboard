@@ -392,6 +392,79 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             conn.close()
         return row
 
+    def test_the_real_discovery_dispatch_honours_the_return_value_vocabulary(self):
+        """For J7 and J9, None means a genuine skip and a real verdict is never discarded.
+
+        ``_run_scheduled_discovery`` and ``_run_startup_discovery`` are driven
+        directly -- the same two handlers ``_invoke_callback`` passes straight
+        through -- so a discovery that genuinely returns 'failed' cannot be
+        reported to the operator as succeeded, while a genuine skip still records
+        succeeded without ``run_discovery`` ever being called.
+        """
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'discovery-vocabulary-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+
+        def services_with(run_discovery, read_scan_state):
+            return SimpleNamespace(
+                settings=SimpleNamespace(db_path=self.db_path),
+                authority=authority,
+                clock=lambda: now,
+                admission=worker_main.WorkerAdmission(),
+                run_discovery=run_discovery,
+                read_scan_state=read_scan_state,
+            )
+
+        def job_failed_items(job_id):
+            payload = self.appmod.beacon_diagnosis.get_current_diagnosis(
+                self.db_path, self.appmod.SETTINGS, now,
+            )
+            return [
+                item for item in payload['exceptions']
+                if item['kind'] == 'job_failed' and item.get('job_id') == job_id
+            ]
+
+        for job_id in ('J7', 'J9'):
+            with self.subTest(
+                job_id=job_id,
+                case='a_genuinely_failed_discovery_is_recorded_as_failed',
+            ):
+                # An empty scan state passes both jobs' skip guards through to the
+                # work path, where run_discovery's own 'failed' return is the only
+                # fact under test.
+                services = services_with(
+                    run_discovery=lambda _authority, **_kwargs: 'failed',
+                    read_scan_state=lambda: {},
+                )
+                self.assertIs(worker_main.dispatch_callback(services, job_id), False)
+                row = self._job_health_row(job_id)
+                self.assertEqual(row['state'], 'failed')
+                self.assertEqual(row['error_class'], 'CallbackReturnedFalse')
+                self.assertEqual(len(job_failed_items(job_id)), 1)
+
+            with self.subTest(
+                job_id=job_id,
+                case='a_genuine_skip_still_records_succeeded',
+            ):
+                # Two genuine, distinct skip conditions: J7 skips because a scan is
+                # already running, J9 because last_discovery is inside its own
+                # 300-second recency window.
+                skip_state = {'scanning': True} if job_id == 'J7' else {'last_discovery': now}
+
+                def never_called(_authority, **_kwargs):
+                    raise AssertionError('run_discovery must not be called on a genuine skip')
+
+                services = services_with(
+                    run_discovery=never_called,
+                    read_scan_state=lambda: skip_state,
+                )
+                self.assertIsNone(worker_main.dispatch_callback(services, job_id))
+                row = self._job_health_row(job_id)
+                self.assertEqual(row['state'], 'succeeded')
+                self.assertEqual(job_failed_items(job_id), [])
+
     def test_a_succeeded_callback_never_records_durable_failed_evidence(self):
         """Gap B: a failed bookkeeping write must never become a verdict on the work."""
         now = 100
