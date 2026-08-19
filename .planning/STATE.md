@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-20-PLAN.md
-last_updated: "2026-08-19T15:10:35.663Z"
+stopped_at: "Completed 03-21-PLAN.md (round-7 gap closure: WR-01, WR-02, WR-03)"
+last_updated: "2026-08-19T15:27:47.000Z"
 last_activity: 2026-08-19
-last_activity_desc: 03-20 closed round-6's one Critical finding — J6's durable job outcome is no longer derived from the previewed service's own health (CR-01) — and made a scan lease confirmed lost on the discovery-busy branch fatal instead of a fabricated clean poll (WR-04)
+last_activity_desc: 03-21 closed round-6's three remaining warnings — an unrecognised discovery outcome now fails closed and loud (WR-01), the uptime-lock contention comment states the true J3/J4 asymmetry (WR-02), and the job_outcome_unrecorded floor derives from the operator's configured DISCOVERY_TIMEOUT_SECONDS (WR-03)
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 56
-  completed_plans: 55
+  completed_plans: 56
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 20 of 21
-Status: Gap-closure round 7 wave 1 complete (03-20) — 03-21 (wave 2) still outstanding; TEL-06 deliberately left open pending independent re-verification
-Last activity: 2026-08-19 — 03-20 stopped an offline or untitled service fabricating a J6 job_failed card, and stopped a lost scan lease reporting a clean poll
+Plan: 21 of 21
+Status: Gap-closure round 7 complete (03-20 wave 1, 03-21 wave 2) — CR-01 and all four round-6 warnings closed; TEL-06 deliberately left open pending independent re-verification
+Last activity: 2026-08-19 — 03-21 made an unrecognised discovery outcome fail closed and loud, corrected the uptime-lock contention claim, and derived the outcome-unrecorded floor from the configured discovery timeout
 
-Progress: [██████████] 98%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -110,6 +110,7 @@ Progress: [██████████] 98%
 | Phase 03 P18 | 24min | 2 tasks | 3 files |
 | Phase 03 P19 | 11min | 3 tasks | 4 files |
 | Phase 03 P20 | 15min | 2 tasks | 2 files |
+| Phase 03 P21 | 7min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -250,6 +251,10 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase 03]: A lost lease is fatal on every terminal path of worker_process_scan_requests, including the discovery-busy branch, which no longer returns before the guard (WR-04)
 - [Phase 03]: worker_process_scan_requests (J5) verified against live source as NOT sharing CR-01's defect class and deliberately left unchanged
 - [Phase 03]: TEL-06 left open in both halves of REQUIREMENTS.md; promotion belongs to the next independent verifier after 03-20 and 03-21 both execute
+- [Phase 03]: An outcome literal outside run_discovery's 'completed'|'busy'|'failed' contract raises ValueError, recorded durably as failed -- membership, never exclusion (WR-01)
+- [Phase 03]: The uptime-lock contention comment states the J3/J4 asymmetry: a down-only holder does not perform a full sweep, so the loser's cycle is skipped, not covered (WR-02)
+- [Phase 03]: The job_outcome_unrecorded floor is max(900, configured DISCOVERY_TIMEOUT_SECONDS + 60), deriving its guarantee from the operator's value rather than the default (WR-03)
+- [Phase 03]: TEL-06 left open in both halves of REQUIREMENTS.md after 03-20 and 03-21; only independent re-verification may promote it
 
 ### Pending Todos
 
@@ -280,6 +285,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T15:10:27.759Z
-Stopped at: Completed 03-20-PLAN.md
+Last session: 2026-08-19T15:27:47.000Z
+Stopped at: Completed 03-21-PLAN.md (round-7 gap closure: WR-01, WR-02, WR-03)
 Resume file: None
