@@ -5,13 +5,13 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-16-PLAN.md
-last_updated: "2026-08-19T10:49:31.295Z"
+stopped_at: Completed 03-17-PLAN.md
+last_updated: "2026-08-19T11:09:02.048Z"
 last_activity: 2026-08-19
-last_activity_desc: 03-15 made a genuine background-job failure survive a bookkeeping failure and promoted a job wedged without an outcome onto the operator safety surface
+last_activity_desc: 03-17 closed the round-4 background-job-health gap — an idle queue records success, the unrecorded-outcome boundary is a floor rather than a poll interval, and a compound startup failure is re-raised instead of downgraded
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 52
   completed_plans: 51
 ---
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 16 of 16
-Status: Gap-closure round 4 in progress — 03-15 complete, 03-16 outstanding; TEL-06 deliberately left open pending independent re-verification
-Last activity: 2026-08-19 — 03-15 recovered the erased work-failure channel, added the job_outcome_unrecorded promotion, and decided what startup does with a bookkeeping failure
+Plan: 17 of 17
+Status: Gap-closure round 5 complete (03-17) — TEL-06 deliberately left open pending independent re-verification
+Last activity: 2026-08-19 — 03-17 gave an empty durable queue a non-failure outcome, floored the job_outcome_unrecorded boundary, and made a compound startup failure loud
 
-Progress: [██████████] 100%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -106,6 +106,7 @@ Progress: [██████████] 100%
 | Phase 03 P14 | 7 min | 1 tasks | 1 files |
 | Phase 03 P15 | 20min | 3 tasks | 5 files |
 | Phase 03 P16 | 22min | 2 tasks | 5 files |
+| Phase 03 P17 | 18min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -231,6 +232,10 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: 03-16: an absence the pipeline never established gets its own operator sentence ahead of the collected-and-clean branch, with the two rendered strings asserted unequal by port in the live DOM so the distinction cannot be re-collapsed
 - [Phase ?]: 03-16: the absent-value rule finiteMeasurement decides on type (finite number, or non-blank string that parses finite) rather than on a list of observed values, so no boolean, array, object or blank string can become the measurement zero
 - [Phase ?]: 03-16: the client completeness-states array is kept complete as the wire vocabulary and bound to the server constants by a source-level set comparison, so a rename on either side fails a test and a reordering does not
+- [Phase 03]: An empty durable queue is a completed poll, not a failure: worker_process_scan_requests and worker_process_preview_requests return None so dispatch_callback's unchanged False->failed mapping stops fabricating job_failed cards on an idle Pi
+- [Phase 03]: The job_outcome_unrecorded promotion boundary is max(UNRECORDED_OUTCOME_FLOOR_SECONDS=900, 4 x cadence) — the larger of the two, applied uniformly whether or not a cadence is configured, so a poll interval is never read as an upper bound on run duration and a None cadence no longer exempts S1/S2/S3/J9
+- [Phase 03]: run_worker re-raises a startup JobHealthBookkeepingError whose work_error_class is not None, so a work failure that could not record itself never reaches build_scheduler; a bookkeeping-only failure still warns and continues
+- [Phase 03]: TEL-06 was deliberately NOT promoted in REQUIREMENTS.md by 03-17 — a gap-closure round may not record its own requirement complete; only independent re-verification may
 
 ### Pending Todos
 
@@ -261,6 +266,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T09:31:13.778Z
-Stopped at: Completed 03-16-PLAN.md
+Last session: 2026-08-19T11:08:43.290Z
+Stopped at: Completed 03-17-PLAN.md
 Resume file: None
