@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-10-PLAN.md
-last_updated: "2026-08-18T20:03:49.962Z"
-last_activity: 2026-08-18
-last_activity_desc: Phase 03 gap closure complete (03-08, 03-09, 03-10)
+stopped_at: Completed 03-11-PLAN.md
+last_updated: "2026-08-19T05:52:52.802Z"
+last_activity: 2026-08-19
+last_activity_desc: 03-11 closed the Services absent-vs-zero fabrication blocker
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 49
-  completed_plans: 45
+  completed_plans: 46
 ---
 
 # Project State
@@ -27,12 +27,12 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 ## Current Position
 
-Phase: 03 (advanced-current-diagnosis) — EXECUTED, AWAITING RE-VERIFICATION
-Plan: 10 of 10
-Status: All 10 plans complete; gap closure done. TEL-06 and DIA-08 stay open until re-verification.
-Last activity: 2026-08-18 — Phase 03 gap-closure plans 03-08..03-10 executed
+Phase: 03 (advanced-current-diagnosis) — EXECUTING
+Plan: 12 of 14
+Status: Gap-closure round 3 in progress; 03-11 complete, 03-12..03-14 remain
+Last activity: 2026-08-19 — 03-11 closed the Services absent-vs-zero fabrication blocker
 
-Progress: [██████████] 100%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -100,6 +100,7 @@ Progress: [██████████] 100%
 | Phase 03 P08 | 12 min | 3 tasks | 4 files |
 | Phase 03 P09 | 10 min | 2 tasks | 3 files |
 | Phase 03 P10 | 14 min | 3 tasks | 3 files |
+| Phase 03 P11 | 8min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -203,6 +204,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: [Phase 03]: The advanced-diagnosis read is deliberately left outside _db_lock (threat T-03-62 accepted) — placing a 30-second maintenance-flock wait inside the process-global lock would stall every DB route on a 5-second poll
 - [Phase ?]: [Phase 03]: Test clocks are frozen through one addCleanup-unwound patch of the stdlib time.time per test — a fixture that mutates process-global state makes suite greenness order-dependent and unusable as verification evidence
 - [Phase ?]: [Phase 03]: Only independently verified requirements are promoted in REQUIREMENTS.md; TEL-06 and DIA-08 stay at Gaps Found until a re-verification of the gap-closure round, never on the strength of a plan summary
+- [Phase ?]: finiteMeasurement is the numeric sibling of displayValue: reject null/undefined/empty BEFORE Number(), because Number(null) === 0 passes Number.isFinite
+- [Phase ?]: An unmeasured value ranks as an extreme (POSITIVE_INFINITY) in the services sort, never as zero; equal keys fall through to the stable index tiebreak
+- [Phase ?]: DIA-03 stays Gaps Found after 03-11: only Gap A bullets 1 and 3 are closed; collection_gaps is deferred to 03-13 and reconciliation to 03-14
 
 ### Pending Todos
 
@@ -232,6 +236,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-18T18:47:57.190Z
-Stopped at: Completed 03-10-PLAN.md
+Last session: 2026-08-19T05:52:52.787Z
+Stopped at: Completed 03-11-PLAN.md
 Resume file: None
