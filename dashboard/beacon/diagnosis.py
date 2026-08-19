@@ -12,7 +12,7 @@ from .telemetry import RetentionPolicy
 from .worker_main import WORKER_CALLBACK_INVENTORY
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Each telemetry_coverage.reason value in the migrations.py CHECK enum maps to the
 # one exception kind it may be promoted as, or to None for lifecycle evidence that
@@ -169,7 +169,6 @@ def compose_service_diagnosis(rows, *, now):
             'freshness': freshness_state(now, probe_ts, cadence),
             'tls_unverified': bool(row.get('tls_unverified')),
             'last_error': row.get('probe_error_class') or row.get('last_error'),
-            'collection_gaps': [],
         }
         services.append(service)
     return sorted(services, key=operational_service_key)
@@ -309,6 +308,12 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
             'items': stream_records,
             'count': len(stream_records),
             'truncated': bool(evidence.get('streams_truncated', False)),
+            # The durable gap read's own bound, kept distinct from the stream
+            # read's bound above: one describes whether a matched stream's gap
+            # evidence is whole, the other whether an unmatched stream was even
+            # looked at. Conflating them is how a count and a truncation flag
+            # come to describe different populations.
+            'gap_evidence_truncated': bool(evidence.get('gaps_truncated', False)),
         },
         'gaps': {
             'items': bounded_gaps,
@@ -321,6 +326,66 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
         },
         'jobs': jobs,
     }
+
+
+# The four states a per-service gap block may disclose. Each is derived from a
+# durable read's own truncation flag; none may be defaulted to or inferred.
+SERVICE_GAP_EVIDENCE_COMPLETE = 'complete'
+SERVICE_GAP_EVIDENCE_POSSIBLY_INCOMPLETE = 'possibly_incomplete'
+SERVICE_GAP_EVIDENCE_ABSENT = 'absent'
+SERVICE_GAP_EVIDENCE_NOT_ESTABLISHED = 'not_established'
+
+# The durable stream vocabulary: a service stream is keyed by its port as text
+# (repositories.get_telemetry_coverage), so the join key must match exactly.
+SERVICE_STREAM_KIND = 'service'
+
+
+def _service_gap_evidence_state(stream, streams_block):
+    """Resolve completeness from a durable truncation flag, never from a default."""
+    if stream is None:
+        # A complete stream list that omits this service is itself evidence of
+        # absence. A truncated one establishes nothing about it.
+        truncated = streams_block.get('truncated')
+        if truncated is False:
+            return SERVICE_GAP_EVIDENCE_ABSENT
+        return SERVICE_GAP_EVIDENCE_NOT_ESTABLISHED
+    gap_truncated = streams_block.get('gap_evidence_truncated')
+    if gap_truncated is False:
+        return SERVICE_GAP_EVIDENCE_COMPLETE
+    if gap_truncated is True:
+        return SERVICE_GAP_EVIDENCE_POSSIBLY_INCOMPLETE
+    return SERVICE_GAP_EVIDENCE_NOT_ESTABLISHED
+
+
+def attach_service_collection_gaps(services, pipeline):
+    """Join each service to its own stream's composed gaps with an explicit completeness state.
+
+    The items are the composed per-stream list verbatim: not sorted, filtered,
+    deduplicated or bounded here, so the order the pipeline composition already
+    established is preserved. ``open`` is read from each item's own row, never
+    from the stream, preserving the per-row derivation closed by 03-08.
+    """
+    streams_block = pipeline.get('streams')
+    if not isinstance(streams_block, dict):
+        streams_block = {}
+    stream_items = streams_block.get('items')
+    stream_index = {}
+    if isinstance(stream_items, list):
+        for stream in stream_items:
+            if isinstance(stream, dict):
+                stream_index[(stream.get('stream_kind'), str(stream.get('stream_key')))] = stream
+    for service in services:
+        stream = stream_index.get((SERVICE_STREAM_KIND, str(service.get('port'))))
+        items = stream.get('gaps') if isinstance(stream, dict) else None
+        if not isinstance(items, list):
+            items = []
+        service['collection_gaps'] = {
+            'items': items,
+            'count': len(items),
+            'open_count': sum(1 for item in items if item.get('open') is True),
+            'evidence': _service_gap_evidence_state(stream, streams_block),
+        }
+    return services
 
 
 def compose_active_exceptions(host, services, pipeline, *, recovery_required):
@@ -393,6 +458,7 @@ def get_current_diagnosis(db_path, settings, now):
             read_current_services(conn, cutoff_ts=now - settings.expire_days * 86400), now=now,
         )
         pipeline = compose_pipeline_diagnosis(read_pipeline_evidence(conn, now=now), settings, now=now)
+    attach_service_collection_gaps(services, pipeline)
     recovery_required = (Path(db_path).parent / RECOVERY_MARKER).exists()
     return {
         'schema_version': SCHEMA_VERSION,
