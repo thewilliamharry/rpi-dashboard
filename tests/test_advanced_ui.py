@@ -749,6 +749,8 @@ class AdvancedUiTests(unittest.TestCase):
          'start_ts': 1_699_998_000, 'end_ts': 1_699_999_000,
          'reason': 'indeterminate', 'detail': None, 'open': False, 'actionable': True},
         {'kind': 'job_failed', 'section': 'pipeline', 'priority': 6, 'job_id': 'J8-cleanup'},
+        {'kind': 'job_outcome_unrecorded', 'section': 'pipeline', 'priority': 6,
+         'job_id': 'J2-metrics'},
         {'kind': 'database_pressure', 'section': 'pipeline', 'priority': 7},
     )
 
@@ -783,7 +785,7 @@ class AdvancedUiTests(unittest.TestCase):
         try:
             cards = page.locator('#overview-content > section article.diagnosis-card')
             overview = page.locator('#overview-section').text_content()
-            self.assertIn('10 active exceptions', overview)
+            self.assertIn('11 active exceptions', overview)
             self.assertEqual(cards.count(), len(self.EMITTED_EXCEPTIONS))
             headings = [
                 cards.nth(index).locator('h3').text_content()
@@ -804,6 +806,7 @@ class AdvancedUiTests(unittest.TestCase):
                 'Open collection gap \u2014 host: cpu',
                 'Coverage could not be determined \u2014 host: ram',
                 'Background job failed \u2014 J8-cleanup',
+                'Background job outcome not recorded \u2014 J2-metrics',
                 'Database pressure is not normal',
             ):
                 with self.subTest(expected=expected):

@@ -997,6 +997,69 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertEqual(exceptions[0]['kind'], 'coverage_unknown')
         self.assertEqual(exceptions[0]['reason'], unmapped)
 
+    def _jobs_pipeline(self, job):
+        """One pipeline shape carrying exactly one durable job row."""
+        return {
+            'worker': {'freshness': {'state': 'fresh', 'age_seconds': 1}},
+            'gaps': {'items': [], 'count': 0, 'truncated': False},
+            'jobs': [job],
+            'database_pressure': {'state': 'normal'},
+        }
+
+    def test_a_job_stuck_without_an_outcome_becomes_an_operator_exception(self):
+        """A job that started and was never recorded finishing must be actionable."""
+        diagnosis = self.appmod.beacon_diagnosis
+        host = {'freshness': {'state': 'fresh', 'age_seconds': 1}}
+        now = 1_700_000_000
+        cadence = 60
+
+        def compose(job):
+            return diagnosis.compose_active_exceptions(
+                host, [], self._jobs_pipeline(job), recovery_required=False, now=now,
+            )
+
+        def job_row(**overrides):
+            row = {
+                'job_id': 'J2',
+                'state': 'running',
+                'last_started_ts': now - 5 * cadence,
+                'cadence_seconds': cadence,
+            }
+            row.update(overrides)
+            return row
+
+        with self.subTest(case='overdue_running_job_promotes_once'):
+            exceptions = compose(job_row())
+            unrecorded = [
+                item for item in exceptions
+                if item['kind'] == 'job_outcome_unrecorded'
+            ]
+            self.assertEqual(len(unrecorded), 1)
+            self.assertEqual(unrecorded[0]['job_id'], 'J2')
+            self.assertEqual(unrecorded[0]['section'], 'pipeline')
+            self.assertEqual(
+                [item for item in exceptions if item['kind'] == 'job_failed'], [],
+            )
+
+        with self.subTest(case='running_inside_its_cadence_window_promotes_nothing'):
+            self.assertEqual(compose(job_row(last_started_ts=now - cadence)), [])
+
+        with self.subTest(case='unknown_state_promotes_nothing'):
+            self.assertEqual(
+                compose(job_row(state='unknown', last_started_ts=None)), [],
+            )
+
+        with self.subTest(case='absent_cadence_promotes_nothing'):
+            self.assertEqual(compose(job_row(cadence_seconds=None)), [])
+
+        with self.subTest(case='non_integer_start_promotes_nothing'):
+            self.assertEqual(compose(job_row(last_started_ts=None)), [])
+
+        with self.subTest(case='failed_job_still_promotes_only_the_failed_kind'):
+            exceptions = compose(job_row(state='failed'))
+            self.assertEqual([item['kind'] for item in exceptions], ['job_failed'])
+            self.assertEqual(exceptions[0]['job_id'], 'J2')
+
     def _reset_gap_evidence(self, conn):
         conn.execute('DELETE FROM telemetry_streams')
         conn.execute('DELETE FROM telemetry_coverage')
