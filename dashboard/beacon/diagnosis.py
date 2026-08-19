@@ -32,6 +32,27 @@ UNMAPPED_GAP_EXCEPTION_KIND = 'coverage_unknown'
 # The durable state literal record_background_job_started writes on a start.
 RUNNING_JOB_STATE = 'running'
 
+# A floor no legitimate run can plausibly exceed, never a bare multiple of a job's
+# own poll interval: J5 and J6 poll every two seconds precisely because an idle run
+# is short while a run that finds work is unboundedly longer.  Fifteen minutes sits
+# comfortably above both of connect_db's thirty-second lock waits and above
+# discovery's one-hundred-and-eighty-second timeout.
+UNRECORDED_OUTCOME_FLOOR_SECONDS = 900
+
+
+def _unrecorded_outcome_boundary(cadence_seconds):
+    """Resolve how long a start may stand without an outcome before it is a fault."""
+    if type(cadence_seconds) is int and cadence_seconds > 0:
+        # freshness_state's own four-times-cadence multiple and strict-integer
+        # discipline, reused rather than a second convention.  The larger of the two
+        # always wins, so a job whose own cadence exceeds the floor is measured
+        # against its cadence and no job is measured below the floor.
+        return max(UNRECORDED_OUTCOME_FLOOR_SECONDS, 4 * cadence_seconds)
+    # An absent, malformed or non-positive cadence describes a startup or lifecycle
+    # callback with no configured interval.  It is measured against the same floor
+    # as every other job rather than exempted from the promotion built to catch it.
+    return UNRECORDED_OUTCOME_FLOOR_SECONDS
+
 
 def gap_exception_kind(reason):
     """Resolve a durable coverage reason to its own exception kind, or to no exception."""
@@ -432,17 +453,19 @@ def compose_active_exceptions(host, services, pipeline, *, recovery_required, no
             exceptions.append({'kind': 'job_failed', 'section': 'pipeline', 'priority': 6, 'job_id': job['job_id']})
         elif (
             # Every input is this job's own durable row: the state literal
-            # record_background_job_started writes, its own recorded start, and its
-            # own configured cadence.  The type discipline and the four-times-cadence
-            # boundary are freshness_state's existing rules, reused rather than
-            # duplicated.  An absent row reads unknown and promotes nothing, and a job
-            # merely still working inside its own cadence window is not an alarm.
+            # record_background_job_started writes and its own recorded start.  The
+            # boundary is a floor no legitimate run can plausibly cross, raised only
+            # for a job whose own cadence already exceeds it -- a poll interval is
+            # never read as an upper bound on how long the work may legitimately run.
+            # An absent row reads unknown and promotes nothing; an absent cadence is
+            # measured against the same floor rather than exempted; and the
+            # comparison stays strict, so an age exactly at the boundary favours the
+            # non-alarm.
             job['state'] == RUNNING_JOB_STATE
             and type(job.get('last_started_ts')) is int
-            and type(job.get('cadence_seconds')) is int
-            and job['cadence_seconds'] > 0
             and type(now) is int
-            and max(0, now - job['last_started_ts']) > 4 * job['cadence_seconds']
+            and max(0, now - job['last_started_ts'])
+            > _unrecorded_outcome_boundary(job.get('cadence_seconds'))
         ):
             # Explicit keys only, never a spread of the durable row, so a future
             # column can neither override this classification nor break the sort.

@@ -181,7 +181,7 @@
     })],
     ['job_outcome_unrecorded', (item) => ({
       title: `Background job outcome not recorded \u2014 ${displayValue(item.job_id)}`,
-      evidence: `The background job ${displayValue(item.job_id)} recorded a start and no outcome has been recorded since, for longer than its own configured cadence allows. See Pipeline for its last start, last success, and configured cadence.`,
+      evidence: `The background job ${displayValue(item.job_id)} recorded a start and no outcome has been recorded since, for longer than any run of this job should take. See Pipeline for its last start, last success, and configured cadence.`,
     })],
     ['database_pressure', () => ({
       title: 'Database pressure is not normal',
