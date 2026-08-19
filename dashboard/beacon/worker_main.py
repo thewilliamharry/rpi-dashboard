@@ -502,6 +502,14 @@ def run_worker(operations, settings=None):
                     if dispatch_callback(services, startup_callback_id) is False:
                         return
                 except JobHealthBookkeepingError as bookkeeping_error:
+                    if bookkeeping_error.work_error_class is not None:
+                        # The startup work itself failed and the write that would
+                        # have recorded that failure also failed, so nothing has
+                        # confirmed the state Beacon would carry forward.  Continuing
+                        # here runs the worker on state nothing confirmed, and the
+                        # operator sees a warning that never names the work failure.
+                        # Fail loudly instead.
+                        raise
                     # A failure to record that a startup job began is a fact about
                     # the recording, never a verdict on whether Beacon should run.
                     # Left unhandled, a transient database lock could stop the
