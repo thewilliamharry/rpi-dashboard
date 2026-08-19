@@ -1409,6 +1409,29 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             row.update(overrides)
             return row
 
+        with self.subTest(case='the_floor_clears_connect_dbs_own_lock_waits'):
+            # Pinned against facts the floor itself cannot see: connect_db takes a
+            # thirty-second flock wait AND a thirty-second SQLite busy timeout, and a
+            # discovery is allowed its own full timeout budget.  Deriving the expected
+            # value from UNRECORDED_OUTCOME_FLOOR_SECONDS would make this gate unable
+            # to fail for any value of it, which is exactly how a regressed floor
+            # could ship green; these two comparisons read only external facts.
+            self.assertGreater(floor, 30 + 30)
+            self.assertGreater(floor, self.appmod.DISCOVERY_TIMEOUT_SECONDS)
+
+        with self.subTest(case='a_full_discovery_timeout_run_promotes_nothing'):
+            # J9 carries no configured cadence and a discovery may legitimately hold
+            # a start open for the whole DISCOVERY_TIMEOUT_SECONDS budget before it
+            # records an outcome.  A floor that does not clear that budget would
+            # promote a job that is simply still working.
+            self.assertEqual(
+                compose(job_row(
+                    job_id='J9', cadence_seconds=None,
+                    last_started_ts=now - self.appmod.DISCOVERY_TIMEOUT_SECONDS,
+                )),
+                [],
+            )
+
         with self.subTest(case='overdue_running_job_promotes_once'):
             exceptions = compose(job_row())
             unrecorded = unrecorded_in(exceptions)
