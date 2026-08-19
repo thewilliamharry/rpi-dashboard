@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 19/19 plans executed (03-18 closed the fabricated-success half of the round-5 gap; 03-19 remains pending)
+**Plans**: 19/21 plans executed (03-18/03-19 closed round-5's background-job-health finding; 03-20/03-21 close the one Critical and four Warnings 03-19-REVIEW.md's round-6 code review found in that same closure — both pending)
 
 - [x] 03-07-PLAN.md
 
@@ -237,6 +237,11 @@ Plans:
 
 - [x] 03-18-PLAN.md — Background-job health, the decisive regression: the two queue pollers and both discovery dispatchers return the verdict they already computed instead of a constant, proven against work that genuinely fails through the real production adapters (wave 1)
 - [x] 03-19-PLAN.md — Background-job health, remaining closure: the outcome-unrecorded floor is pinned against external facts instead of itself, a compound startup failure leaves durable evidence when a best-effort retry succeeds, and the two deferred transient contention sites are closed rather than left as fabricated faults (wave 2)
+
+**Gap closure round 6 (after 03-19-REVIEW.md code review round 6 of plans 03-18/03-19, status issues_found — one Critical (CR-01: a per-service preview warning was conflated with J6's own job outcome) and four Warnings; no round-6 verification was run because the review found the Critical regression first)**
+
+- [ ] 03-20-PLAN.md — J6's job outcome is decoupled from the previewed service's own health per the user's decision (CR-01), the round-6 test that pinned the defect is corrected, and a lost lease during the discovery-busy branch raises instead of reporting success (WR-04) (wave 1)
+- [ ] 03-21-PLAN.md — The three remaining review warnings closed: the discovery-outcome vocabulary fails closed and loud on an unrecognised literal (WR-01), the uptime-lock-contention comment states the true J3/J4 asymmetry (WR-02), and the outcome-unrecorded floor derives from the operator's own configured discovery timeout (WR-03) (wave 2)
 
 **Wave 1**
 
