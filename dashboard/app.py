@@ -1807,8 +1807,9 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
         # anything other than a literal False here means dispatch_callback records
         # this outcome as succeeded, not a fabricated job_failed -- see
         # dispatch_callback's `if result is False:` branch, which is otherwise
-        # unchanged. The busy-retry `return False` below remains a distinct,
-        # out-of-scope condition -- see deferred-items.md.
+        # unchanged. The busy branch below records this same non-fault outcome
+        # (deferred-items.md row 9), except when the lease is confirmed lost --
+        # see WR-04 in 03-19-REVIEW.md.
         return None
     heartbeat_factory = heartbeat_factory or beacon_queues.WorkerScanLeaseHeartbeat
     heartbeat = heartbeat_factory(
@@ -1819,10 +1820,13 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
     try:
         outcome = worker_run_discovery(authority, source=f'manual:{claim.request_id}')
         if outcome == 'busy':
-            if not heartbeat.lost:
-                beacon_queues.requeue_scan_for_worker(
-                    authority, claim.request_id, claim.lease_owner, now=int(now_fn()),
-                )
+            if heartbeat.lost:
+                # A lost lease is a lost lease on this path too: do not requeue a
+                # claim we no longer own, and do not report the poll as clean.
+                raise beacon_queues.LeaseLost('worker scan lease was lost')
+            beacon_queues.requeue_scan_for_worker(
+                authority, claim.request_id, claim.lease_owner, now=int(now_fn()),
+            )
             # Another run already owns this work -- a busy discovery lock is not a
             # job failure. The claim was just returned to queued above; the next
             # scheduled poll picks it up. Returning anything other than a literal
