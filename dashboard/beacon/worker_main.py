@@ -187,19 +187,30 @@ def build_worker_services(operations, settings=None):
 
 
 def _run_scheduled_discovery(services):
+    """Return None only for a genuine skip; otherwise carry discovery's own verdict."""
     state = services.read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
-        return
-    services.run_discovery(services.authority, source='scheduled')
+        # No work was due.  None is reserved for exactly this, so dispatch_callback
+        # records a completed poll rather than a fabricated failure.
+        return None
+    outcome = services.run_discovery(services.authority, source='scheduled')
+    # run_discovery's contract is exactly 'busy' | 'completed' | 'failed', so this
+    # is False only for a genuine failure -- never discarded behind an implicit None.
+    return outcome != 'failed'
 
 
 def _run_startup_discovery(services):
+    """Return None only for a genuine skip; otherwise carry discovery's own verdict."""
     state = services.read_scan_state()
     if state.get('scanning') or state.get('stage') == 'queued':
-        return
+        return None
     last = state.get('last_discovery')
     if not last or int(services.clock()) - int(last) >= 300:
-        services.run_discovery(services.authority, source='startup')
+        outcome = services.run_discovery(services.authority, source='startup')
+        return outcome != 'failed'
+    # A discovery already ran inside the recency window: the second genuine skip,
+    # which used to fall off the end with no return statement at all.
+    return None
 
 
 def _invoke_callback(services, callback):
