@@ -249,6 +249,31 @@
     return `${evidence.state || 'unknown'} — ${relativeAge(evidence.age_seconds)}; expected every ${displayValue(cadence, ' seconds')}`;
   }
 
+  // The four completeness states the server derives for a service's gap block.
+  // Anything else — an absent block, a raw container, an unrecognised state — is
+  // evidence the workspace cannot vouch for, and reads as unavailable.
+  const SERVICE_GAP_EVIDENCE_STATES = ['complete', 'possibly_incomplete', 'absent', 'not_established'];
+
+  function formatServiceGapEvidence(block) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return 'Gap evidence unavailable';
+    const state = block.evidence;
+    if (!SERVICE_GAP_EVIDENCE_STATES.includes(state) || state === 'not_established') {
+      return 'Gap evidence unavailable';
+    }
+    const items = Array.isArray(block.items) ? block.items : [];
+    const declaredCount = finiteMeasurement(block.count);
+    const count = declaredCount === null ? items.length : declaredCount;
+    if (state === 'absent' || (state === 'complete' && count === 0)) return 'No gap evidence';
+    const declaredOpen = finiteMeasurement(block.open_count);
+    const openCount = declaredOpen === null
+      ? items.filter((item) => item && item.open === true).length
+      : declaredOpen;
+    // countLabel owns the singular/plural rule for both this surface and the
+    // Pipeline collection-gaps region, so the copy cannot drift between them.
+    const phrase = `${countLabel(count, 'gap')} (${openCount} open)`;
+    return state === 'possibly_incomplete' ? `${phrase}; more gap evidence may exist` : phrase;
+  }
+
   function renderHost(host) {
     const content = $('host-content');
     const metrics = host.metrics || {};
@@ -651,7 +676,7 @@
       addEvidence(evidence, 'TLS trust annotation', service.tls_unverified ? 'Trusted-LAN TLS; certificate verification disabled' : ((service.tls || {}).posture || 'TLS posture unknown'));
       addEvidence(evidence, 'Last error', displayValue(service.last_error));
       addEvidence(evidence, 'Freshness', formatFreshnessEvidence(service.freshness, service.expected_cadence_seconds));
-      addEvidence(evidence, 'Collection-gap evidence', JSON.stringify(service.collection_gaps || service.collection_gap || 'No gap evidence'));
+      addEvidence(evidence, 'Collection-gap evidence', formatServiceGapEvidence(service.collection_gaps));
       detail.append(evidence); detailRow.append(detail); fragment.append(row, detailRow);
     });
     body.replaceChildren(fragment);

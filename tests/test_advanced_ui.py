@@ -13,6 +13,32 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 UI_CONSIDERATIONS = tuple(f'UI-{number:02d}' for number in range(1, 37))
 
 
+def gap_item(port, *, open_gap, detail=None):
+    """One composed gap item in the shape the server's per-stream list carries."""
+    return {
+        'stream_kind': 'service', 'stream_key': str(port),
+        'start_ts': 1_699_999_000, 'end_ts': 1_699_999_900,
+        'reason': 'collection_gap', 'detail': detail,
+        'open': open_gap, 'actionable': open_gap,
+    }
+
+
+def gap_block(evidence, items=()):
+    """Build the per-service gap block the server now joins onto every service.
+
+    The count and the open count are derived from the same item list they are
+    presented beside, so a fixture can never describe a population it does not
+    carry.
+    """
+    items = list(items)
+    return {
+        'items': items,
+        'count': len(items),
+        'open_count': sum(1 for item in items if item.get('open') is True),
+        'evidence': evidence,
+    }
+
+
 class AdvancedUiTests(unittest.TestCase):
     """Production-route browser coverage for the dependency-free advanced document."""
 
@@ -425,7 +451,9 @@ class AdvancedUiTests(unittest.TestCase):
                     'freshness': {'state': 'fresh', 'age_seconds': 5},
                     'tls': {'posture': 'trusted LAN; certificate verification disabled'},
                     'last_error': 'connection refused',
-                    'collection_gap': {'state': 'none'},
+                    'collection_gaps': gap_block(
+                        'possibly_incomplete', [gap_item(443, open_gap=True)],
+                    ),
                 },
                 {
                     'port': 80,
@@ -442,7 +470,7 @@ class AdvancedUiTests(unittest.TestCase):
                     'freshness': {'state': 'fresh', 'age_seconds': 5},
                     'tls': {'posture': 'not applicable'},
                     'last_error': None,
-                    'collection_gap': {'state': 'none'},
+                    'collection_gaps': gap_block('complete'),
                 },
             ],
         })
@@ -875,7 +903,7 @@ class AdvancedUiTests(unittest.TestCase):
             'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
             'freshness': {'state': 'fresh', 'age_seconds': 5},
             'tls': {'posture': 'not applicable'}, 'last_error': 'connection refused',
-            'collection_gaps': [],
+            'collection_gaps': gap_block('complete', [gap_item(443, open_gap=True)]),
         },
         {
             'port': 80, 'name': 'Healthy web', 'status': 'up', 'latency_ms': 12.5,
@@ -884,7 +912,7 @@ class AdvancedUiTests(unittest.TestCase):
             'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
             'freshness': {'state': 'fresh', 'age_seconds': 5},
             'tls': {'posture': 'not applicable'}, 'last_error': None,
-            'collection_gaps': [],
+            'collection_gaps': gap_block('absent'),
         },
     )
 
@@ -992,7 +1020,7 @@ class AdvancedUiTests(unittest.TestCase):
             'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
             'freshness': {'state': 'fresh', 'age_seconds': 5},
             'tls': {'posture': 'not applicable'}, 'last_error': 'connection refused',
-            'collection_gaps': [],
+            'collection_gaps': gap_block('not_established'),
         },
         {
             'port': 7070, 'name': 'Unknown service', 'status': 'unknown',
@@ -1002,7 +1030,7 @@ class AdvancedUiTests(unittest.TestCase):
             'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
             'freshness': {'state': 'fresh', 'age_seconds': 5},
             'tls': {'posture': 'not applicable'}, 'last_error': None,
-            'collection_gaps': [],
+            'collection_gaps': gap_block('absent'),
         },
         {
             'port': 8080, 'name': 'Fast service', 'status': 'up',
@@ -1012,7 +1040,9 @@ class AdvancedUiTests(unittest.TestCase):
             'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
             'freshness': {'state': 'fresh', 'age_seconds': 5},
             'tls': {'posture': 'not applicable'}, 'last_error': None,
-            'collection_gaps': [],
+            'collection_gaps': gap_block('complete', [
+                gap_item(8080, open_gap=True), gap_item(8080, open_gap=False, detail='closed'),
+            ]),
         },
         {
             'port': 8081, 'name': 'Instant service', 'status': 'up',
@@ -1022,7 +1052,7 @@ class AdvancedUiTests(unittest.TestCase):
             'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
             'freshness': {'state': 'fresh', 'age_seconds': 5},
             'tls': {'posture': 'not applicable'}, 'last_error': None,
-            'collection_gaps': [],
+            'collection_gaps': gap_block('complete'),
         },
     )
 
@@ -1126,16 +1156,6 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
-    @staticmethod
-    def _gap_item(port, *, open_gap, detail):
-        """One composed gap item in the shape the server's per-stream list carries."""
-        return {
-            'stream_kind': 'service', 'stream_key': str(port),
-            'start_ts': 1_699_999_000, 'end_ts': 1_699_999_900,
-            'reason': 'collection_gap', 'detail': detail,
-            'open': open_gap, 'actionable': open_gap,
-        }
-
     @classmethod
     def _gap_evidence_services(cls):
         """Cover every branch of the per-service gap-evidence formatter.
@@ -1167,21 +1187,21 @@ class AdvancedUiTests(unittest.TestCase):
                 'items': [], 'count': 0, 'open_count': 0, 'evidence': 'complete',
             }),
             service(9004, 'Exactly one gap', {
-                'items': [cls._gap_item(9004, open_gap=True, detail=None)],
+                'items': [gap_item(9004, open_gap=True, detail=None)],
                 'count': 1, 'open_count': 1, 'evidence': 'complete',
             }),
             service(9005, 'Several gaps', {
                 'items': [
-                    cls._gap_item(9005, open_gap=True, detail=None),
-                    cls._gap_item(9005, open_gap=True, detail='second'),
-                    cls._gap_item(9005, open_gap=False, detail='closed'),
+                    gap_item(9005, open_gap=True, detail=None),
+                    gap_item(9005, open_gap=True, detail='second'),
+                    gap_item(9005, open_gap=False, detail='closed'),
                 ],
                 'count': 3, 'open_count': 2, 'evidence': 'complete',
             }),
             service(9006, 'Possibly incomplete', {
                 'items': [
-                    cls._gap_item(9006, open_gap=True, detail=None),
-                    cls._gap_item(9006, open_gap=False, detail='closed'),
+                    gap_item(9006, open_gap=True, detail=None),
+                    gap_item(9006, open_gap=False, detail='closed'),
                 ],
                 'count': 2, 'open_count': 1, 'evidence': 'possibly_incomplete',
             }),
@@ -1441,7 +1461,10 @@ class AdvancedUiTests(unittest.TestCase):
                           'state_duration_seconds': 20, 'critical': False, 'pinned_order': 1, 'tags': ['core'],
                           'effective_health_rule': '200-399', 'last_probe_ts': 1_700_000_000,
                           'expected_cadence_seconds': 5, 'freshness': {'state': 'fresh', 'age_seconds': 5},
-                          'tls_unverified': True, 'last_error': None, 'collection_gaps': []}],
+                          'tls_unverified': True, 'last_error': None,
+                          'collection_gaps': gap_block(
+                              'possibly_incomplete', [gap_item(8080, open_gap=False)],
+                          )}],
         })
 
         def route_api(route):
