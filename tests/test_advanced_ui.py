@@ -980,6 +980,119 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # An absent measurement and a real zero must stay distinguishable: the server
+    # sets latency_ms=None for every non-online service by construction, so these
+    # fixtures carry both an unmeasured service and a genuine zero measurement.
+    UNMEASURED_SERVICES = (
+        {
+            'port': 9090, 'name': 'Broken service', 'status': 'down',
+            'failure_class': 'ConnectionRefused', 'latency_ms': None,
+            'state_duration_seconds': None, 'critical': True, 'pinned_order': 1,
+            'tags': ['edge'], 'effective_health_rule': '200-399',
+            'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+            'freshness': {'state': 'fresh', 'age_seconds': 5},
+            'tls': {'posture': 'not applicable'}, 'last_error': 'connection refused',
+            'collection_gaps': [],
+        },
+        {
+            'port': 7070, 'name': 'Unknown service', 'status': 'unknown',
+            'failure_class': None, 'latency_ms': None,
+            'state_duration_seconds': None, 'critical': False, 'pinned_order': 2,
+            'tags': ['lan'], 'effective_health_rule': '200-399',
+            'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+            'freshness': {'state': 'fresh', 'age_seconds': 5},
+            'tls': {'posture': 'not applicable'}, 'last_error': None,
+            'collection_gaps': [],
+        },
+        {
+            'port': 8080, 'name': 'Fast service', 'status': 'up',
+            'failure_class': None, 'latency_ms': 12,
+            'state_duration_seconds': 60, 'critical': False, 'pinned_order': 3,
+            'tags': ['web'], 'effective_health_rule': '200-399',
+            'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+            'freshness': {'state': 'fresh', 'age_seconds': 5},
+            'tls': {'posture': 'not applicable'}, 'last_error': None,
+            'collection_gaps': [],
+        },
+        {
+            'port': 8081, 'name': 'Instant service', 'status': 'up',
+            'failure_class': None, 'latency_ms': 0,
+            'state_duration_seconds': 30, 'critical': False, 'pinned_order': 4,
+            'tags': ['web'], 'effective_health_rule': '200-399',
+            'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+            'freshness': {'state': 'fresh', 'age_seconds': 5},
+            'tls': {'posture': 'not applicable'}, 'last_error': None,
+            'collection_gaps': [],
+        },
+    )
+
+    def _unmeasured_services_page(self, refresh_seconds=5):
+        counter = {'value': 0}
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+        page.add_init_script(
+            "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+            f"{{refreshSeconds: {refresh_seconds}, paused: false, density: null, "
+            "range: '24h', filters: {}}))"
+        )
+
+        def route_api(route):
+            if urlparse(route.request.url).path != '/api/advanced/current':
+                route.fallback()
+                return
+            counter['value'] += 1
+            payload = self._snapshot()
+            payload['generated_ts'] = 1_700_000_005 + counter['value'] * 60
+            payload.update({
+                'exceptions': [], 'pipeline': {}, 'settings': {},
+                'services': [dict(service) for service in self.UNMEASURED_SERVICES],
+            })
+            route.fulfill(status=200, json=payload)
+
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="services"]').click()
+        page.locator('#services-table').wait_for(timeout=5_000)
+        return page
+
+    @staticmethod
+    def _service_row_cells(page, port):
+        """Read one live service row's cells from the DOM, located by its port."""
+        row = page.locator('#services-table tbody > tr.service-row').filter(
+            has=page.locator('.service-port', has_text=f':{port}'),
+        )
+        cells = row.locator('th, td')
+        return [cells.nth(index).text_content() for index in range(cells.count())]
+
+    @classmethod
+    def _service_latency_cell(cls, page, port):
+        return cls._service_row_cells(page, port)[2]
+
+    @classmethod
+    def _service_duration_cell(cls, page, port):
+        return cls._service_row_cells(page, port)[3]
+
+    @staticmethod
+    def _service_port_order(page):
+        rows = page.locator('#services-table tbody > tr.service-row')
+        return [
+            rows.nth(index).locator('.service-port').text_content().lstrip(':')
+            for index in range(rows.count())
+        ]
+
+    def test_unmeasured_service_shows_its_failure_class_instead_of_a_fabricated_latency(self):
+        """A latency the server never sent must never reach the operator as a number."""
+        page = self._unmeasured_services_page()
+        try:
+            self.assertEqual(page.locator('#services-table tbody > tr.service-row').count(), 4)
+            self.assertIn('ConnectionRefused', self._service_latency_cell(page, 9090))
+            unknown_cell = self._service_latency_cell(page, 7070)
+            self.assertEqual(unknown_cell, 'Unknown')
+            self.assertNotRegex(unknown_cell, r'\d')
+            self.assertEqual(self._service_latency_cell(page, 8080), '12 ms')
+            self.assertEqual(self._service_latency_cell(page, 8081), '0 ms')
+        finally:
+            page.close()
+
     def test_unknown_section_value_never_blanks_the_workspace(self):
         """A server section with no matching heading must not hide every section."""
         payload = self._snapshot()
