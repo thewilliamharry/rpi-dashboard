@@ -263,6 +263,69 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             conn.close()
         self.assertEqual(tuple(exception_row), ('failed', None, 'DeliberateFailure'))
 
+    def test_a_succeeded_callback_never_records_durable_failed_evidence(self):
+        """Gap B: a failed bookkeeping write must never become a verdict on the work."""
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'job-health-bookkeeping', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            collect_system_stats=lambda _authority: True,
+        )
+
+        real_write = worker_main._write_job_health_transition
+        recorded = []
+
+        def recording_write(write_services, callback_id, transition, *, error_class=None):
+            recorded.append((transition, error_class))
+            if transition == 'succeeded':
+                raise sqlite3.OperationalError('database is locked')
+            return real_write(
+                write_services, callback_id, transition, error_class=error_class,
+            )
+
+        worker_main._write_job_health_transition = recording_write
+        self.addCleanup(
+            setattr, worker_main, '_write_job_health_transition', real_write,
+        )
+
+        with self.assertRaises(worker_main.JobHealthBookkeepingError) as raised:
+            worker_main.dispatch_callback(services, 'J2')
+
+        # The work returned, so no failure transition may have been attempted at all.
+        self.assertEqual([transition for transition, _ in recorded], ['started', 'succeeded'])
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = conn.execute(
+                'SELECT state,error_class FROM background_job_health WHERE job_id=?',
+                ('J2',),
+            ).fetchone()
+            conn.close()
+        self.assertNotEqual(row['state'], 'failed')
+        self.assertIsNone(row['error_class'])
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        self.assertEqual(
+            [
+                item for item in payload['exceptions']
+                if item['kind'] == 'job_failed' and item.get('job_id') == 'J2'
+            ],
+            [],
+        )
+
+        message = str(raised.exception)
+        self.assertIn('J2', message)
+        self.assertIn('OperationalError', message)
+        self.assertNotIn('database is locked', message)
+        self.assertIsInstance(raised.exception.__cause__, sqlite3.OperationalError)
+
     def test_stale_worker_cannot_change_job_health_evidence(self):
         now = 100
         lease_a = queues.acquire_worker_lease(
