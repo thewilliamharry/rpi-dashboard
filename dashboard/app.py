@@ -1844,7 +1844,13 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
             )
     except beacon_queues.LeaseLost:
         raise
-    return True
+    # Return the verdict this function itself just computed and durably recorded
+    # -- not a constant. status is already 'failed' here on every path that
+    # reached fail_scan_for_worker above: the outcome=='failed' branch, a queued
+    # discovery whose state carries last_error, and the caught exception above.
+    # Returning anything else discards a fault dispatch_callback would otherwise
+    # report faithfully.
+    return status == 'completed'
 
 
 def process_scan_requests(worker_id, worker_owner_token, *, now_fn=None, lease_seconds=30, heartbeat_factory=None):
@@ -2001,7 +2007,11 @@ def worker_process_preview_requests(authority):
             )
     except beacon_queues.LeaseLost:
         raise
-    return True
+    # Return the verdict this function itself just computed and durably recorded
+    # -- see worker_process_scan_requests for the full reasoning. warning is
+    # already set whenever finish_preview_for_worker_in_transaction above
+    # recorded status='failed'.
+    return not warning
 
 
 def _check_scan_rate_limit(client_key):
