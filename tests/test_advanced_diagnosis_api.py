@@ -379,6 +379,80 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             ),
             ['J5', 'J6'],
         )
+    def test_a_titleless_service_never_fails_j6s_job_health(self):
+        """A page with no <title> is the service's condition, never J6's own job fault.
+
+        03-19-REVIEW.md CR-01: ``worker_process_preview_requests`` returned ``not
+        warning``, so an ordinary per-service capture condition -- an offline
+        service, a page with no ``<title>``, a failed thumbnail -- became a
+        durable ``job_failed`` card for J6.  The two signals are asymmetric by
+        design, and this regression proves both of them independently in the
+        same dispatch: the per-request ``preview_requests`` row still reads
+        ``failed`` with the real warning text, while J6's job-health row reads
+        ``succeeded`` because the poller did claim, capture, and durably record
+        its own verdict.  The condition is forced only at the collaborator
+        boundary (``_fetch_html_response``/``fetch_thumbnail``), never by
+        stubbing ``_legacy_refresh_service_preview`` or the poller itself, so
+        the real title-extraction path genuinely finds no title.
+        """
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'titleless-preview-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            process_preview_requests=self.appmod.worker_process_preview_requests,
+        )
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            self._seed_service(conn, 8080, now=now)
+            conn.commit()
+            conn.close()
+        queues.enqueue_preview(self.db_path, 8080, now=now)
+
+        titleless_response = SimpleNamespace(
+            headers={'Content-Type': 'text/html'},
+            text='<html><head></head><body>No title tag on this page.</body></html>',
+        )
+        # Only the two collaborators are forced, and the thread-local a real
+        # Chromium capture would otherwise have set is pinned falsy for the
+        # duration so no residual state can supply a title behind the test's
+        # back.  Every patch here unwinds on both the passing and raising path.
+        with mock.patch.object(
+            self.appmod, '_fetch_html_response',
+            return_value=(True, None, titleless_response, 'http://127.0.0.1:8080/'),
+        ), mock.patch.object(
+            self.appmod, 'fetch_thumbnail',
+            return_value=(b'stub-thumbnail-bytes', 'image/png', 'screenshot', None),
+        ), mock.patch.object(
+            self.appmod._preview_context, 'page_title', None, create=True,
+        ):
+            self.assertIs(worker_main.dispatch_callback(services, 'J6'), True)
+
+        # The job's own health: the poll completed and recorded its verdict.
+        row = self._job_health_row('J6')
+        self.assertEqual(row['state'], 'succeeded')
+        self.assertIsNone(row['error_class'])
+
+        # The previewed service's own health, on its own surface, undiminished.
+        queue_row = self._latest_queue_row('preview_requests')
+        self.assertEqual(queue_row['status'], 'failed')
+        self.assertEqual(queue_row['error'], 'title not found at configured path')
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        self.assertEqual(
+            [
+                item for item in payload['exceptions']
+                if item['kind'] == 'job_failed' and item.get('job_id') == 'J6'
+            ],
+            [],
+        )
 
     def _latest_queue_row(self, table):
         """Read the newest durable queue row so its verdict can be compared."""
