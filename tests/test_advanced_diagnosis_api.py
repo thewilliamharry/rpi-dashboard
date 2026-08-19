@@ -481,6 +481,12 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         through -- so a discovery that genuinely returns 'failed' cannot be
         reported to the operator as succeeded, while a genuine skip still records
         succeeded without ``run_discovery`` ever being called.
+
+        03-19-REVIEW.md WR-01: the vocabulary is now pinned in both directions.
+        'busy' -- the one documented success literal that no test defended -- is
+        proven to record succeeded, and a literal the contract does not name is
+        proven to reach the operator as a genuine, durably-recorded job failure
+        instead of passing silently as success by exclusion.
         """
         now = 100
         lease = queues.acquire_worker_lease(
@@ -545,6 +551,42 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 row = self._job_health_row(job_id)
                 self.assertEqual(row['state'], 'succeeded')
                 self.assertEqual(job_failed_items(job_id), [])
+
+            with self.subTest(
+                job_id=job_id,
+                case='a_busy_discovery_lock_is_recorded_as_succeeded',
+            ):
+                # 'busy' is a documented, genuine success: another discovery
+                # already owns the work, so this poll did its whole job.  Round 6
+                # found this the one contract literal that no test anywhere
+                # pinned at either dispatcher, leaving the intent undefended.
+                services = services_with(
+                    run_discovery=lambda _authority, **_kwargs: 'busy',
+                    read_scan_state=lambda: {},
+                )
+                self.assertIs(worker_main.dispatch_callback(services, job_id), True)
+                row = self._job_health_row(job_id)
+                self.assertEqual(row['state'], 'succeeded')
+                self.assertEqual(job_failed_items(job_id), [])
+
+            with self.subTest(
+                job_id=job_id,
+                case='an_unrecognised_discovery_outcome_fails_closed_and_loud',
+            ):
+                # Deciding success by exclusion made every literal outside the
+                # documented contract -- including one a future run_discovery
+                # might add -- read as success by default.  The default direction
+                # is now failure, and it is stated loudly rather than swallowed.
+                services = services_with(
+                    run_discovery=lambda _authority, **_kwargs: 'unrecognised_outcome',
+                    read_scan_state=lambda: {},
+                )
+                with self.assertRaises(ValueError):
+                    worker_main.dispatch_callback(services, job_id)
+                row = self._job_health_row(job_id)
+                self.assertEqual(row['state'], 'failed')
+                self.assertEqual(row['error_class'], 'ValueError')
+                self.assertEqual(len(job_failed_items(job_id)), 1)
 
     def test_a_discovery_busy_scan_requeue_is_not_reported_as_a_failure(self):
         """Losing the discovery lock is not a fault; the claim goes back on the queue.
