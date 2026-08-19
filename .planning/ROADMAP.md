@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 15/16 plans executed (14 executed; 2 gap-closure plans pending after re-verification round 3)
+**Plans**: 16/16 plans executed (14 executed; 2 gap-closure plans pending after re-verification round 3)
 
 - [x] 03-07-PLAN.md
 
@@ -227,7 +227,7 @@ Plans:
 **Gap closure round 3 (after 03-VERIFICATION.md re-verification round 3, status gaps_found, 3/4 — Gaps A and C closed, Gap B half-closed and half-regressed, one new gap found; DIA-03 promoted to Complete, DIA-08 ruled a Phase 4 deferral)**
 
 - [x] 03-15-PLAN.md — Background-job health: a genuine work failure survives a failing outcome write in the raised condition, the exception chain and the log; a job stuck without an outcome becomes an operator exception; startup no longer dies on a transient lock (wave 1)
-- [ ] 03-16-PLAN.md — Per-service gap evidence: a service with no established collection stream reads differently from a collected clean one, the browser regression asserts the difference instead of pinning it shut, and the absent-value rule becomes type-based (wave 2)
+- [x] 03-16-PLAN.md — Per-service gap evidence: a service with no established collection stream reads differently from a collected clean one, the browser regression asserts the difference instead of pinning it shut, and the absent-value rule becomes type-based (wave 2)
 
 **Wave 1**
 
@@ -321,7 +321,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
-| 3. Advanced Current Diagnosis | 15/16 | In Progress|  |
+| 3. Advanced Current Diagnosis | 16/16 | In Progress|  |
 | 4. Historical Investigation | 0/TBD | Not started | - |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |

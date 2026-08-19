@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-15-PLAN.md
-last_updated: "2026-08-19T09:06:40.662Z"
+stopped_at: Completed 03-16-PLAN.md
+last_updated: "2026-08-19T09:31:27.791Z"
 last_activity: 2026-08-19
 last_activity_desc: 03-15 made a genuine background-job failure survive a bookkeeping failure and promoted a job wedged without an outcome onto the operator safety surface
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 51
-  completed_plans: 50
+  completed_plans: 51
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 16 of 16
 Status: Gap-closure round 4 in progress — 03-15 complete, 03-16 outstanding; TEL-06 deliberately left open pending independent re-verification
 Last activity: 2026-08-19 — 03-15 recovered the erased work-failure channel, added the job_outcome_unrecorded promotion, and decided what startup does with a bookkeeping failure
 
-Progress: [██████████] 98%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -105,6 +105,7 @@ Progress: [██████████] 98%
 | Phase 03 P13 | 21min | 2 tasks | 4 files |
 | Phase 03 P14 | 7 min | 1 tasks | 1 files |
 | Phase 03 P15 | 20min | 3 tasks | 5 files |
+| Phase 03 P16 | 22min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -227,6 +228,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: 03-15: derive the job_outcome_unrecorded promotion only from the job's own durable row, reusing freshness_state's four-times-cadence boundary and strict integer discipline rather than a second staleness convention
 - [Phase ?]: 03-15: a failure to record that a startup job began is a fact about the recording, never a verdict on whether Beacon runs — startup logs the condition and continues instead of dying on a transient lock
 - [Phase ?]: 03-15: build safety-surface exceptions from explicit keys only, never by spreading a durable row, so CF-WR-10's override hazard gains no second site
+- [Phase ?]: 03-16: an absence the pipeline never established gets its own operator sentence ahead of the collected-and-clean branch, with the two rendered strings asserted unequal by port in the live DOM so the distinction cannot be re-collapsed
+- [Phase ?]: 03-16: the absent-value rule finiteMeasurement decides on type (finite number, or non-blank string that parses finite) rather than on a list of observed values, so no boolean, array, object or blank string can become the measurement zero
+- [Phase ?]: 03-16: the client completeness-states array is kept complete as the wire vocabulary and bound to the server constants by a source-level set comparison, so a rename on either side fails a test and a reordering does not
 
 ### Pending Todos
 
@@ -237,6 +241,7 @@ None yet.
 - Before Phase 1 planning, inventory representative production database variants and verify backup/restore outcomes.
 - Before Phase 2 planning, validate legacy service identity, retention resolution, capacity limits, and SQLite query plans on target storage.
 - Before Phase 6 planning, measure Chromium and representative-load resource budgets on Raspberry Pi-class hardware.
+- Second unsatisfiable acceptance criterion in phase 03: plan 03-16's 'pytest -k attach' selector deselects all tests and exits 5 (after 03-13's arithmetically unsatisfiable grep gate). Instance closed in-round by adding a real regression; the plan-defect class is open for the next planning round and recorded in .planning/WINDOWS.md.
 
 ### Quick Tasks Completed
 
@@ -256,6 +261,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T09:06:40.645Z
-Stopped at: Completed 03-15-PLAN.md
+Last session: 2026-08-19T09:31:13.778Z
+Stopped at: Completed 03-16-PLAN.md
 Resume file: None

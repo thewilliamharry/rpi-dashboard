@@ -268,3 +268,7 @@ None — no external service configuration required.
 ---
 *Phase: 03-advanced-current-diagnosis*
 *Completed: 2026-08-19*
+
+## Self-Check: PASSED
+
+All five modified source files, the `deferred-items.md` record and this SUMMARY exist on disk. All seven commits (`67cde82`, `3094e3a`, `832c445`, `477c1f9`, `99ad44e`, `523ef6d`, `66fc367`) are present in repository history. All three newly named tests are present at their claimed paths. No claimed artifact, test or commit is missing.
