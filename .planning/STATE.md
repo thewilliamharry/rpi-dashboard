@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-12-PLAN.md
-last_updated: "2026-08-19T06:01:46.992Z"
+stopped_at: Completed 03-13-PLAN.md
+last_updated: "2026-08-19T06:18:25.057Z"
 last_activity: 2026-08-19
-last_activity_desc: 03-11 closed the Services absent-vs-zero fabrication blocker
+last_activity_desc: 03-13 closed the collection_gaps hollow property on the services surface
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 49
-  completed_plans: 47
+  completed_plans: 48
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 13 of 14
-Status: Gap-closure round 3 in progress; 03-11 complete, 03-12..03-14 remain
-Last activity: 2026-08-19 — 03-11 closed the Services absent-vs-zero fabrication blocker
+Plan: 14 of 14
+Status: Gap-closure round 3 in progress; 03-11..03-13 complete, 03-14 remains
+Last activity: 2026-08-19 — 03-13 closed the collection_gaps hollow property on the services surface
 
-Progress: [██████████] 96%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -102,6 +102,7 @@ Progress: [██████████] 96%
 | Phase 03 P10 | 14 min | 3 tasks | 3 files |
 | Phase 03 P11 | 8min | 2 tasks | 2 files |
 | Phase 03 P12 | 8min | 2 tasks | 2 files |
+| Phase 03 P13 | 21min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -211,6 +212,11 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: 03-12: A durable job-health bookkeeping failure raises JobHealthBookkeepingError (callback id + transition + bounded class name only) instead of being recorded as a work failure
 - [Phase ?]: 03-12: dispatch_callback decides the outcome in a non-writing scope and performs exactly one outcome write outside it — no compensating or retried bookkeeping write (T-03-77)
 - [Phase ?]: 03-12: TEL-06 left at Gaps Found — Gap B closure requires independent re-verification; 03-14 owns the REQUIREMENTS.md reconciliation
+- [Phase ?]: 03-13: service.collection_gaps is populated by a join over the composed per-stream gap items, not dropped — a fixed no-evidence string would assert an absence the code never established
+- [Phase ?]: 03-13: gap_evidence_truncated (the coverage read's bound) stays a separate field from streams.truncated (the stream read's bound); one flag must never describe two populations
+- [Phase ?]: 03-13: a truncation flag that is missing or non-boolean resolves to not_established, never to a derived absence
+- [Phase ?]: 03-13: formatServiceGapEvidence derives singular/plural through the existing countLabel helper, so the services and Pipeline surfaces cannot drift from one copy rule
+- [Phase ?]: 03-13: DIA-03 and TEL-06 left at Gaps Found — Gap A closure requires independent re-verification; 03-14 owns the REQUIREMENTS.md reconciliation
 
 ### Pending Todos
 
@@ -240,6 +246,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T06:01:46.977Z
-Stopped at: Completed 03-12-PLAN.md
+Last session: 2026-08-19T06:18:16.466Z
+Stopped at: Completed 03-13-PLAN.md
 Resume file: None
