@@ -35,7 +35,7 @@
 
 - [x] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
 - [x] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
-- [ ] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
+- [x] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
 - [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
 - [ ] **DIA-05**: The operator can select a validated custom range within retained history.
 - [ ] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
@@ -127,12 +127,12 @@ Every v1 requirement maps to exactly one roadmap phase.
 | MNT-04 | Phase 03.1 | Pending |
 | DIA-01 | Phase 3 | Complete |
 | DIA-02 | Phase 3 | Complete |
-| DIA-03 | Phase 3 | Gaps Found |
+| DIA-03 | Phase 3 | Complete |
 | DIA-04 | Phase 4 | Pending |
 | DIA-05 | Phase 4 | Pending |
 | DIA-06 | Phase 4 | Pending |
 | DIA-07 | Phase 4 | Pending |
-| DIA-08 | Phase 3 | Gaps Found |
+| DIA-08 | Phase 3 | Deferred to Phase 4 |
 | HIS-01 | Phase 4 | Pending |
 | HIS-02 | Phase 4 | Pending |
 | HIS-03 | Phase 4 | Pending |
