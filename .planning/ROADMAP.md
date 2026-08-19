@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 16/16 plans executed (14 executed; 2 gap-closure plans pending after re-verification round 3)
+**Plans**: 16/17 plans executed (16 executed; 1 gap-closure plan pending after re-verification round 4)
 
 - [x] 03-07-PLAN.md
 
@@ -228,6 +228,10 @@ Plans:
 
 - [x] 03-15-PLAN.md — Background-job health: a genuine work failure survives a failing outcome write in the raised condition, the exception chain and the log; a job stuck without an outcome becomes an operator exception; startup no longer dies on a transient lock (wave 1)
 - [x] 03-16-PLAN.md — Per-service gap evidence: a service with no established collection stream reads differently from a collected clean one, the browser regression asserts the difference instead of pinning it shut, and the absent-value rule becomes type-based (wave 2)
+
+**Gap closure round 4 (after 03-VERIFICATION.md re-verification round 4, status gaps_found, 3/4 — Gap 1 (background-job health) half-closed and half-regressed by round 3's own fix, plus one pre-existing defect newly found; TEL-06 remains Gaps Found)**
+
+- [ ] 03-17-PLAN.md — Background-job health: an empty durable queue records succeeded instead of a fabricated failure, the outcome-unrecorded promotion becomes a floor no legitimate run or wedged startup job can dodge, and a compound startup failure reaches the operator instead of an unnamed warning (wave 1)
 
 **Wave 1**
 
