@@ -59,6 +59,11 @@ THUMB_MAX_BYTES = 2 * 1024 * 1024
 THUMB_REFRESH_DAYS = SETTINGS.thumb_refresh_days
 PREVIEW_SETTLE_MS = 5_000
 PREVIEW_BROWSER_BUDGET_MS = 27_000
+# Sentinel that survives both of _legacy_screenshot_service's and
+# _legacy_refresh_service_preview's blanket `except Exception` handlers
+# unmodified, because it travels through the already-existing
+# thumb_error/screenshot_error return slot, never through a raised exception.
+THUMB_ERROR_BROWSER_UNAVAILABLE = 'browser_unavailable'
 UPTIME_WINDOW_SECONDS = 7 * 86400
 UPTIME_BUCKETS = 168
 CHECK_RETENTION_SECONDS = UPTIME_WINDOW_SECONDS + 86400
@@ -889,7 +894,23 @@ def _legacy_screenshot_service(port, target_url=None):
     _preview_context.timings = {}
     _preview_context.page_title = None
     try:
-        browser = _get_browser()
+        # A browser that cannot even launch, or that launches but can no longer
+        # open a new page on it, is the shared machinery J6 owns (its
+        # browser_resource_lifecycle effect surface) -- Chromium missing or
+        # unable to launch, or a browser that can no longer open a page at all,
+        # are the same fault whichever service triggered this poll, never a
+        # fact about the service itself -- reported through a sentinel, before
+        # any per-service navigation is attempted, so the blanket handler below
+        # cannot fold it into an ordinary per-service warning. A rarer failure
+        # while browser_proxy_context itself is entering (browser.new_context(),
+        # evaluated before the `with` body ever starts) is NOT distinguished
+        # here and still falls through to the per-service classification below
+        # -- a known, smaller residual this deliberately leaves open rather
+        # than claim coverage the code does not have.
+        try:
+            browser = _get_browser()
+        except Exception:
+            return None, None, THUMB_ERROR_BROWSER_UNAVAILABLE
         context_started = time.monotonic()
         with beacon_previews.browser_proxy_context(
                 browser,
@@ -897,7 +918,10 @@ def _legacy_screenshot_service(port, target_url=None):
                 viewport={'width': 1280, 'height': 800},
                 ignore_https_errors=not initial_plan.tls.verify_certificate,
         ) as context:
-            page = context.new_page()
+            try:
+                page = context.new_page()
+            except Exception:
+                return None, None, THUMB_ERROR_BROWSER_UNAVAILABLE
             _preview_context.timings['context_ms'] = round((time.monotonic() - context_started) * 1000, 1)
             remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
             if remaining_ms <= 0:
@@ -2025,6 +2049,15 @@ def worker_process_preview_requests(authority):
             )
     except beacon_queues.LeaseLost:
         raise
+    # The per-request row above is already durable and complete
+    # (preview_requests reads its own real status='failed' text, and the
+    # preview_capture event carries error_class=THUMB_ERROR_BROWSER_UNAVAILABLE)
+    # -- but a browser that could not even launch is a fault of the machinery
+    # this job owns, not of the previewed service, and warning cannot carry
+    # that distinction; dispatch_callback records this as a genuine job_failed
+    # for J6, exactly as it already does for J5/J7/J9's own genuine failures.
+    if thumb_error == THUMB_ERROR_BROWSER_UNAVAILABLE:
+        raise beacon_previews.PreviewCaptureUnavailable(THUMB_ERROR_BROWSER_UNAVAILABLE)
     # J6's job outcome answers one question only: did the poller claim a
     # request, attempt a capture, and durably record its own verdict inside an
     # authority-asserted transaction? Reaching this line means yes, regardless
@@ -2032,9 +2065,9 @@ def worker_process_preview_requests(authority):
     # preview_requests.status and on the preview_complete event above -- it
     # describes the monitored service's own health, not the poller's, and must
     # never again decide this return value (03-19-REVIEW.md CR-01). A genuine
-    # J6 job fault -- the claim or the transaction itself failing -- already
-    # propagates as LeaseLost above or as an uncaught exception dispatch_callback
-    # converts to a real failed row.
+    # J6 job fault is now handled by the check just above, by LeaseLost, or by
+    # any other uncaught exception dispatch_callback converts to a real failed
+    # row.
     return True
 
 

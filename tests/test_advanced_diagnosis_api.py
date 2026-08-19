@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from dashboard.beacon import migrations, queues, repositories, worker_main
+from dashboard.beacon import migrations, previews, queues, repositories, worker_main
 from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
@@ -460,6 +460,112 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             ],
             [],
         )
+
+    def test_a_broken_capture_machinery_fails_j6s_job_health_while_a_per_service_fault_does_not(self):
+        """A total capture-machinery failure is J6's own fault; a per-service fault is not.
+
+        03-VERIFICATION.md round 7 gap 1: four consecutive rounds edited the
+        return statement of ``worker_process_preview_requests`` while the fault
+        classes stayed merged upstream inside ``_legacy_screenshot_service``'s
+        and ``_legacy_refresh_service_preview``'s blanket ``except Exception``
+        handlers. The distinction is made where the classes are still
+        distinguishable: at ``_get_browser()`` and ``context.new_page()``,
+        upstream of both blanket handlers. Both directions are pinned in one
+        dispatch shape so neither can be closed by breaking the other.
+        """
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'broken-capture-machinery-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            process_preview_requests=self.appmod.worker_process_preview_requests,
+        )
+
+        with self.subTest(case='browser_machinery_unavailable_fails_j6_job_health'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._seed_service(conn, 8080, now=now)
+                conn.commit()
+                conn.close()
+            queues.enqueue_preview(self.db_path, 8080, now=now)
+
+            titled_response = SimpleNamespace(
+                headers={'Content-Type': 'text/html'},
+                text='<html><head><title>Service</title></head><body></body></html>',
+            )
+            with mock.patch.object(
+                self.appmod, '_fetch_html_response',
+                return_value=(True, None, titled_response, 'http://127.0.0.1:8080/'),
+            ), mock.patch.object(
+                self.appmod, '_get_browser',
+                side_effect=RuntimeError('chromium not installed'),
+            ):
+                with self.assertRaises(previews.PreviewCaptureUnavailable):
+                    worker_main.dispatch_callback(services, 'J6')
+
+            row = self._job_health_row('J6')
+            self.assertEqual(row['state'], 'failed')
+            self.assertEqual(row['error_class'], 'PreviewCaptureUnavailable')
+
+            queue_row = self._latest_queue_row('preview_requests')
+            self.assertEqual(queue_row['status'], 'failed')
+            self.assertEqual(queue_row['error'], 'thumbnail refresh failed')
+
+            # The durable column the sentinel flows through -- the same one
+            # every existing thumb_error sibling already populates. Not a
+            # rendering claim: dashboard/app.js's renderEvents excludes
+            # event_type='preview_capture' from its own EVENT_TYPES_VISIBLE set
+            # before the error_class fallback is ever reached, and
+            # dashboard/advanced.js never touches this field at all, so this
+            # value is not rendered anywhere today.
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                event_row = conn.execute(
+                    "SELECT error_class FROM events WHERE event_type='preview_capture' "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                conn.close()
+            self.assertEqual(event_row['error_class'], 'browser_unavailable')
+
+            diagnosis = self.appmod.beacon_diagnosis
+            payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+            self.assertEqual(
+                sorted(
+                    item['job_id'] for item in payload['exceptions']
+                    if item['kind'] == 'job_failed'
+                ),
+                ['J6'],
+            )
+
+        with self.subTest(case='an_ordinary_probe_fault_still_records_j6_succeeded'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._seed_service(conn, 8081, now=now)
+                conn.commit()
+                conn.close()
+            queues.enqueue_preview(self.db_path, 8081, now=now)
+
+            with mock.patch.object(
+                self.appmod, '_fetch_html_response',
+                side_effect=RuntimeError('probe failed'),
+            ):
+                self.assertIs(worker_main.dispatch_callback(services, 'J6'), True)
+
+            row = self._job_health_row('J6')
+            self.assertEqual(row['state'], 'succeeded')
+            self.assertIsNone(row['error_class'])
+
+            queue_row = self._latest_queue_row('preview_requests')
+            self.assertEqual(queue_row['status'], 'failed')
+            self.assertEqual(
+                queue_row['error'],
+                'title refresh failed (exception); thumbnail refresh skipped',
+            )
 
     def _latest_queue_row(self, table):
         """Read the newest durable queue row so its verdict can be compared."""

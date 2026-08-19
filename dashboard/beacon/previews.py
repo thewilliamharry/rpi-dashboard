@@ -17,6 +17,24 @@ from .outbound import (
 )
 
 
+class PreviewCaptureUnavailable(RuntimeError):
+    """A total failure of the shared capture machinery this job owns.
+
+    Raised when the browser cannot even launch, or has launched but can no
+    longer open a new page -- Chromium missing or unable to launch, or a
+    browser that can no longer open a page at all.  Both are the shared
+    machinery J6 owns, never a fact about the previewed service, and are
+    detected before any per-service content (navigation, title, screenshot)
+    is touched.  Kept distinct from every per-service capture condition (an
+    offline service, a missing title, a failed screenshot of a page that DID
+    load), which stay ``warning`` text and never raise.  Two blanket
+    ``except Exception`` handlers in ``dashboard/app.py`` previously folded
+    both classes into the same string (``03-VERIFICATION.md`` round 7 gap 1),
+    so a permanently broken browser could never be told apart from an
+    unhealthy monitored service on the job-health surface.
+    """
+
+
 class ThumbnailResultRepository(Protocol):
     """Named persistence boundary for preview completion results."""
 
