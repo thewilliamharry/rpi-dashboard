@@ -2056,6 +2056,44 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 ['J9'],
             )
 
+        with self.subTest(
+            case='the_widened_floor_never_reaches_a_job_that_does_not_run_discovery',
+        ):
+            # Pre-fix, f(5, 3600) == 3660, so this exact row promoted nothing
+            # before the fix -- a J1-shaped heartbeat wedge silently ignored
+            # because a setting unrelated to it had been configured wide.
+            self.assertEqual(
+                [
+                    item['job_id']
+                    for item in unrecorded_in(compose_many(
+                        [job_row(job_id='J1', cadence_seconds=5, last_started_ts=now - 901)],
+                        discovery_timeout_seconds=3600,
+                    ))
+                ],
+                ['J1'],
+            )
+
+        with self.subTest(
+            case='a_malformed_discovery_timeout_degrades_one_promotion_instead_of_aborting_the_payload',
+        ):
+            # compose_many's own discovery_timeout_seconds=None sentinel means
+            # "substitute the default 180", so it can never pass a literal
+            # None through -- this subTest bypasses compose_many and calls
+            # diagnosis.compose_active_exceptions directly. Pre-fix, this
+            # exact literal-None input raised TypeError: int() argument must
+            # be a string, a bytes-like object or a real number, not
+            # 'NoneType' from inside _unrecorded_outcome_boundary.
+            pipeline = self._jobs_pipeline(job_row(
+                job_id='J9', cadence_seconds=None, last_started_ts=now - floor - 1,
+            ))
+            exceptions = diagnosis.compose_active_exceptions(
+                host, [], pipeline, recovery_required=False, now=now,
+                discovery_timeout_seconds=None,
+            )
+            self.assertEqual(
+                [item['job_id'] for item in unrecorded_in(exceptions)], ['J9'],
+            )
+
         with self.subTest(case='overdue_running_job_promotes_once'):
             exceptions = compose(job_row())
             unrecorded = unrecorded_in(exceptions)

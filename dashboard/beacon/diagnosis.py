@@ -40,20 +40,37 @@ RUNNING_JOB_STATE = 'running'
 # the only value an operator may configure, so _unrecorded_outcome_boundary widens
 # this floor further whenever the configured DISCOVERY_TIMEOUT_SECONDS approaches
 # or exceeds it: the guarantee is stated against the value actually in force, never
-# against the default alone.
+# against the default alone.  The floor widens further only for DISCOVERY_JOB_IDS,
+# so this guarantee holds for the jobs it actually describes and never for a
+# setting unrelated to the job being measured.
 UNRECORDED_OUTCOME_FLOOR_SECONDS = 900
 
+# The only jobs that actually run under the operator's configured
+# DISCOVERY_TIMEOUT_SECONDS budget: J5's manual scan, J7's scheduled discovery,
+# J9's startup discovery.  Every other job's promotion floor must stay
+# independent of a setting that has nothing to do with it -- 03-VERIFICATION.md
+# round 7 gap 2 / WR-02's reproduction showed widening the floor globally let a
+# configured DISCOVERY_TIMEOUT_SECONDS silently delay wedge detection for J1's
+# five-second heartbeat.
+DISCOVERY_JOB_IDS = frozenset({'J5', 'J7', 'J9'})
 
-def _unrecorded_outcome_boundary(cadence_seconds, discovery_timeout_seconds):
+
+def _unrecorded_outcome_boundary(cadence_seconds, discovery_timeout_seconds, job_id):
     """Resolve how long a start may stand without an outcome before it is a fault.
 
-    The fixed floor is first widened, where necessary, to the operator's own
-    configured ``DISCOVERY_TIMEOUT_SECONDS`` plus a minute of headroom, so a
-    discovery that is legitimately still working inside its configured budget is
-    never promoted as a fabricated fault on a deployment configured above the
-    constant.
+    The fixed floor is widened, where necessary, to the operator's own
+    configured ``DISCOVERY_TIMEOUT_SECONDS`` plus a minute of headroom -- but
+    only for a job in ``DISCOVERY_JOB_IDS``, so a discovery that is legitimately
+    still working inside its configured budget is never promoted as a
+    fabricated fault on a deployment configured above the constant, while every
+    other job's floor stays independent of a setting that does not describe it.
+    ``discovery_timeout_seconds`` is guarded (``type(...) is int and ... > 0``)
+    rather than coerced (``int(...)``), so a malformed value leaves the floor at
+    the constant instead of raising out of ``get_current_diagnosis``.
     """
-    floor = max(UNRECORDED_OUTCOME_FLOOR_SECONDS, int(discovery_timeout_seconds) + 60)
+    floor = UNRECORDED_OUTCOME_FLOOR_SECONDS
+    if job_id in DISCOVERY_JOB_IDS and type(discovery_timeout_seconds) is int and discovery_timeout_seconds > 0:
+        floor = max(floor, discovery_timeout_seconds + 60)
     if type(cadence_seconds) is int and cadence_seconds > 0:
         # freshness_state's own four-times-cadence multiple and strict-integer
         # discipline, reused rather than a second convention.  The larger of the two
@@ -480,7 +497,7 @@ def compose_active_exceptions(
             and type(now) is int
             and max(0, now - job['last_started_ts'])
             > _unrecorded_outcome_boundary(
-                job.get('cadence_seconds'), discovery_timeout_seconds,
+                job.get('cadence_seconds'), discovery_timeout_seconds, job['job_id'],
             )
         ):
             # Explicit keys only, never a spread of the durable row, so a future
