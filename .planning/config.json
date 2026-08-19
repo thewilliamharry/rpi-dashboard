@@ -87,8 +87,11 @@
     "source_grounding": true,
     "source_grounding_authority": "grep"
   },
-  "resolve_model_ids": "omit",
-  "runtime": "codex",
+  "resolve_model_ids": false,
+  "runtime": "claude",
   "mode": "interactive",
-  "granularity": "standard"
+  "granularity": "standard",
+  "model_overrides": {
+    "gsd-plan-checker": "opus"
+  }
 }
