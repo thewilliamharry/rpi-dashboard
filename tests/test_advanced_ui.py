@@ -1093,6 +1093,39 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_unmeasured_latency_and_duration_never_rank_or_read_as_zero(self):
+        """An unmeasured latency is deliberately ranked as an extreme in both directions.
+
+        Ascending it sorts after every real measurement and descending it sorts before
+        them, exactly as the existing state-duration sort treats an unknown duration.
+        It is never ranked as zero, because zero is a measurement the server can send
+        and an absent value is not. A state duration the server never established
+        reads `Unknown duration` rather than `0 seconds` for the same reason.
+        """
+        page = self._unmeasured_services_page()
+        try:
+            page.locator('#service-sort-latency').click()
+            self.assertEqual(page.locator('#service-sort-latency').get_attribute('aria-sort'), 'ascending')
+            self.assertEqual(self._service_port_order(page), ['8081', '8080', '9090', '7070'])
+
+            page.locator('#service-sort-latency').click()
+            self.assertEqual(page.locator('#service-sort-latency').get_attribute('aria-sort'), 'descending')
+            self.assertEqual(self._service_port_order(page)[:2], ['9090', '7070'])
+
+            self.assertEqual(self._service_duration_cell(page, 9090), 'Unknown duration')
+            self.assertEqual(self._service_duration_cell(page, 7070), 'Unknown duration')
+            measured_duration = self._service_duration_cell(page, 8080)
+            self.assertNotEqual(measured_duration, 'Unknown duration')
+            self.assertIn('minutes', measured_duration)
+
+            prior = page.locator('#advanced-last-success').text_content()
+            self._await_new_snapshot(page, prior)
+            self.assertEqual(page.locator('#service-sort-latency').get_attribute('aria-sort'), 'descending')
+            self.assertTrue(page.locator('#reset-service-order').is_visible())
+            self.assertEqual(self._service_port_order(page)[:2], ['9090', '7070'])
+        finally:
+            page.close()
+
     def test_unknown_section_value_never_blanks_the_workspace(self):
         """A server section with no matching heading must not hide every section."""
         payload = self._snapshot()
