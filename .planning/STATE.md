@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-11-PLAN.md
-last_updated: "2026-08-19T05:52:52.802Z"
+stopped_at: Completed 03-12-PLAN.md
+last_updated: "2026-08-19T06:01:46.992Z"
 last_activity: 2026-08-19
 last_activity_desc: 03-11 closed the Services absent-vs-zero fabrication blocker
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 49
-  completed_plans: 46
+  completed_plans: 47
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 12 of 14
+Plan: 13 of 14
 Status: Gap-closure round 3 in progress; 03-11 complete, 03-12..03-14 remain
 Last activity: 2026-08-19 — 03-11 closed the Services absent-vs-zero fabrication blocker
 
-Progress: [█████████░] 94%
+Progress: [██████████] 96%
 
 ## Performance Metrics
 
@@ -101,6 +101,7 @@ Progress: [█████████░] 94%
 | Phase 03 P09 | 10 min | 2 tasks | 3 files |
 | Phase 03 P10 | 14 min | 3 tasks | 3 files |
 | Phase 03 P11 | 8min | 2 tasks | 2 files |
+| Phase 03 P12 | 8min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -207,6 +208,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: finiteMeasurement is the numeric sibling of displayValue: reject null/undefined/empty BEFORE Number(), because Number(null) === 0 passes Number.isFinite
 - [Phase ?]: An unmeasured value ranks as an extreme (POSITIVE_INFINITY) in the services sort, never as zero; equal keys fall through to the stable index tiebreak
 - [Phase ?]: DIA-03 stays Gaps Found after 03-11: only Gap A bullets 1 and 3 are closed; collection_gaps is deferred to 03-13 and reconciliation to 03-14
+- [Phase ?]: 03-12: A durable job-health bookkeeping failure raises JobHealthBookkeepingError (callback id + transition + bounded class name only) instead of being recorded as a work failure
+- [Phase ?]: 03-12: dispatch_callback decides the outcome in a non-writing scope and performs exactly one outcome write outside it — no compensating or retried bookkeeping write (T-03-77)
+- [Phase ?]: 03-12: TEL-06 left at Gaps Found — Gap B closure requires independent re-verification; 03-14 owns the REQUIREMENTS.md reconciliation
 
 ### Pending Todos
 
@@ -236,6 +240,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T05:52:52.787Z
-Stopped at: Completed 03-11-PLAN.md
+Last session: 2026-08-19T06:01:46.977Z
+Stopped at: Completed 03-12-PLAN.md
 Resume file: None
