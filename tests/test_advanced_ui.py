@@ -1126,6 +1126,142 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    @staticmethod
+    def _gap_item(port, *, open_gap, detail):
+        """One composed gap item in the shape the server's per-stream list carries."""
+        return {
+            'stream_kind': 'service', 'stream_key': str(port),
+            'start_ts': 1_699_999_000, 'end_ts': 1_699_999_900,
+            'reason': 'collection_gap', 'detail': detail,
+            'open': open_gap, 'actionable': open_gap,
+        }
+
+    @classmethod
+    def _gap_evidence_services(cls):
+        """Cover every branch of the per-service gap-evidence formatter.
+
+        A raw container must never reach the operator, and an absence the server
+        never established must read differently from one it derived.
+        """
+        def service(port, name, block, omit=False):
+            row = {
+                'port': port, 'name': name, 'status': 'up', 'latency_ms': 5,
+                'state_duration_seconds': 60, 'critical': False, 'pinned_order': port,
+                'tags': ['gap'], 'effective_health_rule': '200-399',
+                'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+                'freshness': {'state': 'fresh', 'age_seconds': 5},
+                'tls': {'posture': 'not applicable'}, 'last_error': None,
+            }
+            if not omit:
+                row['collection_gaps'] = block
+            return row
+
+        return (
+            service(9001, 'Never established', {
+                'items': [], 'count': 0, 'open_count': 0, 'evidence': 'not_established',
+            }),
+            service(9002, 'Derivably absent', {
+                'items': [], 'count': 0, 'open_count': 0, 'evidence': 'absent',
+            }),
+            service(9003, 'Complete and empty', {
+                'items': [], 'count': 0, 'open_count': 0, 'evidence': 'complete',
+            }),
+            service(9004, 'Exactly one gap', {
+                'items': [cls._gap_item(9004, open_gap=True, detail=None)],
+                'count': 1, 'open_count': 1, 'evidence': 'complete',
+            }),
+            service(9005, 'Several gaps', {
+                'items': [
+                    cls._gap_item(9005, open_gap=True, detail=None),
+                    cls._gap_item(9005, open_gap=True, detail='second'),
+                    cls._gap_item(9005, open_gap=False, detail='closed'),
+                ],
+                'count': 3, 'open_count': 2, 'evidence': 'complete',
+            }),
+            service(9006, 'Possibly incomplete', {
+                'items': [
+                    cls._gap_item(9006, open_gap=True, detail=None),
+                    cls._gap_item(9006, open_gap=False, detail='closed'),
+                ],
+                'count': 2, 'open_count': 1, 'evidence': 'possibly_incomplete',
+            }),
+            service(9007, 'Block omitted', None, omit=True),
+            service(9008, 'Legacy container', []),
+        )
+
+    def _gap_evidence_page(self):
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+        payload = self._snapshot()
+        payload.update({
+            'exceptions': [], 'pipeline': {}, 'settings': {},
+            'services': list(self._gap_evidence_services()),
+        })
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="services"]').click()
+        page.locator('#services-table').wait_for(timeout=5_000)
+        return page
+
+    @staticmethod
+    def _service_detail_evidence(page, port, label):
+        """Read one expanded detail row's evidence value from the live DOM."""
+        row = page.locator(f'#service-detail-{port} .evidence-row').filter(
+            has=page.locator('strong', has_text=f'{label}: '),
+        )
+        return row.locator('span').text_content()
+
+    def test_service_detail_gap_evidence_reads_as_operator_copy(self):
+        """The operator reads a sentence about gap evidence, never a data structure.
+
+        Singular and plural count copy follow the same rule the Pipeline
+        collection-gaps region already uses, and a state the server never
+        established reads differently from an absence it derived.
+        """
+        page = self._gap_evidence_page()
+        try:
+            self.assertEqual(page.locator('#services-table tbody > tr.service-row').count(), 8)
+            toggles = page.locator('.service-details-toggle')
+            for index in range(toggles.count()):
+                toggles.nth(index).click()
+            self.assertEqual(page.locator('.service-details-toggle[aria-expanded="true"]').count(), 8)
+
+            expected = {
+                9001: 'Gap evidence unavailable',
+                9002: 'No gap evidence',
+                9003: 'No gap evidence',
+                9004: '1 gap (1 open)',
+                9005: '3 gaps (2 open)',
+                9006: '2 gaps (1 open); more gap evidence may exist',
+                9007: 'Gap evidence unavailable',
+                9008: 'Gap evidence unavailable',
+            }
+            rendered = {
+                port: self._service_detail_evidence(page, port, 'Collection-gap evidence')
+                for port in expected
+            }
+            self.assertEqual(rendered, expected)
+
+            # No serialized container may reach the operator on this surface.
+            for port, line in rendered.items():
+                with self.subTest(port=port):
+                    self.assertNotRegex(line, r'[\[\]{}"]')
+
+            # A malformed or absent block must never blank the table.
+            self.assertEqual(page.locator('#services-table tbody > tr.service-row').count(), 8)
+            self.assertEqual(
+                self._service_detail_evidence(page, 9008, 'Complete service name'),
+                'Legacy container',
+            )
+        finally:
+            page.close()
+
     def test_unknown_section_value_never_blanks_the_workspace(self):
         """A server section with no matching heading must not hide every section."""
         payload = self._snapshot()
