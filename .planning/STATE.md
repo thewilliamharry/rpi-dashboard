@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-17-PLAN.md
-last_updated: "2026-08-19T12:31:29.464Z"
+stopped_at: Completed 03-18-PLAN.md
+last_updated: "2026-08-19T13:01:23.631Z"
 last_activity: 2026-08-19
-last_activity_desc: 03-17 closed the round-4 background-job-health gap — an idle queue records success, the unrecorded-outcome boundary is a floor rather than a poll interval, and a compound startup failure is re-raised instead of downgraded
+last_activity_desc: 03-18 closed the fabricated-success half of the round-5 background-job-health gap — J5, J6, J7 and J9 now report the verdict they themselves computed and durably recorded, proven against work that genuinely fails through the real production adapters
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 54
-  completed_plans: 51
+  completed_plans: 53
 ---
 
 # Project State
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 17 of 17
-Status: Gap-closure round 5 complete (03-17) — TEL-06 deliberately left open pending independent re-verification
-Last activity: 2026-08-19 — 03-17 gave an empty durable queue a non-failure outcome, floored the job_outcome_unrecorded boundary, and made a compound startup failure loud
+Plan: 18 of 19
+Status: Gap-closure round 6 wave 1 complete (03-18) — 03-19 (wave 2) still outstanding; TEL-06 deliberately left open pending independent re-verification
+Last activity: 2026-08-19 — 03-18 stopped J5/J6/J7/J9 reporting a genuine, durably-recorded work failure to the operator as succeeded
 
 Progress: [██████████] 98%
 
@@ -107,6 +107,7 @@ Progress: [██████████] 98%
 | Phase 03 P15 | 20min | 3 tasks | 5 files |
 | Phase 03 P16 | 22min | 2 tasks | 5 files |
 | Phase 03 P17 | 18min | 3 tasks | 6 files |
+| Phase 03 P18 | 24min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -236,6 +237,10 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase 03]: The job_outcome_unrecorded promotion boundary is max(UNRECORDED_OUTCOME_FLOOR_SECONDS=900, 4 x cadence) — the larger of the two, applied uniformly whether or not a cadence is configured, so a poll interval is never read as an upper bound on run duration and a None cadence no longer exempts S1/S2/S3/J9
 - [Phase 03]: run_worker re-raises a startup JobHealthBookkeepingError whose work_error_class is not None, so a work failure that could not record itself never reaches build_scheduler; a bookkeeping-only failure still warns and continues
 - [Phase 03]: TEL-06 was deliberately NOT promoted in REQUIREMENTS.md by 03-17 — a gap-closure round may not record its own requirement complete; only independent re-verification may
+- [Phase 03]: 03-18: worker_process_scan_requests and worker_process_preview_requests return the verdict they themselves computed and durably recorded (status == 'completed' / not warning), never a constant True — a genuine J5/J6 failure can no longer reach the operator as succeeded
+- [Phase 03]: 03-18: _run_scheduled_discovery and _run_startup_discovery return outcome != 'failed' on the work path and an explicit None only on a genuine skip — None now carries exactly one meaning at the worker dispatch boundary
+- [Phase 03]: 03-18: outcome != 'failed' is typed against run_discovery's documented three-literal contract ('busy' | 'completed' | 'failed'), so contention stays a success and only a genuine failure is False
+- [Phase 03]: 03-18: outcome regressions must force the failure at the collaborator boundary and drive the exact callable dashboard/worker.py wires in — stubbing the poller under test is what kept five verification rounds green while the defect was live
 
 ### Pending Todos
 
@@ -266,6 +271,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T11:08:43.290Z
-Stopped at: Completed 03-17-PLAN.md
+Last session: 2026-08-19T13:01:23.121Z
+Stopped at: Completed 03-18-PLAN.md
 Resume file: None

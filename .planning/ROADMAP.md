@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 17/19 plans executed (17 executed; 2 gap-closure plans pending after re-verification round 5)
+**Plans**: 18/19 plans executed (03-18 closed the fabricated-success half of the round-5 gap; 03-19 remains pending)
 
 - [x] 03-07-PLAN.md
 
@@ -235,7 +235,7 @@ Plans:
 
 **Gap closure round 5 (after 03-VERIFICATION.md re-verification round 5, status gaps_found, 3/4 — the fabricated-FAILURE direction (round 4's seven `missing` items) fully closed and reproduced closed; the fabricated-SUCCESS direction found live for J5/J6/J7/J9 and ruled the still-failed half of the same truth, plus a compound-startup-evidence residual and two deferred transient contention sites; TEL-06 remains Gaps Found)**
 
-- [ ] 03-18-PLAN.md — Background-job health, the decisive regression: the two queue pollers and both discovery dispatchers return the verdict they already computed instead of a constant, proven against work that genuinely fails through the real production adapters (wave 1)
+- [x] 03-18-PLAN.md — Background-job health, the decisive regression: the two queue pollers and both discovery dispatchers return the verdict they already computed instead of a constant, proven against work that genuinely fails through the real production adapters (wave 1)
 - [ ] 03-19-PLAN.md — Background-job health, remaining closure: the outcome-unrecorded floor is pinned against external facts instead of itself, a compound startup failure leaves durable evidence when a best-effort retry succeeds, and the two deferred transient contention sites are closed rather than left as fabricated faults (wave 2)
 
 **Wave 1**
@@ -330,7 +330,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
-| 3. Advanced Current Diagnosis | 16/17 | In Progress|  |
+| 3. Advanced Current Diagnosis | 18/19 | In Progress|  |
 | 4. Historical Investigation | 0/TBD | Not started | - |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
