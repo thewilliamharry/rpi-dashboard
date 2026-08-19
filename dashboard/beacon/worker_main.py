@@ -237,6 +237,26 @@ def _job_error_class(error):
     return type(error).__name__[:96] or 'CallbackFailed'
 
 
+class JobHealthBookkeepingError(RuntimeError):
+    """A durable job-health write failed for a reason that is not lease loss.
+
+    It carries the callback identifier, the transition that could not be written,
+    and the bounded class name of the underlying error only, so the no-message
+    discipline `_job_error_class` enforces for durable rows also holds for this
+    raised condition.  Recording a job's outcome can fail on its own; that is a
+    fact about the recording, never a verdict on the work.
+    """
+
+    def __init__(self, callback_id, transition, error_class):
+        self.callback_id = callback_id
+        self.transition = transition
+        self.error_class = error_class
+        super().__init__(
+            f'background job health write failed: callback={callback_id} '
+            f'transition={transition} error_class={error_class}'
+        )
+
+
 def _write_job_health_transition(services, callback_id, transition, *, error_class=None):
     """Publish one outcome only while the exact worker epoch still owns SQLite."""
     now = int(services.clock())
@@ -271,30 +291,55 @@ def dispatch_callback(services, callback_id):
             return _invoke_callback(services, callback)
         try:
             _write_job_health_transition(services, callback_id, 'started')
-            result = _invoke_callback(services, callback)
-            if result is False:
-                _write_job_health_transition(
-                    services, callback_id, 'failed', error_class='CallbackReturnedFalse',
-                )
-                return False
-            _write_job_health_transition(services, callback_id, 'succeeded')
-            return result
         except queues.LeaseLost:
             log.error('Beacon worker lease lost; stopping stale scheduler')
             services.admission.close_admission()
             stop_worker()
             return False
         except Exception as exc:
-            try:
-                _write_job_health_transition(
-                    services, callback_id, 'failed', error_class=_job_error_class(exc),
-                )
-            except queues.LeaseLost:
-                log.error('Beacon worker lease lost while recording callback failure')
-                services.admission.close_admission()
-                stop_worker()
-                return False
-            raise
+            # The work never ran, so there is no work outcome to record.
+            raise JobHealthBookkeepingError(
+                callback_id, 'started', _job_error_class(exc),
+            ) from exc
+
+        # Decide the outcome in its own scope.  Nothing here writes, so a failure
+        # of the recording can never be mistaken for a failure of the work.
+        work_error = None
+        try:
+            result = _invoke_callback(services, callback)
+        except queues.LeaseLost:
+            log.error('Beacon worker lease lost; stopping stale scheduler')
+            services.admission.close_admission()
+            stop_worker()
+            return False
+        except Exception as exc:
+            work_error = exc
+            result = None
+            transition, error_class = 'failed', _job_error_class(exc)
+        else:
+            if result is False:
+                transition, error_class = 'failed', 'CallbackReturnedFalse'
+            else:
+                transition, error_class = 'succeeded', None
+
+        try:
+            _write_job_health_transition(
+                services, callback_id, transition, error_class=error_class,
+            )
+        except queues.LeaseLost:
+            log.error('Beacon worker lease lost while recording callback failure')
+            services.admission.close_admission()
+            stop_worker()
+            return False
+        except Exception as exc:
+            # No corrective or retried write: republishing here is exactly how a
+            # bookkeeping failure used to masquerade as a work failure.
+            raise JobHealthBookkeepingError(
+                callback_id, transition, _job_error_class(exc),
+            ) from exc
+        if work_error is not None:
+            raise work_error
+        return result
 
 
 # Compatibility exports retain their former call shapes, but all post-acquisition
