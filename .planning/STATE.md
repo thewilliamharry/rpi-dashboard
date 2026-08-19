@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-18-PLAN.md
-last_updated: "2026-08-19T13:01:23.631Z"
+stopped_at: Completed 03-19-PLAN.md
+last_updated: "2026-08-19T13:17:20.525Z"
 last_activity: 2026-08-19
 last_activity_desc: 03-18 closed the fabricated-success half of the round-5 background-job-health gap — J5, J6, J7 and J9 now report the verdict they themselves computed and durably recorded, proven against work that genuinely fails through the real production adapters
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 54
-  completed_plans: 53
+  completed_plans: 54
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 18 of 19
+Plan: 19 of 19
 Status: Gap-closure round 6 wave 1 complete (03-18) — 03-19 (wave 2) still outstanding; TEL-06 deliberately left open pending independent re-verification
 Last activity: 2026-08-19 — 03-18 stopped J5/J6/J7/J9 reporting a genuine, durably-recorded work failure to the operator as succeeded
 
-Progress: [██████████] 98%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -108,6 +108,7 @@ Progress: [██████████] 98%
 | Phase 03 P16 | 22min | 2 tasks | 5 files |
 | Phase 03 P17 | 18min | 3 tasks | 6 files |
 | Phase 03 P18 | 24min | 2 tasks | 3 files |
+| Phase 03 P19 | 11min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -241,6 +242,9 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase 03]: 03-18: _run_scheduled_discovery and _run_startup_discovery return outcome != 'failed' on the work path and an explicit None only on a genuine skip — None now carries exactly one meaning at the worker dispatch boundary
 - [Phase 03]: 03-18: outcome != 'failed' is typed against run_discovery's documented three-literal contract ('busy' | 'completed' | 'failed'), so contention stays a success and only a genuine failure is False
 - [Phase 03]: 03-18: outcome regressions must force the failure at the collaborator boundary and drive the exact callable dashboard/worker.py wires in — stubbing the poller under test is what kept five verification rounds green while the defect was live
+- [Phase 03]: Closed deferred-items.md row 8's two transient contention sites rather than merely restating the deferral: a busy discovery lock and a contended uptime probe now return None, so dispatch_callback records succeeded instead of a fabricated job_failed card — requeue_scan_for_worker genuinely returns the claim to status='queued' and _uptime_lock contention is self-clearing on the next tick, and no existing test pinned the old False-mapped behaviour; both contracts are now pinned by the new regressions
+- [Phase 03]: The compound-startup durable-evidence retry is strictly additive: one bounded best-effort _write_job_health_transition wrapped in its own try/except, placed before an unconditional re-raise that stays unchanged — Round 5's achievement was making a compound startup failure escape loudly; the retry adds an operator-facing evidence channel without ever suppressing, delaying or looping around that escape, pinned in both the retry-succeeds and retry-fails directions
+- [Phase 03]: UNRECORDED_OUTCOME_FLOOR_SECONDS is now pinned against external facts (connect_db's two 30 s lock waits, DISCOVERY_TIMEOUT_SECONDS) and proven non-tautological by a mutation-and-restore run — Round 5 proved the prior subtests derived every expectation from the constant under test, so setting it to 30 left the suite byte-identical; the new assertions read only other modules' values and were confirmed to fail against a regressed floor
 
 ### Pending Todos
 
@@ -271,6 +275,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T13:01:23.121Z
-Stopped at: Completed 03-18-PLAN.md
+Last session: 2026-08-19T13:17:20.511Z
+Stopped at: Completed 03-19-PLAN.md
 Resume file: None

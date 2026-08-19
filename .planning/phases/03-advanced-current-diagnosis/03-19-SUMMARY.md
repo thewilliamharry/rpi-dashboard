@@ -302,3 +302,7 @@ None — no external service configuration required.
 *Phase: 03-advanced-current-diagnosis*
 *Plan: 19*
 *Completed: 2026-08-19*
+
+## Self-Check: PASSED
+
+All four modified files and the SUMMARY exist on disk, and all five task commits (`a08cfef`, `974ac41`, `f2a2a4a`, `2d20ed2`, `a584814`) plus the metadata commit (`23a99e0`) are present in git history.
