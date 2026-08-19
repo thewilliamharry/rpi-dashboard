@@ -1331,7 +1331,9 @@ def _legacy_run_discovery(source='scheduled'):
 
 def _legacy_do_uptime_check(only_down=False):
     if not _uptime_lock.acquire(blocking=False):
-        return False
+        # Another run already owns this work -- a concurrent uptime probe holding
+        # the lock is not a job failure. It self-clears on the next scheduled tick.
+        return None
     now = int(time.time())
     expire_cutoff = now - EXPIRE_DAYS * 86400
     transitions = []
@@ -1821,7 +1823,12 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
                 beacon_queues.requeue_scan_for_worker(
                     authority, claim.request_id, claim.lease_owner, now=int(now_fn()),
                 )
-            return False
+            # Another run already owns this work -- a busy discovery lock is not a
+            # job failure. The claim was just returned to queued above; the next
+            # scheduled poll picks it up. Returning anything other than a literal
+            # False means dispatch_callback records this as succeeded, not a
+            # fabricated job_failed.
+            return None
         state = _read_scan_state()
         status = 'failed' if outcome == 'failed' or state.get('last_error') else 'completed'
         error = state.get('last_error') if status == 'failed' else None
