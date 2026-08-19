@@ -1755,6 +1755,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
 
         exceptions = diagnosis.compose_active_exceptions(
             host, [], pipeline, recovery_required=False, now=1_700_000_000,
+            discovery_timeout_seconds=self.appmod.DISCOVERY_TIMEOUT_SECONDS,
         )
 
         self.assertEqual(len(exceptions), 1)
@@ -1783,11 +1784,16 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         floor = diagnosis.UNRECORDED_OUTCOME_FLOOR_SECONDS
         boundary = max(floor, 4 * cadence)
 
-        def compose_many(jobs):
+        def compose_many(jobs, *, discovery_timeout_seconds=None):
             pipeline = self._jobs_pipeline(None)
             pipeline['jobs'] = jobs
             return diagnosis.compose_active_exceptions(
                 host, [], pipeline, recovery_required=False, now=now,
+                discovery_timeout_seconds=(
+                    self.appmod.DISCOVERY_TIMEOUT_SECONDS
+                    if discovery_timeout_seconds is None
+                    else discovery_timeout_seconds
+                ),
             )
 
         def compose(job):
@@ -1830,6 +1836,36 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                     last_started_ts=now - self.appmod.DISCOVERY_TIMEOUT_SECONDS,
                 )),
                 [],
+            )
+
+        with self.subTest(
+            case='a_configured_discovery_timeout_widens_the_floor_it_used_to_ignore',
+        ):
+            # DISCOVERY_TIMEOUT_SECONDS is operator-configurable and unbounded, while
+            # the floor was the hardcoded constant alone.  Any deployment configured
+            # above 840 -- plausible on a Pi sweeping a wide port range -- had a
+            # discovery that was legitimately still running promoted as a fabricated
+            # job_outcome_unrecorded card.  One identically-aged row is measured
+            # against two configured values so the floor is proven to derive from the
+            # input rather than from the constant alone: at 1200 the widened floor
+            # covers it, and at the 180-second default the same row still promotes.
+            stuck_row = {
+                'job_id': 'J9', 'cadence_seconds': None, 'last_started_ts': now - 1200,
+            }
+            self.assertEqual(
+                compose_many(
+                    [job_row(**stuck_row)], discovery_timeout_seconds=1200,
+                ),
+                [],
+            )
+            self.assertEqual(
+                [
+                    item['job_id']
+                    for item in unrecorded_in(compose_many(
+                        [job_row(**stuck_row)], discovery_timeout_seconds=180,
+                    ))
+                ],
+                ['J9'],
             )
 
         with self.subTest(case='overdue_running_job_promotes_once'):
