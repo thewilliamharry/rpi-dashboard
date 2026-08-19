@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 14/14 plans executed (10 executed; 4 gap-closure plans pending after re-verification)
+**Plans**: 16 plans (14 executed; 2 gap-closure plans pending after re-verification round 3)
 
 - [x] 03-07-PLAN.md
 
@@ -223,6 +223,11 @@ Plans:
 - [x] 03-12-PLAN.md — Worker job health reports what the job did: decide the outcome outside the scope that records it, and give a failed bookkeeping write its own named condition (wave 1)
 - [x] 03-13-PLAN.md — Per-service collection-gap evidence joined from composed pipeline gaps with explicit completeness, rendered as operator copy instead of a serialized container (wave 2)
 - [x] 03-14-PLAN.md — REQUIREMENTS.md reconciled in one pass so its traceability table and body checklist agree at the statuses independent verification established (wave 3)
+
+**Gap closure round 3 (after 03-VERIFICATION.md re-verification round 3, status gaps_found, 3/4 — Gaps A and C closed, Gap B half-closed and half-regressed, one new gap found; DIA-03 promoted to Complete, DIA-08 ruled a Phase 4 deferral)**
+
+- [ ] 03-15-PLAN.md — Background-job health: a genuine work failure survives a failing outcome write in the raised condition, the exception chain and the log; a job stuck without an outcome becomes an operator exception; startup no longer dies on a transient lock (wave 1)
+- [ ] 03-16-PLAN.md — Per-service gap evidence: a service with no established collection stream reads differently from a collected clean one, the browser regression asserts the difference instead of pinning it shut, and the absent-value rule becomes type-based (wave 2)
 
 **Wave 1**
 
