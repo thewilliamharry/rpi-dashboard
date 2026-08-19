@@ -340,6 +340,10 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
 
     def test_outcome_paths_survive_the_bookkeeping_split(self):
         """The three outcomes that were already correct must not have moved."""
+        # The lease-loss subtest below reaches stop_worker, which reads the worker
+        # scheduler module global.  Own the reset here rather than depending on
+        # another test module's teardown having run first.
+        self.addCleanup(self._reset_worker_globals)
         now = 100
         lease = queues.acquire_worker_lease(
             self.db_path, 'job-health-outcomes', now=now, lease_seconds=30,
@@ -529,6 +533,92 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             control_row = self._job_health_row('J6')
             self.assertNotEqual(control_row['state'], 'failed')
             self.assertNotEqual(control_row['state'], 'succeeded')
+
+    def _reset_worker_globals(self):
+        """Own the worker module globals this module's tests touch."""
+        worker_main.scheduler = None
+        worker_main._worker_started = False
+        worker_main._active_services = None
+        worker_main._active_worker_id = None
+
+    def test_startup_survives_a_bookkeeping_failure(self):
+        """A failure to record that a startup job began must not stop Beacon running."""
+        self.addCleanup(self._reset_worker_globals)
+        calls = []
+
+        operations = worker_main.WorkerOperations(
+            prepare_database=lambda _settings: calls.append('prepare'),
+            recover_worker_state=lambda _authority: calls.append('recover'),
+            update_worker_heartbeat=lambda _authority: calls.append('heartbeat'),
+            collect_system_stats=lambda _authority: calls.append('metrics'),
+            read_scan_state=lambda: {},
+            run_discovery=lambda _authority, **_kwargs: None,
+            do_uptime_check=lambda _authority, **_kwargs: None,
+            process_scan_requests=lambda _authority: None,
+            process_preview_requests=lambda _authority: None,
+            cleanup_history=lambda _authority: None,
+            shutdown_browser=lambda: calls.append('shutdown_browser'),
+            acquire_worker_lease=queues.acquire_worker_lease,
+            renew_worker_lease=queues.renew_worker_authority,
+            release_worker_lease=queues.release_worker_authority,
+        )
+
+        real_write = worker_main._write_job_health_transition
+        attempted = []
+
+        def recording_write(write_services, callback_id, transition, *, error_class=None):
+            attempted.append((callback_id, transition))
+            if callback_id == 'S1':
+                raise sqlite3.OperationalError('database is locked')
+            return real_write(
+                write_services, callback_id, transition, error_class=error_class,
+            )
+
+        worker_main._write_job_health_transition = recording_write
+        self.addCleanup(
+            setattr, worker_main, '_write_job_health_transition', real_write,
+        )
+
+        observed = {}
+
+        class FakeScheduler:
+            def start(inner_self):
+                observed['worker_started'] = worker_main._worker_started
+                observed['worker_id'] = worker_main._active_worker_id
+
+            def shutdown(inner_self, wait=False):
+                observed['shutdown'] = True
+
+        with (
+            mock.patch.object(worker_main, 'build_scheduler', return_value=FakeScheduler()),
+            mock.patch.object(worker_main.signal, 'signal'),
+        ):
+            with self.assertLogs('beacon.worker', level='WARNING') as captured:
+                worker_main.run_worker(
+                    operations, SimpleNamespace(db_path=self.db_path),
+                )
+
+        # The named condition was decided about, not allowed to escape run_worker.
+        warnings = [
+            record.getMessage() for record in captured.records
+            if record.levelno == logging.WARNING and 'S1' in record.getMessage()
+        ]
+        self.assertTrue(
+            warnings, 'the bookkeeping condition must be logged with its callback',
+        )
+        for text in warnings:
+            self.assertIn('OperationalError', text)
+            self.assertNotIn('database is locked', text)
+
+        # Startup proceeded past the failing dispatch: the later startup jobs ran
+        # and the scheduler was built and started with a real epoch.
+        self.assertEqual(('S1', 'started'), attempted[0])
+        self.assertIn('heartbeat', calls)
+        self.assertIn('metrics', calls)
+        self.assertTrue(observed.get('worker_started'))
+        self.assertIsNotNone(observed.get('worker_id'))
+        # S1's own work is skipped, exactly as a failed started write requires.
+        self.assertNotIn('recover', calls)
 
     def test_stale_worker_cannot_change_job_health_evidence(self):
         now = 100
