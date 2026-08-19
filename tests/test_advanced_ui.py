@@ -1,4 +1,5 @@
 import pathlib
+import re
 import threading
 import unittest
 from urllib.parse import urlparse
@@ -6,6 +7,7 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
 
+from dashboard.beacon import diagnosis as beacon_diagnosis
 from tests.helpers import cleanup_db, load_app
 
 
@@ -1212,12 +1214,13 @@ class AdvancedUiTests(unittest.TestCase):
             service(9008, 'Legacy container', []),
         )
 
-    def _gap_evidence_page(self):
+    def _services_page(self, services):
+        """Serve one fixed service population through the production /advanced route."""
         page = self.browser.new_page(viewport={'width': 959, 'height': 800})
         payload = self._snapshot()
         payload.update({
             'exceptions': [], 'pipeline': {}, 'settings': {},
-            'services': list(self._gap_evidence_services()),
+            'services': list(services),
         })
 
         def route_api(route):
@@ -1231,6 +1234,9 @@ class AdvancedUiTests(unittest.TestCase):
         page.locator('[data-section="services"]').click()
         page.locator('#services-table').wait_for(timeout=5_000)
         return page
+
+    def _gap_evidence_page(self):
+        return self._services_page(self._gap_evidence_services())
 
     @staticmethod
     def _service_detail_evidence(page, port, label):
@@ -1295,6 +1301,112 @@ class AdvancedUiTests(unittest.TestCase):
             )
         finally:
             page.close()
+
+    @staticmethod
+    def _fabrication_services():
+        """Three shapes that are not numbers, plus one control that genuinely is.
+
+        Every value here is unreachable from the current server, which derives
+        latency, state duration, gap count and open count as `int` or `None`.
+        These fixtures exist because the client helper is the last barrier if a
+        future producer ever sends something else, and a fabricated zero on any
+        of these three surfaces is exactly the copy this phase exists to remove.
+        """
+        def service(port, name, **overrides):
+            row = {
+                'port': port, 'name': name, 'status': 'up', 'latency_ms': 15,
+                'state_duration_seconds': 120, 'critical': False, 'pinned_order': port,
+                'tags': ['fabrication'], 'effective_health_rule': '200-399',
+                'last_probe_ts': 1_700_000_000, 'expected_cadence_seconds': 5,
+                'freshness': {'state': 'fresh', 'age_seconds': 5},
+                'tls': {'posture': 'not applicable'}, 'last_error': None,
+                'failure_class': None,
+                'collection_gaps': gap_block('complete'),
+            }
+            row.update(overrides)
+            return row
+
+        return (
+            # An empty container is not a latency; the row's own failure class is.
+            service(9101, 'Container latency', latency_ms=[], failure_class='TlsHandshakeFailed'),
+            # A blank string is not a duration.
+            service(9102, 'Blank duration', state_duration_seconds='   '),
+            # A non-numeric count beside a real open gap must never hide the gap.
+            service(9103, 'Uncountable gaps', collection_gaps={
+                'items': [gap_item(9103, open_gap=True, detail=None)],
+                'count': [], 'open_count': False, 'evidence': 'complete',
+            }),
+            # A genuine numeric zero is a measurement and must survive untouched.
+            service(9104, 'Genuine zero', latency_ms=0, state_duration_seconds=0),
+        )
+
+    def test_non_numeric_server_values_never_become_a_measurement(self):
+        """A value that is not a number must never reach the operator as one.
+
+        The absent-value rule is the single gate in front of the latency cell,
+        the state-duration cell and the per-service gap count. It has to be a
+        rule about types, not a list of values someone happened to observe: an
+        empty container, a blank string and a boolean are all absences, and a
+        genuine zero on any of those surfaces is still a measurement.
+        """
+        page = self._services_page(self._fabrication_services())
+        try:
+            self.assertEqual(page.locator('#services-table tbody > tr.service-row').count(), 4)
+
+            # An empty container reaches the operator as the row's failure class.
+            container_latency = self._service_latency_cell(page, 9101)
+            self.assertEqual(container_latency, 'TlsHandshakeFailed')
+            self.assertNotRegex(container_latency, r'\d')
+
+            # A blank string reaches the operator as an unknown duration.
+            blank_duration = self._service_duration_cell(page, 9102)
+            self.assertEqual(blank_duration, 'Unknown duration')
+            self.assertNotRegex(blank_duration, r'\d')
+
+            # A genuine zero is still a measurement on both cells.
+            self.assertEqual(self._service_latency_cell(page, 9104), '0 ms')
+            self.assertEqual(self._service_duration_cell(page, 9104), '0 seconds')
+
+            toggles = page.locator('.service-details-toggle')
+            for index in range(toggles.count()):
+                toggles.nth(index).click()
+            self.assertEqual(page.locator('.service-details-toggle[aria-expanded="true"]').count(), 4)
+
+            # A non-numeric count is not zero: the gap is counted from the items
+            # it is rendered beside, so a real open gap can never read as clean.
+            self.assertEqual(
+                self._service_detail_evidence(page, 9103, 'Collection-gap evidence'),
+                '1 gap (1 open)',
+            )
+
+            # The control's genuine zero count still reads as an absence of gaps
+            # rather than as a fabricated counted phrase.
+            clean = self._service_detail_evidence(page, 9104, 'Collection-gap evidence')
+            self.assertNotRegex(clean, r'\d')
+            self.assertNotIn('(', clean)
+        finally:
+            page.close()
+
+    def test_gap_evidence_vocabulary_matches_the_server(self):
+        """The client's completeness vocabulary is the server's, compared as sets.
+
+        Both sides declare the same four literals independently. A rename on
+        either side would degrade every service row to the unavailable copy with
+        the suite still green, so the two declarations are bound here. Compared
+        as a set of values, not by constant name or order: a reordering is
+        harmless and must not fail, a rename is not and must.
+        """
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        declaration = re.search(r'SERVICE_GAP_EVIDENCE_STATES = \[([^\]]*)\]', js)
+        self.assertIsNotNone(declaration)
+        client_states = set(re.findall(r"'([^']*)'", declaration.group(1)))
+        self.assertEqual(len(client_states), 4)
+        self.assertEqual(client_states, {
+            beacon_diagnosis.SERVICE_GAP_EVIDENCE_COMPLETE,
+            beacon_diagnosis.SERVICE_GAP_EVIDENCE_POSSIBLY_INCOMPLETE,
+            beacon_diagnosis.SERVICE_GAP_EVIDENCE_ABSENT,
+            beacon_diagnosis.SERVICE_GAP_EVIDENCE_NOT_ESTABLISHED,
+        })
 
     def test_unknown_section_value_never_blanks_the_workspace(self):
         """A server section with no matching heading must not hide every section."""
