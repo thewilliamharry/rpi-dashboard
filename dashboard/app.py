@@ -28,6 +28,7 @@ try:
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
     from .beacon import queues as beacon_queues
+    from .beacon import worker_main as beacon_worker_main
     from .beacon.db import connect_db, MaintenanceBusy
     from .beacon.migrations import RECOVERY_MARKER
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
@@ -40,6 +41,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
     from beacon import queues as beacon_queues
+    from beacon import worker_main as beacon_worker_main
     from beacon.db import connect_db, MaintenanceBusy
     from beacon.migrations import RECOVERY_MARKER
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
@@ -1850,6 +1852,14 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
     heartbeat.start()
     try:
         outcome = worker_run_discovery(authority, source=f'manual:{claim.request_id}')
+        # The same membership check J7/J9 already use; its boolean return is
+        # discarded here because the busy-vs-completed branch below still needs
+        # the literal itself, not a collapsed boolean -- this call exists only
+        # to raise ValueError on an outcome outside the documented contract,
+        # letting this function's own existing except Exception handler
+        # durably record the failure exactly as it already does for
+        # run_discovery raising directly.
+        beacon_worker_main._discovery_outcome_verdict(outcome)
         if outcome == 'busy':
             if heartbeat.lost:
                 # A lost lease is a lost lease on this path too: do not requeue a
@@ -1917,6 +1927,14 @@ def process_scan_requests(worker_id, worker_owner_token, *, now_fn=None, lease_s
 
     try:
         outcome = run_discovery(source=f'manual:{request_id}')
+        # The same membership check J7/J9 already use; its boolean return is
+        # discarded here because the busy-vs-completed branch below still needs
+        # the literal itself, not a collapsed boolean -- this call exists only
+        # to raise ValueError on an outcome outside the documented contract,
+        # letting this function's own existing except Exception handler
+        # durably record the failure exactly as it already does for
+        # run_discovery raising directly.
+        beacon_worker_main._discovery_outcome_verdict(outcome)
         if outcome == 'busy':
             if heartbeat.lost:
                 log.warning('scan lease lost before requeue for request %s', request_id)

@@ -567,6 +567,88 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 'title refresh failed (exception); thumbnail refresh skipped',
             )
 
+    def test_the_real_manual_scan_poller_fails_closed_on_an_unrecognised_discovery_outcome(self):
+        """An outcome literal outside run_discovery's contract fails closed, not open.
+
+        03-VERIFICATION.md round 7 gap 1's secondary count: J5 decided the
+        discovery outcome by exclusion (only the exact 'failed' literal was a
+        fault), so an outcome outside run_discovery's documented
+        'completed'|'busy'|'failed' contract silently read as a success. This
+        routes worker_process_scan_requests through the same
+        _discovery_outcome_verdict membership check J7/J9 already use, driven
+        through the real dispatch_callback.
+        """
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'unrecognised-outcome-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            process_scan_requests=self.appmod.worker_process_scan_requests,
+        )
+
+        queues.enqueue_scan(self.db_path, 'unrecognised-outcome', now=now)
+        with mock.patch.object(
+            self.appmod, 'worker_run_discovery',
+            return_value='an_unrecognised_discovery_outcome',
+        ):
+            self.assertIs(worker_main.dispatch_callback(services, 'J5'), False)
+
+        row = self._job_health_row('J5')
+        self.assertEqual(row['state'], 'failed')
+
+        queue_row = self._latest_queue_row('scan_requests')
+        self.assertEqual(queue_row['status'], 'failed')
+        self.assertIn('unknown outcome', queue_row['error'])
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        self.assertEqual(
+            sorted(
+                item['job_id'] for item in payload['exceptions']
+                if item['kind'] == 'job_failed'
+            ),
+            ['J5'],
+        )
+
+    def test_the_legacy_manual_scan_poller_also_fails_closed_on_an_unrecognised_discovery_outcome(self):
+        """The legacy process_scan_requests fails closed too, at its own queue row.
+
+        This legacy sibling is NOT wired to background_job_health -- only
+        worker_process_scan_requests is, via dashboard/worker.py -- and its own
+        return value is a constant True on every non-lease-loss path both
+        before and after this fix (it ends in an unconditional `return True`
+        after `fail_scan(...)`), so it cannot discriminate and is deliberately
+        not asserted here. Only the scan_requests queue row is a genuine
+        pre/post signal for this function.
+        """
+        now = 100
+        request = queues.enqueue_scan(self.db_path, 'legacy-unrecognised-outcome', now=now)
+        owner = queues.acquire_worker_lease(
+            self.db_path, 'legacy-unrecognised-outcome-worker', now=now, lease_seconds=30,
+        )
+
+        with mock.patch.object(
+            self.appmod, 'run_discovery',
+            return_value='an_unrecognised_discovery_outcome',
+        ):
+            self.appmod.process_scan_requests(
+                owner.worker_id, owner.owner_token, now_fn=lambda: now,
+            )
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = conn.execute(
+                'SELECT status,error FROM scan_requests WHERE id=?', (request.request_id,),
+            ).fetchone()
+            conn.close()
+        self.assertEqual(row['status'], 'failed')
+        self.assertIn('unknown outcome', row['error'])
+
     def _latest_queue_row(self, table):
         """Read the newest durable queue row so its verdict can be compared."""
         if table not in {'scan_requests', 'preview_requests'}:
