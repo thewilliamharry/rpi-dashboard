@@ -36,22 +36,34 @@ RUNNING_JOB_STATE = 'running'
 # own poll interval: J5 and J6 poll every two seconds precisely because an idle run
 # is short while a run that finds work is unboundedly longer.  Fifteen minutes sits
 # comfortably above both of connect_db's thirty-second lock waits and above
-# discovery's one-hundred-and-eighty-second timeout.
+# discovery's one-hundred-and-eighty-second DEFAULT timeout.  That default is not
+# the only value an operator may configure, so _unrecorded_outcome_boundary widens
+# this floor further whenever the configured DISCOVERY_TIMEOUT_SECONDS approaches
+# or exceeds it: the guarantee is stated against the value actually in force, never
+# against the default alone.
 UNRECORDED_OUTCOME_FLOOR_SECONDS = 900
 
 
-def _unrecorded_outcome_boundary(cadence_seconds):
-    """Resolve how long a start may stand without an outcome before it is a fault."""
+def _unrecorded_outcome_boundary(cadence_seconds, discovery_timeout_seconds):
+    """Resolve how long a start may stand without an outcome before it is a fault.
+
+    The fixed floor is first widened, where necessary, to the operator's own
+    configured ``DISCOVERY_TIMEOUT_SECONDS`` plus a minute of headroom, so a
+    discovery that is legitimately still working inside its configured budget is
+    never promoted as a fabricated fault on a deployment configured above the
+    constant.
+    """
+    floor = max(UNRECORDED_OUTCOME_FLOOR_SECONDS, int(discovery_timeout_seconds) + 60)
     if type(cadence_seconds) is int and cadence_seconds > 0:
         # freshness_state's own four-times-cadence multiple and strict-integer
         # discipline, reused rather than a second convention.  The larger of the two
         # always wins, so a job whose own cadence exceeds the floor is measured
         # against its cadence and no job is measured below the floor.
-        return max(UNRECORDED_OUTCOME_FLOOR_SECONDS, 4 * cadence_seconds)
+        return max(floor, 4 * cadence_seconds)
     # An absent, malformed or non-positive cadence describes a startup or lifecycle
     # callback with no configured interval.  It is measured against the same floor
     # as every other job rather than exempted from the promotion built to catch it.
-    return UNRECORDED_OUTCOME_FLOOR_SECONDS
+    return floor
 
 
 def gap_exception_kind(reason):
@@ -419,7 +431,9 @@ def attach_service_collection_gaps(services, pipeline):
     return services
 
 
-def compose_active_exceptions(host, services, pipeline, *, recovery_required, now):
+def compose_active_exceptions(
+    host, services, pipeline, *, recovery_required, now, discovery_timeout_seconds,
+):
     """Produce a safety-first deterministic exception projection without causal inference."""
     exceptions = []
     if recovery_required:
@@ -465,7 +479,9 @@ def compose_active_exceptions(host, services, pipeline, *, recovery_required, no
             and type(job.get('last_started_ts')) is int
             and type(now) is int
             and max(0, now - job['last_started_ts'])
-            > _unrecorded_outcome_boundary(job.get('cadence_seconds'))
+            > _unrecorded_outcome_boundary(
+                job.get('cadence_seconds'), discovery_timeout_seconds,
+            )
         ):
             # Explicit keys only, never a spread of the durable row, so a future
             # column can neither override this classification nor break the sort.
@@ -526,5 +542,6 @@ def get_current_diagnosis(db_path, settings, now):
         },
         'exceptions': compose_active_exceptions(
             host, services, pipeline, recovery_required=recovery_required, now=now,
+            discovery_timeout_seconds=settings.discovery_timeout_seconds,
         ),
     }
