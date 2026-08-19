@@ -241,3 +241,7 @@ None — no external service configuration required.
 ---
 *Phase: 03-advanced-current-diagnosis*
 *Completed: 2026-08-19*
+
+## Self-Check: PASSED
+
+All five modified source files and the SUMMARY itself exist on disk. All seven commits (`7331849`, `39bd5d6`, `2e1d2fe`, `3a3e0b2`, `055fa27`, `d14d9ca`, `e1cae81`) are present in the repository history. No claimed artifact or commit is missing.
