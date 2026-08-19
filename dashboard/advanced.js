@@ -68,6 +68,12 @@
     return value === null || value === undefined || value === '' ? 'Unknown' : `${value}${suffix}`;
   }
 
+  function finiteMeasurement(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const measurement = Number(value);
+    return Number.isFinite(measurement) ? measurement : null;
+  }
+
   function displayTimestamp(timestamp) {
     if (!Number.isFinite(timestamp)) return 'Unknown';
     return new Date(timestamp * 1000).toLocaleString();
@@ -626,8 +632,8 @@
       const status = document.createElement('td');
       status.textContent = `● ${serviceAvailability(service)}`;
       const latency = document.createElement('td');
-      const latencyValue = Number(service.latency_ms);
-      latency.textContent = Number.isFinite(latencyValue) ? `${latencyValue} ms` : displayValue(service.failure_class || service.last_error, '');
+      const latencyValue = finiteMeasurement(service.latency_ms);
+      latency.textContent = latencyValue === null ? displayValue(service.failure_class || service.last_error, '') : `${latencyValue} ms`;
       const duration = document.createElement('td'); duration.textContent = formatDuration(serviceDuration(service));
       const criticality = document.createElement('td'); criticality.textContent = service.critical ? 'Critical' : 'Standard';
       const freshness = document.createElement('td'); freshness.textContent = `● ${serviceFreshness(service)} — ${relativeAge((service.freshness || {}).age_seconds)}`;
