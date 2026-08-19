@@ -1141,18 +1141,35 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         diagnosis = self.appmod.beacon_diagnosis
         host = {'freshness': {'state': 'fresh', 'age_seconds': 1}}
         now = 1_700_000_000
-        cadence = 60
+        cadence = 300
+        # The rule pinned here is stated independently of the code that computes it:
+        # the LARGER of a fixed floor and four times the job's own cadence.  A `min`
+        # would silently lower every long-cadence job's threshold, and a bare cadence
+        # multiple is the defect this boundary replaces.
+        floor = diagnosis.UNRECORDED_OUTCOME_FLOOR_SECONDS
+        boundary = max(floor, 4 * cadence)
+
+        def compose_many(jobs):
+            pipeline = self._jobs_pipeline(None)
+            pipeline['jobs'] = jobs
+            return diagnosis.compose_active_exceptions(
+                host, [], pipeline, recovery_required=False, now=now,
+            )
 
         def compose(job):
-            return diagnosis.compose_active_exceptions(
-                host, [], self._jobs_pipeline(job), recovery_required=False, now=now,
-            )
+            return compose_many([job])
+
+        def unrecorded_in(exceptions):
+            return [
+                item for item in exceptions
+                if item['kind'] == 'job_outcome_unrecorded'
+            ]
 
         def job_row(**overrides):
             row = {
                 'job_id': 'J2',
                 'state': 'running',
-                'last_started_ts': now - 5 * cadence,
+                'last_started_ts': now - boundary - 1,
                 'cadence_seconds': cadence,
             }
             row.update(overrides)
@@ -1160,10 +1177,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
 
         with self.subTest(case='overdue_running_job_promotes_once'):
             exceptions = compose(job_row())
-            unrecorded = [
-                item for item in exceptions
-                if item['kind'] == 'job_outcome_unrecorded'
-            ]
+            unrecorded = unrecorded_in(exceptions)
             self.assertEqual(len(unrecorded), 1)
             self.assertEqual(unrecorded[0]['job_id'], 'J2')
             self.assertEqual(unrecorded[0]['section'], 'pipeline')
@@ -1171,16 +1185,53 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 [item for item in exceptions if item['kind'] == 'job_failed'], [],
             )
 
+        with self.subTest(case='exactly_at_the_boundary_promotes_nothing'):
+            # Adjacency at the boundary favours the non-alarm: the comparison is
+            # strictly greater-than, never inclusive.
+            self.assertEqual(compose(job_row(last_started_ts=now - boundary)), [])
+
         with self.subTest(case='running_inside_its_cadence_window_promotes_nothing'):
             self.assertEqual(compose(job_row(last_started_ts=now - cadence)), [])
+
+        with self.subTest(case='short_cadence_job_nine_seconds_in_promotes_nothing'):
+            # J5/J6 ship a 2 s cadence; a Chromium preview on Pi hardware routinely
+            # runs longer than the 8 s a bare cadence multiple would have allowed.
+            self.assertEqual(
+                compose(job_row(cadence_seconds=2, last_started_ts=now - 9)), [],
+            )
+
+        with self.subTest(case='heartbeat_blocked_behind_the_maintenance_lock_promotes_nothing'):
+            # J1 ships a 5 s cadence, while connect_db is itself allowed a 30 s flock
+            # wait; 25 s behind that lock is legitimate work, not a wedged job.
+            self.assertEqual(
+                compose(job_row(cadence_seconds=5, last_started_ts=now - 25)), [],
+            )
 
         with self.subTest(case='unknown_state_promotes_nothing'):
             self.assertEqual(
                 compose(job_row(state='unknown', last_started_ts=None)), [],
             )
 
-        with self.subTest(case='absent_cadence_promotes_nothing'):
-            self.assertEqual(compose(job_row(cadence_seconds=None)), [])
+        with self.subTest(case='absent_cadence_inside_the_floor_promotes_nothing'):
+            # A startup callback promotes nothing here because it is inside the floor,
+            # not because an absent cadence exempts it structurally.
+            self.assertEqual(
+                compose(job_row(
+                    job_id='S1', cadence_seconds=None,
+                    last_started_ts=now - floor + 1,
+                )),
+                [],
+            )
+
+        with self.subTest(case='absent_cadence_past_the_floor_promotes_once'):
+            # The exemption is gone: a wedged S1 is measured against the same floor
+            # every other job is measured against.
+            unrecorded = unrecorded_in(compose(job_row(
+                job_id='S1', cadence_seconds=None,
+                last_started_ts=now - floor - 1,
+            )))
+            self.assertEqual(len(unrecorded), 1)
+            self.assertEqual(unrecorded[0]['job_id'], 'S1')
 
         with self.subTest(case='non_integer_start_promotes_nothing'):
             self.assertEqual(compose(job_row(last_started_ts=None)), [])
@@ -1189,6 +1240,15 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             exceptions = compose(job_row(state='failed'))
             self.assertEqual([item['kind'] for item in exceptions], ['job_failed'])
             self.assertEqual(exceptions[0]['job_id'], 'J2')
+
+        with self.subTest(case='two_overdue_jobs_promote_in_stable_job_id_order'):
+            unrecorded = unrecorded_in(compose_many([
+                job_row(job_id='J8', cadence_seconds=None,
+                        last_started_ts=now - floor - 1),
+                job_row(job_id='J3', cadence_seconds=None,
+                        last_started_ts=now - floor - 1),
+            ]))
+            self.assertEqual([item['job_id'] for item in unrecorded], ['J3', 'J8'])
 
     def _reset_gap_evidence(self, conn):
         conn.execute('DELETE FROM telemetry_streams')
