@@ -465,6 +465,100 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 self.assertEqual(row['state'], 'succeeded')
                 self.assertEqual(job_failed_items(job_id), [])
 
+    def test_a_discovery_busy_scan_requeue_is_not_reported_as_a_failure(self):
+        """Losing the discovery lock is not a fault; the claim goes back on the queue.
+
+        ``deferred-items.md`` row 8 recorded this site as a fabricated
+        ``Background job failed`` card deliberately left open, and round 5 judged
+        the 03-08 honesty prohibition still violated on it: "another run already
+        owns this work" is not a fault.  The claim is genuinely returned to
+        ``status='queued'`` by ``requeue_scan_for_worker``, so the next scheduled
+        poll picks it up -- exactly the same shape as an empty queue, which
+        already records ``succeeded``.  The real production adapter and the real
+        ``dispatch_callback`` are driven here, never a stand-in for either.
+        """
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'busy-requeue-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            process_scan_requests=self.appmod.worker_process_scan_requests,
+        )
+
+        queues.enqueue_scan(self.db_path, 'busy-requeue', now=now)
+        with mock.patch.object(self.appmod, 'run_discovery', return_value='busy'):
+            self.assertIsNone(worker_main.dispatch_callback(services, 'J5'))
+
+        row = self._job_health_row('J5')
+        self.assertEqual(row['state'], 'succeeded')
+        self.assertIsNone(row['error_class'])
+
+        # The requeue contract is unchanged by this closure: the claim is back on
+        # the queue for the next tick, not lost and not terminal.
+        queue_row = self._latest_queue_row('scan_requests')
+        self.assertEqual(queue_row['status'], 'queued')
+        self.assertIsNone(queue_row['error'])
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        self.assertEqual(
+            [
+                item for item in payload['exceptions']
+                if item['kind'] == 'job_failed' and item.get('job_id') == 'J5'
+            ],
+            [],
+        )
+
+    def test_an_uptime_lock_collision_is_not_reported_as_a_failure(self):
+        """A J3/J4 overlap yields to the holder; yielding is not a fault.
+
+        J3 (every 5 min) and J4 (every 1 min) share ``ThreadPoolExecutor(2)`` and
+        the same ``_uptime_lock``.  Whenever they overlap the later probe finds
+        the lock held and returns immediately, which round 5 judged still shows
+        the operator a ``Background job failed`` card for a run that merely lost a
+        lock.  The lock contract is unchanged here -- the loser still yields to
+        the holder without touching any durable service state -- only how that
+        yield is reported.
+        """
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'uptime-collision-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            do_uptime_check=self.appmod.worker_do_uptime_check,
+        )
+
+        # Stand in for the concurrent probe that already owns the work.
+        self.assertTrue(self.appmod._uptime_lock.acquire(blocking=False))
+        try:
+            self.assertIsNone(worker_main.dispatch_callback(services, 'J3'))
+        finally:
+            self.appmod._uptime_lock.release()
+
+        row = self._job_health_row('J3')
+        self.assertEqual(row['state'], 'succeeded')
+        self.assertIsNone(row['error_class'])
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        self.assertEqual(
+            [
+                item for item in payload['exceptions']
+                if item['kind'] == 'job_failed' and item.get('job_id') == 'J3'
+            ],
+            [],
+        )
+
     def test_a_succeeded_callback_never_records_durable_failed_evidence(self):
         """Gap B: a failed bookkeeping write must never become a verdict on the work."""
         now = 100
