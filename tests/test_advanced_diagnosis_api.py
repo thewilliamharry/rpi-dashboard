@@ -660,6 +660,79 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         # S1's own work is skipped, exactly as a failed started write requires.
         self.assertNotIn('recover', calls)
 
+    def test_a_compound_startup_failure_reaches_the_operator_instead_of_continuing(self):
+        """Startup work that failed AND could not record it must not continue quietly."""
+        self.addCleanup(self._reset_worker_globals)
+        calls = []
+
+        class RecoverBlewUp(RuntimeError):
+            pass
+
+        def recover(_authority):
+            calls.append('recover')
+            raise RecoverBlewUp('secret message')
+
+        operations = worker_main.WorkerOperations(
+            prepare_database=lambda _settings: calls.append('prepare'),
+            recover_worker_state=recover,
+            update_worker_heartbeat=lambda _authority: calls.append('heartbeat'),
+            collect_system_stats=lambda _authority: calls.append('metrics'),
+            read_scan_state=lambda: {},
+            run_discovery=lambda _authority, **_kwargs: None,
+            do_uptime_check=lambda _authority, **_kwargs: None,
+            process_scan_requests=lambda _authority: None,
+            process_preview_requests=lambda _authority: None,
+            cleanup_history=lambda _authority: None,
+            shutdown_browser=lambda: calls.append('shutdown_browser'),
+            acquire_worker_lease=queues.acquire_worker_lease,
+            renew_worker_lease=queues.renew_worker_authority,
+            release_worker_lease=queues.release_worker_authority,
+        )
+
+        real_write = worker_main._write_job_health_transition
+        attempted = []
+
+        def recording_write(write_services, callback_id, transition, *, error_class=None):
+            attempted.append((callback_id, transition))
+            # Only the write that would have recorded S1's own work failure fails, so
+            # the condition raised carries both halves: a real work failure and the
+            # failure to record it.
+            if callback_id == 'S1' and transition == 'failed':
+                raise sqlite3.OperationalError('database is locked')
+            return real_write(
+                write_services, callback_id, transition, error_class=error_class,
+            )
+
+        worker_main._write_job_health_transition = recording_write
+        self.addCleanup(
+            setattr, worker_main, '_write_job_health_transition', real_write,
+        )
+
+        with (
+            mock.patch.object(worker_main, 'build_scheduler') as build_scheduler,
+            mock.patch.object(worker_main.signal, 'signal'),
+        ):
+            with self.assertRaises(worker_main.JobHealthBookkeepingError) as raised:
+                worker_main.run_worker(
+                    operations, SimpleNamespace(db_path=self.db_path),
+                )
+
+        # The work failure is named on the condition that escaped, not erased.
+        self.assertEqual(raised.exception.work_error_class, 'RecoverBlewUp')
+        self.assertNotIn('secret message', str(raised.exception))
+
+        # Beacon never reached the scheduler on state nothing confirmed.
+        build_scheduler.assert_not_called()
+        self.assertFalse(worker_main._worker_started)
+
+        # S1 attempted its start and its failure, and nothing after.
+        self.assertEqual(attempted, [('S1', 'started'), ('S1', 'failed')])
+
+        # Startup halted at S1: the later startup dispatches never ran.
+        self.assertIn('recover', calls)
+        self.assertNotIn('heartbeat', calls)
+        self.assertNotIn('metrics', calls)
+
     def test_stale_worker_cannot_change_job_health_evidence(self):
         now = 100
         lease_a = queues.acquire_worker_lease(
