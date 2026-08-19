@@ -708,6 +708,13 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         lock.  The lock contract is unchanged here -- the loser still yields to
         the holder without touching any durable service state -- only how that
         yield is reported.
+
+        03-19-REVIEW.md WR-02: the comment at that site now discloses honestly
+        that a down-only holder's work is not equivalent to a full sweep's, and
+        this pins the asymmetry it discloses -- the losing J3's own
+        ``last_uptime_check`` is never advanced, so its coverage gap must stay
+        visible on the telemetry-coverage surface rather than being silently
+        claimed as covered by this dispatch.
         """
         now = 100
         lease = queues.acquire_worker_lease(
@@ -732,6 +739,11 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         row = self._job_health_row('J3')
         self.assertEqual(row['state'], 'succeeded')
         self.assertIsNone(row['error_class'])
+
+        # Yielding is not a fault, but neither is it coverage: the full sweep this
+        # dispatch did not run leaves its own coverage clock exactly where it was.
+        state = self.appmod._read_scan_state()
+        self.assertIsNone(state['last_uptime_check'])
 
         diagnosis = self.appmod.beacon_diagnosis
         payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)

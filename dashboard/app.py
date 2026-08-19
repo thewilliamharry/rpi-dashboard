@@ -1331,8 +1331,15 @@ def _legacy_run_discovery(source='scheduled'):
 
 def _legacy_do_uptime_check(only_down=False):
     if not _uptime_lock.acquire(blocking=False):
-        # Another run already owns this work -- a concurrent uptime probe holding
-        # the lock is not a job failure. It self-clears on the next scheduled tick.
+        # Another run already owns this work -- yielding here is not a job failure,
+        # so this still records succeeded, never a fabricated job_failed.  That is
+        # NOT the same claim as "the two runs are equivalent": J3 (only_down=False,
+        # every 5 min) and J4 (only_down=True, every 1 min) share this lock and
+        # collide by construction every fifth J4 tick, because 300 is a multiple of
+        # 60.  A down-only holder does not perform a full sweep -- it never advances
+        # last_uptime_check.  When J3 is the loser, that cycle's full-service
+        # coverage is skipped, not covered; the telemetry-coverage surface is what
+        # must disclose a real gap, never this return value.
         return None
     now = int(time.time())
     expire_cutoff = now - EXPIRE_DAYS * 86400
