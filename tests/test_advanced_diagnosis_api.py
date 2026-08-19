@@ -68,7 +68,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
         payload = response.get_json()
-        self.assertEqual(payload['schema_version'], 2)
+        self.assertEqual(payload['schema_version'], 3)
         self.assertEqual(payload['generated_ts'], 1_700_000_005)
         self.assertEqual(payload['host']['identity']['hostname'], 'beacon-pi')
         self.assertEqual(payload['host']['metrics']['cpu'], {'value': 21.5, 'unit': 'percent'})
@@ -1005,6 +1005,210 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             [(item['open'], item['actionable']) for item in gaps['items']],
             [(True, True), (False, True), (False, True), (False, False)],
         )
+
+    def _seed_service(self, conn, port, *, now, online=1):
+        """Seed one active service row so the composer emits it in the read model."""
+        conn.execute(
+            'INSERT INTO services(port,title,first_seen,last_seen,is_online,last_latency_ms,'
+            'last_error,state_since) VALUES(?,?,?,?,?,?,?,?)',
+            (port, f'Service {port}', now - 20, now, online, 1.0, None, now - 10),
+        )
+        conn.execute(
+            'INSERT INTO service_meta(port,display_name,url,critical,pinned_order,tags,'
+            'healthy_statuses) VALUES(?,?,?,?,?,?,?)',
+            (port, f'Service {port}', f'http://127.0.0.1:{port}', 0, port, '', '200-399'),
+        )
+        conn.execute(
+            'INSERT INTO service_checks(ts,port,online,latency_ms,error_class) VALUES(?,?,?,?,?)',
+            (now, port, online, 1.0, None),
+        )
+
+    def _reset_service_evidence(self, conn):
+        conn.execute('DELETE FROM service_checks')
+        conn.execute('DELETE FROM service_meta')
+        conn.execute('DELETE FROM services')
+
+    def test_service_collection_gap_evidence_is_joined_and_discloses_its_completeness(self):
+        """A service's gap evidence is joined from its own stream and states its completeness.
+
+        Each of the four states is grounded in a durable read fact: the gap read's
+        own truncation flag decides complete versus possibly incomplete for a
+        matched stream, and the stream read's own truncation flag decides
+        derivably absent versus not established for an unmatched one. The join
+        must leave the top-level bounded gap projection -- the population whose
+        count and truncation flag 03-08 made describe one population -- unchanged.
+        """
+        now = 1_700_000_000
+        self._freeze_clock(now)
+
+        with self.subTest(case='matched_stream_with_complete_gap_evidence'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                self._reset_service_evidence(conn)
+                self._seed_service(conn, 8080, now=now)
+                self._seed_stream(conn, 'service', '8080', now=now, open_gap_start_ts=now - 100)
+                conn.execute(
+                    'INSERT INTO telemetry_coverage('
+                    'stream_kind,stream_key,start_ts,end_ts,reason,detail) VALUES(?,?,?,?,?,?)',
+                    ('service', '8080', now - 800, now - 200, 'collection_gap', 'closed-a'),
+                )
+                conn.commit()
+                conn.close()
+
+            payload = self.client.get('/api/advanced/current').get_json()
+            block = {row['port']: row for row in payload['services']}[8080]['collection_gaps']
+
+            self.assertEqual(block['evidence'], 'complete')
+            self.assertEqual(block['count'], 2)
+            self.assertEqual(block['open_count'], 1)
+            self.assertEqual(block['count'], len(block['items']))
+            self.assertEqual(
+                [(item['detail'], item['open']) for item in block['items']],
+                [('closed-a', False), (None, True)],
+            )
+            self.assertEqual(
+                {(item['stream_kind'], item['stream_key']) for item in block['items']},
+                {('service', '8080')},
+            )
+            self.assertFalse(payload['pipeline']['streams']['truncated'])
+            self.assertFalse(payload['pipeline']['streams']['gap_evidence_truncated'])
+            # The join is additive: the bounded top-level projection is untouched.
+            gaps = payload['pipeline']['gaps']
+            self.assertEqual(gaps['count'], 2)
+            self.assertEqual(gaps['count'], len(gaps['items']))
+            self.assertFalse(gaps['truncated'])
+
+        with self.subTest(case='matched_stream_with_truncated_gap_evidence'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                self._reset_service_evidence(conn)
+                self._seed_service(conn, 8080, now=now)
+                self._seed_stream(conn, 'service', '8080', now=now, open_gap_start_ts=now - 100)
+                self._seed_stream(conn, 'host', 'cpu', now=now)
+                conn.execute(
+                    'INSERT INTO telemetry_coverage('
+                    'stream_kind,stream_key,start_ts,end_ts,reason,detail) VALUES(?,?,?,?,?,?)',
+                    ('service', '8080', now - 800, now - 200, 'collection_gap', 'closed-a'),
+                )
+                # Older host coverage pushes the durable gap read past its own cap
+                # without displacing this service's newer row out of that read.
+                conn.executemany(
+                    'INSERT INTO telemetry_coverage('
+                    'stream_kind,stream_key,start_ts,end_ts,reason,detail) VALUES(?,?,?,?,?,?)',
+                    [
+                        ('host', 'cpu', now - 100_000 - index * 10,
+                         now - 99_000 - index * 10, 'collection_gap', f'host-{index:02d}')
+                        for index in range(60)
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+            payload = self.client.get('/api/advanced/current').get_json()
+            block = {row['port']: row for row in payload['services']}[8080]['collection_gaps']
+
+            self.assertEqual(block['evidence'], 'possibly_incomplete')
+            self.assertEqual(block['count'], 2)
+            self.assertEqual(block['open_count'], 1)
+            self.assertEqual(
+                [(item['detail'], item['open']) for item in block['items']],
+                [('closed-a', False), (None, True)],
+            )
+            self.assertTrue(payload['pipeline']['streams']['gap_evidence_truncated'])
+            self.assertFalse(payload['pipeline']['streams']['truncated'])
+            gaps = payload['pipeline']['gaps']
+            self.assertTrue(gaps['truncated'])
+            self.assertEqual(gaps['count'], len(gaps['items']))
+            self.assertLessEqual(gaps['count'], 48)
+
+        with self.subTest(case='unmatched_stream_in_a_complete_stream_list'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                self._reset_service_evidence(conn)
+                self._seed_service(conn, 8081, now=now)
+                self._seed_stream(conn, 'host', 'cpu', now=now)
+                conn.commit()
+                conn.close()
+
+            payload = self.client.get('/api/advanced/current').get_json()
+            block = {row['port']: row for row in payload['services']}[8081]['collection_gaps']
+
+            self.assertFalse(payload['pipeline']['streams']['truncated'])
+            self.assertEqual(block['evidence'], 'absent')
+            self.assertEqual(block['items'], [])
+            self.assertEqual(block['count'], 0)
+            self.assertEqual(block['open_count'], 0)
+
+        with self.subTest(case='unmatched_stream_in_a_truncated_stream_list'):
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                self._reset_gap_evidence(conn)
+                self._reset_service_evidence(conn)
+                self._seed_service(conn, 8082, now=now)
+                for index in range(65):
+                    self._seed_stream(conn, 'host', f'stream-{index:02d}', now=now)
+                conn.commit()
+                conn.close()
+
+            payload = self.client.get('/api/advanced/current').get_json()
+            block = {row['port']: row for row in payload['services']}[8082]['collection_gaps']
+
+            self.assertTrue(payload['pipeline']['streams']['truncated'])
+            self.assertEqual(block['evidence'], 'not_established')
+            self.assertEqual(block['items'], [])
+            self.assertEqual(block['count'], 0)
+            self.assertEqual(block['open_count'], 0)
+
+    def test_service_gap_completeness_never_defaults_to_an_unestablished_absence(self):
+        """A truncation flag that is missing or not a boolean resolves to not established.
+
+        An absence the workspace never established must never be reported as a
+        derived absence, so only a real ``False`` may produce the absent state.
+        """
+        attach = self.appmod.beacon_diagnosis.attach_service_collection_gaps
+
+        unmatched_cases = (
+            ({'items': [], 'count': 0, 'truncated': False}, 'absent'),
+            ({'items': [], 'count': 0, 'truncated': True}, 'not_established'),
+            ({'items': [], 'count': 0, 'truncated': None}, 'not_established'),
+            ({'items': [], 'count': 0, 'truncated': 'no'}, 'not_established'),
+            ({'items': [], 'count': 0}, 'not_established'),
+        )
+        for streams, expected in unmatched_cases:
+            with self.subTest(unmatched=streams):
+                services = [{'port': 8080}]
+                attach(services, {'streams': dict(streams)})
+                block = services[0]['collection_gaps']
+                self.assertEqual(block['evidence'], expected)
+                self.assertEqual(block, {
+                    'items': [], 'count': 0, 'open_count': 0, 'evidence': expected,
+                })
+
+        matched_cases = (
+            ({'truncated': False, 'gap_evidence_truncated': False}, 'complete'),
+            ({'truncated': False, 'gap_evidence_truncated': True}, 'possibly_incomplete'),
+            ({'truncated': False, 'gap_evidence_truncated': None}, 'not_established'),
+            ({'truncated': False, 'gap_evidence_truncated': 'yes'}, 'not_established'),
+            ({'truncated': False}, 'not_established'),
+        )
+        for flags, expected in matched_cases:
+            with self.subTest(matched=flags):
+                stream = {
+                    'stream_kind': 'service', 'stream_key': '8080',
+                    'gaps': [{'open': False}, {'open': True}],
+                }
+                streams = {'items': [stream], 'count': 1, **flags}
+                services = [{'port': 8080}]
+                attach(services, {'streams': streams})
+                block = services[0]['collection_gaps']
+                self.assertEqual(block['evidence'], expected)
+                self.assertEqual(block['count'], 2)
+                self.assertEqual(block['open_count'], 1)
+                # The join copies the composed order and never reorders or filters.
+                self.assertEqual(block['items'], stream['gaps'])
 
     def test_host_freshness_becomes_an_active_exception_when_evidence_is_not_fresh(self):
         """Missing or stale host evidence must never be summarised as normal."""
