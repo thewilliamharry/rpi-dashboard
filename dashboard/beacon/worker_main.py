@@ -240,21 +240,33 @@ def _job_error_class(error):
 class JobHealthBookkeepingError(RuntimeError):
     """A durable job-health write failed for a reason that is not lease loss.
 
-    It carries the callback identifier, the transition that could not be written,
-    and the bounded class name of the underlying error only, so the no-message
-    discipline `_job_error_class` enforces for durable rows also holds for this
-    raised condition.  Recording a job's outcome can fail on its own; that is a
-    fact about the recording, never a verdict on the work.
+    Its own message and arguments carry the callback identifier, the transition
+    that could not be written, and bounded class names only, so the no-message
+    discipline `_job_error_class` enforces for durable rows also holds for
+    everything this condition itself states.  Chaining is deliberately separate:
+    the underlying exceptions stay attached so a maintainer reading a traceback
+    keeps the detail, which is the intended debuggability channel and is not
+    governed by this class's own no-message rule.
+
+    Recording a job's outcome can fail on its own; that is a fact about the
+    recording, never a verdict on the work.  When the write that failed was
+    trying to record a work failure, `work_error_class` names that work
+    failure's own bounded class, so separating the two conditions costs neither
+    of them its visibility.
     """
 
-    def __init__(self, callback_id, transition, error_class):
+    def __init__(self, callback_id, transition, error_class, *, work_error_class=None):
         self.callback_id = callback_id
         self.transition = transition
         self.error_class = error_class
-        super().__init__(
+        self.work_error_class = work_error_class
+        message = (
             f'background job health write failed: callback={callback_id} '
             f'transition={transition} error_class={error_class}'
         )
+        if work_error_class is not None:
+            message = f'{message} work_error_class={work_error_class}'
+        super().__init__(message)
 
 
 def _write_job_health_transition(services, callback_id, transition, *, error_class=None):
@@ -327,16 +339,36 @@ def dispatch_callback(services, callback_id):
                 services, callback_id, transition, error_class=error_class,
             )
         except queues.LeaseLost:
-            log.error('Beacon worker lease lost while recording callback failure')
+            log.error(
+                'Beacon worker lease lost while recording a callback outcome; '
+                'stopping stale scheduler: callback=%s transition=%s',
+                callback_id, transition,
+            )
             services.admission.close_admission()
             stop_worker()
             return False
         except Exception as exc:
             # No corrective or retried write: republishing here is exactly how a
-            # bookkeeping failure used to masquerade as a work failure.
+            # bookkeeping failure used to masquerade as a work failure.  But the
+            # work's own failure must not vanish with the record of it, so it is
+            # stated in the log, carried on the condition, and bound as the
+            # explicit cause.  Python has already bound the write error as the
+            # implicit context, so chaining from the work error is what keeps
+            # both reachable; chaining from the write error keeps only one.
+            work_error_class = (
+                _job_error_class(work_error) if work_error is not None else None
+            )
+            if work_error is not None:
+                log.error(
+                    'Beacon worker could not record a callback failure; reporting '
+                    'the work failure here: callback=%s transition=%s '
+                    'work_error_class=%s write_error_class=%s',
+                    callback_id, transition, work_error_class, _job_error_class(exc),
+                )
             raise JobHealthBookkeepingError(
                 callback_id, transition, _job_error_class(exc),
-            ) from exc
+                work_error_class=work_error_class,
+            ) from (work_error if work_error is not None else exc)
         if work_error is not None:
             raise work_error
         return result
