@@ -1488,6 +1488,35 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 # The join copies the composed order and never reorders or filters.
                 self.assertEqual(block['items'], stream['gaps'])
 
+    def test_a_malformed_gap_element_cannot_raise_out_of_the_service_join(self):
+        """A non-dictionary gap item is skipped, never raised into the request path.
+
+        The join normalises every enclosing container, and the open-count
+        derivation is the last hop. Without an element guard a non-dictionary
+        item raises ``AttributeError`` inside ``/api/advanced/current``, which
+        catches only ``MaintenanceBusy`` and ``sqlite3.OperationalError`` — so
+        the operator would get an unparseable HTML 500 instead of the
+        workspace's own bounded error copy. The real open gap beside the
+        malformed elements must still be counted, so hardening the shape can
+        never suppress a genuine collection failure.
+        """
+        attach = self.appmod.beacon_diagnosis.attach_service_collection_gaps
+        stream = {
+            'stream_kind': 'service', 'stream_key': '8080',
+            'gaps': ['not-a-dict', None, 42, ['open'], {'open': True}, {'open': False}],
+        }
+        services = [{'port': 8080}]
+        attach(services, {'streams': {
+            'items': [stream], 'count': 1,
+            'truncated': False, 'gap_evidence_truncated': False,
+        }})
+        block = services[0]['collection_gaps']
+        self.assertEqual(block['evidence'], 'complete')
+        self.assertEqual(block['count'], 6)
+        self.assertEqual(block['open_count'], 1)
+        # The composed order is preserved verbatim; the join filters nothing.
+        self.assertEqual(block['items'], stream['gaps'])
+
     def test_host_freshness_becomes_an_active_exception_when_evidence_is_not_fresh(self):
         """Missing or stale host evidence must never be summarised as normal."""
         now = 1_700_000_000
