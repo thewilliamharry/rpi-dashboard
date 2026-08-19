@@ -990,7 +990,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         host = {'freshness': {'state': 'fresh', 'age_seconds': 1}}
 
         exceptions = diagnosis.compose_active_exceptions(
-            host, [], pipeline, recovery_required=False,
+            host, [], pipeline, recovery_required=False, now=1_700_000_000,
         )
 
         self.assertEqual(len(exceptions), 1)

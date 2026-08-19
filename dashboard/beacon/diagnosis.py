@@ -29,6 +29,9 @@ GAP_REASON_EXCEPTION_KINDS = {
 # it would hide evidence from the operator.
 UNMAPPED_GAP_EXCEPTION_KIND = 'coverage_unknown'
 
+# The durable state literal record_background_job_started writes on a start.
+RUNNING_JOB_STATE = 'running'
+
 
 def gap_exception_kind(reason):
     """Resolve a durable coverage reason to its own exception kind, or to no exception."""
@@ -388,7 +391,7 @@ def attach_service_collection_gaps(services, pipeline):
     return services
 
 
-def compose_active_exceptions(host, services, pipeline, *, recovery_required):
+def compose_active_exceptions(host, services, pipeline, *, recovery_required, now):
     """Produce a safety-first deterministic exception projection without causal inference."""
     exceptions = []
     if recovery_required:
@@ -420,6 +423,26 @@ def compose_active_exceptions(host, services, pipeline, *, recovery_required):
     for job in pipeline['jobs']:
         if job['state'] == 'failed':
             exceptions.append({'kind': 'job_failed', 'section': 'pipeline', 'priority': 6, 'job_id': job['job_id']})
+        elif (
+            # Every input is this job's own durable row: the state literal
+            # record_background_job_started writes, its own recorded start, and its
+            # own configured cadence.  The type discipline and the four-times-cadence
+            # boundary are freshness_state's existing rules, reused rather than
+            # duplicated.  An absent row reads unknown and promotes nothing, and a job
+            # merely still working inside its own cadence window is not an alarm.
+            job['state'] == RUNNING_JOB_STATE
+            and type(job.get('last_started_ts')) is int
+            and type(job.get('cadence_seconds')) is int
+            and job['cadence_seconds'] > 0
+            and type(now) is int
+            and max(0, now - job['last_started_ts']) > 4 * job['cadence_seconds']
+        ):
+            # Explicit keys only, never a spread of the durable row, so a future
+            # column can neither override this classification nor break the sort.
+            exceptions.append({
+                'kind': 'job_outcome_unrecorded', 'section': 'pipeline', 'priority': 6,
+                'job_id': job['job_id'],
+            })
     if pipeline['database_pressure']['state'] != 'normal':
         exceptions.append({'kind': 'database_pressure', 'section': 'pipeline', 'priority': 7})
     return sorted(exceptions, key=lambda item: (item['priority'], item['kind'], item.get('port', -1), item.get('job_id', '')))
@@ -471,5 +494,7 @@ def get_current_diagnosis(db_path, settings, now):
             'worker_stale': pipeline['worker']['freshness']['state'] in {'stale', 'unknown'},
             'recovery_required': recovery_required,
         },
-        'exceptions': compose_active_exceptions(host, services, pipeline, recovery_required=recovery_required),
+        'exceptions': compose_active_exceptions(
+            host, services, pipeline, recovery_required=recovery_required, now=now,
+        ),
     }

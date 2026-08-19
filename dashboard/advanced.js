@@ -171,6 +171,10 @@
       title: `Background job failed \u2014 ${displayValue(item.job_id)}`,
       evidence: `The background job ${displayValue(item.job_id)} reported state failed. See Pipeline for its last start, last finish, and error class.`,
     })],
+    ['job_outcome_unrecorded', (item) => ({
+      title: `Background job outcome not recorded \u2014 ${displayValue(item.job_id)}`,
+      evidence: `The background job ${displayValue(item.job_id)} recorded a start and no outcome has been recorded since, for longer than its own configured cadence allows. See Pipeline for its last start, last success, and configured cadence.`,
+    })],
     ['database_pressure', () => ({
       title: 'Database pressure is not normal',
       evidence: 'Storage pressure is outside its normal state. See Pipeline for its state, reason, and snapshot.',
