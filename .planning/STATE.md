@@ -4,16 +4,16 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
-status: ready_for_verification
-stopped_at: Completed 03-14-PLAN.md
-last_updated: "2026-08-19T07:46:37.127Z"
+status: executing
+stopped_at: Completed 03-15-PLAN.md
+last_updated: "2026-08-19T09:06:40.662Z"
 last_activity: 2026-08-19
-last_activity_desc: 03-14 reconciled both halves of REQUIREMENTS.md to the verified Phase 3 statuses without promoting this round's own gap closures
+last_activity_desc: 03-15 made a genuine background-job failure survive a bookkeeping failure and promoted a job wedged without an outcome onto the operator safety surface
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 51
-  completed_plans: 49
+  completed_plans: 50
 ---
 
 # Project State
@@ -27,12 +27,12 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 ## Current Position
 
-Phase: 03 (advanced-current-diagnosis) — READY FOR RE-VERIFICATION
-Plan: 14 of 14
-Status: Gap-closure round 3 complete (03-11..03-14); TEL-06, DIA-03 and DIA-08 await independent re-verification before promotion
-Last activity: 2026-08-19 — 03-14 reconciled the project's own record of truth to what verification established
+Phase: 03 (advanced-current-diagnosis) — EXECUTING
+Plan: 16 of 16
+Status: Gap-closure round 4 in progress — 03-15 complete, 03-16 outstanding; TEL-06 deliberately left open pending independent re-verification
+Last activity: 2026-08-19 — 03-15 recovered the erased work-failure channel, added the job_outcome_unrecorded promotion, and decided what startup does with a bookkeeping failure
 
-Progress: [██████████] 100%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -104,6 +104,7 @@ Progress: [██████████] 100%
 | Phase 03 P12 | 8min | 2 tasks | 2 files |
 | Phase 03 P13 | 21min | 2 tasks | 4 files |
 | Phase 03 P14 | 7 min | 1 tasks | 1 files |
+| Phase 03 P15 | 20min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -222,6 +223,10 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: 03-14: TEL-06, DIA-03 and DIA-08 deliberately left at Gaps Found — 03-11..03-13 closing Gaps A and B is an implementation claim by this round about its own work, not the independent re-verification that alone may promote a requirement (03-10 prohibition; precedent eed5ccb)
 - [Phase ?]: 03-14: 03-VERIFICATION.md contradicts itself on TEL-06 and DIA-08; resolved in favour of the gap frontmatter's authoritative 'missing' end state over the closing narrative's capability-satisfaction summary, corroborated by each requirement's own text
 - [Phase ?]: 03-14: requirements mark-complete was invoked with only DIA-01/DIA-02/UX-02, never the plan's full six-ID requirements frontmatter — the workflow default would have re-promoted the three requirements this plan exists to keep open
+- [Phase ?]: 03-15: chain a bookkeeping condition from the work error, not the write error — Python already binds the write error as implicit __context__, so binding the work error as explicit __cause__ is what keeps both reachable
+- [Phase ?]: 03-15: derive the job_outcome_unrecorded promotion only from the job's own durable row, reusing freshness_state's four-times-cadence boundary and strict integer discipline rather than a second staleness convention
+- [Phase ?]: 03-15: a failure to record that a startup job began is a fact about the recording, never a verdict on whether Beacon runs — startup logs the condition and continues instead of dying on a transient lock
+- [Phase ?]: 03-15: build safety-surface exceptions from explicit keys only, never by spreading a durable row, so CF-WR-10's override hazard gains no second site
 
 ### Pending Todos
 
@@ -251,6 +256,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T06:25:00.314Z
-Stopped at: Completed 03-14-PLAN.md
+Last session: 2026-08-19T09:06:40.645Z
+Stopped at: Completed 03-15-PLAN.md
 Resume file: None
