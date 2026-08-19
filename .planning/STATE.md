@@ -27,12 +27,12 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 ## Current Position
 
-Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 21 of 21
-Status: Gap-closure round 7 complete (03-20 wave 1, 03-21 wave 2) — CR-01 and all four round-6 warnings closed; TEL-06 deliberately left open pending independent re-verification
-Last activity: 2026-08-19 — 03-21 made an unrecognised discovery outcome fail closed and loud, corrected the uptime-lock contention claim, and derived the outcome-unrecorded floor from the configured discovery timeout
+Phase: 03 (advanced-current-diagnosis) — READY TO EXECUTE
+Plan: 21 of 22
+Status: Gap-closure round 8 planned — 03-22-PLAN.md cleared the plan-checker (0 blockers, 0 warnings on revision 3) and closes both 03-VERIFICATION.md round-7 gaps: J6's inability to report a fault of its own capture machinery (plus J5's by-exclusion outcome) and the globally-widened job_outcome_unrecorded floor. Not yet executed. TEL-06 stays Gaps Found pending re-verification.
+Last activity: 2026-08-19 — planned round 8: fault-class split moved upstream to _get_browser()/context.new_page() so it bypasses both blanket handlers, both scan pollers routed through _discovery_outcome_verdict, and the unrecorded-outcome floor scoped to DISCOVERY_JOB_IDS with a type guard replacing int() coercion
 
-Progress: [██████████] 100%
+Progress: [█████████░] 95%
 
 ## Performance Metrics
 
