@@ -1801,7 +1801,13 @@ def worker_process_scan_requests(authority, *, now_fn=None, lease_seconds=30, he
     except beacon_queues.LeaseLost:
         raise
     if not claim:
-        return False
+        # An empty durable queue is a completed poll, not a failure. Returning
+        # anything other than a literal False here means dispatch_callback records
+        # this outcome as succeeded, not a fabricated job_failed -- see
+        # dispatch_callback's `if result is False:` branch, which is otherwise
+        # unchanged. The busy-retry `return False` below remains a distinct,
+        # out-of-scope condition -- see deferred-items.md.
+        return None
     heartbeat_factory = heartbeat_factory or beacon_queues.WorkerScanLeaseHeartbeat
     heartbeat = heartbeat_factory(
         authority, claim.request_id, claim.lease_owner,
@@ -1957,7 +1963,9 @@ def worker_process_preview_requests(authority):
     except beacon_queues.LeaseLost:
         raise
     if not claim:
-        return False
+        # An empty durable queue is a completed poll, not a failure -- see
+        # worker_process_scan_requests for the full reasoning.
+        return None
     with connect_db(authority.db_path) as conn:
         row = conn.execute(
             "SELECT COALESCE(url, '') AS url FROM service_meta WHERE port=?", (claim.port,)
