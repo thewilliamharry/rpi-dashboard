@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 9
+open_count: 10
 waived_count: 0
 fixed_count: 4
-total_count: 13
-last_updated: 2026-08-18T16:30:56.949Z
+total_count: 14
+last_updated: 2026-08-19T06:18:34.692Z
 ---
 
 # Broken Windows Ledger
@@ -28,6 +28,7 @@ last_updated: 2026-08-18T16:30:56.949Z
 | 11 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md |  | Operator-approved combined 6/11/20-minute samples replace exact pre-start/midpoint/end timing after corrected host-port command. | open |  | 2026-08-14T19:05:13.868Z |  |
 | 12 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-06-SUMMARY.md |  | Docker cgroup memory was unavailable (0B); recorded host-process RSS as the explicit RAM fallback. | open |  | 2026-08-14T19:05:14.014Z |  |
 | 13 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-07-SUMMARY.md |  | Tracer interactive human-verify gate deferred to end-of-phase per human_verify_mode; automated tracer verify and full regression passed before expansion | open |  | 2026-08-18T16:30:56.949Z |  |
+| 14 | 03 | deviation | dashboard/beacon/diagnosis.py |  | 03-13 acceptance criterion 'grep -c gap_evidence_truncated == 1' is unsatisfiable: the field needs one producer line and one consumer line (count is 2). Code left correct; gate reported, not gamed. | open |  | 2026-08-19T06:18:34.692Z |  |
 
 ````json
 [
@@ -185,6 +186,18 @@ last_updated: 2026-08-18T16:30:56.949Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-18T16:30:56.949Z",
+    "resolved_at": null
+  },
+  {
+    "id": 14,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "dashboard/beacon/diagnosis.py",
+    "line": null,
+    "description": "03-13 acceptance criterion 'grep -c gap_evidence_truncated == 1' is unsatisfiable: the field needs one producer line and one consumer line (count is 2). Code left correct; gate reported, not gamed.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-19T06:18:34.692Z",
     "resolved_at": null
   }
 ]
