@@ -264,6 +264,46 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             conn.close()
         self.assertEqual(tuple(exception_row), ('failed', None, 'DeliberateFailure'))
 
+    def test_the_real_scan_and_preview_pollers_record_an_idle_queue_as_success(self):
+        """An empty durable queue is a completed poll, proven through production's own adapters."""
+        now = 100
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'idle-queue-worker', now=now, lease_seconds=30,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        # Exactly the two callables dashboard/worker.py wires into production, never a
+        # synthetic stand-in.  Proving this mapping against a callback of the test's own
+        # making is what let an idle Pi report two fabricated failures through three
+        # verification rounds.
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=lambda: now,
+            admission=worker_main.WorkerAdmission(),
+            process_scan_requests=self.appmod.worker_process_scan_requests,
+            process_preview_requests=self.appmod.worker_process_preview_requests,
+        )
+
+        # Nothing is seeded into scan_requests or preview_requests: the empty table is
+        # the fixture, because an idle Pi is exactly that state.
+        for job_id in ('J5', 'J6'):
+            with self.subTest(job_id=job_id):
+                self.assertIsNone(worker_main.dispatch_callback(services, job_id))
+                row = self._job_health_row(job_id)
+                self.assertEqual(row['state'], 'succeeded')
+                self.assertEqual(row['last_success_ts'], now)
+                self.assertIsNone(row['error_class'])
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        self.assertEqual(
+            [
+                item for item in payload['exceptions']
+                if item['kind'] == 'job_failed' and item.get('job_id') in {'J5', 'J6'}
+            ],
+            [],
+        )
+
     def test_a_succeeded_callback_never_records_durable_failed_evidence(self):
         """Gap B: a failed bookkeeping write must never become a verdict on the work."""
         now = 100
