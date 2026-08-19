@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 11
+open_count: 12
 waived_count: 0
 fixed_count: 4
-total_count: 15
-last_updated: 2026-08-19T09:25:32.982Z
+total_count: 16
+last_updated: 2026-08-19T15:11:41.132Z
 ---
 
 # Broken Windows Ledger
@@ -30,6 +30,7 @@ last_updated: 2026-08-19T09:25:32.982Z
 | 13 | 03 | deviation | .planning/phases/03-advanced-current-diagnosis/03-07-SUMMARY.md |  | Tracer interactive human-verify gate deferred to end-of-phase per human_verify_mode; automated tracer verify and full regression passed before expansion | open |  | 2026-08-18T16:30:56.949Z |  |
 | 14 | 03 | deviation | dashboard/beacon/diagnosis.py |  | 03-13 acceptance criterion 'grep -c gap_evidence_truncated == 1' is unsatisfiable: the field needs one producer line and one consumer line (count is 2). Code left correct; gate reported, not gamed. | open |  | 2026-08-19T06:18:34.692Z |  |
 | 15 | 03 | deviation | tests/test_advanced_diagnosis_api.py |  | Plan 03-16 Task 2's acceptance selector 'pytest -k attach' deselects all tests and exits 5; the intended proof of the per-service gap-join element guard did not exist. Closed in-round by adding test_a_malformed_gap_element_cannot_raise_out_of_the_service_join, but the plan-defect class (unsatisfiable acceptance selector, second occurrence in this phase after 03-13's grep gate) remains open for the next planning round. | open |  | 2026-08-19T09:25:32.982Z |  |
+| 16 | 03 | deviation | .planning/STATE.md |  | Over-broad sed relabelled 109 pre-existing [Phase ?] decision lines as Phase 03; fully reverted before commit | open |  | 2026-08-19T15:11:41.132Z |  |
 
 ````json
 [
@@ -211,6 +212,18 @@ last_updated: 2026-08-19T09:25:32.982Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-19T09:25:32.982Z",
+    "resolved_at": null
+  },
+  {
+    "id": 16,
+    "kind": "deviation",
+    "phase": "03",
+    "file": ".planning/STATE.md",
+    "line": null,
+    "description": "Over-broad sed relabelled 109 pre-existing [Phase ?] decision lines as Phase 03; fully reverted before commit",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-19T15:11:41.132Z",
     "resolved_at": null
   }
 ]

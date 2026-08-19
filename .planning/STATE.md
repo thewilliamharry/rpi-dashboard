@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: Completed 03-19-PLAN.md
-last_updated: "2026-08-19T14:15:42.829Z"
+stopped_at: Completed 03-20-PLAN.md
+last_updated: "2026-08-19T15:10:35.663Z"
 last_activity: 2026-08-19
-last_activity_desc: 03-18 closed the fabricated-success half of the round-5 background-job-health gap — J5, J6, J7 and J9 now report the verdict they themselves computed and durably recorded, proven against work that genuinely fails through the real production adapters
+last_activity_desc: 03-20 closed round-6's one Critical finding — J6's durable job outcome is no longer derived from the previewed service's own health (CR-01) — and made a scan lease confirmed lost on the discovery-busy branch fatal instead of a fabricated clean poll (WR-04)
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 56
-  completed_plans: 54
+  completed_plans: 55
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 19 of 19
-Status: Gap-closure round 6 wave 1 complete (03-18) — 03-19 (wave 2) still outstanding; TEL-06 deliberately left open pending independent re-verification
-Last activity: 2026-08-19 — 03-18 stopped J5/J6/J7/J9 reporting a genuine, durably-recorded work failure to the operator as succeeded
+Plan: 20 of 21
+Status: Gap-closure round 7 wave 1 complete (03-20) — 03-21 (wave 2) still outstanding; TEL-06 deliberately left open pending independent re-verification
+Last activity: 2026-08-19 — 03-20 stopped an offline or untitled service fabricating a J6 job_failed card, and stopped a lost scan lease reporting a clean poll
 
-Progress: [██████████] 100%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -109,6 +109,7 @@ Progress: [██████████] 100%
 | Phase 03 P17 | 18min | 3 tasks | 6 files |
 | Phase 03 P18 | 24min | 2 tasks | 3 files |
 | Phase 03 P19 | 11min | 3 tasks | 4 files |
+| Phase 03 P20 | 15min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -245,6 +246,10 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase 03]: Closed deferred-items.md row 8's two transient contention sites rather than merely restating the deferral: a busy discovery lock and a contended uptime probe now return None, so dispatch_callback records succeeded instead of a fabricated job_failed card — requeue_scan_for_worker genuinely returns the claim to status='queued' and _uptime_lock contention is self-clearing on the next tick, and no existing test pinned the old False-mapped behaviour; both contracts are now pinned by the new regressions
 - [Phase 03]: The compound-startup durable-evidence retry is strictly additive: one bounded best-effort _write_job_health_transition wrapped in its own try/except, placed before an unconditional re-raise that stays unchanged — Round 5's achievement was making a compound startup failure escape loudly; the retry adds an operator-facing evidence channel without ever suppressing, delaying or looping around that escape, pinned in both the retry-succeeds and retry-fails directions
 - [Phase 03]: UNRECORDED_OUTCOME_FLOOR_SECONDS is now pinned against external facts (connect_db's two 30 s lock waits, DISCOVERY_TIMEOUT_SECONDS) and proven non-tautological by a mutation-and-restore run — Round 5 proved the prior subtests derived every expectation from the constant under test, so setting it to 30 left the suite byte-identical; the new assertions read only other modules' values and were confirmed to fail against a regressed floor
+- [Phase 03]: J6 succeeds whenever the poll claimed a request, attempted a capture, and durably recorded its own verdict -- regardless of the previewed service's health (03-19-REVIEW.md CR-01)
+- [Phase 03]: A lost lease is fatal on every terminal path of worker_process_scan_requests, including the discovery-busy branch, which no longer returns before the guard (WR-04)
+- [Phase 03]: worker_process_scan_requests (J5) verified against live source as NOT sharing CR-01's defect class and deliberately left unchanged
+- [Phase 03]: TEL-06 left open in both halves of REQUIREMENTS.md; promotion belongs to the next independent verifier after 03-20 and 03-21 both execute
 
 ### Pending Todos
 
@@ -275,6 +280,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T13:17:20.511Z
-Stopped at: Completed 03-19-PLAN.md
+Last session: 2026-08-19T15:10:27.759Z
+Stopped at: Completed 03-20-PLAN.md
 Resume file: None
