@@ -886,13 +886,123 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         build_scheduler.assert_not_called()
         self.assertFalse(worker_main._worker_started)
 
-        # S1 attempted its start and its failure, and nothing after.
-        self.assertEqual(attempted, [('S1', 'started'), ('S1', 'failed')])
+        # S1 attempted its start, its failure, and the bounded best-effort retry
+        # of that same failure write -- and nothing after.  This fixture's
+        # recording_write raises for every ('S1', 'failed') call, so the retry
+        # also fails and changes nothing: the same condition still escapes.
+        self.assertEqual(
+            attempted, [('S1', 'started'), ('S1', 'failed'), ('S1', 'failed')],
+        )
 
         # Startup halted at S1: the later startup dispatches never ran.
         self.assertIn('recover', calls)
         self.assertNotIn('heartbeat', calls)
         self.assertNotIn('metrics', calls)
+
+    def test_a_compound_startup_failure_leaves_durable_evidence_when_the_retry_succeeds(self):
+        """A compound startup failure must reach the /advanced workspace, not only the log.
+
+        The sibling test above proves the loud channel: the condition escapes
+        ``run_worker`` carrying the work error's own class.  Five verification
+        rounds recorded that this leaves ``background_job_health`` at ``running``,
+        so the workspace this phase is about names nothing at all about a startup
+        that both failed and failed to record its failure.  Here the FIRST write
+        of S1's failure loses a database lock and the retry succeeds, which is the
+        ordinary transient case; the durable row must then read ``failed`` with
+        the work error's class and the operator must see one ``job_failed`` card.
+        The condition still escapes exactly as before either way.
+        """
+        self.addCleanup(self._reset_worker_globals)
+        calls = []
+
+        class RecoverBlewUp(RuntimeError):
+            pass
+
+        def recover(_authority):
+            calls.append('recover')
+            raise RecoverBlewUp('secret message')
+
+        operations = worker_main.WorkerOperations(
+            prepare_database=lambda _settings: calls.append('prepare'),
+            recover_worker_state=recover,
+            update_worker_heartbeat=lambda _authority: calls.append('heartbeat'),
+            collect_system_stats=lambda _authority: calls.append('metrics'),
+            read_scan_state=lambda: {},
+            run_discovery=lambda _authority, **_kwargs: None,
+            do_uptime_check=lambda _authority, **_kwargs: None,
+            process_scan_requests=lambda _authority: None,
+            process_preview_requests=lambda _authority: None,
+            cleanup_history=lambda _authority: None,
+            shutdown_browser=lambda: calls.append('shutdown_browser'),
+            acquire_worker_lease=queues.acquire_worker_lease,
+            renew_worker_lease=queues.renew_worker_authority,
+            release_worker_lease=queues.release_worker_authority,
+        )
+
+        real_write = worker_main._write_job_health_transition
+        attempted = []
+        first_failure_write_seen = []
+
+        def recording_write(write_services, callback_id, transition, *, error_class=None):
+            attempted.append((callback_id, transition))
+            # Only the FIRST attempt to record S1's own work failure loses the lock.
+            # The retry, and every other write, reaches the real durable path.
+            if (
+                callback_id == 'S1' and transition == 'failed'
+                and not first_failure_write_seen
+            ):
+                first_failure_write_seen.append(True)
+                raise sqlite3.OperationalError('database is locked')
+            return real_write(
+                write_services, callback_id, transition, error_class=error_class,
+            )
+
+        # Registered BEFORE the assignment, so no ordering window exists in which the
+        # process-global monkeypatch could outlive this test.
+        self.addCleanup(
+            setattr, worker_main, '_write_job_health_transition', real_write,
+        )
+        worker_main._write_job_health_transition = recording_write
+
+        with (
+            mock.patch.object(worker_main, 'build_scheduler') as build_scheduler,
+            mock.patch.object(worker_main.signal, 'signal'),
+        ):
+            with self.assertRaises(worker_main.JobHealthBookkeepingError) as raised:
+                worker_main.run_worker(
+                    operations, SimpleNamespace(db_path=self.db_path),
+                )
+
+        # The loud channel is unchanged: the same condition still escapes, carrying
+        # the work error's own class, and Beacon never reached the scheduler.
+        self.assertEqual(raised.exception.work_error_class, 'RecoverBlewUp')
+        self.assertNotIn('secret message', str(raised.exception))
+        build_scheduler.assert_not_called()
+        self.assertFalse(worker_main._worker_started)
+        self.assertIn('recover', calls)
+        self.assertNotIn('heartbeat', calls)
+        self.assertNotIn('metrics', calls)
+
+        # The original attempt, then exactly one bounded retry -- never a loop.
+        self.assertEqual(
+            attempted, [('S1', 'started'), ('S1', 'failed'), ('S1', 'failed')],
+        )
+
+        # The half five rounds lacked: durable evidence the workspace can read.
+        row = self._job_health_row('S1')
+        self.assertEqual(row['state'], 'failed')
+        self.assertEqual(row['error_class'], 'RecoverBlewUp')
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(
+            self.db_path, self.appmod.SETTINGS, int(time.time()),
+        )
+        failed_cards = [
+            item for item in payload['exceptions'] if item['kind'] == 'job_failed'
+        ]
+        self.assertEqual(len(failed_cards), 1)
+        self.assertEqual(failed_cards[0]['job_id'], 'S1')
+        self.assertEqual(failed_cards[0]['section'], 'pipeline')
 
     def test_stale_worker_cannot_change_job_health_evidence(self):
         now = 100
