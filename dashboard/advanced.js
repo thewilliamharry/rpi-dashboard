@@ -256,6 +256,14 @@
   // The four completeness states the server derives for a service's gap block.
   // Anything else — an absent block, a raw container, an unrecognised state — is
   // evidence the workspace cannot vouch for, and reads as unavailable.
+  //
+  // This array is the wire vocabulary: it is the complete set of literals the
+  // server can send, which is why it deliberately still lists 'not_established'
+  // even though the very next statement rejects that state. Membership here
+  // means "the server may send this", not "the workspace can render it".
+  // test_gap_evidence_vocabulary_matches_the_server binds this array to the
+  // server's own SERVICE_GAP_EVIDENCE_* constants at source level, so a rename
+  // on either side fails a test instead of greying out every service row.
   const SERVICE_GAP_EVIDENCE_STATES = ['complete', 'possibly_incomplete', 'absent', 'not_established'];
 
   function formatServiceGapEvidence(block) {
@@ -267,7 +275,13 @@
     const items = Array.isArray(block.items) ? block.items : [];
     const declaredCount = finiteMeasurement(block.count);
     const count = declaredCount === null ? items.length : declaredCount;
-    if (state === 'absent' || (state === 'complete' && count === 0)) return 'No gap evidence';
+    // 'absent' means the stream list was complete and carried no stream for this
+    // service, so the pipeline has no record of ever observing it. That is a
+    // different fact from having been collected and found clean, and only the
+    // copy can carry the difference. Per D-11 the sentence states the observed
+    // condition and stops short of diagnosing a cause.
+    if (state === 'absent') return 'No collection stream established for this service';
+    if (state === 'complete' && count === 0) return 'No gap evidence';
     const declaredOpen = finiteMeasurement(block.open_count);
     const openCount = declaredOpen === null
       ? items.filter((item) => item && item.open === true).length
