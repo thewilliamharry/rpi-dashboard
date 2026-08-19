@@ -186,6 +186,26 @@ def build_worker_services(operations, settings=None):
     )
 
 
+def _discovery_outcome_verdict(outcome):
+    """Map run_discovery's documented outcome contract to a job verdict by membership.
+
+    ``run_discovery``'s contract is exactly ``'busy' | 'completed' | 'failed'``.
+    ``'busy'`` is a genuine, expected success -- another discovery already owns
+    the work, so this poll did the whole of its own job.  Deciding by exclusion
+    -- treating every value that is not the exact ``'failed'`` literal as a
+    success -- made ``None``, ``''``, and any literal a future ``run_discovery``
+    adds read as success by default, which is precisely the fabricated-success
+    direction this surface must not have.
+    Membership is checked instead: an outcome the contract does not name is
+    reported loudly as a job failure, never silently as a success.
+    """
+    if outcome in ('completed', 'busy'):
+        return True
+    if outcome == 'failed':
+        return False
+    raise ValueError(f'run_discovery returned an unknown outcome: {outcome!r}')
+
+
 def _run_scheduled_discovery(services):
     """Return None only for a genuine skip; otherwise carry discovery's own verdict."""
     state = services.read_scan_state()
@@ -194,9 +214,8 @@ def _run_scheduled_discovery(services):
         # records a completed poll rather than a fabricated failure.
         return None
     outcome = services.run_discovery(services.authority, source='scheduled')
-    # run_discovery's contract is exactly 'busy' | 'completed' | 'failed', so this
-    # is False only for a genuine failure -- never discarded behind an implicit None.
-    return outcome != 'failed'
+    # Verdict by membership against the contract; see the helper's docstring.
+    return _discovery_outcome_verdict(outcome)
 
 
 def _run_startup_discovery(services):
@@ -207,7 +226,8 @@ def _run_startup_discovery(services):
     last = state.get('last_discovery')
     if not last or int(services.clock()) - int(last) >= 300:
         outcome = services.run_discovery(services.authority, source='startup')
-        return outcome != 'failed'
+        # Verdict by membership against the contract; see the helper's docstring.
+        return _discovery_outcome_verdict(outcome)
     # A discovery already ran inside the recency window: the second genuine skip,
     # which used to fall off the end with no return statement at all.
     return None
