@@ -117,6 +117,27 @@ class AdvancedUiTests(unittest.TestCase):
             return locator.evaluate(f'(node) => getComputedStyle(node)[{prop!r}]')
 
         payload = self._snapshot()
+        payload.update({
+            'services': [{
+                'port': 443,
+                'name': 'Critical gateway',
+                'status': 'down',
+                'failure_class': 'connection refused',
+                'latency_ms': None,
+                'state_since_ts': 1_699_999_900,
+                'critical': True,
+                'pinned_order': 1,
+                'tags': ['edge', 'critical'],
+                'health_rule': '200-399',
+                'last_probe_ts': 1_700_000_000,
+                'expected_cadence_seconds': 5,
+                'freshness': {'state': 'fresh', 'age_seconds': 5},
+                'tls': {'posture': 'trusted LAN; certificate verification disabled'},
+                'last_error': 'connection refused',
+                'collection_gaps': gap_block('complete'),
+            }],
+            'pipeline': {}, 'settings': {}, 'exceptions': [],
+        })
         for theme in ('dark', 'light'):
             with self.subTest(theme=theme):
                 page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
@@ -132,6 +153,9 @@ class AdvancedUiTests(unittest.TestCase):
                 page.route('**/api/**', route_api)
                 try:
                     page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.locator('[data-section="services"]').click()
+                    page.locator('#services-table').wait_for(timeout=5_000)
+                    page.locator('.service-details-toggle').first.wait_for(timeout=5_000)
                     page.mouse.move(0, 0)
 
                     # #advanced-refresh is a real click target with the pointing-hand cursor.
@@ -157,6 +181,66 @@ class AdvancedUiTests(unittest.TestCase):
                     refresh_bg_hover = computed(page.locator('#advanced-refresh'), 'backgroundColor')
                     self.assertNotEqual(refresh_bg_rest, refresh_bg_hover)
                     page.mouse.move(0, 0)
+
+                    # 1. Pointer sweep across every remaining click target named by G-03-4's missing list.
+                    pointer_selectors = (
+                        '#advanced-refresh', '#pause-updates', '#refresh-interval',
+                        '[data-section="host"]', '[data-section="pipeline"]',
+                        '#clear-service-filters', '#service-status-filter', '#service-criticality-filter',
+                        '#service-sort-name', '#service-sort-freshness', '.service-details-toggle',
+                    )
+                    for selector in pointer_selectors:
+                        with self.subTest(theme=theme, selector=selector):
+                            locator = page.locator(selector)
+                            if selector == '.service-details-toggle':
+                                locator = locator.first
+                            self.assertEqual(computed(locator, 'cursor'), 'pointer')
+
+                    # 2. Negative: the search input is typed into, not clicked, and keeps its native caret.
+                    self.assertNotEqual(computed(page.locator('#service-search'), 'cursor'), 'pointer')
+
+                    # 3. The Dashboard link already reads as interactive via the UA default -- no new
+                    #    rule is added for it, per this plan's deliberate scope decision.
+                    self.assertEqual(computed(page.locator('.advanced-header a'), 'cursor'), 'pointer')
+
+                    # 4. Neutral hover delta on a header control and on a dynamically-created toggle.
+                    pause_border_rest = computed(page.locator('#pause-updates'), 'borderTopColor')
+                    page.locator('#pause-updates').hover()
+                    pause_border_hover = computed(page.locator('#pause-updates'), 'borderTopColor')
+                    self.assertNotEqual(pause_border_rest, pause_border_hover)
+                    page.mouse.move(0, 0)
+
+                    toggle = page.locator('.service-details-toggle').first
+                    toggle_border_rest = computed(toggle, 'borderTopColor')
+                    toggle.hover()
+                    toggle_border_hover = computed(toggle, 'borderTopColor')
+                    self.assertNotEqual(toggle_border_rest, toggle_border_hover)
+                    page.mouse.move(0, 0)
+
+                    # 5. Nav hover delta on the unselected Host tab (Services is the active section here).
+                    host_tab = page.locator('[data-section="host"]')
+                    host_border_rest = computed(host_tab, 'borderTopColor')
+                    host_tab.hover()
+                    host_border_hover = computed(host_tab, 'borderTopColor')
+                    self.assertNotEqual(host_border_rest, host_border_hover)
+                    page.mouse.move(0, 0)
+
+                    # 6. Accent reservation, negatively -- 03-UI-SPEC.md:76 grants accent only to the
+                    #    selected nav tab, never to an ordinary control at rest or while hovered.
+                    accent_color = computed(page.locator('#advanced-refresh'), 'color')
+                    self.assertNotEqual(computed(page.locator('#pause-updates'), 'color'), accent_color)
+                    self.assertNotEqual(computed(host_tab, 'color'), accent_color)
+                    host_tab.hover()
+                    self.assertNotEqual(computed(host_tab, 'color'), accent_color)
+                    page.mouse.move(0, 0)
+                    self.assertEqual(
+                        computed(page.locator('.section-navigation button[aria-selected="true"]'), 'color'),
+                        accent_color,
+                    )
+
+                    # 7. Hit-target non-regression beyond Task 1's #advanced-refresh check.
+                    self.assertEqual(computed(host_tab, 'minHeight'), '44px')
+                    self.assertEqual(computed(page.locator('.service-details-toggle').first, 'minHeight'), '44px')
                 finally:
                     page.close()
 

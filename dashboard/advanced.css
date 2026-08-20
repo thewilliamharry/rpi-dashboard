@@ -55,6 +55,12 @@
 .service-skeleton td { height: 44px; background: linear-gradient(90deg, var(--bg3), var(--border2), var(--bg3)); }
 button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, .services-table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Mouse affordance for the advanced workspace's click targets: accent stays reserved for the primary refresh action per 03-UI-SPEC.md */
+.advanced-header-controls button, .advanced-header-controls select, .section-navigation button, .service-filters button, .service-filters select, .settings-grid select, .service-details-toggle, #services-table th button { cursor: pointer; }
+html:not(.light) .advanced-header-controls button:hover, html:not(.light) .advanced-header-controls select:hover, html:not(.light) .service-filters button:hover, html:not(.light) .service-filters select:hover, html:not(.light) .settings-grid select:hover, html:not(.light) .service-details-toggle:hover, html:not(.light) #services-table th button:hover { background: rgba(0, 212, 255, 0.08); border-color: var(--accent); }
+html.light .advanced-header-controls button:hover, html.light .advanced-header-controls select:hover, html.light .service-filters button:hover, html.light .service-filters select:hover, html.light .settings-grid select:hover, html.light .service-details-toggle:hover, html.light #services-table th button:hover { color: #0f172a; border-color: #94a3b8; }
+/* No color is set on the nav hover rules below so mouse hover cannot grant or strip the accent that only aria-selected owns */
+html:not(.light) .section-navigation button:hover { background: rgba(0, 212, 255, 0.08); border-color: var(--border); }
+html.light .section-navigation button:hover { background: var(--bg3); border-color: #cbd5e1; }
 #advanced-refresh { cursor: pointer; color: var(--accent); border-color: var(--accent); font-weight: 600; }
 html:not(.light) #advanced-refresh:hover { background: rgba(0, 212, 255, 0.12); }
 html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
