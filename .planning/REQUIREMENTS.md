@@ -22,7 +22,7 @@
 - [x] **TEL-03**: Rollups complete successfully before their source observations are deleted.
 - [x] **TEL-04**: Historical queries explicitly distinguish known values, unknown intervals, collection gaps, and retention expiry.
 - [x] **TEL-05**: Historical APIs select an appropriate resolution and enforce a bounded response-point budget.
-- [ ] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
+- [x] **TEL-06**: The operator can see effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health.
 
 ### Planned Maintenance
 
@@ -120,7 +120,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | TEL-03 | Phase 2 | Complete |
 | TEL-04 | Phase 2 | Complete |
 | TEL-05 | Phase 2 | Complete |
-| TEL-06 | Phase 3 | Gaps Found |
+| TEL-06 | Phase 3 | Complete |
 | MNT-01 | Phase 03.1 | Pending |
 | MNT-02 | Phase 03.1 | Pending |
 | MNT-03 | Phase 03.1 | Pending |

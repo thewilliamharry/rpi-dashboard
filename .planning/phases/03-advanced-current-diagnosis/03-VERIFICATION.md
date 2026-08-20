@@ -1,7 +1,7 @@
 ---
 phase: 03-advanced-current-diagnosis
 verified: 2026-08-20T22:50:00Z
-status: human_needed
+status: passed
 score: 5/5 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
@@ -11,6 +11,7 @@ re_verification:
   previous_status: human_needed
   previous_score: 4/4
   gaps_closed:
+
     - "G-03-4 (03-UAT.md, opened 2026-08-20) — the /advanced workspace's interactive controls had zero cursor/hover affordance and #advanced-refresh carried none of the accent 03-UI-SPEC.md:76 reserves for it. CLOSED at the code level and independently reproduced closed. `dashboard/advanced.css` gained a nine-line interactive-affordance block (comment + 5 general rules + 3 #advanced-refresh-specific rules) across commits 2b12c4b and 07ac39c. I independently re-ran every acceptance-criteria grep the plan specifies (cursor: pointer=2, both header hover pairs=1 each, both nav hover pairs=1 each, .service-filters input=1 unchanged, min-height:44px=6 unchanged, focus-visible=1 unchanged, font-weight:600=4 with exactly 1 on #advanced-refresh, both @media blocks still last, test method count=36) — every count matches exactly. I ran `test_every_interactive_control_reads_as_interactive_in_both_themes` myself (not trusted from SUMMARY.md): 1 passed. I ran the full suite myself: 307 passed, 454 subtests, 0 failures — no regression. `git diff 2b12c4b~1..07ac39c --name-only` confirms the scope fence held: exactly `dashboard/advanced.css` and `tests/test_advanced_ui.py`, nothing else."
   gaps_remaining: []
   regressions: []
@@ -18,6 +19,7 @@ re_verification:
   over_credit_corrected: []
   round_8_record_condensed: "Round 8 (03-VERIFICATION.md, superseded): status human_needed, 4/4 roadmap success criteria VERIFIED via direct reproduction against a real SQLite database (not symbol presence). TEL-06's background-job-health clause — open for seven consecutive rounds — closed at the code level via 03-22-PLAN.md (J6 machinery-fault signal at the collaborator boundary, J5 fail-closed discovery vocabulary, scoped/guarded job_outcome_unrecorded floor). Five judgment-tier prohibitions all upheld. Three standing hardware human-verification items carried forward (unaffected by round 8's own changes). Full round 7-and-earlier history condensed inside round 8's own frontmatter (recoverable from this file's git history at commit 2633b9e and earlier); not restated here a second time."
 prohibitions:
+
   - source: "03-08-PLAN.md"
     statement: "MUST NOT present resolved, retention-expired, or otherwise inferred evidence to the operator as a current, open, actionable fault -- every operator-facing open/actionable/kind label must be derivable from the durable row it describes, never from a neighbouring row or a stream-level fact."
     verification: judgment
@@ -25,6 +27,7 @@ prohibitions:
     flagged: true
     previous_verdict: upheld
     detail: "UNCHANGED this round. 03-23 touches only dashboard/advanced.css and tests/test_advanced_ui.py — no gap/inference logic file. `git diff 2633b9e..07ac39c -- dashboard/beacon/diagnosis.py` (the file that owns this logic) is empty since round 8."
+
   - source: "03-08-PLAN.md"
     statement: "MUST NOT suppress a genuine collection failure while narrowing false positives -- restricting promotion by reason must never cause a real collection_gap, or a reason value the code does not recognise, to go unreported to the operator."
     verification: judgment
@@ -32,6 +35,7 @@ prohibitions:
     flagged: true
     previous_verdict: upheld
     detail: "UNCHANGED. Not touched by this round's presentation-only diff."
+
   - source: "03-09-PLAN.md"
     statement: "MUST NOT let automatic background refresh silently override an operator's explicit presentation choice, and MUST NOT present a machine identifier or a placeholder as the operator's primary safety evidence when the server supplied real evidence."
     verification: judgment
@@ -39,6 +43,7 @@ prohibitions:
     flagged: true
     previous_verdict: upheld
     detail: "UNCHANGED. `dashboard/advanced.js` is byte-unchanged since round 7 through this round (git diff confirms 07ac39c touches only advanced.css and the test file)."
+
   - source: "03-10-PLAN.md"
     statement: "MUST NOT let test scaffolding mutate process-global state so that suite greenness depends on execution order."
     verification: judgment
@@ -46,6 +51,7 @@ prohibitions:
     flagged: true
     previous_verdict: upheld
     detail: "UPHELD. The one new/extended test in this round (`test_every_interactive_control_reads_as_interactive_in_both_themes`) uses only per-test Playwright page objects created and closed inside a try/finally; it patches no module-level state. Full suite run once by me confirms 307 passed / 454 subtests, no order-dependent failures observed."
+
   - source: "03-10-PLAN.md"
     statement: "MUST NOT record a requirement, plan, or phase as complete on the strength of an implementation claim rather than independent verification -- the traceability table is the project's own memory of what is actually true."
     verification: judgment
