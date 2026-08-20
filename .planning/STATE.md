@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: advanced-current-diagnosis
 status: executing
-stopped_at: "Completed 03-22-PLAN.md (round-8 gap closure: J6 machinery-fault signal, J5 discovery vocabulary, floor scoping)"
-last_updated: "2026-08-19T17:52:51.894Z"
-last_activity: 2026-08-19
-last_activity_desc: 03-21 closed round-6's three remaining warnings — an unrecognised discovery outcome now fails closed and loud (WR-01), the uptime-lock contention comment states the true J3/J4 asymmetry (WR-02), and the job_outcome_unrecorded floor derives from the operator's configured DISCOVERY_TIMEOUT_SECONDS (WR-03)
+stopped_at: Completed 03-23-PLAN.md (G-03-4 advanced control affordance gap closure)
+last_updated: "2026-08-20T19:45:18.161Z"
+last_activity: 2026-08-20
+last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 57
-  completed_plans: 57
+  total_plans: 58
+  completed_plans: 58
 ---
 
 # Project State
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (advanced-current-diagnosis) — EXECUTING
-Plan: 2 of 22
+Plan: 2 of 23
 Status: Ready to execute
-Last activity: 2026-08-19 — Phase 03 execution started
+Last activity: 2026-08-20 — Phase 03 execution started
 
 Progress: [██████████] 100%
 
@@ -112,6 +112,7 @@ Progress: [██████████] 100%
 | Phase 03 P20 | 15min | 2 tasks | 2 files |
 | Phase 03 P21 | 7min | 3 tasks | 4 files |
 | Phase 03 P22 | 20min | 3 tasks | 4 files |
+| Phase 03 P23 | 9min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -260,6 +261,7 @@ Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecti
 - [Phase ?]: 03-22: worker_process_scan_requests and process_scan_requests both route through beacon_worker_main._discovery_outcome_verdict before their busy-branch handling, fail closed on an outcome literal outside run_discovery's documented contract
 - [Phase ?]: 03-22: The job_outcome_unrecorded floor widens only for DISCOVERY_JOB_IDS ({'J5','J7','J9'}) and guards discovery_timeout_seconds by type instead of coercing it, closing both counts of 03-VERIFICATION.md round 7 gap 2
 - [Phase ?]: 03-22: TEL-06 left open in both halves of REQUIREMENTS.md after round 8; both remaining gaps closed in code, but only independent re-verification may promote it
+- [Phase ?]: 03-23: Task 1's #advanced-refresh accent treatment accepted as-is by the user at the tracer checkpoint; Task 2 extends the same affordance to every remaining control and pins the accent reservation negatively (no ordinary control, at rest or hovered, ever computes accent)
 
 ### Pending Todos
 
@@ -290,6 +292,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-19T17:52:51.878Z
-Stopped at: Completed 03-22-PLAN.md (round-8 gap closure: J6 machinery-fault signal, J5 discovery vocabulary, floor scoping)
+Last session: 2026-08-20T19:45:18.146Z
+Stopped at: Completed 03-23-PLAN.md (G-03-4 advanced control affordance gap closure)
 Resume file: None

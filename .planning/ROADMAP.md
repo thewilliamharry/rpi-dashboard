@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 23 plans (22/23 executed — 03-18/03-19 closed round-5's background-job-health finding; 03-20/03-21 closed the one Critical and four Warnings 03-19-REVIEW.md's round-6 code review found in that same closure; 03-22 closed the two gaps 03-VERIFICATION.md round 7 found on the same background-job-health clause; 03-23 closes the one cosmetic gap 03-UAT.md found — pending)
+**Plans**: 23/23 plans executed (22/23 executed — 03-18/03-19 closed round-5's background-job-health finding; 03-20/03-21 closed the one Critical and four Warnings 03-19-REVIEW.md's round-6 code review found in that same closure; 03-22 closed the two gaps 03-VERIFICATION.md round 7 found on the same background-job-health clause; 03-23 closes the one cosmetic gap 03-UAT.md found — pending)
 
 - [x] 03-07-PLAN.md
 
@@ -249,7 +249,7 @@ Plans:
 
 **Gap closure round 9 (after 03-UAT.md conversational verification, status complete, 3/4 — the three hardware tests for collection gaps, idle-Pi job health, and the J6 machinery-fault signal all PASSED on the real Pi on 2026-08-20; one cosmetic gap found, G-03-4, on the advanced workspace's control affordance; the J6 signal-duration observation is a recorded Deferred Follow-Up, not a gap)**
 
-- [ ] 03-23-PLAN.md — The /advanced workspace answers the mouse: every click target gets a pointer cursor and a theme-scoped hover state lifted from style.css's own vocabulary, and `Refresh now` finally carries the accent treatment 03-UI-SPEC.md:76 reserves for it — pinned by a real-Chromium computed-style regression in both themes and by an explicit negative that the accent never widens to an ordinary control (wave 1)
+- [x] 03-23-PLAN.md — The /advanced workspace answers the mouse: every click target gets a pointer cursor and a theme-scoped hover state lifted from style.css's own vocabulary, and `Refresh now` finally carries the accent treatment 03-UI-SPEC.md:76 reserves for it — pinned by a real-Chromium computed-style regression in both themes and by an explicit negative that the accent never widens to an ordinary control (wave 1)
 
 **Wave 1**
 
@@ -343,7 +343,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
-| 3. Advanced Current Diagnosis | 22/22 | In Progress|  |
+| 3. Advanced Current Diagnosis | 23/23 | In Progress|  |
 | 4. Historical Investigation | 0/TBD | Not started | - |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
