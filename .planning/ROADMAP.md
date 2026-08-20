@@ -204,7 +204,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 22/22 plans executed (03-18/03-19 closed round-5's background-job-health finding; 03-20/03-21 closed the one Critical and four Warnings 03-19-REVIEW.md's round-6 code review found in that same closure; 03-22 closes the two gaps 03-VERIFICATION.md round 7 found on the same background-job-health clause — pending)
+**Plans**: 23 plans (22/23 executed — 03-18/03-19 closed round-5's background-job-health finding; 03-20/03-21 closed the one Critical and four Warnings 03-19-REVIEW.md's round-6 code review found in that same closure; 03-22 closed the two gaps 03-VERIFICATION.md round 7 found on the same background-job-health clause; 03-23 closes the one cosmetic gap 03-UAT.md found — pending)
 
 - [x] 03-07-PLAN.md
 
@@ -246,6 +246,10 @@ Plans:
 **Gap closure round 7 (after 03-VERIFICATION.md re-verification round 7, status gaps_found, 3/4 — five of six round-6 review findings fully closed and reproduced closed; two gaps found, both on Success Criterion 4's background-job-health clause: J6 cannot report a fault of its own capture machinery, and the widened job_outcome_unrecorded floor is global and coerces its input; TEL-06 remains Gaps Found)**
 
 - [x] 03-22-PLAN.md — Give J6 a job-owned failure signal for a total capture-machinery failure distinct from every per-service condition, route J5's discovery outcome through the same fail-closed membership check J7/J9 already use, and scope the job_outcome_unrecorded floor to the jobs that actually run discovery while guarding its input instead of coercing it (wave 1)
+
+**Gap closure round 9 (after 03-UAT.md conversational verification, status complete, 3/4 — the three hardware tests for collection gaps, idle-Pi job health, and the J6 machinery-fault signal all PASSED on the real Pi on 2026-08-20; one cosmetic gap found, G-03-4, on the advanced workspace's control affordance; the J6 signal-duration observation is a recorded Deferred Follow-Up, not a gap)**
+
+- [ ] 03-23-PLAN.md — The /advanced workspace answers the mouse: every click target gets a pointer cursor and a theme-scoped hover state lifted from style.css's own vocabulary, and `Refresh now` finally carries the accent treatment 03-UI-SPEC.md:76 reserves for it — pinned by a real-Chromium computed-style regression in both themes and by an explicit negative that the accent never widens to an ordinary control (wave 1)
 
 **Wave 1**
 
