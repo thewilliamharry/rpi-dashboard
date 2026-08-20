@@ -112,6 +112,54 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_every_interactive_control_reads_as_interactive_in_both_themes(self):
+        def computed(locator, prop):
+            return locator.evaluate(f'(node) => getComputedStyle(node)[{prop!r}]')
+
+        payload = self._snapshot()
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+                if theme == 'light':
+                    page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+
+                def route_api(route):
+                    if urlparse(route.request.url).path != '/api/advanced/current':
+                        route.fallback()
+                        return
+                    route.fulfill(status=200, json=payload)
+
+                page.route('**/api/**', route_api)
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.mouse.move(0, 0)
+
+                    # #advanced-refresh is a real click target with the pointing-hand cursor.
+                    self.assertEqual(computed(page.locator('#advanced-refresh'), 'cursor'), 'pointer')
+                    # advanced.css:7's hit-target rule is untouched by this task.
+                    self.assertEqual(computed(page.locator('#advanced-refresh'), 'minHeight'), '44px')
+                    self.assertEqual(computed(page.locator('#advanced-refresh'), 'fontWeight'), '600')
+
+                    # 03-UI-SPEC.md:76 reserves accent for Refresh now and the Dashboard link only.
+                    refresh_color = computed(page.locator('#advanced-refresh'), 'color')
+                    link_color = computed(page.locator('.advanced-header a'), 'color')
+                    pause_color = computed(page.locator('#pause-updates'), 'color')
+                    self.assertEqual(refresh_color, link_color)
+                    self.assertNotEqual(refresh_color, pause_color)
+
+                    self.assertNotEqual(
+                        computed(page.locator('#advanced-refresh'), 'borderTopColor'),
+                        computed(page.locator('#pause-updates'), 'borderTopColor'),
+                    )
+
+                    refresh_bg_rest = computed(page.locator('#advanced-refresh'), 'backgroundColor')
+                    page.locator('#advanced-refresh').hover()
+                    refresh_bg_hover = computed(page.locator('#advanced-refresh'), 'backgroundColor')
+                    self.assertNotEqual(refresh_bg_rest, refresh_bg_hover)
+                    page.mouse.move(0, 0)
+                finally:
+                    page.close()
+
     def test_connection_warning_retains_last_success_and_keeps_server_safety_independent(self):
         healthy = self._snapshot()
         healthy.update({
