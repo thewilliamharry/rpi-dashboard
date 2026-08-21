@@ -274,7 +274,7 @@ Plans:
 **Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
 **Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
 **Depends on:** Phase 3
-**Plans:** 0 plans
+**Plans:** 10 plans
 
 **Success Criteria** (what must be TRUE):
 
@@ -285,7 +285,16 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run $gsd-plan-phase 03.1 to break down)
+- [ ] 03.1-01-PLAN.md — Tracer: one covered down-transition is tagged, retained, and never alerted
+- [ ] 03.1-02-PLAN.md — IANA time-zone data in the container (tzdata dependency + TZ plumbing)
+- [ ] 03.1-03-PLAN.md — Window CRUD over the existing service-meta write surface
+- [ ] 03.1-04-PLAN.md — Overrun outage: one truthful event past window and grace
+- [ ] 03.1-05-PLAN.md — Maintenance windows section in the service editor
+- [ ] 03.1-06-PLAN.md — Suggestion detector recomputed on every metadata read
+- [ ] 03.1-07-PLAN.md — Derived maintenance availability, exception exclusion, and attribution
+- [ ] 03.1-08-PLAN.md — Suggestion card with Confirm and Adjust
+- [ ] 03.1-09-PLAN.md — Main dashboard: calm maintenance card and suppressed-entry reveal
+- [ ] 03.1-10-PLAN.md — /advanced maintenance evidence, overrun timestamps, and attribution
 
 ### Phase 4: Historical Investigation
 
