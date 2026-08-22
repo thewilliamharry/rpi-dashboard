@@ -2628,6 +2628,7 @@ def api_services():
         ).fetchall()
 
         checks_by_port = defaultdict(list)
+        windows_by_port = {}
         if services:
             ports = [s['port'] for s in services]
             placeholders = ','.join('?' * len(ports))
@@ -2638,6 +2639,10 @@ def api_services():
             ).fetchall()
             for row in all_checks:
                 checks_by_port[row['port']].append((row['ts'], row['online']))
+            # One bulk read for the whole list rather than one per-service window
+            # query inside this loop (T-03.1-29) -- every service's coverage
+            # derivation below shares this single read.
+            windows_by_port = beacon_repositories.read_maintenance_windows_by_port(conn, ports=ports)
         tls_posture = beacon_repositories.get_runtime_state(conn, 'service_tls_posture', {})
         tls_posture = tls_posture if isinstance(tls_posture, dict) else {}
         preview_rows = conn.execute(
@@ -2652,6 +2657,28 @@ def api_services():
             uptime_pct, uptime_buckets = _uptime_summary(checks, now)
             effective_url = _safe_service_url(svc['url'], svc['port'])
             preview = previews_by_port.get(svc['port'])
+            port_windows = windows_by_port.get(svc['port'], [])
+
+            # The maintenance literal is derived here, additively, from the same
+            # coverage rule the suppression write path calls -- never a second
+            # percentage, never a change to is_online/state_since/last_error
+            # below, which stay the true stored facts (D-06, D-09).
+            availability = 'online' if svc['is_online'] else 'offline'
+            maintenance_until = None
+            if not svc['is_online']:
+                covered, grace_until = beacon_maintenance.coverage(
+                    port_windows, now, SETTINGS.timezone,
+                )
+                if covered:
+                    availability = beacon_diagnosis.MAINTENANCE_AVAILABILITY
+                    maintenance_until = grace_until
+            offline_intervals = beacon_repositories.read_service_offline_intervals(
+                conn, svc['port'], start_ts=now - CHECK_RETENTION_SECONDS, end_ts=now,
+            )
+            maintenance_attributed_seconds = beacon_maintenance.attributed_downtime_seconds(
+                offline_intervals, port_windows, SETTINGS.timezone,
+            )
+
             result.append({
                 "port": svc['port'],
                 "title": svc['title'],
@@ -2675,6 +2702,9 @@ def api_services():
                 "preview_deadline_ts": preview['deadline_ts'] if preview else None,
                 "uptime_pct": uptime_pct,
                 "uptime_buckets": uptime_buckets,
+                "availability": availability,
+                "maintenance_until": maintenance_until,
+                "maintenance_attributed_seconds": maintenance_attributed_seconds,
             })
 
         conn.close()

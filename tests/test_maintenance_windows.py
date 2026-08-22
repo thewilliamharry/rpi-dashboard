@@ -1966,6 +1966,197 @@ class SuggestionEvidenceTests(unittest.TestCase):
         )
 
 
+class ServicesPayloadTests(unittest.TestCase):
+    """The main dashboard's /api/services publishes D-06's derived availability."""
+
+    def setUp(self):
+        self._clock = {'now': None}
+        self._clock_patcher = None
+        self.appmod, self.db_path = load_app({})
+        self.client = self.appmod.app.test_client()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _freeze_clock(self, value):
+        """Freeze the process-global ``time.time`` for this test only (see
+        ``SuppressionTracerTests._freeze_clock``; identical contract)."""
+        self._clock['now'] = value
+        if self._clock_patcher is None:
+            real_time = time.time
+            patcher = mock.patch(
+                'time.time',
+                lambda: real_time() if self._clock['now'] is None else self._clock['now'],
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            self._clock_patcher = patcher
+        return value
+
+    def _seed_service(self, port, *, is_online, state_since, last_error=None):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO services(port,title,first_seen,last_seen,is_online,'
+                'last_latency_ms,last_error,state_since) VALUES(?,?,?,?,?,?,?,?)',
+                (
+                    port, f'Service {port}', state_since - 100, state_since + 100000,
+                    is_online, None, last_error, state_since,
+                ),
+            )
+            conn.execute(
+                'INSERT INTO service_meta(port,display_name,url,critical,pinned_order,tags,healthy_statuses) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (port, f'Service {port}', f'http://127.0.0.1:{port}', 0, port, '', '200-399'),
+            )
+            conn.commit()
+            conn.close()
+
+    def _insert_checks(self, port, checks):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for ts, online in checks:
+                conn.execute(
+                    'INSERT INTO service_checks(ts,port,online) VALUES(?,?,?)', (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+    def _write_window(
+        self, port, *, start_minute, duration_minutes, weekdays, grace_minutes, enabled=True,
+        now=1_700_000_000,
+    ):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            beacon_repositories.upsert_maintenance_windows(
+                conn, port=port,
+                windows=[{
+                    'start_minute': start_minute, 'duration_minutes': duration_minutes,
+                    'weekdays': set(weekdays), 'grace_minutes': grace_minutes, 'enabled': enabled,
+                }],
+                now=now,
+            )
+            conn.commit()
+            conn.close()
+
+    def _services(self):
+        return self.client.get('/api/services').get_json()
+
+    def _service(self, port):
+        return next(s for s in self._services() if s['port'] == port)
+
+    def test_an_offline_covered_service_publishes_the_maintenance_availability(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)  # a Monday, inside a 2:00-3:00 window
+        port = 9611
+        self._seed_service(port, is_online=0, state_since=now - 900, last_error='ConnectionRefused')
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        self.assertEqual(self._service(port)['availability'], 'maintenance')
+
+    def test_the_is_online_field_is_still_false_for_a_covered_service(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9612
+        self._seed_service(port, is_online=0, state_since=now - 900)
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['availability'], 'maintenance')
+        self.assertEqual(service['is_online'], 0)
+
+    def test_the_since_and_error_fields_are_the_true_stored_ones(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9613
+        self._seed_service(port, is_online=0, state_since=now - 900, last_error='ConnectionRefused')
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['state_since'], now - 900)
+        self.assertEqual(service['last_error'], 'ConnectionRefused')
+
+    def test_the_payload_carries_the_coverage_end_instant_for_the_disclosure(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9614
+        self._seed_service(port, is_online=0, state_since=now - 900)
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['availability'], 'maintenance')
+        self.assertIsInstance(service['maintenance_until'], int)
+        self.assertEqual(service['maintenance_until'], _epoch(2026, 1, 5, 3, 10, 0))
+
+    def test_an_online_service_publishes_the_online_availability(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9615
+        self._seed_service(port, is_online=1, state_since=now - 900)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['availability'], 'online')
+        self.assertIsNone(service['maintenance_until'])
+
+    def test_an_offline_uncovered_service_publishes_the_offline_availability(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9616
+        self._seed_service(port, is_online=0, state_since=now - 900)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['availability'], 'offline')
+        self.assertIsNone(service['maintenance_until'])
+
+    def test_the_uptime_percentage_is_identical_with_and_without_suppression(self):
+        now = _epoch(2026, 1, 5, 4, 0, 0)
+        port_uncovered, port_covered = 9617, 9618
+        checks = [(now - 300, 1), (now - 240, 0), (now - 120, 0), (now, 0)]
+        for port in (port_uncovered, port_covered):
+            self._seed_service(port, is_online=0, state_since=now - 240)
+            self._insert_checks(port, checks)
+        self._write_window(
+            port_covered, start_minute=120, duration_minutes=180, weekdays=(1,), grace_minutes=60,
+        )
+        self._freeze_clock(now)
+
+        uncovered = self._service(port_uncovered)
+        covered = self._service(port_covered)
+        self.assertEqual(uncovered['availability'], 'offline')
+        self.assertEqual(covered['availability'], 'maintenance')
+        self.assertEqual(uncovered['uptime_pct'], covered['uptime_pct'])
+        self.assertEqual(uncovered['uptime_buckets'], covered['uptime_buckets'])
+
+    def test_the_payload_contains_no_second_availability_percentage(self):
+        now = _epoch(2026, 1, 5, 4, 0, 0)
+        port = 9619
+        self._seed_service(port, is_online=1, state_since=now - 900)
+        self._insert_checks(port, [(now - 60, 1), (now, 1)])
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        percent_like_keys = [key for key in service if 'pct' in key.lower() or 'percent' in key.lower()]
+        self.assertEqual(percent_like_keys, ['uptime_pct'])
+
+    def test_every_failed_probe_is_still_stored(self):
+        now = _epoch(2026, 1, 5, 4, 0, 0)
+        port = 9620
+        checks = [(now - offset, 0) for offset in (0, 60, 120, 180, 240)]
+        self._seed_service(port, is_online=0, state_since=now - 300)
+        self._insert_checks(port, checks)
+        self._freeze_clock(now)
+
+        self._services()
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            count = conn.execute(
+                'SELECT COUNT(*) FROM service_checks WHERE port=?', (port,),
+            ).fetchone()[0]
+            conn.close()
+        self.assertEqual(count, len(checks))
+
+
 class TimezoneEnvironmentTests(unittest.TestCase):
     """The IANA time-zone database resolves inside this environment, and the
     operator's TZ value reaches Settings/the containers with a fail-closed
