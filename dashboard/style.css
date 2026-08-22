@@ -749,6 +749,9 @@ html.light .svc-empty { font-family: var(--font-sans); font-weight: 300; letter-
   border: 1px dashed var(--border);
   color: var(--muted);
 }
+.meta-suggestion[hidden] {
+  display: none;
+}
 .meta-suggestion-evidence {
   color: var(--muted);
   font-size: 12px;
