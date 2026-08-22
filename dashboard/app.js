@@ -322,24 +322,80 @@ function monitoringGapDuration(event) {
   }
 }
 
+function isOverrunEvent(event) {
+  return event.event_type === MAINTENANCE_OVERRUN_EVENT_TYPE;
+}
+
+function isSuppressedEvent(event) {
+  // The overrun outage is excluded from the suppressed partition
+  // unconditionally, regardless of any other field it carries (MNT-04) --
+  // it must never be tagged Expected or hidden behind the reveal control.
+  return !isOverrunEvent(event) && Boolean(event.suppressed_reason);
+}
+
+function eventTitle(event) {
+  if (isOverrunEvent(event)) return `${event.service_name} still down past maintenance`;
+  if (event.event_type === 'state_change') return `${event.service_name} ${event.online ? 'recovered' : 'went down'}`;
+  if (event.event_type === 'monitoring_gap') return 'Monitoring gap recorded';
+  return event.event_type.replaceAll('_', ' ');
+}
+
 function renderEvents(events) {
   const visible = events.filter((event) => EVENT_TYPES_VISIBLE.has(event.event_type)).slice(0, 20);
+  const suppressedCount = visible.filter(isSuppressedEvent).length;
   const panel = $('events-panel');
   panel.replaceChildren();
-  if (!visible.length) panel.appendChild(Object.assign(document.createElement('div'), {className: 'evt-empty', textContent: 'no recent incidents'}));
-  for (const event of visible) {
+
+  // Suppressed entries are always retained and always counted; they are
+  // filtered at render time only -- the reveal control is the only signal
+  // that the feed is not showing everything (D-10). It is not rendered at
+  // all when zero suppressed entries are loaded, and its own label always
+  // states the exact hidden count.
+  if (suppressedCount > 0) {
+    const reveal = document.createElement('button');
+    reveal.type = 'button';
+    reveal.className = 'evt-reveal';
+    reveal.textContent = suppressedEventsRevealed
+      ? 'Hide suppressed entries'
+      : suppressedCount === 1
+        ? 'Show 1 suppressed entry'
+        : `Show ${suppressedCount} suppressed entries`;
+    reveal.addEventListener('click', () => {
+      suppressedEventsRevealed = !suppressedEventsRevealed;
+      renderEvents(events);
+    });
+    panel.appendChild(reveal);
+  }
+
+  const rendered = visible.filter((event) => suppressedEventsRevealed || !isSuppressedEvent(event));
+  if (!rendered.length) panel.appendChild(Object.assign(document.createElement('div'), {className: 'evt-empty', textContent: 'no recent incidents'}));
+  for (const event of rendered) {
+    const overrun = isOverrunEvent(event);
+    const suppressed = isSuppressedEvent(event);
     const row = document.createElement('div');
-    const state = event.event_type === 'state_change' ? (event.online ? 'up' : 'down') : event.event_type;
+    const state = overrun ? 'down' : event.event_type === 'state_change' ? (event.online ? 'up' : 'down') : event.event_type;
     row.className = `evt-row evt-${state}`;
     const left = document.createElement('div');
     left.className = 'evt-left';
-    left.append(
-      Object.assign(document.createElement('span'), {className: 'evt-title', textContent: event.event_type === 'state_change' ? `${event.service_name} ${event.online ? 'recovered' : 'went down'}` : event.event_type === 'monitoring_gap' ? 'Monitoring gap recorded' : event.event_type.replaceAll('_', ' ')}),
-      Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: event.event_type === 'monitoring_gap' ? `Worker unavailable for ${monitoringGapDuration(event)}.` : event.details || event.error_class || ''}),
-    );
+    left.appendChild(Object.assign(document.createElement('span'), {className: 'evt-title', textContent: eventTitle(event)}));
+    if (suppressed) {
+      left.appendChild(Object.assign(document.createElement('span'), {className: 'evt-pill evt-pill-expected', textContent: 'Expected'}));
+    }
+    if (overrun) {
+      // D-08: down-since and raised-at are always two separately rendered
+      // values, never merged into one truncatable string.
+      left.append(
+        Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: `Down since ${fmtLocalDateTime(event.down_since_ts)}`}),
+        Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: `Raised at ${fmtLocalDateTime(event.ts)}`}),
+      );
+    } else {
+      left.appendChild(Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: event.event_type === 'monitoring_gap' ? `Worker unavailable for ${monitoringGapDuration(event)}.` : event.details || event.error_class || ''}));
+    }
     row.append(left, Object.assign(document.createElement('span'), {className: 'evt-time', textContent: fmtAgo(event.ts)}));
     panel.appendChild(row);
   }
+  // Loaded count, not just the currently-rendered count -- a suppressed
+  // entry stays counted here even while collapsed (D-10).
   $('events-label').textContent = `${visible.length} recent`;
 }
 

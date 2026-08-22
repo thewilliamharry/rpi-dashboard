@@ -1063,6 +1063,31 @@ html.light .events-panel {
   background: #ffffff;
   border-radius: 6px;
 }
+/* Suppressed-entries reveal control (D-10): its own full-width row above the
+   feed, an ordinary control in the existing button vocabulary -- it never
+   uses the maintenance token, which is reserved for status/evidence text. */
+.evt-reveal {
+  display: block;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--border2);
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-family: inherit;
+}
+.evt-reveal:hover { color: var(--text); }
+html.light .evt-reveal {
+  font-family: var(--font-sans);
+  letter-spacing: 0;
+  font-size: 11px;
+  padding: 8px 10px;
+}
 .evt-row {
   display: flex;
   align-items: center;
@@ -1110,6 +1135,28 @@ html.light .events-panel {
   color: var(--muted);
   font-size: 10px;
   letter-spacing: 0.08em;
+}
+/* Expected pill: reused on every revealed suppressed row, positioned after
+   .evt-title, in the Maintenance colour so a revealed suppressed entry is
+   never mistaken for an ordinary one even once shown (D-10). */
+.evt-pill {
+  display: inline-flex;
+  align-self: flex-start;
+  width: fit-content;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border: 1px solid;
+}
+.evt-pill-expected {
+  color: var(--accent3);
+  border-color: var(--accent3);
+}
+html.light .evt-pill {
+  font-family: var(--font-sans);
+  letter-spacing: 0;
+  font-size: 10px;
 }
 html.light .evt-row {
   padding: 8px 10px;
@@ -1214,6 +1261,7 @@ html.light .evt-meta_updated .evt-title {
   .svc-edit { min-width: 44px; min-height: 44px; }
   .evt-row { padding: 10px 8px; }
   .evt-sub { font-size: 9px; }
+  .evt-reveal { min-height: 44px; }
   .meta-modal-backdrop { padding: 14px; }
   .meta-modal-window { width: 100%; }
   .meta-modal-head { padding: 12px; }
