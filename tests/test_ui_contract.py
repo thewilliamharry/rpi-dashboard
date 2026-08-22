@@ -141,6 +141,31 @@ console.log(JSON.stringify({
         self.assertIn('max-height: 280px', css)
         self.assertIn('.meta-window-list {', css)
 
+    def test_dashboard_maintenance_card_and_events_reveal_copywriting_contract_strings_appear_verbatim(self):
+        js = pathlib.Path('dashboard/app.js').read_text(encoding='utf-8')
+        self.assertIn("'MAINTENANCE'", js)
+        self.assertIn('Show 1 suppressed entry', js)
+        self.assertIn('suppressed entries', js)
+        self.assertIn('Hide suppressed entries', js)
+        self.assertIn("'Expected'", js)
+        self.assertIn('still down past maintenance', js)
+        self.assertIn('Down since', js)
+        self.assertIn('Raised at', js)
+        self.assertIn(
+            'Offline and covered by a confirmed maintenance window until',
+            js,
+        )
+        self.assertIn('Downtime is still counted in the 7-day availability figure.', js)
+
+    def test_dashboard_maintenance_and_reveal_stylesheet_declares_required_classes(self):
+        css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
+        for token in [
+            '.svc-maintenance', '.svc-maintenance-status', '.evt-pill',
+            '.evt-pill-expected', '.evt-reveal',
+        ]:
+            self.assertIn(token, css)
+        self.assertIn('.svc-status-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; }', css)
+
     def test_readme_has_one_offline_recovery_command_and_safe_ordering(self):
         readme = pathlib.Path('README.md').read_text(encoding='utf-8')
         status = 'docker compose run --rm --no-deps recovery python -m beacon.recovery status'
