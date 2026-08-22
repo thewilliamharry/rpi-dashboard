@@ -72,6 +72,17 @@
         <label class="meta-field"><span class="meta-label">Path</span><input type="text" id="meta-path" placeholder="/" autocomplete="off"><span class="meta-help">Used for checks, previews, and the link.</span></label>
         <label class="meta-field meta-checkbox"><input type="checkbox" id="meta-critical"><span>Critical service</span></label>
         <label class="meta-field"><span class="meta-label">Tags</span><input type="text" id="meta-tags" placeholder="core, prod" autocomplete="off"></label>
+        <div class="meta-maintenance">
+          <span class="meta-label" id="meta-maintenance-heading">Maintenance windows</span>
+          <div class="meta-suggestion" id="meta-suggestion" hidden></div>
+          <span class="meta-window-count" id="meta-window-count" hidden></span>
+          <div class="meta-window-empty" id="meta-window-empty" hidden>
+            <strong>No maintenance windows yet</strong>
+            <span>Add a window to suppress expected restarts without hiding real failures.</span>
+          </div>
+          <div class="meta-window-list" id="meta-window-list"></div>
+          <button type="button" class="meta-btn meta-btn-ghost" id="meta-window-add">+ Add window</button>
+        </div>
         <details class="meta-advanced" id="meta-advanced"><summary>Advanced</summary>
           <label class="meta-field"><span class="meta-label">Base URL</span><input type="text" id="meta-url" placeholder="http://raspi.local:8100" autocomplete="off"><span class="meta-help">Must target this Pi or an approved alias.</span></label>
           <label class="meta-field"><span class="meta-label">Healthy HTTP statuses</span><input type="text" id="meta-healthy-statuses" placeholder="200-399" autocomplete="off"><span class="meta-help">Comma-separated codes or ranges.</span></label>
