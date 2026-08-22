@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from dashboard.beacon import maintenance as beacon_maintenance
 from dashboard.beacon import queues as beacon_queues
+from dashboard.beacon import repositories as beacon_repositories
 from dashboard.beacon.config import Settings, load_settings
 from dashboard.beacon.migrations import (
     MIGRATIONS,
@@ -194,6 +195,176 @@ class MigrationNineTests(unittest.TestCase):
                 self.assertEqual(window_count, 0)
             finally:
                 conn.close()
+
+
+def _window_payload(
+    start_minute=120, duration_minutes=30, weekdays=(1, 2, 3, 4, 5, 6, 7),
+    grace_minutes=0, enabled=True,
+):
+    """Build a normalised window payload matching upsert_maintenance_windows's input shape."""
+    return {
+        'start_minute': start_minute, 'duration_minutes': duration_minutes,
+        'weekdays': set(weekdays), 'grace_minutes': grace_minutes, 'enabled': enabled,
+    }
+
+
+class WindowPersistenceTests(unittest.TestCase):
+    """upsert_maintenance_windows / get_maintenance_windows replace-semantics contract."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _write(self, port, windows, now=1_700_000_000):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            written = beacon_repositories.upsert_maintenance_windows(
+                conn, port=port, windows=windows, now=now,
+            )
+            conn.commit()
+            conn.close()
+        return written
+
+    def _read(self, port):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = beacon_repositories.get_maintenance_windows(conn, port)
+            conn.close()
+        return rows
+
+    def test_windows_are_replaced_wholesale_for_a_port(self):
+        port = 9001
+        self._write(port, [_window_payload(start_minute=60), _window_payload(start_minute=120)])
+        self.assertEqual(len(self._read(port)), 2)
+        self._write(port, [_window_payload(start_minute=180)])
+        rows = self._read(port)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['start_minute'], 180)
+
+    def test_an_empty_list_removes_every_window_for_the_port(self):
+        port_a, port_b = 9002, 9003
+        self._write(port_a, [_window_payload()])
+        self._write(port_b, [_window_payload()])
+        self._write(port_a, [])
+        self.assertEqual(self._read(port_a), [])
+        self.assertEqual(len(self._read(port_b)), 1)
+
+    def test_windows_are_read_back_in_deterministic_order(self):
+        port = 9004
+        self._write(port, [
+            _window_payload(start_minute=180),
+            _window_payload(start_minute=60),
+            _window_payload(start_minute=120),
+        ])
+        first = self._read(port)
+        second = self._read(port)
+        self.assertEqual([row['start_minute'] for row in first], [60, 120, 180])
+        self.assertEqual(first, second)
+
+    def test_two_identical_writes_produce_the_same_stored_tuple_set(self):
+        port = 9005
+        windows = [
+            _window_payload(start_minute=60, weekdays=(1, 3)),
+            _window_payload(start_minute=120),
+        ]
+        self._write(port, windows)
+        first = {
+            (r['start_minute'], r['duration_minutes'], r['weekdays'], r['grace_minutes'], bool(r['enabled']))
+            for r in self._read(port)
+        }
+        self._write(port, windows)
+        second = {
+            (r['start_minute'], r['duration_minutes'], r['weekdays'], r['grace_minutes'], bool(r['enabled']))
+            for r in self._read(port)
+        }
+        self.assertEqual(first, second)
+
+    def test_the_write_uses_the_callers_transaction(self):
+        port = 9006
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            beacon_repositories.upsert_maintenance_windows(
+                conn, port=port, windows=[_window_payload()], now=1_700_000_000,
+            )
+            conn.rollback()
+            remaining = conn.execute(
+                'SELECT COUNT(*) FROM maintenance_windows WHERE port=?', (port,),
+            ).fetchone()[0]
+            conn.close()
+        self.assertEqual(remaining, 0)
+
+    def test_weekday_text_round_trips_through_the_domain_parser(self):
+        port = 9007
+        self._write(port, [_window_payload(weekdays=(2, 4, 6))])
+        row = self._read(port)[0]
+        self.assertEqual(beacon_maintenance.parse_weekdays(row['weekdays']), frozenset({2, 4, 6}))
+
+
+class SettingsBoundsTests(unittest.TestCase):
+    """The maintenance grace prefill and per-port window cap are safe-default Settings fields."""
+
+    def test_the_default_grace_prefill_and_window_cap_have_defaults(self):
+        settings = load_settings({})
+        self.assertEqual(settings.maintenance_default_grace_minutes, 15)
+        self.assertEqual(settings.maintenance_windows_per_port_max, 50)
+
+    def test_a_non_numeric_bound_retains_its_default(self):
+        settings = load_settings({
+            'MAINTENANCE_DEFAULT_GRACE_MINUTES': 'not-a-number',
+            'MAINTENANCE_WINDOWS_PER_PORT_MAX': 'also-not-a-number',
+        })
+        self.assertEqual(settings.maintenance_default_grace_minutes, 15)
+        self.assertEqual(settings.maintenance_windows_per_port_max, 50)
+
+
+class MetadataPayloadTests(unittest.TestCase):
+    """metadata_response carries the port's windows, present and empty when none exist."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_service(self, port):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port, title, first_seen, last_seen, is_online) "
+                "VALUES (?,?,?,?,1)",
+                (port, f':{port}', 1_700_000_000, 1_700_000_000),
+            )
+            conn.commit()
+            conn.close()
+
+    def _meta_row(self, port):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            row = self.appmod._service_meta_row(conn, port)
+            conn.close()
+        return row
+
+    def test_the_metadata_response_carries_the_ports_windows(self):
+        port = 9101
+        self._insert_service(port)
+
+        empty_row = self._meta_row(port)
+        self.assertIn('windows', empty_row)
+        self.assertEqual(empty_row['windows'], [])
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            beacon_repositories.upsert_maintenance_windows(
+                conn, port=port, windows=[_window_payload()], now=1_700_000_000,
+            )
+            conn.commit()
+            conn.close()
+
+        populated_row = self._meta_row(port)
+        self.assertEqual(len(populated_row['windows']), 1)
+        self.assertIsInstance(populated_row['windows'][0], dict)
 
 
 class SuppressionTracerTests(unittest.TestCase):

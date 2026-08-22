@@ -543,6 +543,12 @@ class BackupRecoveryTests(unittest.TestCase):
                     'latency_ms REAL, error_class TEXT, alert_status TEXT, details TEXT, '
                     'suppressed_reason TEXT, maintenance_grace_until INTEGER, down_since_ts INTEGER)'
                 )
+                conn.execute(
+                    'CREATE TABLE maintenance_windows (id INTEGER PRIMARY KEY AUTOINCREMENT, '
+                    'port INTEGER NOT NULL, start_minute INTEGER NOT NULL, duration_minutes INTEGER NOT NULL, '
+                    'weekdays TEXT NOT NULL, grace_minutes INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, '
+                    'created_ts INTEGER NOT NULL, updated_ts INTEGER NOT NULL)'
+                )
             writer = None
             try:
                 appmod._set_runtime_state('worker_heartbeat', {'ts': 0}, now=0)

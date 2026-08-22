@@ -5,6 +5,19 @@ from flask import Flask, jsonify
 from .config import Settings, load_settings
 from .db import connect_db, read_transaction, write_transaction
 from . import repositories
+from .maintenance import parse_weekdays
+
+
+def _window_response(row):
+    """Translate a stored window row into the editor's response shape."""
+    return {
+        'id': row['id'],
+        'start_minute': row['start_minute'],
+        'duration_minutes': row['duration_minutes'],
+        'weekdays': sorted(parse_weekdays(row.get('weekdays'))),
+        'grace_minutes': row['grace_minutes'],
+        'enabled': bool(row['enabled']),
+    }
 
 
 def metadata_response(conn, port, *, safe_url, path_from_url, parse_tags):
@@ -16,6 +29,9 @@ def metadata_response(conn, port, *, safe_url, path_from_url, parse_tags):
     row['path'] = path_from_url(row['url'], port)
     row['tags'] = parse_tags(row.get('tags'))
     row['critical'] = bool(row.get('critical'))
+    row['windows'] = [
+        _window_response(window) for window in repositories.get_maintenance_windows(conn, port)
+    ]
     return row
 
 

@@ -8,6 +8,7 @@ import json
 import time
 import re
 
+from .maintenance import format_weekdays
 from .queues import enqueue_preview_in_transaction
 from .telemetry import SourceSegment
 
@@ -782,6 +783,40 @@ def get_maintenance_windows(conn, port):
         (port,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def upsert_maintenance_windows(conn, *, port, windows, now):
+    """Replace every stored window for a port with the supplied list.
+
+    Operates on the caller's connection and opens no transaction of its own,
+    matching ``upsert_service_metadata``'s contract exactly -- the delete and
+    the re-insert share whatever transaction and lock the caller already
+    holds. Each supplied window is a mapping with ``start_minute``,
+    ``duration_minutes``, ``weekdays`` (an iterable of ISO weekday integers),
+    ``grace_minutes``, and ``enabled``. ``weekdays`` is persisted through
+    ``format_weekdays`` so the stored text is exactly what ``parse_weekdays``
+    consumes on read. Returns the number of rows written.
+    """
+    conn.execute('DELETE FROM maintenance_windows WHERE port=?', (port,))
+    written = 0
+    for window in windows:
+        conn.execute(
+            "INSERT INTO maintenance_windows "
+            "(port, start_minute, duration_minutes, weekdays, grace_minutes, enabled, "
+            "created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                port,
+                int(window['start_minute']),
+                int(window['duration_minutes']),
+                format_weekdays(window['weekdays']),
+                int(window['grace_minutes']),
+                int(bool(window['enabled'])),
+                int(now),
+                int(now),
+            ),
+        )
+        written += 1
+    return written
 
 
 def get_open_down_transition(conn, port):

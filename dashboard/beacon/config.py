@@ -58,6 +58,8 @@ class Settings:
     telemetry_retry_base_seconds: int = 300
     telemetry_retry_max_seconds: int = 3_600
     timezone: str = 'UTC'
+    maintenance_default_grace_minutes: int = 15
+    maintenance_windows_per_port_max: int = 50
 
 
 def _positive_int(environ, key, default):
@@ -243,4 +245,10 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         telemetry_retry_base_seconds=telemetry['retry_base_seconds'],
         telemetry_retry_max_seconds=telemetry['retry_max_seconds'],
         timezone=_resolved_timezone(source.get('TZ', 'UTC')),
+        maintenance_default_grace_minutes=_positive_int(
+            source, 'MAINTENANCE_DEFAULT_GRACE_MINUTES', 15,
+        ),
+        maintenance_windows_per_port_max=_positive_int(
+            source, 'MAINTENANCE_WINDOWS_PER_PORT_MAX', 50,
+        ),
     )
