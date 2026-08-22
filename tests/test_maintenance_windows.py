@@ -42,6 +42,12 @@ def _epoch(year, month, day, hour, minute, second=0, tz='UTC'):
     return int(datetime(year, month, day, hour, minute, second, tzinfo=ZoneInfo(tz)).timestamp())
 
 
+def _pair(date_ymd, hour, minute, duration_minutes, tz='UTC'):
+    """Build a (down_ts, recovered_ts) tuple for the detector tests."""
+    down = _epoch(date_ymd[0], date_ymd[1], date_ymd[2], hour, minute, 0, tz)
+    return (down, down + duration_minutes * 60)
+
+
 class CoverageTests(unittest.TestCase):
     """Pure, framework-free coverage() behavior -- no SQLite, no Flask."""
 
@@ -140,6 +146,194 @@ class DstCoverageTests(unittest.TestCase):
     def test_an_unknown_zone_name_falls_back_to_utc_without_raising(self):
         tz = beacon_maintenance.resolve_timezone('Not/ARealZone')
         self.assertEqual(str(tz), 'UTC')
+
+
+class DetectorTests(unittest.TestCase):
+    """Pure, framework-free detect_suggestion() behavior -- no SQLite, no Flask."""
+
+    def _detect(self, pairs, start_tolerance_seconds=900, duration_tolerance_seconds=600):
+        return beacon_maintenance.detect_suggestion(
+            pairs, 'UTC', now_epoch=0,
+            start_tolerance_seconds=start_tolerance_seconds,
+            duration_tolerance_seconds=duration_tolerance_seconds,
+        )
+
+    def test_three_similar_daily_outages_produce_a_suggestion(self):
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 6), 2, 5, 28),
+            _pair((2026, 1, 7), 1, 58, 32),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['occurrence_count'], 3)
+        self.assertEqual(result['weekdays'], frozenset(range(1, 8)))
+
+    def test_two_similar_outages_produce_nothing(self):
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 6), 2, 5, 28),
+        ]
+        self.assertIsNone(self._detect(pairs))
+
+    def test_three_outages_on_the_same_calendar_date_produce_nothing(self):
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 5), 2, 10, 30),
+            _pair((2026, 1, 5), 2, 20, 30),
+        ]
+        self.assertIsNone(self._detect(pairs))
+
+    def test_start_times_outside_the_tolerance_do_not_cluster(self):
+        tight = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 6), 2, 5, 30),
+            _pair((2026, 1, 7), 2, 10, 30),
+        ]
+        self.assertIsNotNone(self._detect(tight))
+
+        wide = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 6), 2, 20, 30),
+            _pair((2026, 1, 7), 2, 40, 30),
+        ]
+        self.assertIsNone(self._detect(wide))
+
+    def test_durations_outside_the_tolerance_do_not_cluster(self):
+        tight = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 6), 2, 0, 35),
+            _pair((2026, 1, 7), 2, 0, 25),
+        ]
+        self.assertIsNotNone(self._detect(tight))
+
+        wide = [
+            _pair((2026, 1, 5), 2, 0, 10),
+            _pair((2026, 1, 6), 2, 0, 30),
+            _pair((2026, 1, 7), 2, 0, 50),
+        ]
+        self.assertIsNone(self._detect(wide))
+
+    def test_the_suggested_start_and_duration_are_the_cluster_medians(self):
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 6), 2, 0, 30),
+            _pair((2026, 1, 7), 2, 10, 38),  # inside tolerance, but an outlier
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start_minute'], 120)
+        self.assertEqual(result['duration_minutes'], 30)
+
+    def test_the_suggested_weekday_set_is_all_seven_days(self):
+        # All three occurrences happen to fall on a Monday; the suggestion
+        # must not narrow to "Mondays only".
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 12), 2, 0, 30),
+            _pair((2026, 1, 19), 2, 0, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['weekdays'], frozenset(range(1, 8)))
+
+    def test_the_output_carries_no_score_or_threshold_value(self):
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 30),
+            _pair((2026, 1, 6), 2, 0, 30),
+            _pair((2026, 1, 7), 2, 0, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            set(result.keys()),
+            {'occurrence_count', 'start_minute', 'duration_minutes', 'weekdays'},
+        )
+
+    def test_malformed_evidence_yields_no_suggestion_and_does_not_raise(self):
+        malformed = [
+            ('not-an-int', 100),
+            (200, 100),  # recovery before its down
+            (100,),  # missing element
+        ]
+        try:
+            result = self._detect(malformed)
+        except Exception as exc:  # pragma: no cover -- the assertion below is the real gate
+            self.fail(f'detect_suggestion raised on malformed evidence: {exc!r}')
+        self.assertIsNone(result)
+
+    def test_evidence_older_than_the_lookback_is_not_supplied_to_the_detector(self):
+        # detect_suggestion has no lookback parameter of its own -- it
+        # processes every pair it is given regardless of age. Feed it three
+        # occurrences spanning ~90 days (well past the 21-day default
+        # lookback) and confirm it still clusters them: bounding by age is
+        # the caller's job, expressed as the named Settings field, never an
+        # inline number inside this pure function.
+        pairs = [
+            _pair((2025, 11, 1), 2, 0, 30),
+            _pair((2025, 12, 15), 2, 5, 30),
+            _pair((2026, 1, 29), 2, 10, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['occurrence_count'], 3)
+
+
+class SuggestionOverlapTests(unittest.TestCase):
+    """Pure, framework-free suggestion_overlaps_enabled_window() behavior."""
+
+    def _suggestion(self, start_minute=120, duration_minutes=30):
+        return {
+            'occurrence_count': 3, 'start_minute': start_minute,
+            'duration_minutes': duration_minutes, 'weekdays': frozenset(range(1, 8)),
+        }
+
+    def test_a_cluster_matching_an_enabled_window_is_reported_as_overlapping(self):
+        suggestion = self._suggestion()
+        window = _window_row(start_minute=125, duration_minutes=32, enabled=1)
+        self.assertTrue(
+            beacon_maintenance.suggestion_overlaps_enabled_window(
+                suggestion, [window], start_tolerance_seconds=900,
+            )
+        )
+
+    def test_a_cluster_matching_only_a_disabled_window_does_not_overlap(self):
+        suggestion = self._suggestion()
+        window = _window_row(start_minute=125, duration_minutes=32, enabled=0)
+        self.assertFalse(
+            beacon_maintenance.suggestion_overlaps_enabled_window(
+                suggestion, [window], start_tolerance_seconds=900,
+            )
+        )
+
+    def test_an_unrelated_second_pattern_on_the_same_port_does_not_overlap(self):
+        suggestion = self._suggestion(start_minute=120, duration_minutes=30)
+        window = _window_row(start_minute=800, duration_minutes=30, enabled=1)
+        self.assertFalse(
+            beacon_maintenance.suggestion_overlaps_enabled_window(
+                suggestion, [window], start_tolerance_seconds=900,
+            )
+        )
+
+
+class SettingsDetectorTests(unittest.TestCase):
+    """The three detector Settings fields fail closed to their documented defaults."""
+
+    def test_the_three_detector_settings_have_documented_defaults(self):
+        settings = load_settings({})
+        self.assertEqual(settings.maintenance_start_tolerance_seconds, 900)
+        self.assertEqual(settings.maintenance_duration_tolerance_seconds, 600)
+        self.assertEqual(settings.maintenance_suggestion_lookback_days, 21)
+
+    def test_a_malformed_detector_setting_retains_its_default(self):
+        settings = load_settings({
+            'MAINTENANCE_START_TOLERANCE_SECONDS': 'not-an-int',
+            'MAINTENANCE_DURATION_TOLERANCE_SECONDS': '-5',
+            'MAINTENANCE_SUGGESTION_LOOKBACK_DAYS': '0',
+        })
+        self.assertEqual(settings.maintenance_start_tolerance_seconds, 900)
+        self.assertEqual(settings.maintenance_duration_tolerance_seconds, 600)
+        self.assertEqual(settings.maintenance_suggestion_lookback_days, 21)
 
 
 class MigrationNineTests(unittest.TestCase):

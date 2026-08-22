@@ -60,6 +60,20 @@ class Settings:
     timezone: str = 'UTC'
     maintenance_default_grace_minutes: int = 15
     maintenance_windows_per_port_max: int = 50
+    # A newly-down service is invisible to the 60s down-only sweep (J4) until
+    # the 300s full sweep (J3) catches the flip, so two independently-sampled
+    # observations of one true restart time can differ by roughly 300s from
+    # polling jitter alone. 900s is a deliberate margin over that noise floor.
+    maintenance_start_tolerance_seconds: int = 900
+    # Observed durations compound both sides' sampling jitter (up to ~300s on
+    # the down side, ~60s on the recovery side), so two measurements of one
+    # true restart duration can differ by roughly 360s. 600s is a deliberate
+    # margin over that noise floor.
+    maintenance_duration_tolerance_seconds: int = 600
+    # Long enough to plausibly accumulate three occurrences of a genuinely
+    # daily pattern without waiting a full month; short enough to satisfy
+    # D-12's "actually been doing lately" framing (RESEARCH A2).
+    maintenance_suggestion_lookback_days: int = 21
 
 
 def _positive_int(environ, key, default):
@@ -250,5 +264,14 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         ),
         maintenance_windows_per_port_max=_positive_int(
             source, 'MAINTENANCE_WINDOWS_PER_PORT_MAX', 50,
+        ),
+        maintenance_start_tolerance_seconds=_positive_int(
+            source, 'MAINTENANCE_START_TOLERANCE_SECONDS', 900,
+        ),
+        maintenance_duration_tolerance_seconds=_positive_int(
+            source, 'MAINTENANCE_DURATION_TOLERANCE_SECONDS', 600,
+        ),
+        maintenance_suggestion_lookback_days=_positive_int(
+            source, 'MAINTENANCE_SUGGESTION_LOOKBACK_DAYS', 21,
         ),
     )

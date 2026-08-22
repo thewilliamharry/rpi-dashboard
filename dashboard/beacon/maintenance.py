@@ -8,6 +8,7 @@ keeps it importable by worker jobs and unit tests alike, matching the
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from statistics import median
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -21,6 +22,16 @@ MAINTENANCE_REASON = 'maintenance'
 MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS = 2
 
 _ISO_WEEKDAYS = frozenset(range(1, 8))
+
+# MNT-02's literal requirement -- not a tunable, unlike the two tolerances
+# and the lookback, which are configurable Settings fields.
+MAINTENANCE_MIN_OCCURRENCES = 3
+
+# The suggested weekday set always defaults to all seven ISO weekdays,
+# matching MNT-02's "daily" wording (RESEARCH A3); narrowing it is the
+# operator's Adjust path, never an inference from which weekdays happened to
+# be observed.
+MAINTENANCE_SUGGESTION_WEEKDAYS = frozenset(_ISO_WEEKDAYS)
 
 
 def resolve_timezone(name):
@@ -175,3 +186,124 @@ def coverage(windows, now_epoch, tz_name):
     if not covering_grace_ends:
         return False, None
     return True, max(covering_grace_ends)
+
+
+def _observation_from_pair(pair, tz):
+    """Translate one down/recovered pair into a clustering observation.
+
+    Returns ``None`` for anything malformed: not a two-element pair, a
+    non-integer timestamp (an actual ``int``, never a ``bool``, matching the
+    identity-typed discipline the rest of the codebase uses), or a recovery
+    that is not strictly after its down. Malformed evidence is dropped, never
+    raised on, so a single corrupt row can never break the editor's read.
+    """
+    try:
+        down_ts, recovered_ts = pair
+    except (TypeError, ValueError):
+        return None
+    if isinstance(down_ts, bool) or isinstance(recovered_ts, bool):
+        return None
+    if not isinstance(down_ts, int) or not isinstance(recovered_ts, int):
+        return None
+    if recovered_ts <= down_ts:
+        return None
+    local_down = datetime.fromtimestamp(down_ts, tz=tz)
+    return {
+        'date': local_down.date(),
+        'start_minute': local_down.hour * 60 + local_down.minute,
+        'duration_seconds': recovered_ts - down_ts,
+    }
+
+
+def detect_suggestion(
+    down_recovered_pairs, tz_name, *, now_epoch, start_tolerance_seconds,
+    duration_tolerance_seconds,
+):
+    """Cluster down/recovered pairs into an inactive candidate window, or ``None``.
+
+    ``down_recovered_pairs`` is a sequence of two-tuples of down and
+    recovered epoch timestamps for one port -- the caller (the repository
+    read plus the configured lookback) owns bounding how much evidence is
+    supplied; this function is a pure computation over whatever it receives,
+    with no lookback awareness of its own (Assumption A2's lookback bound is
+    a caller-side, named ``Settings`` field, never an inline number here).
+
+    Each pair is converted to a local start-of-day minute and an observed
+    duration, then clustered greedily: for every observation used as an
+    anchor, every other observation within ``start_tolerance_seconds`` of the
+    anchor's start minute *and* within ``duration_tolerance_seconds`` of the
+    anchor's duration joins its cluster. Occurrences are counted by distinct
+    local calendar date, not by row, so several observations on the same
+    date count once. The largest qualifying cluster (by distinct-date count)
+    wins; ties keep the first one found. Returns ``None`` when no cluster
+    reaches ``MAINTENANCE_MIN_OCCURRENCES``.
+
+    The returned mapping carries only the observed occurrence count, the
+    cluster's median start minute and median duration in whole minutes, and
+    the all-seven-day weekday set (RESEARCH A3) -- no score, no threshold,
+    no internal cluster detail.
+    """
+    tz = resolve_timezone(tz_name)
+    observations = []
+    for pair in down_recovered_pairs:
+        observation = _observation_from_pair(pair, tz)
+        if observation is not None:
+            observations.append(observation)
+
+    best_cluster = None
+    best_occurrence_count = 0
+    for anchor in observations:
+        cluster = [
+            o for o in observations
+            if abs(o['start_minute'] - anchor['start_minute']) * 60 <= start_tolerance_seconds
+            and abs(o['duration_seconds'] - anchor['duration_seconds']) <= duration_tolerance_seconds
+        ]
+        occurrence_count = len({o['date'] for o in cluster})
+        if occurrence_count >= MAINTENANCE_MIN_OCCURRENCES and occurrence_count > best_occurrence_count:
+            best_cluster = cluster
+            best_occurrence_count = occurrence_count
+
+    if best_cluster is None:
+        return None
+    return {
+        'occurrence_count': best_occurrence_count,
+        'start_minute': int(median(o['start_minute'] for o in best_cluster)),
+        'duration_minutes': int(median(o['duration_seconds'] for o in best_cluster) // 60),
+        'weekdays': MAINTENANCE_SUGGESTION_WEEKDAYS,
+    }
+
+
+def suggestion_overlaps_enabled_window(suggestion, windows, *, start_tolerance_seconds):
+    """Return True when an ENABLED window already covers ``suggestion``.
+
+    ``windows`` is a sequence of raw stored-row mappings (as returned by
+    ``repositories.get_maintenance_windows``); each is validated through
+    ``window_from_row`` exactly as ``coverage()`` does, so a malformed row
+    is skipped rather than raised on. A window overlaps the suggestion when
+    it is ENABLED, its start minute is within ``start_tolerance_seconds`` of
+    the suggestion's start minute, and its duration is comparable -- within
+    that same tolerance, converted to minutes, since no separate duration
+    tolerance is threaded through this call. This lets the caller withhold a
+    redundant "confirm what you already confirmed" proposal while the
+    detector itself still sees the evidence (RESEARCH Q3) -- a disabled
+    window is not a confirmed pattern the operator already owns, so it is
+    never treated as overlapping.
+    """
+    if not suggestion:
+        return False
+    try:
+        suggestion_start = int(suggestion['start_minute'])
+        suggestion_duration = int(suggestion['duration_minutes'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    tolerance_minutes = max(1, start_tolerance_seconds // 60)
+    for row in windows:
+        window = window_from_row(row)
+        if window is None or not window.enabled:
+            continue
+        if abs(window.start_minute - suggestion_start) > tolerance_minutes:
+            continue
+        if abs(window.duration_minutes - suggestion_duration) > tolerance_minutes:
+            continue
+        return True
+    return False
