@@ -496,6 +496,169 @@ class WindowPersistenceTests(unittest.TestCase):
         self.assertEqual(beacon_maintenance.parse_weekdays(row['weekdays']), frozenset({2, 4, 6}))
 
 
+class BulkWindowReadTests(unittest.TestCase):
+    """read_maintenance_windows_by_port groups stored windows by port in one query."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _write(self, port, windows, now=1_700_000_000):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            beacon_repositories.upsert_maintenance_windows(conn, port=port, windows=windows, now=now)
+            conn.commit()
+            conn.close()
+
+    def _bulk(self, ports):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            result = beacon_repositories.read_maintenance_windows_by_port(conn, ports=ports)
+            conn.close()
+        return result
+
+    def _single(self, port):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = beacon_repositories.get_maintenance_windows(conn, port)
+            conn.close()
+        return rows
+
+    def test_windows_are_returned_grouped_by_port(self):
+        self._write(9601, [_window_payload(start_minute=60)])
+        self._write(9602, [_window_payload(start_minute=120), _window_payload(start_minute=180)])
+        result = self._bulk([9601, 9602, 9603])
+        self.assertEqual(len(result.get(9601, [])), 1)
+        self.assertEqual(len(result.get(9602, [])), 2)
+        # A port with no stored windows is consistently absent-or-empty --
+        # never a source of a KeyError for a caller that iterates every
+        # requested port.
+        self.assertEqual(result.get(9603, []), [])
+
+    def test_the_bulk_read_matches_the_single_port_read(self):
+        self._write(9611, [_window_payload(start_minute=60), _window_payload(start_minute=30)])
+        self._write(9612, [_window_payload(start_minute=90)])
+        result = self._bulk([9611, 9612])
+        self.assertEqual(result[9611], self._single(9611))
+        self.assertEqual(result[9612], self._single(9612))
+
+    def test_the_bulk_read_is_bounded(self):
+        self._write(9621, [_window_payload(start_minute=m) for m in range(0, 300, 30)])
+        with mock.patch.object(beacon_repositories, '_MAINTENANCE_WINDOWS_BULK_ROW_LIMIT', 3):
+            result = self._bulk([9621])
+        self.assertLessEqual(len(result.get(9621, [])), 3)
+
+
+class OfflineIntervalTests(unittest.TestCase):
+    """read_service_offline_intervals reconstructs offline spans from service_checks."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_check(self, port, ts, online):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                (ts, port, int(online)),
+            )
+            conn.commit()
+            conn.close()
+
+    def _intervals(self, port, start_ts, end_ts):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            intervals = beacon_repositories.read_service_offline_intervals(
+                conn, port, start_ts=start_ts, end_ts=end_ts,
+            )
+            conn.close()
+        return intervals
+
+    def test_offline_intervals_are_reconstructed_from_service_checks(self):
+        port = 9701
+        base = 1_700_000_000
+        self._insert_check(port, base, 1)
+        self._insert_check(port, base + 60, 0)
+        self._insert_check(port, base + 180, 1)
+        intervals = self._intervals(port, base, base + 300)
+        self.assertEqual(intervals, [(base + 60, base + 180)])
+
+    def test_an_interval_still_open_at_the_period_end_is_clipped_to_it(self):
+        port = 9702
+        base = 1_700_000_000
+        self._insert_check(port, base, 1)
+        self._insert_check(port, base + 60, 0)
+        intervals = self._intervals(port, base, base + 300)
+        self.assertEqual(intervals, [(base + 60, base + 300)])
+
+
+class AttributionTests(unittest.TestCase):
+    """attributed_downtime_seconds intersects offline intervals with window coverage."""
+
+    def test_an_offline_interval_fully_inside_a_window_is_fully_attributed(self):
+        start = _epoch(2026, 1, 5, 2, 0, 0)  # a Monday
+        row = _window_row(start_minute=120, duration_minutes=60, weekdays='1', grace_minutes=0)
+        interval = (start + 300, start + 600)
+        seconds = beacon_maintenance.attributed_downtime_seconds([interval], [row], 'UTC')
+        self.assertEqual(seconds, 300)
+
+    def test_an_offline_interval_fully_outside_any_window_attributes_zero(self):
+        start = _epoch(2026, 1, 5, 2, 0, 0)
+        row = _window_row(start_minute=120, duration_minutes=60, weekdays='1', grace_minutes=0)
+        interval = (start - 7200, start - 3600)
+        seconds = beacon_maintenance.attributed_downtime_seconds([interval], [row], 'UTC')
+        self.assertEqual(seconds, 0)
+
+    def test_an_interval_straddling_a_coverage_boundary_attributes_only_the_covered_part(self):
+        start = _epoch(2026, 1, 5, 2, 0, 0)
+        row = _window_row(start_minute=120, duration_minutes=60, weekdays='1', grace_minutes=0)
+        # The window covers [start, start+3600). This interval straddles that
+        # boundary by starting inside coverage and ending well past it.
+        interval = (start + 1800, start + 5400)
+        seconds = beacon_maintenance.attributed_downtime_seconds([interval], [row], 'UTC')
+        self.assertEqual(seconds, 1800)
+
+    def test_overlapping_windows_do_not_double_count_attributed_seconds(self):
+        start = _epoch(2026, 1, 5, 2, 0, 0)
+        row_a = _window_row(id=1, start_minute=120, duration_minutes=60, weekdays='1', grace_minutes=0)
+        row_b = _window_row(id=2, start_minute=150, duration_minutes=60, weekdays='1', grace_minutes=0)
+        # row_a covers [start, start+3600); row_b covers [start+1800, start+5400).
+        # Their union covers the whole interval with no gap.
+        interval = (start, start + 5400)
+        seconds = beacon_maintenance.attributed_downtime_seconds([interval], [row_a, row_b], 'UTC')
+        self.assertEqual(seconds, 5400)
+
+    def test_attribution_never_exceeds_the_total_offline_seconds_in_the_period(self):
+        start = _epoch(2026, 1, 5, 2, 0, 0)
+        row = _window_row(
+            start_minute=0, duration_minutes=1440, weekdays='1,2,3,4,5,6,7', grace_minutes=0,
+        )
+        interval = (start, start + 3600)
+        seconds = beacon_maintenance.attributed_downtime_seconds([interval], [row], 'UTC')
+        self.assertLessEqual(seconds, interval[1] - interval[0])
+        self.assertEqual(seconds, 3600)
+
+    def test_zero_attribution_is_reported_as_zero_not_as_absent(self):
+        seconds = beacon_maintenance.attributed_downtime_seconds([], [], 'UTC')
+        self.assertEqual(seconds, 0)
+        self.assertIsNotNone(seconds)
+
+    def test_malformed_windows_attribute_zero_and_do_not_raise(self):
+        start = _epoch(2026, 1, 5, 2, 0, 0)
+        bad_row = {
+            'id': 1, 'port': 8080, 'start_minute': 'nope', 'duration_minutes': 30,
+            'weekdays': '1', 'grace_minutes': 0, 'enabled': 1,
+        }
+        interval = (start, start + 300)
+        seconds = beacon_maintenance.attributed_downtime_seconds([interval], [bad_row], 'UTC')
+        self.assertEqual(seconds, 0)
+
+
 class SettingsBoundsTests(unittest.TestCase):
     """The maintenance grace prefill and per-port window cap are safe-default Settings fields."""
 

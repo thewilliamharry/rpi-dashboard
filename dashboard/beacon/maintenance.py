@@ -307,3 +307,84 @@ def suggestion_overlaps_enabled_window(suggestion, windows, *, start_tolerance_s
             continue
         return True
     return False
+
+
+# A generous, bounded cap on how many times boundary discovery may step its
+# search anchor backward for a single window inside a single offline
+# interval -- guards against a pathologically long offline interval turning
+# attribution into an unbounded loop, while comfortably covering any
+# interval this codebase's retention windows can produce (each step covers
+# MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS days, so 64 steps covers well over a
+# year).
+_ATTRIBUTION_MAX_ANCHOR_STEPS = 64
+
+
+def _covering_boundaries(window, interval_start, interval_end, tz):
+    """Yield every start/grace-end epoch of ``window`` that could fall inside
+    ``[interval_start, interval_end)``, discovered by stepping the boundary
+    search anchor backward in ``MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS``-sized
+    strides so an interval spanning more calendar days than one search
+    covers is still searched exhaustively, bounded by
+    ``_ATTRIBUTION_MAX_ANCHOR_STEPS``.
+    """
+    seen = set()
+    anchor = interval_end
+    step_seconds = MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS * 86400
+    steps = 0
+    while anchor >= interval_start - 86400 and steps < _ATTRIBUTION_MAX_ANCHOR_STEPS:
+        for start_epoch in _local_occurrence_epochs(window, anchor, tz):
+            grace_end = start_epoch + (window.duration_minutes + window.grace_minutes) * 60
+            if grace_end <= interval_start or start_epoch >= interval_end:
+                continue
+            key = (start_epoch, grace_end)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield key
+        anchor -= step_seconds
+        steps += 1
+
+
+def attributed_downtime_seconds(intervals, windows, tz_name):
+    """Return whole seconds of ``intervals`` that fell inside window coverage.
+
+    ``intervals`` is a sequence of half-open ``(start_epoch, end_epoch)``
+    offline intervals (as ``repositories.read_service_offline_intervals``
+    returns). ``windows`` is the same raw stored-row sequence ``coverage()``
+    accepts. Each interval is split at every coverage boundary a window's
+    occurrences introduce inside it -- every occurrence's start epoch and
+    grace-end epoch -- and the covered/uncovered state of each resulting
+    segment is decided by calling ``coverage()`` itself at the segment's
+    start instant, so this function never re-implements the interval-overlap
+    rule; it only discovers where to split. Overlapping windows contribute
+    their union rather than being double-counted, because ``coverage()``
+    already resolves overlapping coverage to a single boolean (D-05's
+    longest-grace-wins rule) and every occurrence's boundary from every
+    window is included in the split set. A malformed window row is dropped
+    by ``window_from_row`` during boundary discovery, exactly as ``coverage()``
+    drops it internally, and so contributes no boundaries and no coverage.
+    Returns the integer zero, never ``None``, when nothing is attributable.
+    """
+    tz = resolve_timezone(tz_name)
+    total = 0
+    for raw_start, raw_end in intervals:
+        interval_start = int(raw_start)
+        interval_end = int(raw_end)
+        if interval_end <= interval_start:
+            continue
+        boundaries = {interval_start, interval_end}
+        for row in windows:
+            window = window_from_row(row)
+            if window is None or not window.enabled:
+                continue
+            for start_epoch, grace_end in _covering_boundaries(window, interval_start, interval_end, tz):
+                if interval_start < start_epoch < interval_end:
+                    boundaries.add(start_epoch)
+                if interval_start < grace_end < interval_end:
+                    boundaries.add(grace_end)
+        ordered = sorted(boundaries)
+        for segment_start, segment_end in zip(ordered, ordered[1:]):
+            covered, _grace_until = coverage(windows, segment_start, tz_name)
+            if covered:
+                total += segment_end - segment_start
+    return total
