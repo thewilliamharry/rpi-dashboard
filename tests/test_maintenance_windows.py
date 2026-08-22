@@ -1491,6 +1491,318 @@ class OverrunTests(unittest.TestCase):
         self.assertEqual(pct_covered, pct_plain)
 
 
+class SuggestionLifecycleTests(unittest.TestCase):
+    """GET /api/service-meta/<port> recomputes the MNT-02 suggestion on every read."""
+
+    def setUp(self):
+        self._clock = {'now': None}
+        self._clock_patcher = None
+        self.appmod, self.db_path = load_app({'TZ': 'UTC'})
+        self.client = self.appmod.app.test_client()
+        self.ui_headers = {'X-Beacon-UI': '1'}
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _freeze_clock(self, value):
+        """Freeze the process-global ``time.time`` for this test only."""
+        self._clock['now'] = value
+        if self._clock_patcher is None:
+            real_time = time.time
+            patcher = mock.patch(
+                'time.time',
+                lambda: real_time() if self._clock['now'] is None else self._clock['now'],
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            self._clock_patcher = patcher
+        return value
+
+    def _insert_service(self, port):
+        _insert_meta_service(self.appmod, port)
+
+    def _insert_window(
+        self, *, port, start_minute, duration_minutes, weekdays, grace_minutes=0, enabled=1,
+    ):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO maintenance_windows("
+                "port, start_minute, duration_minutes, weekdays, grace_minutes, enabled, "
+                "created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?)",
+                (port, start_minute, duration_minutes, weekdays, grace_minutes, enabled, 0, 0),
+            )
+            conn.commit()
+            conn.close()
+
+    def _seed_occurrence(self, port, date_ymd, hour, minute, duration_minutes, *, suppressed=False):
+        down_ts, recovered_ts = _pair(date_ymd, hour, minute, duration_minutes)
+        reason = beacon_maintenance.MAINTENANCE_REASON if suppressed else None
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO events(ts, port, event_type, online, previous_online, suppressed_reason) "
+                "VALUES (?,?,?,?,?,?)",
+                (down_ts, port, 'state_change', 0, 1, reason),
+            )
+            conn.execute(
+                "INSERT INTO events(ts, port, event_type, online, previous_online, suppressed_reason) "
+                "VALUES (?,?,?,?,?,?)",
+                (recovered_ts, port, 'state_change', 1, 0, reason),
+            )
+            conn.commit()
+            conn.close()
+
+    def _seed_pattern(self, port, *, dates, hour, minute, duration_minutes, suppressed=False):
+        for date_ymd in dates:
+            self._seed_occurrence(port, date_ymd, hour, minute, duration_minutes, suppressed=suppressed)
+
+    def _get_meta(self, port):
+        return self.client.get(f'/api/service-meta/{port}', headers=self.ui_headers)
+
+    def _table_counts(self):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            tables = [
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            ]
+            counts = {
+                table: conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+                for table in tables
+            }
+            conn.close()
+        return counts
+
+    def test_a_qualifying_pattern_appears_in_the_service_meta_get(self):
+        port = 9351
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        self._seed_pattern(
+            port, dates=[(2026, 1, 5), (2026, 1, 6), (2026, 1, 7)],
+            hour=2, minute=0, duration_minutes=30,
+        )
+        response = self._get_meta(port)
+        self.assertEqual(response.status_code, 200)
+        suggestion = response.get_json()['suggestion']
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion['occurrence_count'], 3)
+        self.assertEqual(suggestion['start_minute'], 120)
+        self.assertEqual(suggestion['duration_minutes'], 30)
+        self.assertEqual(sorted(suggestion['weekdays']), list(range(1, 8)))
+
+    def test_a_service_with_no_pattern_omits_the_suggestion_field(self):
+        port = 9352
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        response = self._get_meta(port)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.get_json().get('suggestion'))
+
+    def test_the_suggestion_disappears_when_the_pattern_stops(self):
+        port = 9353
+        self._insert_service(port)
+        base = _epoch(2026, 1, 1, 2, 0, 0)
+        self._seed_pattern(
+            port, dates=[(2026, 1, 1), (2026, 1, 2), (2026, 1, 3)],
+            hour=2, minute=0, duration_minutes=30,
+        )
+        self._freeze_clock(base + 5 * 86400)  # 5 days later -- still inside the 21-day lookback
+        first = self._get_meta(port)
+        self.assertIsNotNone(first.get_json()['suggestion'])
+
+        self._freeze_clock(base + 30 * 86400)  # 30 days later -- past the 21-day lookback
+        second = self._get_meta(port)
+        self.assertIsNone(second.get_json().get('suggestion'))
+
+    def test_the_suggestion_is_recomputed_not_frozen(self):
+        port = 9354
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 9, 12, 0, 0))
+        self._seed_occurrence(port, (2026, 1, 5), 1, 58, 30)
+        self._seed_occurrence(port, (2026, 1, 6), 2, 0, 30)
+        self._seed_occurrence(port, (2026, 1, 7), 2, 2, 30)
+        first = self._get_meta(port).get_json()['suggestion']
+        self.assertIsNotNone(first)
+        self.assertEqual(first['start_minute'], 120)
+
+        # A fourth, later occurrence shifts the cluster's median.
+        self._seed_occurrence(port, (2026, 1, 8), 2, 12, 30)
+        second = self._get_meta(port).get_json()['suggestion']
+        self.assertIsNotNone(second)
+        self.assertNotEqual(second['start_minute'], first['start_minute'])
+
+    def test_suppressed_transitions_count_as_evidence(self):
+        port = 9355
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        self._seed_pattern(
+            port, dates=[(2026, 1, 5), (2026, 1, 6), (2026, 1, 7)],
+            hour=2, minute=0, duration_minutes=30, suppressed=True,
+        )
+        suggestion = self._get_meta(port).get_json()['suggestion']
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion['occurrence_count'], 3)
+
+    def test_a_pattern_already_covered_by_an_enabled_window_is_withheld(self):
+        port = 9356
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        self._seed_pattern(
+            port, dates=[(2026, 1, 5), (2026, 1, 6), (2026, 1, 7)],
+            hour=2, minute=0, duration_minutes=30,
+        )
+        self._insert_window(
+            port=port, start_minute=120, duration_minutes=30,
+            weekdays='1,2,3,4,5,6,7', grace_minutes=0, enabled=1,
+        )
+        suggestion = self._get_meta(port).get_json().get('suggestion')
+        self.assertIsNone(suggestion)
+
+    def test_a_pattern_covered_only_by_a_disabled_window_is_still_offered(self):
+        port = 9357
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        self._seed_pattern(
+            port, dates=[(2026, 1, 5), (2026, 1, 6), (2026, 1, 7)],
+            hour=2, minute=0, duration_minutes=30,
+        )
+        self._insert_window(
+            port=port, start_minute=120, duration_minutes=30,
+            weekdays='1,2,3,4,5,6,7', grace_minutes=0, enabled=0,
+        )
+        suggestion = self._get_meta(port).get_json().get('suggestion')
+        self.assertIsNotNone(suggestion)
+
+    def test_a_second_unrelated_pattern_is_still_offered(self):
+        port = 9358
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        self._seed_pattern(
+            port, dates=[(2026, 1, 5), (2026, 1, 6), (2026, 1, 7)],
+            hour=2, minute=0, duration_minutes=30,
+        )
+        self._insert_window(
+            port=port, start_minute=800, duration_minutes=30,
+            weekdays='1,2,3,4,5,6,7', grace_minutes=0, enabled=1,
+        )
+        suggestion = self._get_meta(port).get_json().get('suggestion')
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion['start_minute'], 120)
+
+    def test_no_row_is_written_by_computing_a_suggestion(self):
+        port = 9359
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        self._seed_pattern(
+            port, dates=[(2026, 1, 5), (2026, 1, 6), (2026, 1, 7)],
+            hour=2, minute=0, duration_minutes=30,
+        )
+        before = self._table_counts()
+        response = self._get_meta(port)
+        self.assertIsNotNone(response.get_json()['suggestion'])
+        after = self._table_counts()
+        self.assertEqual(before, after)
+
+    def test_the_suggestion_appears_on_no_other_endpoint(self):
+        port = 9360
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 8, 12, 0, 0))
+        self._seed_pattern(
+            port, dates=[(2026, 1, 5), (2026, 1, 6), (2026, 1, 7)],
+            hour=2, minute=0, duration_minutes=30,
+        )
+        self.assertIsNotNone(self._get_meta(port).get_json()['suggestion'])
+
+        services_response = self.client.get('/api/services')
+        self.assertEqual(services_response.status_code, 200)
+        for service in services_response.get_json():
+            self.assertNotIn('suggestion', service)
+
+        advanced_response = self.client.get('/api/advanced/current')
+        self.assertEqual(advanced_response.status_code, 200)
+        for service in advanced_response.get_json().get('services', []):
+            self.assertNotIn('suggestion', service)
+
+
+class SuggestionEvidenceTests(unittest.TestCase):
+    """get_maintenance_suggestion_evidence pairs down/recovered state_change rows."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_state_change(self, port, ts, online):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO events(ts, port, event_type, online, previous_online) "
+                "VALUES (?,?,?,?,?)",
+                (ts, port, 'state_change', online, 1 - online),
+            )
+            conn.commit()
+            conn.close()
+
+    def _evidence(self, port, since_ts):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            pairs = beacon_repositories.get_maintenance_suggestion_evidence(
+                conn, port, since_ts=since_ts,
+            )
+            conn.close()
+        return pairs
+
+    def test_pairs_are_bounded_by_the_configured_lookback(self):
+        port = 9401
+        old_down, old_recovered = _pair((2026, 1, 1), 2, 0, 30)
+        recent_down, recent_recovered = _pair((2026, 1, 20), 2, 0, 30)
+        self._insert_state_change(port, old_down, 0)
+        self._insert_state_change(port, old_recovered, 1)
+        self._insert_state_change(port, recent_down, 0)
+        self._insert_state_change(port, recent_recovered, 1)
+
+        since_ts = _epoch(2026, 1, 10, 0, 0, 0)
+        pairs = self._evidence(port, since_ts)
+        self.assertEqual(pairs, [(recent_down, recent_recovered)])
+
+    def test_an_unrecovered_down_transition_is_not_paired(self):
+        port = 9402
+        down_ts, recovered_ts = _pair((2026, 1, 5), 2, 0, 30)
+        self._insert_state_change(port, down_ts, 0)
+        self._insert_state_change(port, recovered_ts, 1)
+        trailing_down = recovered_ts + 3600
+        self._insert_state_change(port, trailing_down, 0)  # never recovers
+
+        pairs = self._evidence(port, _epoch(2026, 1, 1, 0, 0, 0))
+        self.assertEqual(pairs, [(down_ts, recovered_ts)])
+
+    def test_pairs_are_returned_in_chronological_order(self):
+        port = 9403
+        first_down, first_recovered = _pair((2026, 1, 5), 2, 0, 30)
+        second_down, second_recovered = _pair((2026, 1, 6), 2, 0, 30)
+        third_down, third_recovered = _pair((2026, 1, 7), 2, 0, 30)
+        # Insert out of order to prove the read sorts, not merely echoes insert order.
+        self._insert_state_change(port, third_down, 0)
+        self._insert_state_change(port, third_recovered, 1)
+        self._insert_state_change(port, first_down, 0)
+        self._insert_state_change(port, first_recovered, 1)
+        self._insert_state_change(port, second_down, 0)
+        self._insert_state_change(port, second_recovered, 1)
+
+        pairs = self._evidence(port, _epoch(2026, 1, 1, 0, 0, 0))
+        self.assertEqual(
+            pairs,
+            [
+                (first_down, first_recovered),
+                (second_down, second_recovered),
+                (third_down, third_recovered),
+            ],
+        )
+
+
 class TimezoneEnvironmentTests(unittest.TestCase):
     """The IANA time-zone database resolves inside this environment, and the
     operator's TZ value reaches Settings/the containers with a fail-closed

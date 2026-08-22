@@ -2333,6 +2333,11 @@ def _service_meta_row(conn, port):
         safe_url=_safe_service_url,
         path_from_url=_service_path_from_url,
         parse_tags=_parse_tags,
+        now_epoch=int(time.time()),
+        tz_name=SETTINGS.timezone,
+        start_tolerance_seconds=SETTINGS.maintenance_start_tolerance_seconds,
+        duration_tolerance_seconds=SETTINGS.maintenance_duration_tolerance_seconds,
+        lookback_days=SETTINGS.maintenance_suggestion_lookback_days,
     )
 
 

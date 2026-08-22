@@ -875,6 +875,42 @@ def mark_overrun_raised(conn, port, now):
     )
 
 
+# Generous but finite -- keeps a pathological event history from making the
+# editor's GET unbounded, in the spirit of the existing capped list reads
+# (read_pipeline_evidence's gap_limit/stream_limit/pending_limit).
+_MAINTENANCE_EVIDENCE_ROW_LIMIT = 500
+
+
+def get_maintenance_suggestion_evidence(conn, port, *, since_ts):
+    """Return down/recovered epoch-timestamp pairs for the MNT-02 detector.
+
+    Selects the port's ``state_change`` rows at or after ``since_ts`` in
+    ascending timestamp order and pairs each down transition (``online=0``)
+    with the next recovery transition (``online=1``) that follows it. A down
+    transition with no following recovery in the scanned range contributes
+    no pair. Rows carrying a suppression tag are included -- a suppressed
+    transition is still detector evidence (RESEARCH Q3); this function makes
+    no distinction between suppressed and unsuppressed rows. Operates on the
+    caller's connection and opens no transaction of its own. Bounded by
+    ``_MAINTENANCE_EVIDENCE_ROW_LIMIT`` so a pathological event history
+    cannot make this read unbounded.
+    """
+    rows = conn.execute(
+        "SELECT ts, online FROM events WHERE port=? AND event_type='state_change' "
+        "AND ts >= ? ORDER BY ts ASC, id ASC LIMIT ?",
+        (port, int(since_ts), _MAINTENANCE_EVIDENCE_ROW_LIMIT),
+    ).fetchall()
+    pairs = []
+    pending_down_ts = None
+    for row in rows:
+        if row['online'] == 0:
+            pending_down_ts = row['ts']
+        elif row['online'] == 1 and pending_down_ts is not None:
+            pairs.append((pending_down_ts, row['ts']))
+            pending_down_ts = None
+    return pairs
+
+
 def get_runtime_state(conn, key, default=None):
     row = conn.execute('SELECT value FROM runtime_state WHERE key=?', (key,)).fetchone()
     if not row:
