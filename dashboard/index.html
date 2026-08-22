@@ -74,7 +74,14 @@
         <label class="meta-field"><span class="meta-label">Tags</span><input type="text" id="meta-tags" placeholder="core, prod" autocomplete="off"></label>
         <div class="meta-maintenance">
           <span class="meta-label" id="meta-maintenance-heading">Maintenance windows</span>
-          <div class="meta-suggestion" id="meta-suggestion" hidden></div>
+          <div class="meta-suggestion" id="meta-suggestion" hidden>
+            <span class="meta-label">Suggested window</span>
+            <p class="meta-suggestion-evidence" id="meta-suggestion-evidence"></p>
+            <div class="meta-suggestion-actions">
+              <button type="button" class="meta-btn meta-btn-primary" id="meta-suggestion-confirm">Confirm</button>
+              <button type="button" class="meta-btn meta-btn-ghost" id="meta-suggestion-adjust">Adjust</button>
+            </div>
+          </div>
           <span class="meta-window-count" id="meta-window-count" hidden></span>
           <div class="meta-window-empty" id="meta-window-empty" hidden>
             <strong>No maintenance windows yet</strong>
