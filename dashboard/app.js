@@ -1,6 +1,7 @@
 'use strict';
 
-const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated', 'monitoring_gap']);
+const MAINTENANCE_OVERRUN_EVENT_TYPE = 'maintenance_overrun';
+const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated', 'monitoring_gap', MAINTENANCE_OVERRUN_EVENT_TYPE]);
 const UI_HEADERS = {'X-Beacon-UI': '1'};
 const WORKER_STALE_COPY = 'Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.';
 const DASHBOARD_SCROLL_KEY = 'beacon-dashboard-scroll-position';
@@ -12,6 +13,7 @@ let pollFailures = 0;
 let workerWasStale = false;
 let workerIsStale = false;
 let scanSubmitting = false;
+let suppressedEventsRevealed = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,6 +25,13 @@ function fmtAgo(ts) {
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
   return `${Math.floor(d / 86400)}d ago`;
+}
+
+function fmtLocalDateTime(ts) {
+  if (ts === null || ts === undefined) return 'unknown';
+  const date = new Date(Number(ts) * 1000);
+  if (Number.isNaN(date.getTime())) return 'unknown';
+  return date.toLocaleString();
 }
 
 function normalizedBytes(value) {
@@ -187,10 +196,22 @@ function uptimeStrip(values) {
   return wrapper;
 }
 
+function serviceCardAvailability(service) {
+  // Fail-closed: only the recognised 'maintenance' literal ever produces the
+  // calm state. Anything else (unset, 'online', 'offline', or an unrecognised
+  // future value) falls back to the true is_online-derived classification, so
+  // an unknown literal can never be coerced into the calm treatment (D-06).
+  const raw = String(service.availability || '').toLowerCase();
+  if (raw === 'maintenance') return 'maintenance';
+  return service.is_online ? 'online' : 'offline';
+}
+
 function buildServiceCard(service) {
   const online = Boolean(service.is_online);
+  const availability = serviceCardAvailability(service);
+  const maintenance = availability === 'maintenance';
   const card = document.createElement('article');
-  card.className = `svc-card${online ? '' : ' offline'}`;
+  card.className = maintenance ? 'svc-card svc-maintenance' : `svc-card${online ? '' : ' offline'}`;
 
   const link = document.createElement('a');
   link.className = 'svc-link';
@@ -244,8 +265,11 @@ function buildServiceCard(service) {
   const statusRow = document.createElement('div');
   statusRow.className = 'svc-status-row';
   const status = document.createElement('span');
-  status.className = online ? 'svc-online' : 'svc-offline';
-  status.append(Object.assign(document.createElement('span'), {className: 'status-pip'}), Object.assign(document.createElement('span'), {textContent: online ? 'ONLINE' : 'OFFLINE'}));
+  status.className = maintenance ? 'svc-maintenance-status' : (online ? 'svc-online' : 'svc-offline');
+  status.append(Object.assign(document.createElement('span'), {className: 'status-pip'}), Object.assign(document.createElement('span'), {textContent: maintenance ? 'MAINTENANCE' : (online ? 'ONLINE' : 'OFFLINE')}));
+  if (maintenance) {
+    status.title = `Offline and covered by a confirmed maintenance window until ${fmtLocalDateTime(service.maintenance_until)}. Downtime is still counted in the 7-day availability figure.`;
+  }
   const since = Object.assign(document.createElement('span'), {className: 'svc-since', textContent: `${online ? 'up' : 'down'} since ${fmtAgo(service.state_since)}`});
   statusRow.append(status, since);
 

@@ -494,16 +494,24 @@ html.light .svc-port-badge {
   font-weight: 300; font-size: 12px; padding: 0; color: var(--muted);
 }
 
-.svc-status-row { display: flex; align-items: center; justify-content: space-between; }
+.svc-status-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .svc-online { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--green); letter-spacing: 0.1em; }
 .svc-offline { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--red); letter-spacing: 0.1em; }
-html.light .svc-online, html.light .svc-offline { letter-spacing: 0; font-size: 11px; font-family: var(--font-sans); font-weight: 300; }
+/* In-maintenance status: a calm, non-fault register reusing the existing
+   --accent3 token (D-06). Deliberately its own class, never svc-offline, so
+   none of the offline-scoped rules above ever apply to it; the pip carries no
+   animation/box-shadow declaration of any kind, unlike svc-online's dark-mode
+   glow, so it reads as static rather than alarming. */
+.svc-maintenance-status { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--accent3); letter-spacing: 0.1em; }
+html.light .svc-online, html.light .svc-offline, html.light .svc-maintenance-status { letter-spacing: 0; font-size: 11px; font-family: var(--font-sans); font-weight: 300; }
 html.light .svc-online { color: var(--green); }
 html.light .svc-offline { color: var(--red); }
+html.light .svc-maintenance-status { color: var(--accent3); }
 
 .status-pip { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .svc-online .status-pip { background: var(--green); }
 .svc-offline .status-pip { background: var(--red); }
+.svc-maintenance-status .status-pip { background: var(--accent3); }
 html:not(.light) .svc-online .status-pip { box-shadow: 0 0 6px var(--green); }
 html.light .status-pip { width: 5px; height: 5px; }
 
