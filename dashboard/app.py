@@ -544,6 +544,75 @@ def _status_is_healthy(status, healthy_statuses='200-399'):
     return any(start <= int(status) <= end for start, end in ranges)
 
 
+# Seven days -- the bound that keeps the occurrence search finite (see
+# 03.1-PLAN.md Task 2, step 2's duration_minutes/grace_minutes bound).
+_MAINTENANCE_WINDOW_MAX_MINUTES = 10080
+
+
+def _validate_maintenance_windows(payload_value, *, max_windows):
+    """Validate and normalise the ``maintenance_windows`` PUT payload field.
+
+    Returns ``(normalised_windows, error)`` where exactly one of the two is
+    ``None``. Runs before any database connection is opened, so a rejection
+    never touches storage. Every numeric/type check is identity-based
+    (``type(x) is int``, not ``isinstance``) in the style of the existing
+    ``pinned_order`` check, so a Python ``bool`` -- itself an ``int``
+    subclass -- is never silently accepted where an integer is required.
+    Every rejection message matches the Copywriting Contract character for
+    character, including the 1-based window index prefix; the array-shape
+    and per-service-cap messages are planner-authored, since the contract
+    does not cover those two cases.
+    """
+    if not isinstance(payload_value, list):
+        return None, 'maintenance_windows must be an array'
+    if len(payload_value) > max_windows:
+        return None, f'A service may have at most {max_windows} maintenance windows.'
+
+    normalised = []
+    for index, window in enumerate(payload_value, start=1):
+        if not isinstance(window, dict):
+            return None, f'Window {index}: Start time is required.'
+
+        start_minute = window.get('start_minute')
+        if type(start_minute) is not int or not 0 <= start_minute <= 1439:
+            return None, f'Window {index}: Start time is required.'
+
+        duration_minutes = window.get('duration_minutes')
+        if (
+            type(duration_minutes) is not int
+            or duration_minutes < 1
+            or duration_minutes > _MAINTENANCE_WINDOW_MAX_MINUTES
+        ):
+            return None, f'Window {index}: Duration must be at least 1 minute.'
+
+        weekdays = window.get('weekdays')
+        if (
+            not isinstance(weekdays, list)
+            or not weekdays
+            or any(type(day) is not int or not 1 <= day <= 7 for day in weekdays)
+            or len(set(weekdays)) != len(weekdays)
+        ):
+            return None, f'Window {index}: Select at least one weekday.'
+
+        grace_minutes = window.get('grace_minutes')
+        if (
+            type(grace_minutes) is not int
+            or grace_minutes < 0
+            or grace_minutes > _MAINTENANCE_WINDOW_MAX_MINUTES
+        ):
+            return None, f'Window {index}: Grace period is required and must be 0 minutes or more.'
+
+        normalised.append({
+            'start_minute': start_minute,
+            'duration_minutes': duration_minutes,
+            'weekdays': set(weekdays),
+            'grace_minutes': grace_minutes,
+            'enabled': bool(window.get('enabled', True)),
+        })
+
+    return normalised, None
+
+
 def _outbound_policy():
     """Build a fresh immutable policy so tests and config reloads never share TLS state."""
     return OutboundPolicy(replace(load_settings(), alert_webhook_url=ALERT_WEBHOOK_URL))
@@ -2589,7 +2658,10 @@ def api_service_meta(port):
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({'error': 'metadata payload must be an object'}), 400
-    allowed_fields = {'display_name', 'url', 'path', 'critical', 'pinned_order', 'tags', 'healthy_statuses'}
+    allowed_fields = {
+        'display_name', 'url', 'path', 'critical', 'pinned_order', 'tags', 'healthy_statuses',
+        'maintenance_windows',
+    }
     unknown = [k for k in payload.keys() if k not in allowed_fields]
     if unknown:
         return jsonify({"error": f"unknown fields: {', '.join(unknown)}"}), 400
@@ -2608,6 +2680,14 @@ def api_service_meta(port):
         return jsonify({
             'error': 'pinned_order must be an integer between 0 and 65535',
         }), 400
+
+    maintenance_windows_normalised = None
+    if 'maintenance_windows' in payload:
+        maintenance_windows_normalised, maintenance_windows_error = _validate_maintenance_windows(
+            payload['maintenance_windows'], max_windows=SETTINGS.maintenance_windows_per_port_max,
+        )
+        if maintenance_windows_error:
+            return jsonify({'error': maintenance_windows_error}), 400
 
     next_url = None
     with _db_lock:
@@ -2656,6 +2736,7 @@ def api_service_meta(port):
             return jsonify({"error": str(exc)}), 400
 
         try:
+            now_ts = int(time.time())
             preview_request = beacon_repositories.upsert_service_metadata(
                 conn,
                 port=port,
@@ -2665,8 +2746,12 @@ def api_service_meta(port):
                 pinned_order=next_pinned_order,
                 tags=next_tags,
                 healthy_statuses=next_healthy_statuses,
-                requested_ts=int(time.time()),
+                requested_ts=now_ts,
             )
+            if maintenance_windows_normalised is not None:
+                beacon_repositories.upsert_maintenance_windows(
+                    conn, port=port, windows=maintenance_windows_normalised, now=now_ts,
+                )
             row = _service_meta_row(conn, port)
             conn.commit()
         except sqlite3.Error:

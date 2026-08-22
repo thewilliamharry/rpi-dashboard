@@ -367,6 +367,363 @@ class MetadataPayloadTests(unittest.TestCase):
         self.assertIsInstance(populated_row['windows'][0], dict)
 
 
+def _insert_meta_service(appmod, port):
+    with appmod._db_lock:
+        conn = appmod.get_db()
+        conn.execute(
+            "INSERT INTO services(port, title, first_seen, last_seen, is_online) "
+            "VALUES (?,?,?,?,1)",
+            (port, f':{port}', 1_700_000_000, 1_700_000_000),
+        )
+        conn.commit()
+        conn.close()
+
+
+class WindowCrudApiTests(unittest.TestCase):
+    """PUT /api/service-meta/<port> accepts, edits, disables, and removes windows."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+        self.client = self.appmod.app.test_client()
+        self.ui_headers = {'X-Beacon-UI': '1'}
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _put(self, port, payload):
+        return self.client.put(f'/api/service-meta/{port}', json=payload, headers=self.ui_headers)
+
+    def _stored_windows(self, port):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = beacon_repositories.get_maintenance_windows(conn, port)
+            conn.close()
+        return rows
+
+    def test_a_valid_window_list_is_accepted_and_returned(self):
+        port = 9201
+        _insert_meta_service(self.appmod, port)
+        window = {
+            'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1, 2, 3],
+            'grace_minutes': 10, 'enabled': True,
+        }
+        response = self._put(port, {'maintenance_windows': [window]})
+        self.assertEqual(response.status_code, 200)
+        windows = response.get_json()['windows']
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]['start_minute'], 60)
+        self.assertEqual(windows[0]['duration_minutes'], 30)
+        self.assertEqual(sorted(windows[0]['weekdays']), [1, 2, 3])
+        self.assertEqual(windows[0]['grace_minutes'], 10)
+        self.assertTrue(windows[0]['enabled'])
+
+    def test_several_windows_per_service_are_accepted(self):
+        port = 9202
+        _insert_meta_service(self.appmod, port)
+        windows_payload = [
+            {'start_minute': 0, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 5},
+            {'start_minute': 600, 'duration_minutes': 120, 'weekdays': [6, 7], 'grace_minutes': 15},
+            {'start_minute': 1000, 'duration_minutes': 15, 'weekdays': [2, 3, 4], 'grace_minutes': 0},
+        ]
+        response = self._put(port, {'maintenance_windows': windows_payload})
+        self.assertEqual(response.status_code, 200)
+        windows = response.get_json()['windows']
+        self.assertEqual(len(windows), 3)
+        self.assertEqual(sorted(w['start_minute'] for w in windows), [0, 600, 1000])
+
+    def test_editing_a_window_replaces_it(self):
+        port = 9203
+        _insert_meta_service(self.appmod, port)
+        self._put(port, {'maintenance_windows': [
+            {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 5},
+        ]})
+        response = self._put(port, {'maintenance_windows': [
+            {'start_minute': 120, 'duration_minutes': 45, 'weekdays': [2], 'grace_minutes': 10},
+        ]})
+        self.assertEqual(response.status_code, 200)
+        windows = response.get_json()['windows']
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]['start_minute'], 120)
+        self.assertEqual(windows[0]['duration_minutes'], 45)
+
+    def test_disabling_a_window_keeps_the_row(self):
+        port = 9204
+        _insert_meta_service(self.appmod, port)
+        response = self._put(port, {'maintenance_windows': [
+            {
+                'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1],
+                'grace_minutes': 5, 'enabled': False,
+            },
+        ]})
+        self.assertEqual(response.status_code, 200)
+        windows = response.get_json()['windows']
+        self.assertEqual(len(windows), 1)
+        self.assertFalse(windows[0]['enabled'])
+
+    def test_an_empty_array_removes_every_window(self):
+        port = 9205
+        _insert_meta_service(self.appmod, port)
+        self._put(port, {'maintenance_windows': [
+            {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 5},
+        ]})
+        response = self._put(port, {'maintenance_windows': []})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['windows'], [])
+
+    def test_omitting_the_key_leaves_existing_windows_untouched(self):
+        port = 9206
+        _insert_meta_service(self.appmod, port)
+        self._put(port, {'maintenance_windows': [
+            {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 5},
+        ]})
+        response = self._put(port, {'display_name': 'Renamed'})
+        self.assertEqual(response.status_code, 200)
+        windows = response.get_json()['windows']
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]['start_minute'], 60)
+
+    def test_adjacent_windows_both_persist_and_cover_continuously(self):
+        port = 9207
+        _insert_meta_service(self.appmod, port)
+        response = self._put(port, {'maintenance_windows': [
+            {'start_minute': 0, 'duration_minutes': 60, 'weekdays': [1], 'grace_minutes': 0},
+            {'start_minute': 60, 'duration_minutes': 60, 'weekdays': [1], 'grace_minutes': 0},
+        ]})
+        self.assertEqual(response.status_code, 200)
+        windows = response.get_json()['windows']
+        self.assertEqual(len(windows), 2)
+        stored = self._stored_windows(port)
+        seam_epoch = _epoch(2026, 1, 5, 1, 0, 0)  # Monday 01:00 -- the seam between the two windows
+        covered, _ = beacon_maintenance.coverage(stored, seam_epoch, 'UTC')
+        self.assertTrue(covered)
+
+    def test_repeating_an_identical_put_is_idempotent(self):
+        port = 9208
+        _insert_meta_service(self.appmod, port)
+        payload = {'maintenance_windows': [
+            {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1, 2], 'grace_minutes': 5},
+        ]}
+        first = self._put(port, payload)
+        second = self._put(port, payload)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_windows = [
+            {k: v for k, v in w.items() if k != 'id'} for w in first.get_json()['windows']
+        ]
+        second_windows = [
+            {k: v for k, v in w.items() if k != 'id'} for w in second.get_json()['windows']
+        ]
+        self.assertEqual(first_windows, second_windows)
+
+
+class WindowValidationTests(unittest.TestCase):
+    """Every maintenance_windows field is bounds-checked server-side before any write."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+        self.client = self.appmod.app.test_client()
+        self.ui_headers = {'X-Beacon-UI': '1'}
+        self.port = 9301
+        _insert_meta_service(self.appmod, self.port)
+        # Seed one known-good window so the "unchanged after rejection" assertions have
+        # something concrete to check against.
+        seed = self.client.put(
+            f'/api/service-meta/{self.port}',
+            json={'maintenance_windows': [
+                {'start_minute': 480, 'duration_minutes': 60, 'weekdays': [3], 'grace_minutes': 10},
+            ]},
+            headers=self.ui_headers,
+        )
+        self.assertEqual(seed.status_code, 200)
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _stored_window_count(self):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            count = conn.execute(
+                'SELECT COUNT(*) FROM maintenance_windows WHERE port=?', (self.port,),
+            ).fetchone()[0]
+            conn.close()
+        return count
+
+    def _assert_rejected(self, windows, expected_error):
+        before_count = self._stored_window_count()
+        response = self.client.put(
+            f'/api/service-meta/{self.port}',
+            json={'maintenance_windows': windows},
+            headers=self.ui_headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], expected_error)
+        self.assertEqual(self._stored_window_count(), before_count)
+
+    def _valid_window(self, **overrides):
+        window = {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 5}
+        window.update(overrides)
+        return window
+
+    def test_a_missing_start_time_is_rejected(self):
+        window = self._valid_window()
+        del window['start_minute']
+        self._assert_rejected([window], 'Window 1: Start time is required.')
+
+    def test_a_start_minute_outside_bounds_is_rejected(self):
+        self._assert_rejected(
+            [self._valid_window(start_minute=1440)], 'Window 1: Start time is required.',
+        )
+
+    def test_a_duration_below_one_is_rejected(self):
+        self._assert_rejected(
+            [self._valid_window(duration_minutes=0)],
+            'Window 1: Duration must be at least 1 minute.',
+        )
+
+    def test_a_duration_above_the_bound_is_rejected(self):
+        self._assert_rejected(
+            [self._valid_window(duration_minutes=10081)],
+            'Window 1: Duration must be at least 1 minute.',
+        )
+
+    def test_an_empty_weekday_list_is_rejected(self):
+        self._assert_rejected(
+            [self._valid_window(weekdays=[])], 'Window 1: Select at least one weekday.',
+        )
+
+    def test_a_weekday_integer_outside_range_is_rejected(self):
+        self._assert_rejected(
+            [self._valid_window(weekdays=[8])], 'Window 1: Select at least one weekday.',
+        )
+
+    def test_a_duplicate_weekday_is_rejected(self):
+        self._assert_rejected(
+            [self._valid_window(weekdays=[1, 1])], 'Window 1: Select at least one weekday.',
+        )
+
+    def test_a_missing_grace_is_rejected(self):
+        window = self._valid_window()
+        del window['grace_minutes']
+        self._assert_rejected(
+            [window], 'Window 1: Grace period is required and must be 0 minutes or more.',
+        )
+
+    def test_a_negative_grace_is_rejected(self):
+        self._assert_rejected(
+            [self._valid_window(grace_minutes=-1)],
+            'Window 1: Grace period is required and must be 0 minutes or more.',
+        )
+
+    def test_a_non_object_list_element_is_rejected(self):
+        self._assert_rejected(['not-an-object'], 'Window 1: Start time is required.')
+
+    def test_a_non_list_payload_value_is_rejected(self):
+        before_count = self._stored_window_count()
+        response = self.client.put(
+            f'/api/service-meta/{self.port}',
+            json={'maintenance_windows': 'not-a-list'},
+            headers=self.ui_headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'maintenance_windows must be an array')
+        self.assertEqual(self._stored_window_count(), before_count)
+
+    def test_a_list_longer_than_the_per_port_maximum_is_rejected(self):
+        max_windows = self.appmod.SETTINGS.maintenance_windows_per_port_max
+        windows = [self._valid_window(start_minute=start) for start in range(0, max_windows + 1)]
+        before_count = self._stored_window_count()
+        response = self.client.put(
+            f'/api/service-meta/{self.port}',
+            json={'maintenance_windows': windows},
+            headers=self.ui_headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json()['error'],
+            f'A service may have at most {max_windows} maintenance windows.',
+        )
+        self.assertEqual(self._stored_window_count(), before_count)
+
+    def test_a_boolean_is_not_accepted_where_an_integer_is_required(self):
+        self._assert_rejected(
+            [self._valid_window(start_minute=True)], 'Window 1: Start time is required.',
+        )
+
+
+class WindowConcurrencyTests(unittest.TestCase):
+    """The metadata upsert and the window replacement share one commit."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+        self.client = self.appmod.app.test_client()
+        self.ui_headers = {'X-Beacon-UI': '1'}
+        self.port = 9401
+        _insert_meta_service(self.appmod, self.port)
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def test_metadata_and_windows_commit_together(self):
+        # Seed a known display name so a rollback of the metadata write is provable too.
+        seed = self.client.put(
+            f'/api/service-meta/{self.port}',
+            json={'display_name': 'Before'},
+            headers=self.ui_headers,
+        )
+        self.assertEqual(seed.status_code, 200)
+
+        with mock.patch.object(
+            self.appmod.beacon_repositories, 'upsert_maintenance_windows',
+            side_effect=sqlite3.Error('forced failure'),
+        ):
+            response = self.client.put(
+                f'/api/service-meta/{self.port}',
+                json={
+                    'display_name': 'After',
+                    'maintenance_windows': [
+                        {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 5},
+                    ],
+                },
+                headers=self.ui_headers,
+            )
+        self.assertEqual(response.status_code, 503)
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            window_count = conn.execute(
+                'SELECT COUNT(*) FROM maintenance_windows WHERE port=?', (self.port,),
+            ).fetchone()[0]
+            display_name = conn.execute(
+                'SELECT display_name FROM service_meta WHERE port=?', (self.port,),
+            ).fetchone()[0]
+            conn.close()
+        self.assertEqual(window_count, 0)
+        self.assertEqual(display_name, 'Before')
+
+
+class ReadOnlyAdvancedTests(unittest.TestCase):
+    """The /advanced workspace never gains a mutation endpoint (D-01)."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def test_no_advanced_route_accepts_a_mutation_method(self):
+        safe_methods = {'GET', 'HEAD', 'OPTIONS'}
+        advanced_prefixes = ('/advanced', '/api/advanced')
+        checked_any = False
+        for rule in self.appmod.app.url_map.iter_rules():
+            if rule.rule.startswith(advanced_prefixes):
+                checked_any = True
+                self.assertLessEqual(
+                    rule.methods, safe_methods,
+                    f'{rule.rule} permits {rule.methods - safe_methods}',
+                )
+        self.assertTrue(checked_any, 'expected at least one /advanced route to exist')
+
+
 class SuppressionTracerTests(unittest.TestCase):
     """End-to-end: a real covered restart, tagged, retained, and unalerted."""
 
