@@ -498,6 +498,10 @@
     const value = String(service.availability || service.status || 'unknown').toLowerCase();
     if (value === 'online' || value === 'up') return 'online';
     if (value === 'offline' || value === 'down') return 'offline';
+    // D-06: a service covered by an active confirmed maintenance window is its own
+    // status value, never folded into 'offline' -- WR-01's fail-closed vocabulary
+    // discipline still governs everything this branch does not recognise below.
+    if (value === 'maintenance') return 'maintenance';
     return 'unknown';
   }
 
@@ -681,7 +685,13 @@
       details.addEventListener('click', () => toggleServiceDetails(port));
       identity.append(name, portLabel, details);
       const status = document.createElement('td');
-      status.textContent = `● ${serviceAvailability(service)}`;
+      const availability = serviceAvailability(service);
+      status.textContent = `● ${availability}`;
+      // The Maintenance colour is a status-text role only (03.1-UI-SPEC.md "Color") --
+      // never applied to a button, link, or any other interactive element on this
+      // read-only surface, and no new custom property is introduced: this reuses the
+      // existing --accent3 token already declared for both themes in style.css.
+      if (availability === 'maintenance') status.className = 'service-status-maintenance';
       const latency = document.createElement('td');
       const latencyValue = finiteMeasurement(service.latency_ms);
       latency.textContent = latencyValue === null ? displayValue(service.failure_class || service.last_error, '') : `${latencyValue} ms`;
