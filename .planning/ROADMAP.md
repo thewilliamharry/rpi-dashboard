@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Behavioral Safety & Runtime Ownership** - Preserve working Beacon behavior while making upgrades, background ownership, and outbound access safe. (completed 2026-08-07)
 - [x] **Phase 2: Bounded Telemetry & Retention** - Establish truthful 90-day host and service history with bounded storage and query contracts. (completed 2026-08-11)
 - [x] **Phase 3: Advanced Current Diagnosis** - Let the operator open an advanced workspace for fresh host, service, settings, and pipeline-health diagnosis. (completed 2026-08-20)
-- [ ] **Phase 03.1: Planned Maintenance Recognition (INSERTED)** - Confirm or define expected recurring service restarts without hiding downtime or overruns.
+- [x] **Phase 03.1: Planned Maintenance Recognition (INSERTED)** - Confirm or define expected recurring service restarts without hiding downtime or overruns. (completed 2026-08-22)
 - [ ] **Phase 4: Historical Investigation** - Turn retained telemetry into honest range-based charts, service history, and incident investigation.
 - [ ] **Phase 5: Theme-Parity Analytics Experience** - Make the dashboard and advanced workspace cohesive, responsive, accessible, and equivalent in both themes.
 - [ ] **Phase 6: Workload Resilience & Pi Acceptance** - Ensure discovery and previews remain bounded best-effort work and prove Beacon holds up under Pi-class load.
@@ -274,7 +274,7 @@ Plans:
 **Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
 **Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
 **Depends on:** Phase 3
-**Plans:** 10 plans
+**Plans:** 10/10 plans complete
 
 **Success Criteria** (what must be TRUE):
 
@@ -285,16 +285,16 @@ Plans:
 
 Plans:
 
-- [ ] 03.1-01-PLAN.md — Tracer: one covered down-transition is tagged, retained, and never alerted
-- [ ] 03.1-02-PLAN.md — IANA time-zone data in the container (tzdata dependency + TZ plumbing)
-- [ ] 03.1-03-PLAN.md — Window CRUD over the existing service-meta write surface
-- [ ] 03.1-04-PLAN.md — Overrun outage: one truthful event past window and grace
-- [ ] 03.1-05-PLAN.md — Maintenance windows section in the service editor
-- [ ] 03.1-06-PLAN.md — Suggestion detector recomputed on every metadata read
-- [ ] 03.1-07-PLAN.md — Derived maintenance availability, exception exclusion, and attribution
-- [ ] 03.1-08-PLAN.md — Suggestion card with Confirm and Adjust
-- [ ] 03.1-09-PLAN.md — Main dashboard: calm maintenance card and suppressed-entry reveal
-- [ ] 03.1-10-PLAN.md — /advanced maintenance evidence, overrun timestamps, and attribution
+- [x] 03.1-01-PLAN.md — Tracer: one covered down-transition is tagged, retained, and never alerted
+- [x] 03.1-02-PLAN.md — IANA time-zone data in the container (tzdata dependency + TZ plumbing)
+- [x] 03.1-03-PLAN.md — Window CRUD over the existing service-meta write surface
+- [x] 03.1-04-PLAN.md — Overrun outage: one truthful event past window and grace
+- [x] 03.1-05-PLAN.md — Maintenance windows section in the service editor
+- [x] 03.1-06-PLAN.md — Suggestion detector recomputed on every metadata read
+- [x] 03.1-07-PLAN.md — Derived maintenance availability, exception exclusion, and attribution
+- [x] 03.1-08-PLAN.md — Suggestion card with Confirm and Adjust
+- [x] 03.1-09-PLAN.md — Main dashboard: calm maintenance card and suppressed-entry reveal
+- [x] 03.1-10-PLAN.md — /advanced maintenance evidence, overrun timestamps, and attribution
 
 ### Phase 4: Historical Investigation
 
