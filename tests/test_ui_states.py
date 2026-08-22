@@ -118,12 +118,12 @@ class UiStateBrowserTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _service_meta(port, *, windows=None, display_name='', critical=False, tags=None, healthy_statuses='200-399'):
+    def _service_meta(port, *, windows=None, display_name='', critical=False, tags=None, healthy_statuses='200-399', suggestion=None):
         return {
             'port': port, 'display_name': display_name, 'url': f'http://127.0.0.1:{port}',
             'path': '/', 'critical': critical, 'pinned_order': port,
             'tags': tags or [], 'healthy_statuses': healthy_statuses,
-            'windows': windows or [],
+            'windows': windows or [], 'suggestion': suggestion,
         }
 
     def _maintenance_route(self, fixture):
@@ -133,12 +133,17 @@ class UiStateBrowserTests(unittest.TestCase):
             method = route.request.method
             if path.startswith('/api/service-meta/'):
                 port = int(path.rsplit('/', 1)[-1])
+                if method == 'GET' and fixture.get('get_error'):
+                    route.fulfill(status=500, json={'error': 'boom'})
+                    return
                 if method == 'PUT':
+                    fixture.setdefault('put_calls', []).append({'port': port, 'body': None})
                     put_error = fixture.get('put_error')
                     if put_error:
                         route.fulfill(status=put_error.get('status', 400), json={'error': put_error['message']})
                         return
                     body = json.loads(route.request.post_data or '{}')
+                    fixture['put_calls'][-1]['body'] = body
                     meta = dict(fixture['service_meta'].get(port) or self._service_meta(port))
                     meta['windows'] = body.get('maintenance_windows', [])
                     meta['preview_queued'] = True
@@ -397,6 +402,241 @@ class UiStateBrowserTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_no_suggestion_renders_no_card_and_no_empty_state_message(self):
+        fixture = {
+            'services': [self._service(8211)],
+            'service_meta': {8211: self._service_meta(8211, windows=[], suggestion=None)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            self.assertFalse(page.locator('#meta-suggestion').is_visible())
+            self.assertNotIn('Suggested window', page.locator('.meta-maintenance').inner_text())
+        finally:
+            page.close()
+
+    def test_a_failed_metadata_fetch_renders_no_suggestion_and_no_error_copy(self):
+        fixture = {
+            'services': [self._service(8212)],
+            'service_meta': {8212: self._service_meta(8212, windows=[])},
+            'get_error': True,
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            self.assertFalse(page.locator('#meta-suggestion').is_visible())
+            self.assertFalse(page.locator('#meta-error').is_visible())
+        finally:
+            page.close()
+
+    def test_a_suggestion_renders_the_observed_evidence_sentence(self):
+        suggestion = {'occurrence_count': 4, 'start_minute': 120, 'duration_minutes': 30, 'weekdays': [1, 2, 3, 4, 5, 6, 7]}
+        fixture = {
+            'services': [self._service(8213)],
+            'service_meta': {8213: self._service_meta(8213, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(
+                page.locator('#meta-suggestion-evidence').text_content(),
+                'Beacon observed 4 similar restarts recently, typically around 02:00–02:30 '
+                'on Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.',
+            )
+        finally:
+            page.close()
+
+    def test_the_suggestion_card_exposes_exactly_two_actions(self):
+        suggestion = {'occurrence_count': 3, 'start_minute': 60, 'duration_minutes': 20, 'weekdays': [1, 2, 3]}
+        fixture = {
+            'services': [self._service(8214)],
+            'service_meta': {8214: self._service_meta(8214, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            buttons = page.locator('#meta-suggestion button')
+            self.assertEqual(buttons.count(), 2)
+            labels = [buttons.nth(i).text_content() for i in range(2)]
+            self.assertEqual(labels, ['Confirm', 'Adjust'])
+            for label in labels:
+                self.assertNotIn('dismiss', label.lower())
+                self.assertNotIn('not now', label.lower())
+        finally:
+            page.close()
+
+    def test_confirm_appends_an_unsaved_row_and_writes_nothing(self):
+        suggestion = {'occurrence_count': 5, 'start_minute': 90, 'duration_minutes': 45, 'weekdays': [6, 7]}
+        fixture = {
+            'services': [self._service(8215)],
+            'service_meta': {8215: self._service_meta(8215, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-suggestion-confirm').click()
+            self.assertEqual(page.locator('.meta-window-row').count(), 1)
+            self.assertEqual(page.locator('#meta-window-count').text_content(), '1 maintenance window')
+            self.assertFalse(page.locator('#meta-suggestion').is_visible())
+            self.assertEqual(fixture.get('put_calls', []), [])
+        finally:
+            page.close()
+
+    def test_adjust_appends_the_row_and_focuses_its_start_field(self):
+        suggestion = {'occurrence_count': 3, 'start_minute': 300, 'duration_minutes': 15, 'weekdays': [1]}
+        fixture = {
+            'services': [self._service(8216)],
+            'service_meta': {8216: self._service_meta(8216, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-suggestion-adjust').click()
+            row = page.locator('.meta-window-row').first
+            row.wait_for(state='visible', timeout=4_000)
+            self.assertTrue(row.locator('.meta-window-start').evaluate('(node) => document.activeElement === node'))
+            self.assertFalse(page.locator('#meta-suggestion').is_visible())
+            self.assertEqual(fixture.get('put_calls', []), [])
+        finally:
+            page.close()
+
+    def test_a_confirmed_row_is_saved_only_by_the_existing_save_control(self):
+        suggestion = {'occurrence_count': 4, 'start_minute': 120, 'duration_minutes': 30, 'weekdays': [1, 2, 3, 4, 5, 6, 7]}
+        fixture = {
+            'services': [self._service(8217)],
+            'service_meta': {8217: self._service_meta(8217, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-suggestion-confirm').click()
+            page.locator('.meta-window-row').first.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(fixture.get('put_calls', []), [])
+            page.locator('#meta-form').evaluate('(form) => form.requestSubmit()')
+            page.locator('#meta-modal').wait_for(state='hidden', timeout=4_000)
+            self.assertEqual(len(fixture.get('put_calls', [])), 1)
+            body = fixture['put_calls'][0]['body']
+            saved = body['maintenance_windows'][0]
+            self.assertEqual(saved['start_minute'], 120)
+            self.assertEqual(saved['duration_minutes'], 30)
+            self.assertEqual(saved['weekdays'], [1, 2, 3, 4, 5, 6, 7])
+            self.assertEqual(saved['grace_minutes'], 15)
+            self.assertTrue(saved['enabled'])
+        finally:
+            page.close()
+
+    def test_long_evidence_prose_wraps_and_is_not_truncated(self):
+        suggestion = {'occurrence_count': 12, 'start_minute': 1320, 'duration_minutes': 90, 'weekdays': [1, 2, 3, 4, 5, 6, 7]}
+        fixture = {
+            'services': [self._service(8218)],
+            'service_meta': {8218: self._service_meta(8218, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 360, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            card = page.locator('#meta-suggestion')
+            scroll_width = card.evaluate('(node) => node.scrollWidth')
+            client_width = card.evaluate('(node) => node.clientWidth')
+            self.assertLessEqual(scroll_width, client_width)
+            expected = (
+                'Beacon observed 12 similar restarts recently, typically around 22:00–23:30 '
+                'on Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.'
+            )
+            self.assertEqual(page.locator('#meta-suggestion-evidence').text_content(), expected)
+        finally:
+            page.close()
+
+    def test_the_card_uses_neither_the_maintenance_nor_the_warning_colour(self):
+        suggestion = {'occurrence_count': 3, 'start_minute': 60, 'duration_minutes': 20, 'weekdays': [1, 2, 3]}
+        fixture = {
+            'services': [self._service(8219)],
+            'service_meta': {8219: self._service_meta(8219, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+
+            def read_colours():
+                return page.evaluate(
+                    """() => {
+                        const probe = document.createElement('span');
+                        document.body.appendChild(probe);
+                        probe.style.color = 'var(--accent2)';
+                        const accent2 = getComputedStyle(probe).color;
+                        probe.style.color = 'var(--accent3)';
+                        const accent3 = getComputedStyle(probe).color;
+                        probe.remove();
+                        const card = getComputedStyle(document.getElementById('meta-suggestion'));
+                        const evidence = getComputedStyle(document.getElementById('meta-suggestion-evidence'));
+                        return {
+                            accent2, accent3,
+                            borderColor: card.borderTopColor,
+                            textColor: evidence.color,
+                        };
+                    }"""
+                )
+
+            dark = read_colours()
+            self.assertNotEqual(dark['borderColor'], dark['accent2'])
+            self.assertNotEqual(dark['borderColor'], dark['accent3'])
+            self.assertNotEqual(dark['textColor'], dark['accent2'])
+            self.assertNotEqual(dark['textColor'], dark['accent3'])
+
+            page.locator('#toggle').evaluate('(node) => node.click()')
+            self.assertTrue(page.locator('html').evaluate('(node) => node.classList.contains("light")'))
+            light = read_colours()
+            self.assertNotEqual(light['borderColor'], light['accent2'])
+            self.assertNotEqual(light['borderColor'], light['accent3'])
+            self.assertNotEqual(light['textColor'], light['accent2'])
+            self.assertNotEqual(light['textColor'], light['accent3'])
+        finally:
+            page.close()
+
+    def test_the_suggestion_never_appears_on_a_service_card(self):
+        suggestion = {'occurrence_count': 4, 'start_minute': 120, 'duration_minutes': 30, 'weekdays': [1, 2, 3, 4, 5, 6, 7]}
+        fixture = {
+            'services': [self._service(8220)],
+            'service_meta': {8220: self._service_meta(8220, windows=[], suggestion=suggestion)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            evidence_text = page.locator('#meta-suggestion-evidence').text_content()
+            main_text = page.locator('main').text_content()
+            self.assertNotIn(evidence_text, main_text)
+        finally:
+            page.close()
+
     def test_playwright_zero_one_many_states_in_dark_light_and_narrow_layout(self):
         fixture = {'services': [], 'events': []}
         page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
@@ -431,7 +671,7 @@ class UiStateBrowserTests(unittest.TestCase):
 
             page.set_viewport_size({'width': 720, 'height': 800})
             page.locator('.svc-edit').click()
-            self.assertGreaterEqual(page.locator('.meta-btn').first.bounding_box()['height'], 44)
+            self.assertGreaterEqual(page.locator('#meta-cancel').bounding_box()['height'], 44)
             page.locator('#meta-cancel').click()
             page.locator('#toggle').click()
             self.assertTrue(page.locator('html').evaluate('(node) => node.classList.contains("light")'))
