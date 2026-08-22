@@ -86,6 +86,7 @@ def read_current_services(conn, *, cutoff_ts):
         tls_by_port = {}
     rows = conn.execute(
         'SELECT s.port, s.title, s.is_online, s.last_latency_ms, s.last_error, s.state_since, '
+        's.overrun_raised_ts, '
         's.first_seen, s.last_seen, m.display_name, m.critical, m.pinned_order, m.tags, '
         'm.healthy_statuses, '
         '(SELECT c.ts FROM service_checks c WHERE c.port=s.port ORDER BY c.ts DESC LIMIT 1) '

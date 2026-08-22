@@ -1,8 +1,10 @@
+import inspect
 import json
 import logging
 import sqlite3
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -10,6 +12,10 @@ from unittest import mock
 from dashboard.beacon import migrations, previews, queues, repositories, worker_main
 from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
+
+
+def _epoch(year, month, day, hour, minute, second=0):
+    return int(datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc).timestamp())
 
 
 class AdvancedDiagnosisApiTests(unittest.TestCase):
@@ -69,7 +75,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
         payload = response.get_json()
-        self.assertEqual(payload['schema_version'], 3)
+        self.assertEqual(payload['schema_version'], 4)
         self.assertEqual(payload['generated_ts'], 1_700_000_005)
         self.assertEqual(payload['host']['identity']['hostname'], 'beacon-pi')
         self.assertEqual(payload['host']['metrics']['cpu'], {'value': 21.5, 'unit': 'percent'})
@@ -2713,6 +2719,288 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             response = self.client.get('/api/advanced/current')
 
         self.assertEqual(response.status_code, 500)
+
+
+class _MaintenanceDiagnosisFixture(unittest.TestCase):
+    """Shared seeding/freezing helpers for the maintenance advanced-snapshot tests."""
+
+    def setUp(self):
+        self._clock = {'now': None}
+        self._clock_patcher = None
+        self.appmod, self.db_path = load_app({'METRIC_SAMPLE_SECONDS': '5'})
+        self.client = self.appmod.app.test_client()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _freeze_clock(self, value):
+        """Freeze the process-global ``time.time`` for this test only (see the
+        module-level docstring on ``AdvancedDiagnosisApiTests._freeze_clock``
+        for the unwind discipline this copies verbatim)."""
+        self._clock['now'] = value
+        if self._clock_patcher is None:
+            real_time = time.time
+            patcher = mock.patch(
+                'time.time',
+                lambda: real_time() if self._clock['now'] is None else self._clock['now'],
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            self._clock_patcher = patcher
+        return value
+
+    def _seed_service(
+        self, port, *, online, state_since, critical=0, last_error=None,
+        overrun_raised_ts=None, last_probe_online=None, last_probe_ts=None,
+    ):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO services('
+                'port,title,first_seen,last_seen,is_online,last_latency_ms,last_error,'
+                'state_since,overrun_raised_ts'
+                ') VALUES(?,?,?,?,?,?,?,?,?)',
+                (
+                    port, f'Service {port}', state_since - 100, state_since + 100000,
+                    online, None, last_error, state_since, overrun_raised_ts,
+                ),
+            )
+            conn.execute(
+                'INSERT INTO service_meta(port,display_name,url,critical,pinned_order,tags,healthy_statuses) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (port, f'Service {port}', f'http://127.0.0.1:{port}', critical, port, '', '200-399'),
+            )
+            probe_ts = state_since if last_probe_ts is None else last_probe_ts
+            probe_online = online if last_probe_online is None else last_probe_online
+            conn.execute(
+                'INSERT INTO service_checks(ts,port,online,latency_ms,error_class) VALUES(?,?,?,?,?)',
+                (probe_ts, port, probe_online, None, last_error),
+            )
+            conn.commit()
+            conn.close()
+
+    def _write_window(
+        self, port, *, start_minute, duration_minutes, weekdays, grace_minutes, enabled=True,
+        now=1_700_000_000,
+    ):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            repositories.upsert_maintenance_windows(
+                conn, port=port,
+                windows=[{
+                    'start_minute': start_minute, 'duration_minutes': duration_minutes,
+                    'weekdays': set(weekdays), 'grace_minutes': grace_minutes, 'enabled': enabled,
+                }],
+                now=now,
+            )
+            conn.commit()
+            conn.close()
+
+    def _snapshot(self):
+        return self.client.get('/api/advanced/current').get_json()
+
+    def _service(self, port):
+        return next(s for s in self._snapshot()['services'] if s['port'] == port)
+
+
+class MaintenanceDiagnosisTests(_MaintenanceDiagnosisFixture):
+    """The advanced snapshot derives D-06's maintenance availability and evidence."""
+
+    def test_an_offline_service_covered_by_an_enabled_window_reports_maintenance(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)  # a Monday, inside a 2:00-3:00 window
+        port = 9801
+        self._seed_service(port, online=0, state_since=now - 900, last_error='ConnectionRefused')
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        self.assertEqual(self._service(port)['availability'], 'maintenance')
+
+    def test_the_stored_online_fact_is_unchanged(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9802
+        self._seed_service(port, online=0, state_since=now - 900, last_error='ConnectionRefused')
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['availability'], 'maintenance')
+        self.assertEqual(service['state_since_ts'], now - 900)
+        self.assertEqual(service['failure_class'], 'ConnectionRefused')
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            stored = conn.execute('SELECT is_online FROM services WHERE port=?', (port,)).fetchone()
+            conn.close()
+        self.assertEqual(stored['is_online'], 0)
+
+    def test_an_offline_service_with_only_a_disabled_window_reports_offline(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9803
+        self._seed_service(port, online=0, state_since=now - 900)
+        self._write_window(
+            port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10,
+            enabled=False,
+        )
+        self._freeze_clock(now)
+
+        self.assertEqual(self._service(port)['availability'], 'offline')
+
+    def test_an_online_service_inside_a_window_reports_online(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9804
+        self._seed_service(port, online=1, state_since=now - 900)
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        self.assertEqual(self._service(port)['availability'], 'online')
+
+    def test_the_probe_cadence_stays_sixty_seconds_for_a_maintenance_service(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9805
+        self._seed_service(port, online=0, state_since=now - 900)
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['availability'], 'maintenance')
+        self.assertEqual(service['expected_cadence_seconds'], 60)
+
+    def test_the_maintenance_evidence_block_discloses_the_covering_window(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9806
+        self._seed_service(port, online=0, state_since=now - 900)
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertTrue(service['maintenance']['active'])
+        self.assertEqual(
+            service['maintenance']['window'],
+            {'start_minute': 120, 'duration_minutes': 60, 'weekdays': [1], 'grace_minutes': 10},
+        )
+        self.assertEqual(service['maintenance']['covered_until_ts'], _epoch(2026, 1, 5, 3, 10, 0))
+
+    def test_the_maintenance_evidence_block_is_present_and_explicit_when_inactive(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9807
+        self._seed_service(port, online=0, state_since=now - 900)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(
+            service['maintenance'], {'active': False, 'window': None, 'covered_until_ts': None},
+        )
+
+    def test_attribution_is_published_for_every_service_including_zero(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9808
+        self._seed_service(port, online=1, state_since=now - 900)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertIn('maintenance_attribution', service)
+        self.assertEqual(service['maintenance_attribution']['attributed_seconds'], 0)
+        self.assertGreater(service['maintenance_attribution']['period_seconds'], 0)
+
+    def test_an_open_overrun_publishes_both_timestamps_separately(self):
+        now = _epoch(2026, 1, 5, 4, 0, 0)
+        port = 9809
+        down_since = now - 3600
+        raised_at = now - 60
+        self._seed_service(port, online=0, state_since=down_since, overrun_raised_ts=raised_at)
+        self._freeze_clock(now)
+
+        service = self._service(port)
+        self.assertEqual(service['overrun'], {'down_since_ts': down_since, 'raised_at_ts': raised_at})
+
+    def test_the_overrun_fields_are_absent_when_no_overrun_is_open(self):
+        now = _epoch(2026, 1, 5, 4, 0, 0)
+        port = 9810
+        self._seed_service(port, online=0, state_since=now - 3600)
+        self._freeze_clock(now)
+
+        self.assertNotIn('overrun', self._service(port))
+
+    def test_the_derived_value_returns_to_offline_past_window_and_grace(self):
+        covered_at = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9811
+        self._seed_service(port, online=0, state_since=covered_at - 900)
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(covered_at)
+        self.assertEqual(self._service(port)['availability'], 'maintenance')
+
+        past_boundary = _epoch(2026, 1, 5, 3, 11, 0)  # one minute past window end + grace
+        self._freeze_clock(past_boundary)
+        self.assertEqual(self._service(port)['availability'], 'offline')
+
+
+class MaintenanceExceptionTests(_MaintenanceDiagnosisFixture):
+    """D-07: maintenance is resolved upstream so the exception composer stays pure."""
+
+    def test_a_maintenance_service_produces_no_service_offline_exception(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9901
+        self._seed_service(
+            port, online=0, state_since=now - 900, critical=1,
+            last_probe_ts=now, last_probe_online=0,
+        )
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        payload = self._snapshot()
+        kinds = {item['kind'] for item in payload['exceptions']}
+        self.assertNotIn('critical_service_offline', kinds)
+        self.assertNotIn('service_offline', kinds)
+        self.assertNotIn(port, [item.get('port') for item in payload['exceptions']])
+
+    def test_a_maintenance_service_still_produces_a_freshness_exception_when_stale(self):
+        now = _epoch(2026, 1, 5, 2, 15, 0)
+        port = 9902
+        stale_probe_ts = now - 10_000  # well past 4x the 60s down-only cadence
+        self._seed_service(
+            port, online=0, state_since=now - 900,
+            last_probe_ts=stale_probe_ts, last_probe_online=0,
+        )
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        payload = self._snapshot()
+        service = next(s for s in payload['services'] if s['port'] == port)
+        self.assertEqual(service['availability'], 'maintenance')
+        self.assertEqual(service['freshness']['state'], 'stale')
+        kinds_with_port = [(item['kind'], item.get('port')) for item in payload['exceptions']]
+        self.assertIn(('service_freshness', port), kinds_with_port)
+
+    def test_an_overrun_service_produces_the_ordinary_offline_exception(self):
+        now = _epoch(2026, 1, 5, 5, 0, 0)  # well past the window's end plus grace
+        port = 9903
+        self._seed_service(port, online=0, state_since=now - 7200, critical=0)
+        self._write_window(port, start_minute=120, duration_minutes=60, weekdays=(1,), grace_minutes=10)
+        self._freeze_clock(now)
+
+        payload = self._snapshot()
+        service = next(s for s in payload['services'] if s['port'] == port)
+        self.assertEqual(service['availability'], 'offline')
+        kinds_with_port = [(item['kind'], item.get('port')) for item in payload['exceptions']]
+        self.assertIn(('service_offline', port), kinds_with_port)
+
+    def test_the_exception_composer_gained_no_maintenance_branch(self):
+        source = inspect.getsource(self.appmod.beacon_diagnosis.compose_active_exceptions)
+        self.assertNotIn('MAINTENANCE_AVAILABILITY', source)
+        self.assertNotIn('maintenance', source.lower())
+
+
+class SnapshotVersionTests(unittest.TestCase):
+    """The snapshot's schema_version tracks the per-service shape it now carries."""
+
+    def test_the_snapshot_schema_version_advanced(self):
+        appmod, db_path = load_app({})
+        try:
+            client = appmod.app.test_client()
+            payload = client.get('/api/advanced/current').get_json()
+            self.assertEqual(payload['schema_version'], 4)
+        finally:
+            cleanup_db(db_path)
+
 
 class ClockIsolationTests(unittest.TestCase):
     """The phase module must leave the process-global clock exactly as it found it."""
