@@ -6,12 +6,13 @@ import tempfile
 import time
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
 from dashboard.beacon import maintenance as beacon_maintenance
 from dashboard.beacon import queues as beacon_queues
-from dashboard.beacon.config import Settings
+from dashboard.beacon.config import Settings, load_settings
 from dashboard.beacon.migrations import (
     MIGRATIONS,
     _migration_9_planned_maintenance,
@@ -19,6 +20,8 @@ from dashboard.beacon.migrations import (
 )
 from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _window_row(
@@ -393,6 +396,50 @@ class SuppressionTracerTests(unittest.TestCase):
         self.assertEqual(len(state_changes), 1)
         self.assertIsNone(state_changes[0]['suppressed_reason'])
         self.assertIsNone(state_changes[0]['maintenance_grace_until'])
+
+
+class TimezoneEnvironmentTests(unittest.TestCase):
+    """The IANA time-zone database resolves inside this environment, and the
+    operator's TZ value reaches Settings/the containers with a fail-closed
+    default (D-02's container gap, closed by plan 03.1-02)."""
+
+    def test_a_named_iana_zone_resolves_in_this_environment(self):
+        """Regression for Pitfall 2: this must not be mocked -- it is the one
+        test that fails inside a container missing the IANA database."""
+        january = datetime(2026, 1, 15, 12, 0, tzinfo=ZoneInfo('America/New_York'))
+        july = datetime(2026, 7, 15, 12, 0, tzinfo=ZoneInfo('America/New_York'))
+        self.assertNotEqual(january.utcoffset(), july.utcoffset())
+
+        london_january = datetime(2026, 1, 15, 12, 0, tzinfo=ZoneInfo('Europe/London'))
+        london_july = datetime(2026, 7, 15, 12, 0, tzinfo=ZoneInfo('Europe/London'))
+        self.assertNotEqual(london_january.utcoffset(), london_july.utcoffset())
+
+    def test_load_settings_reads_the_tz_environment_key(self):
+        settings = load_settings({'TZ': 'America/New_York'})
+        self.assertEqual(settings.timezone, 'America/New_York')
+
+    def test_load_settings_falls_back_to_utc_on_an_unresolvable_zone(self):
+        settings = load_settings({'TZ': 'Not/AZone'})
+        self.assertEqual(settings.timezone, 'UTC')
+
+    def test_load_settings_falls_back_to_utc_on_an_empty_tz(self):
+        self.assertEqual(load_settings({'TZ': ''}).timezone, 'UTC')
+        self.assertEqual(load_settings({}).timezone, 'UTC')
+
+    def test_the_compose_file_supplies_tz_to_the_worker_and_web_services(self):
+        compose_text = (PROJECT_ROOT / 'docker-compose.yml').read_text()
+        services = compose_text.split('\nservices:\n', 1)[1]
+        worker_block = services.split('\n  worker:\n', 1)[1].split('\n  recovery:\n', 1)[0]
+        web_block = services.split('\n  web:\n', 1)[1]
+        self.assertIn('TZ', worker_block)
+        self.assertIn('TZ', web_block)
+
+    def test_the_project_pins_the_iana_database_as_a_python_dependency(self):
+        pyproject_text = (PROJECT_ROOT / 'dashboard' / 'pyproject.toml').read_text()
+        self.assertIn('tzdata', pyproject_text)
+
+        dockerfile_text = (PROJECT_ROOT / 'dashboard' / 'Dockerfile').read_text()
+        self.assertNotRegex(dockerfile_text, r'(?i)apt-get.*tzdata')
 
 
 class ClockIsolationTests(unittest.TestCase):

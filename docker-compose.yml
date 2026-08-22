@@ -53,6 +53,9 @@ services:
     mem_limit: 1g
     pids_limit: 256
     shm_size: 256m
+    environment:
+      <<: *beacon-environment
+      TZ: "${TZ:-UTC}"
     depends_on:
       data-init:
         condition: service_completed_successfully
@@ -78,6 +81,9 @@ services:
       - "80:8080"
     mem_limit: 256m
     pids_limit: 128
+    environment:
+      <<: *beacon-environment
+      TZ: "${TZ:-UTC}"
     depends_on:
       data-init:
         condition: service_completed_successfully

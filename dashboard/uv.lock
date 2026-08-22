@@ -26,6 +26,7 @@ dependencies = [
     { name = "playwright" },
     { name = "psutil" },
     { name = "requests" },
+    { name = "tzdata" },
     { name = "urllib3" },
 ]
 
@@ -44,6 +45,7 @@ requires-dist = [
     { name = "playwright", specifier = "==1.61.0" },
     { name = "psutil", specifier = "==7.2.2" },
     { name = "requests", specifier = "==2.34.2" },
+    { name = "tzdata", specifier = "==2026.3" },
     { name = "urllib3", specifier = "==2.7.0" },
 ]
 
