@@ -28,7 +28,7 @@
 
 - [ ] **MNT-01**: The operator can manually configure, edit, disable, and remove a bounded recurring local-time maintenance window for an individual service, including an explicit overrun grace period.
 - [ ] **MNT-02**: After three similar daily restart outages, Beacon can suggest a candidate maintenance window that remains inactive until the operator confirms or edits it.
-- [ ] **MNT-03**: During a confirmed maintenance window, Beacon retains every failed probe and continues counting downtime in availability while suppressing only the expected down/recovered event entries and transition alerts.
+- [x] **MNT-03**: During a confirmed maintenance window, Beacon retains every failed probe and continues counting downtime in availability while suppressing only the expected down/recovered event entries and transition alerts.
 - [ ] **MNT-04**: If a service remains unavailable beyond its confirmed maintenance window and grace period, Beacon records and alerts one truthful outage without hiding the continuing failure.
 
 ### Advanced Diagnosis
@@ -123,7 +123,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | TEL-06 | Phase 3 | Complete |
 | MNT-01 | Phase 03.1 | Pending |
 | MNT-02 | Phase 03.1 | Pending |
-| MNT-03 | Phase 03.1 | Pending |
+| MNT-03 | Phase 03.1 | Complete |
 | MNT-04 | Phase 03.1 | Pending |
 | DIA-01 | Phase 3 | Complete |
 | DIA-02 | Phase 3 | Complete |
