@@ -775,6 +775,9 @@ html.light .svc-empty { font-family: var(--font-sans); font-weight: 300; letter-
   padding: 12px;
   border: 1px dashed var(--border);
 }
+.meta-window-empty[hidden] {
+  display: none;
+}
 .meta-window-empty strong {
   color: var(--text);
   font-size: 11px;

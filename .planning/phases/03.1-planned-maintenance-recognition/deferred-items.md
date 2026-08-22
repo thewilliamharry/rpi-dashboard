@@ -5,6 +5,14 @@ Out-of-scope discoveries logged during plan execution, per the executor's scope-
 
 ## From 03.1-08 (Suggestion card)
 
+> **RESOLVED in-phase by the orchestrator, not deferred.** The element was introduced by plan
+> 03.1-05 *within this same phase*, so this is a phase gap rather than a pre-existing defect, and
+> closing it here is scope-correct. Fixed by adding `.meta-window-empty[hidden] { display: none; }`
+> and pinned by `test_the_empty_state_is_hidden_once_the_service_has_windows` in
+> `tests/test_ui_states.py`, which was verified to FAIL with the CSS override removed and PASS with
+> it restored. Plan 03.1-08 was correct to log rather than fix it — the selector was outside its
+> declared `files_modified` scope.
+
 **`.meta-window-empty[hidden]` does not actually hide the element.**
 
 - **File:** `dashboard/style.css`

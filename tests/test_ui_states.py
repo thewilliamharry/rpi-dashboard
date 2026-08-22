@@ -418,6 +418,38 @@ class UiStateBrowserTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_the_empty_state_is_hidden_once_the_service_has_windows(self):
+        """A service with windows must not also show the no-windows message.
+
+        `.meta-window-empty` sets `display: flex`, which outranks the UA
+        stylesheet's `[hidden] { display: none }`, so setting the `hidden`
+        attribute alone does not hide it. Without an explicit
+        `.meta-window-empty[hidden]` override the editor renders both the
+        window list and 'No maintenance windows yet' at the same time.
+        """
+        windows = [
+            {'start_minute': 120, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True},
+        ]
+        fixture = {
+            'services': [self._service(8231)],
+            'service_meta': {8231: self._service_meta(8231, windows=windows)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('.meta-window-row').first.wait_for(state='visible', timeout=8_000)
+            self.assertTrue(page.locator('#meta-window-empty').is_hidden())
+            self.assertEqual(
+                page.locator('#meta-window-empty').evaluate(
+                    'el => getComputedStyle(el).display'
+                ),
+                'none',
+            )
+        finally:
+            page.close()
+
     def test_a_failed_metadata_fetch_renders_no_suggestion_and_no_error_copy(self):
         fixture = {
             'services': [self._service(8212)],
