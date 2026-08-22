@@ -848,6 +848,33 @@ def get_open_down_transition(conn, port):
     return dict(row) if row else None
 
 
+def overrun_already_raised(conn, port):
+    """Return True when this down period's MNT-04 overrun has already fired.
+
+    Reads ``services.overrun_raised_ts`` on the caller's connection; the
+    column holds an integer only for the duration of the down period whose
+    overrun it guards, and is cleared to ``NULL`` by the caller's own
+    ``UPDATE services`` on the next genuine transition.
+    """
+    row = conn.execute(
+        'SELECT overrun_raised_ts FROM services WHERE port=?', (port,),
+    ).fetchone()
+    return bool(row) and row['overrun_raised_ts'] is not None
+
+
+def mark_overrun_raised(conn, port, now):
+    """Record that this down period's one overrun event has been raised.
+
+    Operates on the caller's connection and opens no transaction of its
+    own -- the caller holds this inside the same write transaction that
+    already wrote the overrun event, so the read-then-set idempotency check
+    is race-free by construction.
+    """
+    conn.execute(
+        'UPDATE services SET overrun_raised_ts=? WHERE port=?', (int(now), port),
+    )
+
+
 def get_runtime_state(conn, key, default=None):
     row = conn.execute('SELECT value FROM runtime_state WHERE key=?', (key,)).fetchone()
     if not row:

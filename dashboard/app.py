@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
+from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -106,6 +107,8 @@ TRIGGER_SCAN_WINDOW_SECONDS = SETTINGS.trigger_scan_window_seconds
 ALERT_WEBHOOK_URL = SETTINGS.alert_webhook_url
 ALERT_COOLDOWN_SECONDS = SETTINGS.alert_cooldown_seconds
 ALERT_ONLY_CRITICAL = SETTINGS.alert_only_critical
+# Event-vocabulary constant so no call site spells the MNT-04 overrun literal twice.
+MAINTENANCE_OVERRUN_EVENT_TYPE = 'maintenance_overrun'
 
 _db_lock = threading.Lock()
 _scan_lock = threading.Lock()
@@ -947,6 +950,20 @@ def _maintenance_suppression_decision(conn, port, *, online, now):
     return None, None
 
 
+def _overrun_detail(down_since_ts, raised_ts):
+    """Render the Copywriting Contract's overrun detail string.
+
+    Both instants are formatted in the configured local timezone so the
+    stored text reads the way an operator expects; the durable
+    ``down_since_ts``/``ts`` columns on the event row remain the
+    authoritative machine-readable instants (D-08), never this string.
+    """
+    zone = beacon_maintenance.resolve_timezone(SETTINGS.timezone)
+    down_str = datetime.fromtimestamp(down_since_ts, tz=zone).strftime('%Y-%m-%d %H:%M %Z')
+    raised_str = datetime.fromtimestamp(raised_ts, tz=zone).strftime('%Y-%m-%d %H:%M %Z')
+    return f"Down since {down_str}; window and grace expired at {raised_str}."
+
+
 def _legacy_handle_state_transition(*, port, previous_online, online, title, display_name,
                              url, critical, latency_ms, error_class):
     now = int(time.time())
@@ -1483,6 +1500,7 @@ def _legacy_do_uptime_check(only_down=False):
     now = int(time.time())
     expire_cutoff = now - EXPIRE_DAYS * 86400
     transitions = []
+    overruns = []
     authority = _worker_mutation_authority.get()
     snapshot = beacon_telemetry.measure_storage(authority.db_path) if authority is not None else None
     try:
@@ -1490,7 +1508,7 @@ def _legacy_do_uptime_check(only_down=False):
             conn = get_db()
             where = "WHERE s.last_seen >= ? AND s.is_online = 0" if only_down else "WHERE s.last_seen >= ?"
             rows = conn.execute(
-                "SELECT s.port, s.title, s.is_online, "
+                "SELECT s.port, s.title, s.is_online, s.state_since, "
                 "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
                 "COALESCE(m.critical, 0) AS critical, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
@@ -1520,6 +1538,7 @@ def _legacy_do_uptime_check(only_down=False):
             online_int = 1 if online else 0
             title_update = _extract_title(resp, port) if online and resp is not None else ''
 
+            overrun_alert_kwargs = None
             with _mutation_write_transaction(authority, now=now) as conn:
                 decision = None
                 if authority is not None:
@@ -1527,21 +1546,61 @@ def _legacy_do_uptime_check(only_down=False):
                 if online and title_update and title_update != f":{port}":
                     conn.execute(
                         "UPDATE services SET title=?, is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL, "
-                        "state_since=CASE WHEN is_online != 1 THEN ? ELSE state_since END WHERE port=?",
+                        "state_since=CASE WHEN is_online != 1 THEN ? ELSE state_since END, "
+                        "overrun_raised_ts=CASE WHEN is_online != 1 THEN NULL ELSE overrun_raised_ts END "
+                        "WHERE port=?",
                         (title_update, now, latency_ms, now, port),
                     )
                 elif online:
                     conn.execute(
                         "UPDATE services SET is_online=1, last_seen=?, last_latency_ms=?, last_error=NULL, "
-                        "state_since=CASE WHEN is_online != 1 THEN ? ELSE state_since END WHERE port=?",
+                        "state_since=CASE WHEN is_online != 1 THEN ? ELSE state_since END, "
+                        "overrun_raised_ts=CASE WHEN is_online != 1 THEN NULL ELSE overrun_raised_ts END "
+                        "WHERE port=?",
                         (now, latency_ms, now, port),
                     )
                 else:
                     conn.execute(
                         "UPDATE services SET is_online=0, last_latency_ms=NULL, last_error=?, "
-                        "state_since=CASE WHEN is_online != 0 THEN ? ELSE state_since END WHERE port=?",
+                        "state_since=CASE WHEN is_online != 0 THEN ? ELSE state_since END, "
+                        "overrun_raised_ts=CASE WHEN is_online != 0 THEN NULL ELSE overrun_raised_ts END "
+                        "WHERE port=?",
                         (error_class or 'probe_failed', now, port),
                     )
+                if previous_online == 0 and online_int == 0:
+                    # Still down, no transition this poll (RESEARCH Pitfall 8) --
+                    # the only case the transition funnel cannot see.
+                    opening = beacon_repositories.get_open_down_transition(conn, port)
+                    if (
+                        opening
+                        and opening.get('suppressed_reason') == beacon_maintenance.MAINTENANCE_REASON
+                        and opening.get('maintenance_grace_until') is not None
+                        and now >= opening['maintenance_grace_until']
+                        and not beacon_repositories.overrun_already_raised(conn, port)
+                    ):
+                        down_since_ts = row['state_since']
+                        _insert_event(
+                            conn,
+                            ts=now,
+                            event_type=MAINTENANCE_OVERRUN_EVENT_TYPE,
+                            port=port,
+                            online=0,
+                            previous_online=0,
+                            down_since_ts=down_since_ts,
+                            details=_overrun_detail(down_since_ts, now),
+                        )
+                        beacon_repositories.mark_overrun_raised(conn, port, now)
+                        overrun_alert_kwargs = {
+                            "port": port,
+                            "previous_online": 0,
+                            "online": 0,
+                            "title": row['title'] or f":{port}",
+                            "display_name": row['display_name'] or '',
+                            "url": service_url,
+                            "critical": int(row['critical'] or 0),
+                            "latency_ms": latency_ms,
+                            "error_class": error_class,
+                        }
                 if decision is None or decision.historical_persistence_allowed:
                     conn.execute(
                         "INSERT OR REPLACE INTO service_checks (ts, port, online, latency_ms, error_class) VALUES (?,?,?,?,?)",
@@ -1588,8 +1647,16 @@ def _legacy_do_uptime_check(only_down=False):
                     "critical": int(row['critical'] or 0),
                 })
 
+            if overrun_alert_kwargs is not None:
+                overruns.append(overrun_alert_kwargs)
+
         for transition in transitions:
             _handle_state_transition(**transition)
+
+        for overrun in overruns:
+            # The webhook effect stays outside any open write transaction,
+            # exactly as the existing transition alerts already are (T-03.1-17).
+            _dispatch_overrun_alert(now=now, **overrun)
 
         state_changes = {'last_down_check': now}
         if not only_down:
@@ -1681,6 +1748,20 @@ def _handle_state_transition(**kwargs):
     if authority is not None:
         return worker_handle_state_transition(authority, **kwargs)
     return beacon_monitoring.handle_state_transition(_monitoring_operations(), **kwargs)
+
+
+def _dispatch_overrun_alert(**kwargs):
+    """Send the overrun's alert through the same sender a transition uses.
+
+    No event is inserted here -- the ``maintenance_overrun`` row was already
+    written inside the write transaction that raised it; this call performs
+    only the webhook effect, gated by the existing cooldown/critical-only
+    filters rather than a parallel mechanism (MNT-04).
+    """
+    authority = _worker_effect_authority.get()
+    if authority is not None:
+        return worker_send_transition_alert(authority, **kwargs)
+    return _send_transition_alert(**kwargs)
 
 
 def _screenshot_service(port, target_url=None):

@@ -926,6 +926,377 @@ class SuppressionTracerTests(unittest.TestCase):
         self.assertIsNone(state_changes[0]['maintenance_grace_until'])
 
 
+class OverrunTests(unittest.TestCase):
+    """MNT-04: a service still down past its window's end plus grace raises
+    exactly one truthful, untagged outage event -- driven through the real
+    down-only probe cycle (``do_uptime_check``) rather than a stub of it."""
+
+    def setUp(self):
+        self._clock = {'now': None}
+        self._clock_patcher = None
+        self.appmod, self.db_path = load_app({'TZ': 'UTC'})
+        self.client = self.appmod.app.test_client()
+        self._probe_online = False
+        self._probe_latency = None
+        self._probe_error = 'connection_refused'
+        self._original_probe = self.appmod._probe_http
+        self.appmod._probe_http = self._fake_probe
+        self.addCleanup(self._restore_probe)
+        self._next_port = 9200
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _restore_probe(self):
+        self.appmod._probe_http = self._original_probe
+
+    def _fake_probe(self, *_args, **_kwargs):
+        return self._probe_online, self._probe_latency, self._probe_error, None
+
+    def _freeze_clock(self, value):
+        """Freeze the process-global ``time.time`` for this test only (see
+        ``SuppressionTracerTests._freeze_clock``; identical contract)."""
+        self._clock['now'] = value
+        if self._clock_patcher is None:
+            real_time = time.time
+            patcher = mock.patch(
+                'time.time',
+                lambda: real_time() if self._clock['now'] is None else self._clock['now'],
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            self._clock_patcher = patcher
+        return value
+
+    def _allocate_port(self):
+        self._next_port += 1
+        return self._next_port
+
+    def _insert_service(self, port, *, critical=0):
+        now = int(self._clock['now'])
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port, title, first_seen, last_seen, is_online, state_since) "
+                "VALUES (?,?,?,?,1,?)",
+                (port, f':{port}', now, now, now),
+            )
+            conn.execute(
+                "INSERT INTO service_meta(port, display_name, url, critical, pinned_order, tags, healthy_statuses) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (port, '', f'http://127.0.0.1:{port}', critical, port, '', '200-399'),
+            )
+            conn.commit()
+            conn.close()
+
+    def _insert_window(self, *, port, start_minute, duration_minutes, weekdays, grace_minutes=0, enabled=1):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO maintenance_windows("
+                "port, start_minute, duration_minutes, weekdays, grace_minutes, enabled, "
+                "created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?)",
+                (port, start_minute, duration_minutes, weekdays, grace_minutes, enabled, 0, 0),
+            )
+            conn.commit()
+            conn.close()
+
+    def _events(self, port):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = conn.execute(
+                "SELECT * FROM events WHERE port=? ORDER BY ts ASC, id ASC", (port,),
+            ).fetchall()
+            conn.close()
+        return [dict(row) for row in rows]
+
+    def _overrun_rows(self, port):
+        return [e for e in self._events(port) if e['event_type'] == 'maintenance_overrun']
+
+    def _grace_until(self, port):
+        down_changes = [
+            e for e in self._events(port)
+            if e['event_type'] == 'state_change' and e['online'] == 0
+        ]
+        self.assertTrue(down_changes, 'no down transition recorded yet')
+        return down_changes[-1]['maintenance_grace_until']
+
+    def _service_checks(self, port):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = conn.execute(
+                "SELECT ts, online FROM service_checks WHERE port=? ORDER BY ts ASC", (port,),
+            ).fetchall()
+            conn.close()
+        return [(row['ts'], row['online']) for row in rows]
+
+    def _go_down(self):
+        self._probe_online = False
+        self._probe_latency = None
+        self._probe_error = 'connection_refused'
+        self.appmod.do_uptime_check(only_down=False)
+
+    def _go_up(self):
+        self._probe_online = True
+        self._probe_latency = 5.0
+        self._probe_error = None
+        self.appmod.do_uptime_check(only_down=False)
+
+    def _poll_down_only(self):
+        self._probe_online = False
+        self._probe_latency = None
+        self._probe_error = 'connection_refused'
+        return self.appmod.do_uptime_check(only_down=True)
+
+    def test_a_covered_service_still_down_past_grace_raises_one_outage(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        # Covers [01:40, 02:35) local plus 5 minutes grace -> boundary 02:40.
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary = self._grace_until(port)
+        self._freeze_clock(boundary)
+        self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 1)
+
+    def test_the_overrun_event_carries_both_timestamps_separately(self):
+        port = self._allocate_port()
+        down_now = self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary = self._grace_until(port)
+        self._freeze_clock(boundary)
+        self._poll_down_only()
+        rows = self._overrun_rows(port)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['down_since_ts'], down_now)
+        self.assertEqual(rows[0]['ts'], boundary)
+        self.assertNotEqual(rows[0]['down_since_ts'], rows[0]['ts'])
+
+    def test_the_overrun_event_is_never_tagged_as_suppressed(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary = self._grace_until(port)
+        self._freeze_clock(boundary)
+        self._poll_down_only()
+        rows = self._overrun_rows(port)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]['suppressed_reason'])
+
+    def test_repeated_polls_raise_exactly_one_overrun(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary = self._grace_until(port)
+        self._freeze_clock(boundary)
+        for _ in range(4):
+            self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 1)
+
+    def test_no_overrun_is_raised_one_second_before_the_boundary(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary = self._grace_until(port)
+        self._freeze_clock(boundary - 1)
+        self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 0)
+        self._freeze_clock(boundary)
+        self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 1)
+
+    def test_an_unsuppressed_down_period_never_raises_an_overrun(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        # No maintenance window at all for this port.
+        self._go_down()
+        for offset in (0, 1000, 100_000, 1_000_000):
+            self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0) + offset)
+            self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 0)
+
+    def test_a_service_that_transitioned_this_poll_is_not_evaluated_for_overrun(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        # Simulate a stale bookkeeping value left behind by an earlier down
+        # period -- the guard must ignore it entirely for a service that is
+        # only now transitioning down this same poll (Pitfall 8).
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'UPDATE services SET overrun_raised_ts=? WHERE port=?',
+                (int(self._clock['now']) - 1000, port),
+            )
+            conn.commit()
+            conn.close()
+        self._go_down()
+        self.assertEqual(len(self._overrun_rows(port)), 0)
+
+    def test_a_second_down_period_raises_its_own_overrun(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 0, 0, 0))
+        self._insert_service(port)
+        # All-day window so both down periods in this test stay covered.
+        self._insert_window(
+            port=port, start_minute=0, duration_minutes=1440,
+            weekdays='1,2,3,4,5,6,7', grace_minutes=2,
+        )
+        self._go_down()
+        boundary_1 = self._grace_until(port)
+        self._freeze_clock(boundary_1)
+        self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 1)
+
+        self._freeze_clock(boundary_1 + 60)
+        self._go_up()
+        self._freeze_clock(boundary_1 + 120)
+        self._go_down()
+        boundary_2 = self._grace_until(port)
+        self.assertGreater(boundary_2, boundary_1)
+        self._freeze_clock(boundary_2)
+        self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 2)
+
+    def test_editing_the_window_mid_outage_does_not_move_the_boundary(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        original_boundary = self._grace_until(port)
+
+        # Operator edits the window mid-outage with a much longer grace.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            beacon_repositories.upsert_maintenance_windows(
+                conn, port=port, windows=[{
+                    'start_minute': 100, 'duration_minutes': 50,
+                    'weekdays': [1], 'grace_minutes': 500, 'enabled': True,
+                }], now=int(self._clock['now']),
+            )
+            conn.commit()
+            conn.close()
+
+        self._freeze_clock(original_boundary)
+        self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(port)), 1)
+
+    def test_the_overrun_dispatches_through_the_existing_alert_sender(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary = self._grace_until(port)
+        self._freeze_clock(boundary)
+
+        self.appmod.ALERT_WEBHOOK_URL = 'https://alerts.example.test/beacon'
+        self.appmod.ALERT_ONLY_CRITICAL = False
+        with mock.patch.object(self.appmod, '_send_transition_alert') as send_alert:
+            self._poll_down_only()
+        send_alert.assert_called_once()
+        kwargs = send_alert.call_args.kwargs
+        self.assertEqual(kwargs['port'], port)
+        self.assertEqual(kwargs['online'], 0)
+        self.assertEqual(kwargs['previous_online'], 0)
+
+        # The critical-only gate is the same gate the real sender already
+        # enforces -- not a parallel one -- so a non-critical service under
+        # ALERT_ONLY_CRITICAL never reaches the webhook at all.
+        port2 = self._allocate_port()
+        self._insert_service(port2, critical=0)
+        self._insert_window(
+            port=port2, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary2 = self._grace_until(port2)
+        self._freeze_clock(boundary2)
+        self.appmod.ALERT_ONLY_CRITICAL = True
+        fake_transport = mock.Mock()
+        with mock.patch.object(self.appmod, '_outbound_transport', return_value=fake_transport):
+            self._poll_down_only()
+        fake_transport.request.assert_not_called()
+
+    def test_the_alert_is_dispatched_outside_the_write_transaction(self):
+        port = self._allocate_port()
+        self._freeze_clock(_epoch(2026, 1, 5, 2, 0, 0))
+        self._insert_service(port)
+        self._insert_window(
+            port=port, start_minute=100, duration_minutes=50, weekdays='1', grace_minutes=5,
+        )
+        self._go_down()
+        boundary = self._grace_until(port)
+        self._freeze_clock(boundary)
+
+        self.appmod.ALERT_WEBHOOK_URL = 'https://alerts.example.test/beacon'
+        lock_was_free = []
+
+        def fake_alert(**_kwargs):
+            acquired = self.appmod._db_lock.acquire(blocking=False)
+            lock_was_free.append(acquired)
+            if acquired:
+                self.appmod._db_lock.release()
+
+        with mock.patch.object(self.appmod, '_send_transition_alert', side_effect=fake_alert):
+            self._poll_down_only()
+
+        self.assertEqual(lock_was_free, [True])
+
+    def test_availability_is_unchanged_by_an_overrun(self):
+        covered_port = self._allocate_port()
+        plain_port = self._allocate_port()
+        start = _epoch(2026, 1, 5, 2, 0, 0)
+        self._freeze_clock(start)
+        self._insert_service(covered_port)
+        self._insert_service(plain_port)
+        self._insert_window(
+            port=covered_port, start_minute=100, duration_minutes=50,
+            weekdays='1', grace_minutes=5,
+        )
+        # Both services transition down together, identically.
+        self._go_down()
+        boundary = self._grace_until(covered_port)
+        self._freeze_clock(boundary)
+        self._poll_down_only()
+        self.assertEqual(len(self._overrun_rows(covered_port)), 1)
+        self.assertEqual(len(self._overrun_rows(plain_port)), 0)
+
+        checks_covered = self._service_checks(covered_port)
+        checks_plain = self._service_checks(plain_port)
+        self.assertEqual(
+            [online for _ts, online in checks_covered],
+            [online for _ts, online in checks_plain],
+        )
+        pct_covered = self.appmod._calc_uptime_pct(checks_covered, now=boundary)
+        pct_plain = self.appmod._calc_uptime_pct(checks_plain, now=boundary)
+        self.assertEqual(pct_covered, pct_plain)
+
+
 class TimezoneEnvironmentTests(unittest.TestCase):
     """The IANA time-zone database resolves inside this environment, and the
     operator's TZ value reaches Settings/the containers with a fail-closed
