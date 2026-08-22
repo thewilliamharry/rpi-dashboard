@@ -1,3 +1,4 @@
+import json
 import pathlib
 import functools
 import http.server
@@ -115,6 +116,286 @@ class UiStateBrowserTests(unittest.TestCase):
             'uptime_pct': 100, 'uptime_buckets': [1, 1, 1],
             'preview_status': 'queued',
         }
+
+    @staticmethod
+    def _service_meta(port, *, windows=None, display_name='', critical=False, tags=None, healthy_statuses='200-399'):
+        return {
+            'port': port, 'display_name': display_name, 'url': f'http://127.0.0.1:{port}',
+            'path': '/', 'critical': critical, 'pinned_order': port,
+            'tags': tags or [], 'healthy_statuses': healthy_statuses,
+            'windows': windows or [],
+        }
+
+    def _maintenance_route(self, fixture):
+        """Build a route handler stubbing /api/service-meta/<port> GET/PUT for the maintenance editor tests."""
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            method = route.request.method
+            if path.startswith('/api/service-meta/'):
+                port = int(path.rsplit('/', 1)[-1])
+                if method == 'PUT':
+                    put_error = fixture.get('put_error')
+                    if put_error:
+                        route.fulfill(status=put_error.get('status', 400), json={'error': put_error['message']})
+                        return
+                    body = json.loads(route.request.post_data or '{}')
+                    meta = dict(fixture['service_meta'].get(port) or self._service_meta(port))
+                    meta['windows'] = body.get('maintenance_windows', [])
+                    meta['preview_queued'] = True
+                    fixture['service_meta'][port] = meta
+                    route.fulfill(status=200, json=meta)
+                    return
+                meta = fixture['service_meta'].get(port) or self._service_meta(port)
+                route.fulfill(status=200, json=meta)
+                return
+            payloads = {
+                '/api/stats': {'hostname': 'beacon', 'sample_ts': 1_700_000_000, 'cpu': 1, 'ram': 2, 'disk': 3, 'ram_used': 1, 'ram_total': 2, 'disk_used': 1, 'disk_total': 2, 'temp': 40},
+                '/api/history': [],
+                '/api/scan-status': {'worker_ready': True, 'worker_stale': False, 'recovery_required': False, 'stage': 'idle', 'scanning': False, 'last_completed_found': len(fixture['services']), 'last_discovery': 1_700_000_000},
+                '/api/services': fixture['services'],
+                '/api/events': fixture.get('events', []),
+            }
+            route.fulfill(status=200, json=payloads.get(path, {}))
+        return route_api
+
+    def test_a_service_with_no_windows_shows_the_empty_state_and_the_add_control(self):
+        fixture = {
+            'services': [self._service(8200)],
+            'service_meta': {8200: self._service_meta(8200, windows=[])},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            self.assertFalse(page.locator('#meta-window-count').is_visible())
+            self.assertIn('No maintenance windows yet', page.locator('#meta-window-empty').text_content())
+            add_button = page.locator('#meta-window-add')
+            self.assertTrue(add_button.is_visible())
+            self.assertTrue(add_button.is_enabled())
+        finally:
+            page.close()
+
+    def test_one_window_renders_the_singular_count_and_many_render_the_plural(self):
+        one_window = [{'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True}]
+        three_windows = [
+            {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True},
+            {'start_minute': 120, 'duration_minutes': 15, 'weekdays': [2], 'grace_minutes': 10, 'enabled': True},
+            {'start_minute': 180, 'duration_minutes': 45, 'weekdays': [3], 'grace_minutes': 20, 'enabled': False},
+        ]
+        fixture = {
+            'services': [self._service(8201), self._service(8202)],
+            'service_meta': {
+                8201: self._service_meta(8201, windows=one_window),
+                8202: self._service_meta(8202, windows=three_windows),
+            },
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').nth(0).click()
+            page.locator('#meta-window-count').wait_for(state='visible', timeout=8_000)
+            singular = page.locator('#meta-window-count').text_content()
+            self.assertEqual(singular, '1 maintenance window')
+            self.assertNotEqual(singular, '0 maintenance windows')
+            page.locator('#meta-cancel').click()
+
+            page.locator('.svc-edit').nth(1).click()
+            page.locator('#meta-window-count').wait_for(state='visible', timeout=8_000)
+            plural = page.locator('#meta-window-count').text_content()
+            self.assertEqual(plural, '3 maintenance windows')
+            self.assertNotEqual(plural, '0 maintenance windows')
+        finally:
+            page.close()
+
+    def test_adding_a_row_prefills_the_default_grace_and_focuses_the_start_field(self):
+        fixture = {
+            'services': [self._service(8203)],
+            'service_meta': {8203: self._service_meta(8203, windows=[])},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-window-add').click()
+            row = page.locator('.meta-window-row').first
+            row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(row.locator('.meta-window-grace').input_value(), '15')
+            self.assertTrue(row.locator('.meta-window-start').evaluate('(node) => document.activeElement === node'))
+        finally:
+            page.close()
+
+    def test_a_weekday_chip_toggles_its_pressed_state_and_carries_a_full_day_label(self):
+        fixture = {
+            'services': [self._service(8204)],
+            'service_meta': {8204: self._service_meta(8204, windows=[])},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-window-add').click()
+            chip = page.locator('.meta-window-row').first.locator('.meta-weekday-chip').first
+            chip.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(chip.get_attribute('aria-pressed'), 'false')
+            self.assertEqual(chip.get_attribute('aria-label'), 'Monday')
+            chip.click()
+            self.assertEqual(chip.get_attribute('aria-pressed'), 'true')
+            chip.click()
+            self.assertEqual(chip.get_attribute('aria-pressed'), 'false')
+        finally:
+            page.close()
+
+    def test_unchecking_enabled_dims_the_row_without_hiding_any_field(self):
+        windows = [{'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True}]
+        fixture = {
+            'services': [self._service(8205)],
+            'service_meta': {8205: self._service_meta(8205, windows=windows)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            row = page.locator('.meta-window-row').first
+            row.wait_for(state='visible', timeout=8_000)
+            self.assertFalse(row.evaluate('(node) => node.classList.contains("is-disabled")'))
+            row.locator('.meta-window-enabled').uncheck()
+            self.assertTrue(row.evaluate('(node) => node.classList.contains("is-disabled")'))
+            for selector in ['.meta-window-start', '.meta-window-duration', '.meta-weekday-chip', '.meta-window-grace', '.meta-window-remove']:
+                self.assertTrue(row.locator(selector).first.is_visible(), selector)
+        finally:
+            page.close()
+
+    def test_removing_a_window_requires_two_activations(self):
+        windows = [{'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True}]
+        fixture = {
+            'services': [self._service(8206)],
+            'service_meta': {8206: self._service_meta(8206, windows=windows)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            row = page.locator('.meta-window-row').first
+            row.wait_for(state='visible', timeout=8_000)
+            remove_button = row.locator('.meta-window-remove')
+            self.assertEqual(remove_button.text_content(), 'Remove')
+            remove_button.click()
+            self.assertEqual(remove_button.text_content(), 'Confirm remove')
+            self.assertEqual(page.locator('.meta-window-row').count(), 1)
+            remove_button.click()
+            self.assertEqual(page.locator('.meta-window-row').count(), 0)
+            self.assertTrue(page.locator('#meta-window-empty').is_visible())
+        finally:
+            page.close()
+
+    def test_a_server_validation_message_is_shown_verbatim_in_the_shared_error_region(self):
+        windows = [{'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True}]
+        fixture = {
+            'services': [self._service(8207)],
+            'service_meta': {8207: self._service_meta(8207, windows=windows)},
+            'put_error': {'status': 400, 'message': 'Window 1: Duration must be at least 1 minute.'},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('.meta-window-row').first.wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-form').evaluate('(form) => form.requestSubmit()')
+            page.locator('#meta-error').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(
+                page.locator('#meta-error').text_content(),
+                'Window 1: Duration must be at least 1 minute.',
+            )
+            self.assertTrue(page.locator('#meta-modal').is_visible())
+            self.assertEqual(page.locator('.meta-window-row').count(), 1)
+        finally:
+            page.close()
+
+    def test_the_window_list_scrolls_rather_than_growing_past_four_rows(self):
+        windows = [
+            {'start_minute': i * 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True}
+            for i in range(6)
+        ]
+        fixture = {
+            'services': [self._service(8208)],
+            'service_meta': {8208: self._service_meta(8208, windows=windows)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('.meta-window-row').nth(5).wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.meta-window-row').count(), 6)
+            scroll_height = page.locator('#meta-window-list').evaluate('(node) => node.scrollHeight')
+            client_height = page.locator('#meta-window-list').evaluate('(node) => node.clientHeight')
+            self.assertGreater(scroll_height, client_height)
+        finally:
+            page.close()
+
+    def test_every_added_control_meets_the_narrow_viewport_touch_target(self):
+        windows = [{'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True}]
+        fixture = {
+            'services': [self._service(8209)],
+            'service_meta': {8209: self._service_meta(8209, windows=windows)},
+        }
+        page = self.browser.new_page(viewport={'width': 360, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            row = page.locator('.meta-window-row').first
+            row.wait_for(state='visible', timeout=8_000)
+            for selector in [
+                '.meta-window-start', '.meta-window-duration', '.meta-weekday-chip',
+                '.meta-window-grace', '.meta-checkbox', '.meta-window-remove',
+            ]:
+                box = row.locator(selector).first.bounding_box()
+                self.assertGreaterEqual(box['height'], 44, selector)
+                self.assertGreaterEqual(box['width'], 44, selector)
+            add_box = page.locator('#meta-window-add').bounding_box()
+            self.assertGreaterEqual(add_box['height'], 44)
+        finally:
+            page.close()
+
+    def test_the_modal_focus_trap_still_reaches_the_new_controls(self):
+        windows = [{'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 15, 'enabled': True}]
+        fixture = {
+            'services': [self._service(8210)],
+            'service_meta': {8210: self._service_meta(8210, windows=windows)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('.meta-window-row').first.wait_for(state='visible', timeout=8_000)
+            result = page.locator('#meta-modal').evaluate(
+                """(modal) => {
+                    const focusable = [...modal.querySelectorAll('button,input,summary,[href],[tabindex]:not([tabindex="-1"])')]
+                      .filter((el) => !el.disabled);
+                    return {
+                      hasChip: focusable.some((el) => el.classList.contains('meta-weekday-chip')),
+                      hasAdd: focusable.some((el) => el.id === 'meta-window-add'),
+                      hasRemove: focusable.some((el) => el.classList.contains('meta-window-remove')),
+                    };
+                }"""
+            )
+            self.assertTrue(result['hasChip'])
+            self.assertTrue(result['hasAdd'])
+            self.assertTrue(result['hasRemove'])
+        finally:
+            page.close()
 
     def test_playwright_zero_one_many_states_in_dark_light_and_narrow_layout(self):
         fixture = {'services': [], 'events': []}

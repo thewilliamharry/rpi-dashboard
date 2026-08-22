@@ -1181,7 +1181,7 @@ html.light .evt-meta_updated .evt-title {
   .meta-window-row input[type="time"],
   .meta-window-row input[type="number"] { min-height: 44px; }
   .meta-weekday-chip { min-width: 44px; min-height: 44px; }
-  .meta-window-row .meta-checkbox { min-height: 44px; align-items: center; }
+  .meta-window-row .meta-checkbox { min-height: 44px; min-width: 44px; align-items: center; }
   .meta-window-remove { width: 100%; min-height: 44px; grid-column: 1 / -1; }
   .svc-title-right { flex-wrap: wrap; justify-content: flex-end; }
   .svc-tls-unverified { max-width: 100%; }
