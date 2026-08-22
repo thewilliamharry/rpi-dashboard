@@ -41,6 +41,55 @@ def gap_block(evidence, items=()):
     }
 
 
+def maintenance_block(*, active, start_minute=540, duration_minutes=60, weekdays=(1, 2, 3, 4, 5, 6, 7),
+                       grace_minutes=15, covered_until_ts=1_700_010_000):
+    """One composed maintenance evidence block, in the shape diagnosis.py's
+    ``_maintenance_disclosure`` publishes (03.1-07) -- always a dict, never
+    omitted, matching the server's own always-present-block discipline.
+    """
+    if not active:
+        return {'active': False, 'window': None, 'covered_until_ts': None}
+    return {
+        'active': True,
+        'window': {
+            'start_minute': start_minute, 'duration_minutes': duration_minutes,
+            'weekdays': list(weekdays), 'grace_minutes': grace_minutes,
+        },
+        'covered_until_ts': covered_until_ts,
+    }
+
+
+def attribution_block(attributed_seconds, period_seconds=604_800):
+    """One composed maintenance_attribution block, in diagnosis.py's own shape."""
+    return {'attributed_seconds': attributed_seconds, 'period_seconds': period_seconds}
+
+
+def maintenance_service(port, name, *, availability='online', maintenance=None, attribution=None,
+                         overrun=None, critical=False, state_duration_seconds=60, failure_class=None, tags=()):
+    """One composed service row in the maintenance-aware shape diagnosis.py
+    publishes (03.1-07/03.1-10) -- the same fields ``_gap_evidence_services``'s
+    inline ``service()`` builder uses, plus the maintenance/overrun/attribution
+    blocks this plan's Task 1/Task 2 render.
+    """
+    row = {
+        'port': port, 'name': name, 'availability': availability,
+        'latency_ms': 5 if availability == 'online' else None,
+        'failure_class': failure_class,
+        'state_duration_seconds': state_duration_seconds, 'critical': critical,
+        'pinned_order': port, 'tags': list(tags), 'effective_health_rule': '200-399',
+        'last_probe_ts': 1_700_000_000,
+        'expected_cadence_seconds': 300 if availability == 'online' else 60,
+        'freshness': {'state': 'fresh', 'age_seconds': 5},
+        'tls_unverified': False, 'last_error': None,
+        'collection_gaps': gap_block('complete'),
+        'maintenance': maintenance if maintenance is not None else maintenance_block(active=False),
+        'maintenance_attribution': attribution if attribution is not None else attribution_block(0),
+    }
+    if overrun is not None:
+        row['overrun'] = overrun
+    return row
+
+
 class AdvancedUiTests(unittest.TestCase):
     """Production-route browser coverage for the dependency-free advanced document."""
 
@@ -1346,12 +1395,12 @@ class AdvancedUiTests(unittest.TestCase):
             service(9008, 'Legacy container', []),
         )
 
-    def _services_page(self, services):
+    def _services_page(self, services, exceptions=()):
         """Serve one fixed service population through the production /advanced route."""
         page = self.browser.new_page(viewport={'width': 959, 'height': 800})
         payload = self._snapshot()
         payload.update({
-            'exceptions': [], 'pipeline': {}, 'settings': {},
+            'exceptions': list(exceptions), 'pipeline': {}, 'settings': {},
             'services': list(services),
         })
 
@@ -1769,6 +1818,340 @@ class AdvancedUiTests(unittest.TestCase):
         self.assertIn('state_duration_seconds', js)
         self.assertIn('expected_cadence_seconds', js)
         self.assertIn('TLS trust annotation', js)
+
+    # -- 03.1-10: planned-maintenance recognition on the read-only workspace --
+
+    @staticmethod
+    def _service_row_locator(page, port):
+        return page.locator('#services-table tbody > tr.service-row').filter(
+            has=page.locator('.service-port', has_text=f':{port}'),
+        )
+
+    @staticmethod
+    def _resolved_css_color(page, css_value):
+        """Resolve a CSS value (e.g. ``var(--accent3)``) to its computed color.
+
+        Per this plan's own instruction, colour assertions compare computed
+        styles against the token value resolved from the document root rather
+        than asserting a literal hex string.
+        """
+        return page.evaluate(
+            "(value) => { const probe = document.createElement('span'); "
+            "document.documentElement.appendChild(probe); probe.style.color = value; "
+            "const resolved = getComputedStyle(probe).color; probe.remove(); return resolved; }",
+            css_value,
+        )
+
+    def test_a_maintenance_service_renders_the_new_status_value(self):
+        service = maintenance_service(
+            9401, 'Nightly batch', availability='maintenance',
+            maintenance=maintenance_block(active=True),
+        )
+        page = self._services_page([service])
+        try:
+            status_cell = self._service_row_locator(page, 9401).locator('td').nth(0)
+            self.assertEqual(status_cell.text_content().strip(), '● maintenance')
+            accent3 = self._resolved_css_color(page, 'var(--accent3)')
+            self.assertEqual(status_cell.evaluate('(node) => getComputedStyle(node).color'), accent3)
+        finally:
+            page.close()
+
+    def test_the_services_table_still_has_six_columns(self):
+        service = maintenance_service(
+            9402, 'Nightly batch', availability='maintenance',
+            maintenance=maintenance_block(active=True),
+        )
+        page = self._services_page([service])
+        try:
+            self.assertEqual(page.locator('#services-table thead th').count(), 6)
+            row = self._service_row_locator(page, 9402)
+            self.assertEqual(row.locator('th, td').count(), 6)
+        finally:
+            page.close()
+
+    def test_an_unrecognised_availability_still_renders_the_unknown_value(self):
+        service = maintenance_service(9403, 'Odd literal', availability='paused_for_reasons')
+        page = self._services_page([service])
+        try:
+            status_cell = self._service_row_locator(page, 9403).locator('td').nth(0)
+            self.assertEqual(status_cell.text_content().strip(), '● unknown')
+        finally:
+            page.close()
+
+    def test_a_maintenance_service_is_absent_from_the_active_exceptions_list_and_count(self):
+        """D-07: the server never emits an exception for a covered service, and the
+        client renders exactly what the server sends -- it performs no exclusion
+        of its own.
+        """
+        service = maintenance_service(
+            9404, 'Nightly batch', availability='maintenance', critical=True,
+            maintenance=maintenance_block(active=True),
+        )
+        page = self._services_page([service])
+        try:
+            page.locator('[data-section="overview"]').click()
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('No active exceptions', overview)
+            page.locator('[data-section="services"]').click()
+            status_cell = self._service_row_locator(page, 9404).locator('td').nth(0)
+            self.assertEqual(status_cell.text_content().strip(), '● maintenance')
+        finally:
+            page.close()
+
+    def test_an_overrun_service_reappears_in_the_active_exceptions_list(self):
+        """Once coverage lapses into an overrun, the service is offline again and
+        the server-composed exception reappears -- pinned here at the client
+        rendering layer; the server's own exclusion/reversion is 03.1-07's
+        MaintenanceExceptionTests.
+        """
+        service = maintenance_service(
+            9405, 'Nightly batch', availability='offline', critical=True,
+            maintenance=maintenance_block(active=False),
+            overrun={'down_since_ts': 1_699_990_000, 'raised_at_ts': 1_700_000_000},
+        )
+        exceptions = [{
+            'kind': 'critical_service_offline', 'section': 'services',
+            'priority': 2, 'port': 9405, 'name': 'Nightly batch',
+        }]
+        page = self._services_page([service], exceptions=exceptions)
+        try:
+            page.locator('[data-section="overview"]').click()
+            overview = page.locator('#overview-section').text_content()
+            self.assertIn('1 active exception', overview)
+            page.locator('[data-section="services"]').click()
+            status_cell = self._service_row_locator(page, 9405).locator('td').nth(0)
+            self.assertEqual(status_cell.text_content().strip(), '● offline')
+        finally:
+            page.close()
+
+    def test_a_maintenance_service_still_shows_its_true_state_duration_and_failure_class(self):
+        """D-06: the service is never removed from the failure surface entirely."""
+        service = maintenance_service(
+            9406, 'Nightly batch', availability='maintenance',
+            maintenance=maintenance_block(active=True),
+            state_duration_seconds=7_200, failure_class='connection refused',
+        )
+        page = self._services_page([service])
+        try:
+            cells = self._service_row_cells(page, 9406)
+            self.assertIn('hours', cells[3])
+            self.assertIn('connection refused', cells[2])
+        finally:
+            page.close()
+
+    def test_the_maintenance_evidence_row_always_renders(self):
+        active_service = maintenance_service(
+            9407, 'Nightly batch', availability='maintenance',
+            maintenance=maintenance_block(
+                active=True, start_minute=540, duration_minutes=60,
+                weekdays=(1, 3, 5), grace_minutes=15, covered_until_ts=1_700_010_000,
+            ),
+        )
+        inactive_service = maintenance_service(
+            9408, 'Daytime batch', availability='online',
+            maintenance=maintenance_block(active=False),
+        )
+        page = self._services_page([active_service, inactive_service])
+        try:
+            toggles = page.locator('.service-details-toggle')
+            for index in range(toggles.count()):
+                toggles.nth(index).click()
+            active_value = self._service_detail_evidence(page, 9407, 'Maintenance')
+            inactive_value = self._service_detail_evidence(page, 9408, 'Maintenance')
+            self.assertNotEqual(active_value.strip(), '')
+            self.assertNotEqual(inactive_value.strip(), '')
+            self.assertEqual(inactive_value, 'No active maintenance window.')
+            self.assertIn('Covered by a confirmed window:', active_value)
+            self.assertIn('09:00', active_value)
+            self.assertIn('10:00', active_value)
+            self.assertIn('Monday, Wednesday, Friday', active_value)
+            self.assertIn('grace 15 minutes', active_value)
+        finally:
+            page.close()
+
+    def test_the_attribution_row_always_renders_including_zero(self):
+        zero_service = maintenance_service(9409, 'Zero attribution', attribution=attribution_block(0))
+        nonzero_service = maintenance_service(9410, 'Nonzero attribution', attribution=attribution_block(3_600))
+        page = self._services_page([zero_service, nonzero_service])
+        try:
+            toggles = page.locator('.service-details-toggle')
+            for index in range(toggles.count()):
+                toggles.nth(index).click()
+            zero_value = self._service_detail_evidence(page, 9409, 'Maintenance attribution')
+            nonzero_value = self._service_detail_evidence(page, 9410, 'Maintenance attribution')
+            self.assertNotEqual(zero_value.strip(), '')
+            self.assertNotEqual(nonzero_value.strip(), '')
+            self.assertEqual(zero_value, 'No downtime in the past 7 days was attributed to confirmed maintenance.')
+            self.assertIn('occurred during confirmed maintenance.', nonzero_value)
+        finally:
+            page.close()
+
+    def test_the_attribution_row_renders_no_percentage(self):
+        service = maintenance_service(9411, 'Nonzero attribution', attribution=attribution_block(3_600))
+        page = self._services_page([service])
+        try:
+            page.locator('.service-details-toggle').first.click()
+            detail_text = page.locator('#service-detail-9411').text_content()
+            self.assertNotIn('%', detail_text)
+            self.assertEqual(len(re.findall(r'\d+(?:\.\d+)?%', detail_text)), 0)
+        finally:
+            page.close()
+
+    def test_no_second_availability_figure_exists_anywhere_on_the_page(self):
+        services = [
+            maintenance_service(
+                9412, 'A', availability='maintenance',
+                maintenance=maintenance_block(active=True), attribution=attribution_block(1_800),
+            ),
+            maintenance_service(9413, 'B', availability='online', attribution=attribution_block(0)),
+        ]
+        page = self._services_page(services)
+        try:
+            toggles = page.locator('.service-details-toggle')
+            for index in range(toggles.count()):
+                toggles.nth(index).click()
+            for port in (9412, 9413):
+                row_text = self._service_row_locator(page, port).text_content()
+                row_text += page.locator(f'#service-detail-{port}').text_content()
+                self.assertLessEqual(len(re.findall(r'\d+(?:\.\d+)?%', row_text)), 1)
+        finally:
+            page.close()
+
+    def test_the_overrun_rows_render_as_two_separate_values(self):
+        service = maintenance_service(
+            9414, 'Overrun outage', availability='offline', critical=True,
+            overrun={'down_since_ts': 1_699_990_000, 'raised_at_ts': 1_700_000_000},
+        )
+        page = self._services_page([service])
+        try:
+            page.locator('.service-details-toggle').first.click()
+            down_since = self._service_detail_evidence(page, 9414, 'Down since')
+            raised_at = self._service_detail_evidence(page, 9414, 'Raised at')
+            self.assertNotEqual(down_since, raised_at)
+            self.assertNotIn(down_since, raised_at)
+            self.assertNotIn(raised_at, down_since)
+        finally:
+            page.close()
+
+    def test_the_overrun_rows_are_absent_without_an_open_overrun(self):
+        service = maintenance_service(9415, 'No overrun', availability='online')
+        page = self._services_page([service])
+        try:
+            page.locator('.service-details-toggle').first.click()
+            detail = page.locator('#service-detail-9415')
+            self.assertEqual(detail.locator('strong', has_text='Down since:').count(), 0)
+            self.assertEqual(detail.locator('strong', has_text='Raised at:').count(), 0)
+        finally:
+            page.close()
+
+    def test_the_management_pointer_is_plain_text_and_not_actionable(self):
+        service = maintenance_service(9416, 'Pointer check')
+        page = self._services_page([service])
+        try:
+            page.locator('.service-details-toggle').first.click()
+            pointer_text = self._service_detail_evidence(page, 9416, 'Maintenance windows')
+            self.assertEqual(pointer_text, "Maintenance windows are managed from the main dashboard's service editor.")
+            detail = page.locator('#service-detail-9416')
+            self.assertEqual(detail.locator('a').count(), 0)
+            self.assertEqual(detail.locator('button').count(), 0)
+        finally:
+            page.close()
+
+    def test_the_service_detail_contains_no_interactive_element(self):
+        service = maintenance_service(
+            9417, 'Interactive check', availability='maintenance',
+            maintenance=maintenance_block(active=True),
+            overrun={'down_since_ts': 1_699_990_000, 'raised_at_ts': 1_700_000_000},
+        )
+        page = self._services_page([service])
+        try:
+            page.locator('.service-details-toggle').first.click()
+            detail = page.locator('#service-detail-9417')
+            self.assertEqual(detail.locator('a, button, input, select, textarea').count(), 0)
+        finally:
+            page.close()
+
+    def test_long_evidence_values_wrap_rather_than_truncating(self):
+        service = maintenance_service(
+            9418, 'Wrap check', availability='maintenance',
+            maintenance=maintenance_block(
+                active=True, start_minute=0, duration_minutes=90,
+                weekdays=(1, 2, 3, 4, 5, 6, 7), grace_minutes=120, covered_until_ts=1_700_010_000,
+            ),
+        )
+        page = self._services_page([service])
+        try:
+            page.locator('.service-details-toggle').first.click()
+            row = page.locator('#service-detail-9418 .evidence-row').filter(
+                has=page.locator('strong', has_text='Maintenance: '),
+            )
+            span = row.locator('span')
+            overflow = span.evaluate('(node) => node.scrollWidth - node.clientWidth')
+            self.assertLessEqual(overflow, 1)
+        finally:
+            page.close()
+
+    def test_the_maintenance_colour_is_applied_to_no_interactive_element(self):
+        service = maintenance_service(
+            9419, 'Colour check', availability='maintenance',
+            maintenance=maintenance_block(active=True),
+        )
+        page = self._services_page([service])
+        try:
+            page.locator('.service-details-toggle').first.click()
+            accent3 = self._resolved_css_color(page, 'var(--accent3)')
+            elements = page.locator('a:visible, button:visible')
+            count = elements.count()
+            self.assertGreater(count, 0)
+            for index in range(count):
+                element = elements.nth(index)
+                self.assertNotEqual(element.evaluate('(node) => getComputedStyle(node).color'), accent3)
+                element.hover()
+                self.assertNotEqual(element.evaluate('(node) => getComputedStyle(node).color'), accent3)
+                page.mouse.move(0, 0)
+        finally:
+            page.close()
+
+    def test_no_workspace_route_accepts_a_mutation_method(self):
+        service = maintenance_service(
+            9420, 'Read only check', availability='maintenance',
+            maintenance=maintenance_block(active=True),
+            overrun={'down_since_ts': 1_699_990_000, 'raised_at_ts': 1_700_000_000},
+        )
+        payload = self._snapshot()
+        payload.update({'exceptions': [], 'pipeline': {}, 'settings': {}, 'services': [service]})
+        methods_seen = []
+        page = self.browser.new_page(viewport={'width': 959, 'height': 800})
+        page.on('request', lambda request: methods_seen.append(request.method))
+
+        def route_api(route):
+            if urlparse(route.request.url).path == '/api/advanced/current':
+                route.fulfill(status=200, json=payload)
+            else:
+                route.fallback()
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="services"]').click()
+            page.locator('#services-table').wait_for(timeout=5_000)
+            page.locator('.service-details-toggle').first.click()
+            page.locator('#advanced-refresh').click()
+            page.wait_for_timeout(200)
+            self.assertTrue(methods_seen)
+            self.assertTrue(all(method == 'GET' for method in methods_seen))
+            # The one pre-existing form on this page (client-side service filters,
+            # 03-advanced-current-diagnosis) targets no mutation: no action, no
+            # non-safe method, and no submit control that could trigger one.
+            forms = page.locator('form')
+            for index in range(forms.count()):
+                form = forms.nth(index)
+                self.assertIsNone(form.get_attribute('action'))
+                method = (form.get_attribute('method') or 'get').lower()
+                self.assertEqual(method, 'get')
+            self.assertEqual(page.locator('button[type="submit"]').count(), 0)
+        finally:
+            page.close()
 
 
 if __name__ == '__main__':
