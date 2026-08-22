@@ -115,6 +115,32 @@ console.log(JSON.stringify({
         self.assertIn('condition: service_completed_successfully', web_block)
         self.assertNotIn('worker:', web_block)
 
+    def test_maintenance_window_editor_markup_has_stable_hooks_and_one_error_region(self):
+        html = pathlib.Path('dashboard/index.html').read_text(encoding='utf-8')
+        for hook in [
+            'id="meta-window-list"', 'id="meta-window-add"', 'id="meta-window-empty"',
+            'id="meta-window-count"', 'id="meta-suggestion"',
+        ]:
+            self.assertEqual(html.count(hook), 1, hook)
+        self.assertEqual(html.count('id="meta-error"'), 1)
+
+    def test_maintenance_window_editor_copywriting_contract_strings_appear_verbatim(self):
+        html = pathlib.Path('dashboard/index.html').read_text(encoding='utf-8')
+        js = pathlib.Path('dashboard/app.js').read_text(encoding='utf-8')
+        self.assertIn('+ Add window', html)
+        self.assertIn('No maintenance windows yet', html)
+        self.assertIn('Add a window to suppress expected restarts without hiding real failures.', html)
+        self.assertIn(
+            'How long the service may stay down after this window ends before Beacon raises a real outage.',
+            js,
+        )
+
+    def test_maintenance_window_stylesheet_declares_bounded_list_and_chip_wrap(self):
+        css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
+        self.assertIn('.meta-weekday-chips {\n  display: flex;\n  flex-wrap: wrap;', css)
+        self.assertIn('max-height: 280px', css)
+        self.assertIn('.meta-window-list {', css)
+
     def test_readme_has_one_offline_recovery_command_and_safe_ordering(self):
         readme = pathlib.Path('README.md').read_text(encoding='utf-8')
         status = 'docker compose run --rm --no-deps recovery python -m beacon.recovery status'
