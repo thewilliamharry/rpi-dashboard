@@ -86,6 +86,7 @@ def read_current_services(conn, *, cutoff_ts):
         tls_by_port = {}
     rows = conn.execute(
         'SELECT s.port, s.title, s.is_online, s.last_latency_ms, s.last_error, s.state_since, '
+        's.overrun_raised_ts, '
         's.first_seen, s.last_seen, m.display_name, m.critical, m.pinned_order, m.tags, '
         'm.healthy_statuses, '
         '(SELECT c.ts FROM service_checks c WHERE c.port=s.port ORDER BY c.ts DESC LIMIT 1) '
@@ -909,6 +910,82 @@ def get_maintenance_suggestion_evidence(conn, port, *, since_ts):
             pairs.append((pending_down_ts, row['ts']))
             pending_down_ts = None
     return pairs
+
+
+# Generous but finite -- keeps a pathological total number of stored windows
+# across every requested port from making one bulk read unbounded, in the
+# spirit of _MAINTENANCE_EVIDENCE_ROW_LIMIT above.
+_MAINTENANCE_WINDOWS_BULK_ROW_LIMIT = 5000
+
+
+def read_maintenance_windows_by_port(conn, *, ports):
+    """Return every stored window for the supplied ports, grouped by port.
+
+    One query over the whole port list rather than one query per port.
+    Ordered exactly as ``get_maintenance_windows`` orders a single port
+    (start_minute ASC, id ASC), so the bulk result for any one port equals
+    that port's single-port read. Operates on the caller's connection and
+    opens no transaction of its own. Bounded by
+    ``_MAINTENANCE_WINDOWS_BULK_ROW_LIMIT`` so a pathological number of
+    stored windows cannot make one request unbounded. A port with no windows
+    is simply absent from the returned mapping.
+    """
+    ports = list(ports)
+    if not ports:
+        return {}
+    placeholders = ','.join('?' * len(ports))
+    rows = conn.execute(
+        f"SELECT id, port, start_minute, duration_minutes, weekdays, grace_minutes, "
+        f"enabled, created_ts, updated_ts FROM maintenance_windows WHERE port IN ({placeholders}) "
+        f"ORDER BY port ASC, start_minute ASC, id ASC LIMIT ?",
+        (*ports, _MAINTENANCE_WINDOWS_BULK_ROW_LIMIT),
+    ).fetchall()
+    by_port = {}
+    for row in rows:
+        by_port.setdefault(row['port'], []).append(dict(row))
+    return by_port
+
+
+def read_service_offline_intervals(conn, port, *, start_ts, end_ts):
+    """Return this port's half-open offline intervals within [start_ts, end_ts).
+
+    Reconstructs offline intervals from ``service_checks`` using the same
+    boundary-then-transitions algorithm the existing uptime summary performs
+    (a sample strictly before ``start_ts`` establishes the state already in
+    effect at the period's start) -- read here as its own separate query, so
+    the uptime computation itself is never called into or modified. An
+    interval still open at ``end_ts`` is clipped to it rather than omitted.
+    """
+    start_ts = int(start_ts)
+    end_ts = int(end_ts)
+    boundary_row = conn.execute(
+        'SELECT ts, online FROM service_checks WHERE port=? AND ts < ? '
+        'ORDER BY ts DESC LIMIT 1',
+        (port, start_ts),
+    ).fetchone()
+    in_window_rows = conn.execute(
+        'SELECT ts, online FROM service_checks WHERE port=? AND ts >= ? AND ts <= ? '
+        'ORDER BY ts ASC',
+        (port, start_ts, end_ts),
+    ).fetchall()
+    points = [(int(row['ts']), 1 if int(row['online']) else 0) for row in in_window_rows]
+    if boundary_row is not None:
+        cursor, state = start_ts, (1 if int(boundary_row['online']) else 0)
+    elif points:
+        cursor, state = points[0][0], points[0][1]
+        points = points[1:]
+    else:
+        return []
+
+    intervals = []
+    for ts, next_state in points:
+        clamped = min(max(ts, start_ts), end_ts)
+        if clamped > cursor and state == 0:
+            intervals.append((cursor, clamped))
+        cursor, state = clamped, next_state
+    if cursor < end_ts and state == 0:
+        intervals.append((cursor, end_ts))
+    return intervals
 
 
 def get_runtime_state(conn, key, default=None):

@@ -3,16 +3,24 @@
 import json
 from pathlib import Path
 
+from . import maintenance
 from .db import read_transaction
 from .migrations import RECOVERY_MARKER
 from .repositories import (
-    read_current_host, read_current_services, read_pipeline_evidence,
+    read_current_host, read_current_services, read_maintenance_windows_by_port,
+    read_pipeline_evidence, read_service_offline_intervals,
 )
 from .telemetry import RetentionPolicy
 from .worker_main import WORKER_CALLBACK_INVENTORY
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# The one derived availability literal a covered, offline service composes
+# as instead of 'offline' -- D-06/D-07. Never referenced inside
+# compose_active_exceptions: maintenance is resolved upstream of that
+# function so the exception projection stays pure (D-07, Phase 3 precedent).
+MAINTENANCE_AVAILABILITY = 'maintenance'
 
 # Each telemetry_coverage.reason value in the migrations.py CHECK enum maps to the
 # one exception kind it may be promoted as, or to None for lifecycle evidence that
@@ -189,10 +197,68 @@ def _safe_pinned_order(value, fallback):
     return fallback
 
 
-def compose_service_diagnosis(rows, *, now):
-    """Project current service evidence without conflating TLS or freshness with availability."""
+def _maintenance_disclosure(windows, now, tz_name):
+    """Resolve D-06's maintenance evidence block for one port's windows.
+
+    Always returns a dict -- never omitted, never blank. Coverage is decided
+    by ``maintenance.coverage`` (the same function the suppression write
+    path calls), so the displayed state and the stored suppression tag can
+    never disagree. When covered, the specific covering window is identified
+    by re-checking each window individually through that same coverage
+    function and picking the one whose own grace end matches the overall
+    (longest-grace-wins, D-05) result -- this never re-implements the
+    interval rule, it only asks the one function that already owns it, once
+    per window.
+    """
+    covered, covered_until_ts = maintenance.coverage(windows, now, tz_name)
+    if not covered:
+        return {'active': False, 'window': None, 'covered_until_ts': None}
+    disclosed_window = None
+    for row in windows:
+        window = maintenance.window_from_row(row)
+        if window is None or not window.enabled:
+            continue
+        window_covered, window_grace_until = maintenance.coverage([row], now, tz_name)
+        if window_covered and window_grace_until == covered_until_ts:
+            disclosed_window = window
+            break
+    return {
+        'active': True,
+        'window': (
+            {
+                'start_minute': disclosed_window.start_minute,
+                'duration_minutes': disclosed_window.duration_minutes,
+                'weekdays': sorted(disclosed_window.weekdays),
+                'grace_minutes': disclosed_window.grace_minutes,
+            }
+            if disclosed_window is not None else None
+        ),
+        'covered_until_ts': covered_until_ts,
+    }
+
+
+def compose_service_diagnosis(
+    rows, *, now, windows_by_port=None, tz_name='UTC', attribution_by_port=None,
+    period_seconds=0,
+):
+    """Project current service evidence without conflating TLS or freshness with availability.
+
+    ``windows_by_port``, ``tz_name``, ``attribution_by_port``, and
+    ``period_seconds`` are supplied by the caller (``get_current_diagnosis``)
+    -- this function performs no reads of its own. A service's stored
+    availability is reclassified to the maintenance literal only when it is
+    genuinely offline AND a port window currently covers ``now``; an online
+    service inside a window's schedule is never reclassified (D-06). The
+    expected probe cadence and freshness classification are computed from
+    the TRUE offline/online state before any reclassification, so a
+    maintenance-derived service is still measured against the 60-second
+    down-only cadence its stored offline state actually earns.
+    """
+    windows_by_port = windows_by_port or {}
+    attribution_by_port = attribution_by_port or {}
     services = []
     for row in rows:
+        port = row['port']
         online = row.get('last_probe_online')
         if online is None:
             online = row.get('is_online')
@@ -200,8 +266,8 @@ def compose_service_diagnosis(rows, *, now):
         probe_ts = row.get('last_probe_ts')
         cadence = 60 if availability == 'offline' else 300
         service = {
-            'port': row['port'],
-            'name': row.get('display_name') or row.get('title') or f"Port {row['port']}",
+            'port': port,
+            'name': row.get('display_name') or row.get('title') or f"Port {port}",
             'title': row.get('title'),
             'availability': availability,
             'latency_ms': row.get('probe_latency_ms') if availability == 'online' else None,
@@ -215,7 +281,7 @@ def compose_service_diagnosis(rows, *, now):
             ),
             'critical': bool(row.get('critical')),
             'tags': _tags(row.get('tags')),
-            'pinned_order': _safe_pinned_order(row.get('pinned_order'), row['port']),
+            'pinned_order': _safe_pinned_order(row.get('pinned_order'), port),
             'effective_health_rule': row.get('healthy_statuses') or '200-399',
             'last_probe_ts': probe_ts,
             'expected_cadence_seconds': cadence,
@@ -223,6 +289,25 @@ def compose_service_diagnosis(rows, *, now):
             'tls_unverified': bool(row.get('tls_unverified')),
             'last_error': row.get('probe_error_class') or row.get('last_error'),
         }
+
+        maintenance_state = _maintenance_disclosure(windows_by_port.get(port, []), now, tz_name)
+        if availability == 'offline' and maintenance_state['active']:
+            service['availability'] = MAINTENANCE_AVAILABILITY
+        service['maintenance'] = maintenance_state
+
+        attributed_seconds = attribution_by_port.get(port) or 0
+        service['maintenance_attribution'] = {
+            'attributed_seconds': int(attributed_seconds),
+            'period_seconds': int(period_seconds or 0),
+        }
+
+        overrun_raised_ts = row.get('overrun_raised_ts')
+        if isinstance(overrun_raised_ts, int) and not isinstance(overrun_raised_ts, bool):
+            service['overrun'] = {
+                'down_since_ts': row.get('state_since'),
+                'raised_at_ts': overrun_raised_ts,
+            }
+
         services.append(service)
     return sorted(services, key=operational_service_key)
 
@@ -537,11 +622,28 @@ def _settings_payload(settings):
 def get_current_diagnosis(db_path, settings, now):
     """Read one versioned current snapshot and close SQLite before serialization."""
     cadence_seconds = settings.metric_sample_seconds
+    # The same retention period this composition's own service listing
+    # already uses (settings.expire_days) -- a net-new additive read
+    # alongside the uptime computation, never inside it (D-09, Pitfall 5).
+    period_seconds = settings.expire_days * 86400
+    start_ts = now - period_seconds
     with read_transaction(db_path) as conn:
         row = read_current_host(conn)
         host = _host_payload(row, cadence_seconds, now)
+        service_rows = read_current_services(conn, cutoff_ts=start_ts)
+        ports = [service_row['port'] for service_row in service_rows]
+        windows_by_port = read_maintenance_windows_by_port(conn, ports=ports)
+        attribution_by_port = {
+            port: maintenance.attributed_downtime_seconds(
+                read_service_offline_intervals(conn, port, start_ts=start_ts, end_ts=now),
+                windows_by_port.get(port, []),
+                settings.timezone,
+            )
+            for port in ports
+        }
         services = compose_service_diagnosis(
-            read_current_services(conn, cutoff_ts=now - settings.expire_days * 86400), now=now,
+            service_rows, now=now, windows_by_port=windows_by_port, tz_name=settings.timezone,
+            attribution_by_port=attribution_by_port, period_seconds=period_seconds,
         )
         pipeline = compose_pipeline_diagnosis(read_pipeline_evidence(conn, now=now), settings, now=now)
     attach_service_collection_gaps(services, pipeline)
