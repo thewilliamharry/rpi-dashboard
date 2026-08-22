@@ -1,6 +1,7 @@
 'use strict';
 
-const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated', 'monitoring_gap']);
+const MAINTENANCE_OVERRUN_EVENT_TYPE = 'maintenance_overrun';
+const EVENT_TYPES_VISIBLE = new Set(['state_change', 'alert_failed', 'meta_updated', 'monitoring_gap', MAINTENANCE_OVERRUN_EVENT_TYPE]);
 const UI_HEADERS = {'X-Beacon-UI': '1'};
 const WORKER_STALE_COPY = 'Monitoring paused — worker unavailable. Dashboard data may be stale; service settings changes are still saved.';
 const DASHBOARD_SCROLL_KEY = 'beacon-dashboard-scroll-position';
@@ -12,6 +13,7 @@ let pollFailures = 0;
 let workerWasStale = false;
 let workerIsStale = false;
 let scanSubmitting = false;
+let suppressedEventsRevealed = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,6 +25,13 @@ function fmtAgo(ts) {
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
   return `${Math.floor(d / 86400)}d ago`;
+}
+
+function fmtLocalDateTime(ts) {
+  if (ts === null || ts === undefined) return 'unknown';
+  const date = new Date(Number(ts) * 1000);
+  if (Number.isNaN(date.getTime())) return 'unknown';
+  return date.toLocaleString();
 }
 
 function normalizedBytes(value) {
@@ -187,10 +196,22 @@ function uptimeStrip(values) {
   return wrapper;
 }
 
+function serviceCardAvailability(service) {
+  // Fail-closed: only the recognised 'maintenance' literal ever produces the
+  // calm state. Anything else (unset, 'online', 'offline', or an unrecognised
+  // future value) falls back to the true is_online-derived classification, so
+  // an unknown literal can never be coerced into the calm treatment (D-06).
+  const raw = String(service.availability || '').toLowerCase();
+  if (raw === 'maintenance') return 'maintenance';
+  return service.is_online ? 'online' : 'offline';
+}
+
 function buildServiceCard(service) {
   const online = Boolean(service.is_online);
+  const availability = serviceCardAvailability(service);
+  const maintenance = availability === 'maintenance';
   const card = document.createElement('article');
-  card.className = `svc-card${online ? '' : ' offline'}`;
+  card.className = maintenance ? 'svc-card svc-maintenance' : `svc-card${online ? '' : ' offline'}`;
 
   const link = document.createElement('a');
   link.className = 'svc-link';
@@ -244,8 +265,11 @@ function buildServiceCard(service) {
   const statusRow = document.createElement('div');
   statusRow.className = 'svc-status-row';
   const status = document.createElement('span');
-  status.className = online ? 'svc-online' : 'svc-offline';
-  status.append(Object.assign(document.createElement('span'), {className: 'status-pip'}), Object.assign(document.createElement('span'), {textContent: online ? 'ONLINE' : 'OFFLINE'}));
+  status.className = maintenance ? 'svc-maintenance-status' : (online ? 'svc-online' : 'svc-offline');
+  status.append(Object.assign(document.createElement('span'), {className: 'status-pip'}), Object.assign(document.createElement('span'), {textContent: maintenance ? 'MAINTENANCE' : (online ? 'ONLINE' : 'OFFLINE')}));
+  if (maintenance) {
+    status.title = `Offline and covered by a confirmed maintenance window until ${fmtLocalDateTime(service.maintenance_until)}. Downtime is still counted in the 7-day availability figure.`;
+  }
   const since = Object.assign(document.createElement('span'), {className: 'svc-since', textContent: `${online ? 'up' : 'down'} since ${fmtAgo(service.state_since)}`});
   statusRow.append(status, since);
 
@@ -298,24 +322,80 @@ function monitoringGapDuration(event) {
   }
 }
 
+function isOverrunEvent(event) {
+  return event.event_type === MAINTENANCE_OVERRUN_EVENT_TYPE;
+}
+
+function isSuppressedEvent(event) {
+  // The overrun outage is excluded from the suppressed partition
+  // unconditionally, regardless of any other field it carries (MNT-04) --
+  // it must never be tagged Expected or hidden behind the reveal control.
+  return !isOverrunEvent(event) && Boolean(event.suppressed_reason);
+}
+
+function eventTitle(event) {
+  if (isOverrunEvent(event)) return `${event.service_name} still down past maintenance`;
+  if (event.event_type === 'state_change') return `${event.service_name} ${event.online ? 'recovered' : 'went down'}`;
+  if (event.event_type === 'monitoring_gap') return 'Monitoring gap recorded';
+  return event.event_type.replaceAll('_', ' ');
+}
+
 function renderEvents(events) {
   const visible = events.filter((event) => EVENT_TYPES_VISIBLE.has(event.event_type)).slice(0, 20);
+  const suppressedCount = visible.filter(isSuppressedEvent).length;
   const panel = $('events-panel');
   panel.replaceChildren();
-  if (!visible.length) panel.appendChild(Object.assign(document.createElement('div'), {className: 'evt-empty', textContent: 'no recent incidents'}));
-  for (const event of visible) {
+
+  // Suppressed entries are always retained and always counted; they are
+  // filtered at render time only -- the reveal control is the only signal
+  // that the feed is not showing everything (D-10). It is not rendered at
+  // all when zero suppressed entries are loaded, and its own label always
+  // states the exact hidden count.
+  if (suppressedCount > 0) {
+    const reveal = document.createElement('button');
+    reveal.type = 'button';
+    reveal.className = 'evt-reveal';
+    reveal.textContent = suppressedEventsRevealed
+      ? 'Hide suppressed entries'
+      : suppressedCount === 1
+        ? 'Show 1 suppressed entry'
+        : `Show ${suppressedCount} suppressed entries`;
+    reveal.addEventListener('click', () => {
+      suppressedEventsRevealed = !suppressedEventsRevealed;
+      renderEvents(events);
+    });
+    panel.appendChild(reveal);
+  }
+
+  const rendered = visible.filter((event) => suppressedEventsRevealed || !isSuppressedEvent(event));
+  if (!rendered.length) panel.appendChild(Object.assign(document.createElement('div'), {className: 'evt-empty', textContent: 'no recent incidents'}));
+  for (const event of rendered) {
+    const overrun = isOverrunEvent(event);
+    const suppressed = isSuppressedEvent(event);
     const row = document.createElement('div');
-    const state = event.event_type === 'state_change' ? (event.online ? 'up' : 'down') : event.event_type;
+    const state = overrun ? 'down' : event.event_type === 'state_change' ? (event.online ? 'up' : 'down') : event.event_type;
     row.className = `evt-row evt-${state}`;
     const left = document.createElement('div');
     left.className = 'evt-left';
-    left.append(
-      Object.assign(document.createElement('span'), {className: 'evt-title', textContent: event.event_type === 'state_change' ? `${event.service_name} ${event.online ? 'recovered' : 'went down'}` : event.event_type === 'monitoring_gap' ? 'Monitoring gap recorded' : event.event_type.replaceAll('_', ' ')}),
-      Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: event.event_type === 'monitoring_gap' ? `Worker unavailable for ${monitoringGapDuration(event)}.` : event.details || event.error_class || ''}),
-    );
+    left.appendChild(Object.assign(document.createElement('span'), {className: 'evt-title', textContent: eventTitle(event)}));
+    if (suppressed) {
+      left.appendChild(Object.assign(document.createElement('span'), {className: 'evt-pill evt-pill-expected', textContent: 'Expected'}));
+    }
+    if (overrun) {
+      // D-08: down-since and raised-at are always two separately rendered
+      // values, never merged into one truncatable string.
+      left.append(
+        Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: `Down since ${fmtLocalDateTime(event.down_since_ts)}`}),
+        Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: `Raised at ${fmtLocalDateTime(event.ts)}`}),
+      );
+    } else {
+      left.appendChild(Object.assign(document.createElement('span'), {className: 'evt-sub', textContent: event.event_type === 'monitoring_gap' ? `Worker unavailable for ${monitoringGapDuration(event)}.` : event.details || event.error_class || ''}));
+    }
     row.append(left, Object.assign(document.createElement('span'), {className: 'evt-time', textContent: fmtAgo(event.ts)}));
     panel.appendChild(row);
   }
+  // Loaded count, not just the currently-rendered count -- a suppressed
+  // entry stays counted here even while collapsed (D-10).
   $('events-label').textContent = `${visible.length} recent`;
 }
 

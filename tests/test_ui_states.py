@@ -126,6 +126,29 @@ class UiStateBrowserTests(unittest.TestCase):
             'windows': windows or [], 'suggestion': suggestion,
         }
 
+    @staticmethod
+    def _event(*, ts, event_type='state_change', online=None, previous_online=None,
+               service_name='Service', suppressed_reason=None, details=None,
+               down_since_ts=None, error_class=None):
+        return {
+            'event_type': event_type, 'ts': ts, 'online': online,
+            'previous_online': previous_online, 'service_name': service_name,
+            'suppressed_reason': suppressed_reason, 'details': details,
+            'down_since_ts': down_since_ts, 'error_class': error_class,
+            'maintenance_grace_until': None,
+        }
+
+    @staticmethod
+    def _overrun_event(*, ts, down_since_ts, service_name='Service'):
+        return {
+            'event_type': 'maintenance_overrun', 'ts': ts, 'online': None,
+            'previous_online': None, 'service_name': service_name,
+            'suppressed_reason': None,
+            'details': 'Down since 2024-01-01 00:00 UTC; window and grace expired at 2024-01-01 01:00 UTC.',
+            'down_since_ts': down_since_ts, 'error_class': None,
+            'maintenance_grace_until': None,
+        }
+
     def _maintenance_route(self, fixture):
         """Build a route handler stubbing /api/service-meta/<port> GET/PUT for the maintenance editor tests."""
         def route_api(route):
@@ -830,6 +853,438 @@ class UiStateBrowserTests(unittest.TestCase):
             page.set_viewport_size({'width': 1440, 'height': 900})
             self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 1440)
             self.assertIn('Monitoring gap recorded', page.locator('#events-panel').text_content())
+        finally:
+            page.close()
+
+    # -- Phase 03.1 Plan 09: the in-maintenance card and its disclosure -----
+
+    def test_a_covered_offline_service_renders_the_calm_maintenance_card(self):
+        service = {**self._service(8221, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        fixture = {'services': [service], 'service_meta': {8221: self._service_meta(8221)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.svc-maintenance-status').text_content(), 'MAINTENANCE')
+
+            def read_colours():
+                return page.evaluate(
+                    """() => {
+                        const probe = document.createElement('span');
+                        document.body.appendChild(probe);
+                        probe.style.color = 'var(--accent3)';
+                        const accent3 = getComputedStyle(probe).color;
+                        probe.remove();
+                        const card = getComputedStyle(document.querySelector('.svc-maintenance'));
+                        return {accent3, opacity: card.opacity, filter: card.filter};
+                    }"""
+                )
+
+            colours = read_colours()
+            self.assertEqual(
+                page.locator('.svc-maintenance-status').evaluate('(node) => getComputedStyle(node).color'),
+                colours['accent3'],
+            )
+        finally:
+            page.close()
+
+    def test_the_maintenance_card_never_carries_the_offline_class(self):
+        service = {**self._service(8222, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        fixture = {'services': [service], 'service_meta': {8222: self._service_meta(8222)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            class_list = page.locator('.svc-card').first.get_attribute('class')
+            self.assertIn('svc-maintenance', class_list)
+            self.assertNotIn('offline', class_list.split())
+
+            online_card = {**self._service(8100, online=True)}
+            online_fixture = {'services': [online_card], 'service_meta': {}}
+            page.route('**/api/**', self._maintenance_route(online_fixture))
+            page.reload(wait_until='networkidle')
+            healthy_opacity = page.locator('.svc-card').first.evaluate('(node) => getComputedStyle(node).opacity')
+
+            page.route('**/api/**', self._maintenance_route(fixture))
+            page.reload(wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            maintenance_opacity = page.locator('.svc-maintenance').evaluate('(node) => getComputedStyle(node).opacity')
+            maintenance_filter = page.locator('.svc-maintenance').evaluate('(node) => getComputedStyle(node).filter')
+            self.assertEqual(maintenance_opacity, healthy_opacity)
+            self.assertIn(maintenance_filter, ('none', 'none 0 0'))
+        finally:
+            page.close()
+
+    def test_the_maintenance_card_keeps_the_true_down_since_line(self):
+        maintenance_service = {
+            **self._service(8223, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600,
+        }
+        offline_service = {**self._service(8224, online=False)}
+        fixture = {
+            'services': [maintenance_service, offline_service],
+            'service_meta': {8223: self._service_meta(8223), 8224: self._service_meta(8224)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            maintenance_since = page.locator('.svc-maintenance .svc-since').text_content()
+            offline_since = page.locator('.svc-card.offline .svc-since').text_content()
+            self.assertEqual(maintenance_since, offline_since)
+        finally:
+            page.close()
+
+    def test_the_maintenance_status_pip_does_not_animate(self):
+        service = {**self._service(8225, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        fixture = {'services': [service], 'service_meta': {8225: self._service_meta(8225)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            animation_name = page.locator('.svc-maintenance-status .status-pip').evaluate(
+                '(node) => getComputedStyle(node).animationName'
+            )
+            self.assertEqual(animation_name, 'none')
+        finally:
+            page.close()
+
+    def test_the_maintenance_card_discloses_its_derivation_in_a_title_attribute(self):
+        service = {**self._service(8226, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        fixture = {'services': [service], 'service_meta': {8226: self._service_meta(8226)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            title = page.locator('.svc-maintenance-status').get_attribute('title')
+            self.assertTrue(title)
+            self.assertIn('Offline and covered by a confirmed maintenance window until', title)
+            self.assertIn('Downtime is still counted in the 7-day availability figure.', title)
+        finally:
+            page.close()
+
+    def test_the_card_reverts_to_offline_once_coverage_lapses(self):
+        service = {**self._service(8227, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        fixture = {'services': [service], 'service_meta': {8227: self._service_meta(8227)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+
+            fixture['services'] = [{**service, 'availability': 'offline', 'maintenance_until': None}]
+            page.evaluate('() => loadServices()')
+            page.locator('.svc-card.offline').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.svc-maintenance').count(), 0)
+            self.assertIn('OFFLINE', page.locator('.svc-status-row').text_content())
+        finally:
+            page.close()
+
+    def test_the_status_row_wraps_rather_than_clipping_at_a_narrow_viewport(self):
+        service = {**self._service(8228, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        fixture = {'services': [service], 'service_meta': {8228: self._service_meta(8228)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            wrap = page.locator('.svc-status-row').first.evaluate('(node) => getComputedStyle(node).flexWrap')
+            self.assertEqual(wrap, 'wrap')
+            result = page.locator('.svc-status-row').first.evaluate(
+                """(node) => {
+                    node.style.width = '40px';
+                    const status = node.querySelector('.svc-maintenance-status');
+                    const since = node.querySelector('.svc-since');
+                    return {statusTop: status.getBoundingClientRect().top, sinceTop: since.getBoundingClientRect().top};
+                }"""
+            )
+            self.assertGreater(result['sinceTop'], result['statusTop'])
+        finally:
+            page.close()
+
+    def test_the_maintenance_status_word_does_not_wrap_at_ordinary_widths(self):
+        service = {**self._service(8230, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        fixture = {'services': [service], 'service_meta': {8230: self._service_meta(8230)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-maintenance').wait_for(state='visible', timeout=8_000)
+            result = page.locator('.svc-maintenance-status').first.evaluate(
+                """(node) => {
+                    const pip = node.querySelector('.status-pip');
+                    const word = node.querySelector('span:last-child');
+                    return {pipRect: pip.getBoundingClientRect(), wordRect: word.getBoundingClientRect()};
+                }"""
+            )
+            # Same row: their vertical spans overlap (align-items: center keeps
+            # them on one line at this width, unlike the forced-narrow case).
+            pip, word = result['pipRect'], result['wordRect']
+            self.assertLess(pip['top'], word['bottom'])
+            self.assertLess(word['top'], pip['bottom'])
+        finally:
+            page.close()
+
+    # -- Phase 03.1 Plan 09: the suppressed-entries reveal control -----------
+
+    def test_suppressed_entries_are_hidden_by_default_but_still_present_in_the_data(self):
+        events = [
+            self._event(ts=4000, event_type='state_change', online=False, service_name='Alpha', suppressed_reason='maintenance', details='service went down'),
+            self._event(ts=3000, event_type='state_change', online=True, service_name='Alpha', suppressed_reason='maintenance', details='service recovered'),
+            self._event(ts=2000, event_type='state_change', online=False, service_name='Beta', suppressed_reason='maintenance', details='service went down'),
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Gamma', suppressed_reason=None, details='service went down'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.evt-reveal').text_content(), 'Show 3 suppressed entries')
+            self.assertEqual(page.locator('.evt-pill-expected').count(), 0)
+            self.assertEqual(page.locator('.evt-row').count(), 1)
+            self.assertIn('Gamma went down', page.locator('.evt-row').first.text_content())
+        finally:
+            page.close()
+
+    def test_the_reveal_control_states_the_singular_count(self):
+        events = [
+            self._event(ts=2000, event_type='state_change', online=False, service_name='Alpha', suppressed_reason='maintenance', details='service went down'),
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Beta', suppressed_reason=None, details='service went down'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.evt-reveal').text_content(), 'Show 1 suppressed entry')
+        finally:
+            page.close()
+
+    def test_the_reveal_control_states_the_plural_count(self):
+        events = [
+            self._event(ts=3000, event_type='state_change', online=False, service_name='Alpha', suppressed_reason='maintenance', details='service went down'),
+            self._event(ts=2000, event_type='state_change', online=True, service_name='Alpha', suppressed_reason='maintenance', details='service recovered'),
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Beta', suppressed_reason='maintenance', details='service went down'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.evt-reveal').text_content(), 'Show 3 suppressed entries')
+        finally:
+            page.close()
+
+    def test_no_reveal_control_exists_when_nothing_is_suppressed(self):
+        events = [
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Beta', suppressed_reason=None, details='service went down'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-row').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.evt-reveal').count(), 0)
+        finally:
+            page.close()
+
+    def test_revealing_renders_suppressed_rows_inline_in_chronological_order(self):
+        events = [
+            self._event(ts=4000, event_type='state_change', online=False, service_name='Delta', suppressed_reason=None, details='service went down'),
+            self._event(ts=3000, event_type='state_change', online=False, service_name='Alpha', suppressed_reason='maintenance', details='service went down'),
+            self._event(ts=2000, event_type='state_change', online=True, service_name='Alpha', suppressed_reason='maintenance', details='service recovered'),
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Beta', suppressed_reason=None, details='service went down'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            page.locator('.evt-reveal').click()
+            page.locator('.evt-pill-expected').first.wait_for(state='visible', timeout=8_000)
+            titles = page.locator('.evt-title').all_text_contents()
+            self.assertEqual(titles, ['Delta went down', 'Alpha went down', 'Alpha recovered', 'Beta went down'])
+            self.assertEqual(page.locator('.evt-pill-expected').count(), 2)
+            self.assertEqual(page.locator('.evt-reveal').text_content(), 'Hide suppressed entries')
+        finally:
+            page.close()
+
+    def test_a_revealed_suppressed_recovery_keeps_its_recovery_colour_and_gains_the_pill(self):
+        events = [
+            self._event(ts=2000, event_type='state_change', online=True, service_name='Alpha', suppressed_reason='maintenance', details='service recovered'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            page.locator('.evt-reveal').click()
+            row = page.locator('.evt-row').first
+            row.wait_for(state='visible', timeout=8_000)
+            self.assertIn('evt-up', row.get_attribute('class'))
+            pill = row.locator('.evt-pill-expected')
+            self.assertEqual(pill.count(), 1)
+            self.assertEqual(pill.text_content(), 'Expected')
+
+            def read_colours():
+                return page.evaluate(
+                    """() => {
+                        const probe = document.createElement('span');
+                        document.body.appendChild(probe);
+                        probe.style.color = 'var(--green)';
+                        const green = getComputedStyle(probe).color;
+                        probe.remove();
+                        const title = document.querySelector('.evt-up .evt-title');
+                        return {green, titleColor: getComputedStyle(title).color};
+                    }"""
+                )
+
+            colours = read_colours()
+            self.assertEqual(colours['titleColor'], colours['green'])
+        finally:
+            page.close()
+
+    def test_the_reveal_state_is_not_persisted_across_a_reload(self):
+        events = [
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Alpha', suppressed_reason='maintenance', details='service went down'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            page.locator('.evt-reveal').click()
+            self.assertEqual(page.locator('.evt-reveal').text_content(), 'Hide suppressed entries')
+            page.reload(wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            self.assertEqual(page.locator('.evt-reveal').text_content(), 'Show 1 suppressed entry')
+        finally:
+            page.close()
+
+    def test_the_reveal_control_survives_a_failed_refresh_with_its_count_unchanged(self):
+        events = [
+            self._event(ts=3000, event_type='state_change', online=False, service_name='Alpha', suppressed_reason='maintenance', details='service went down'),
+            self._event(ts=2000, event_type='state_change', online=True, service_name='Alpha', suppressed_reason='maintenance', details='service recovered'),
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Beta', suppressed_reason='maintenance', details='service went down'),
+        ]
+        fail = {'value': False}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/events' and fail['value']:
+                route.fulfill(status=500, json={'error': 'boom'})
+                return
+            payloads = {
+                '/api/stats': {'hostname': 'beacon', 'sample_ts': 1_700_000_000, 'cpu': 1, 'ram': 2, 'disk': 3, 'ram_used': 1, 'ram_total': 2, 'disk_used': 1, 'disk_total': 2, 'temp': 40},
+                '/api/history': [],
+                '/api/scan-status': {'worker_ready': True, 'worker_stale': False, 'recovery_required': False, 'stage': 'idle', 'scanning': False, 'last_completed_found': 0, 'last_discovery': 1_700_000_000},
+                '/api/services': [],
+                '/api/events': events,
+            }
+            route.fulfill(status=200, json=payloads.get(path, {}))
+
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            label_before = page.locator('.evt-reveal').text_content()
+            fail['value'] = True
+            page.evaluate('() => loadEvents()')
+            page.wait_for_timeout(300)
+            self.assertTrue(page.locator('.evt-reveal').is_visible())
+            self.assertEqual(page.locator('.evt-reveal').text_content(), label_before)
+        finally:
+            page.close()
+
+    # -- Phase 03.1 Plan 09: the overrun outage entry -------------------------
+
+    def test_the_overrun_entry_renders_unmuted_and_without_the_pill(self):
+        events = [
+            self._overrun_event(ts=5000, down_since_ts=1000, service_name='Alpha'),
+            self._event(ts=4000, event_type='state_change', online=False, service_name='Beta', details='service went down'),
+        ]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-row').first.wait_for(state='visible', timeout=8_000)
+            rows = page.locator('.evt-row.evt-down')
+            self.assertEqual(rows.count(), 2)
+            overrun_row = rows.filter(has_text='still down past maintenance')
+            ordinary_row = rows.filter(has_text='Beta went down')
+            self.assertEqual(overrun_row.count(), 1)
+            self.assertEqual(ordinary_row.count(), 1)
+            self.assertEqual(overrun_row.locator('.evt-pill').count(), 0)
+            overrun_colour = overrun_row.locator('.evt-title').evaluate('(node) => getComputedStyle(node).color')
+            ordinary_colour = ordinary_row.locator('.evt-title').evaluate('(node) => getComputedStyle(node).color')
+            self.assertEqual(overrun_colour, ordinary_colour)
+        finally:
+            page.close()
+
+    def test_the_overrun_entry_renders_both_timestamps_as_separate_values(self):
+        events = [self._overrun_event(ts=5000, down_since_ts=1000, service_name='Alpha')]
+        fixture = {'services': [], 'events': events, 'service_meta': {}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            row = page.locator('.evt-row').first
+            row.wait_for(state='visible', timeout=8_000)
+            subs = row.locator('.evt-sub').all_text_contents()
+            self.assertEqual(len(subs), 2)
+            self.assertNotEqual(subs[0], subs[1])
+            self.assertNotIn(subs[0], subs[1])
+            self.assertNotIn(subs[1], subs[0])
+        finally:
+            page.close()
+
+    # -- Phase 03.1 Plan 09: the maintenance colour reservation ---------------
+
+    def test_the_maintenance_colour_is_applied_to_no_interactive_element(self):
+        service = {**self._service(8229, online=False), 'availability': 'maintenance', 'maintenance_until': 1_700_003_600}
+        events = [
+            self._event(ts=1000, event_type='state_change', online=False, service_name='Beta', suppressed_reason='maintenance', details='service went down'),
+        ]
+        fixture = {'services': [service], 'events': events, 'service_meta': {8229: self._service_meta(8229)}}
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.evt-reveal').wait_for(state='visible', timeout=8_000)
+            accent3 = page.evaluate(
+                """() => {
+                    const probe = document.createElement('span');
+                    document.body.appendChild(probe);
+                    probe.style.color = 'var(--accent3)';
+                    const value = getComputedStyle(probe).color;
+                    probe.remove();
+                    return value;
+                }"""
+            )
+            for element in page.locator('button, a').all():
+                if not element.is_visible():
+                    continue
+                rest_colour = element.evaluate('(node) => getComputedStyle(node).color')
+                self.assertNotEqual(rest_colour, accent3)
+                try:
+                    element.hover(timeout=2_000)
+                except Exception:
+                    continue
+                hover_colour = element.evaluate('(node) => getComputedStyle(node).color')
+                self.assertNotEqual(hover_colour, accent3)
         finally:
             page.close()
 
