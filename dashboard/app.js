@@ -330,6 +330,7 @@ const MAINTENANCE_WEEKDAYS = [
 ];
 const MAINTENANCE_DEFAULT_GRACE_MINUTES = 15;
 const MAINTENANCE_GRACE_HELP = 'How long the service may stay down after this window ends before Beacon raises a real outage.';
+let currentSuggestion = null;
 
 function minutesToTimeValue(minutes) {
   const total = Number(minutes);
@@ -472,16 +473,38 @@ function readMaintenanceWindows() {
   }));
 }
 
+function formatSuggestionWeekdays(weekdays) {
+  const selected = new Set((weekdays || []).map(Number));
+  return MAINTENANCE_WEEKDAYS.filter((day) => selected.has(day.iso)).map((day) => day.label).join(', ');
+}
+
+function renderMaintenanceSuggestion(suggestion) {
+  currentSuggestion = suggestion || null;
+  if (!currentSuggestion) {
+    $('meta-suggestion').hidden = true;
+    return;
+  }
+  const start = minutesToTimeValue(currentSuggestion.start_minute);
+  const end = minutesToTimeValue((currentSuggestion.start_minute + currentSuggestion.duration_minutes) % 1440);
+  const weekdays = formatSuggestionWeekdays(currentSuggestion.weekdays);
+  $('meta-suggestion-evidence').textContent =
+    `Beacon observed ${currentSuggestion.occurrence_count} similar restarts recently, typically around ${start}–${end} on ${weekdays}.`;
+  $('meta-suggestion').hidden = false;
+}
+
 async function loadMaintenanceWindowsForEditor(service) {
   let windows = service.windows || [];
+  let suggestion = null;
   try {
     const meta = await apiFetch(`/api/service-meta/${service.port}`);
     windows = meta.windows || [];
+    suggestion = meta.suggestion || null;
   } catch (_) {
     windows = service.windows || [];
   }
   if (!editingService || editingService.port !== service.port) return;
   renderMaintenanceWindows(windows);
+  renderMaintenanceSuggestion(suggestion);
 }
 
 function openMetaEditor(service, returnFocus) {
@@ -497,6 +520,8 @@ function openMetaEditor(service, returnFocus) {
   $('meta-window-list').replaceChildren();
   $('meta-window-count').hidden = true;
   $('meta-window-empty').hidden = true;
+  $('meta-suggestion').hidden = true;
+  currentSuggestion = null;
   $('meta-error').hidden = true;
   $('meta-stale-warning').hidden = !workerIsStale;
   $('meta-modal').hidden = false;
@@ -510,10 +535,39 @@ function closeMetaEditor() {
   $('meta-modal').hidden = true;
   document.body.classList.remove('modal-open');
   editingService = null;
+  $('meta-suggestion').hidden = true;
+  currentSuggestion = null;
   const focusTarget = modalReturnFocus?.isConnected
     ? modalReturnFocus
     : document.querySelector(`.svc-edit[data-port="${returnPort}"]`);
   focusTarget?.focus();
+}
+
+function confirmMaintenanceSuggestion() {
+  if (!currentSuggestion) return;
+  addMaintenanceWindowRow({
+    start_minute: currentSuggestion.start_minute,
+    duration_minutes: currentSuggestion.duration_minutes,
+    weekdays: currentSuggestion.weekdays,
+    grace_minutes: MAINTENANCE_DEFAULT_GRACE_MINUTES,
+    enabled: true,
+  });
+  updateMaintenanceWindowCount();
+  $('meta-suggestion').hidden = true;
+}
+
+function adjustMaintenanceSuggestion() {
+  if (!currentSuggestion) return;
+  const row = addMaintenanceWindowRow({
+    start_minute: currentSuggestion.start_minute,
+    duration_minutes: currentSuggestion.duration_minutes,
+    weekdays: currentSuggestion.weekdays,
+    grace_minutes: MAINTENANCE_DEFAULT_GRACE_MINUTES,
+    enabled: true,
+  });
+  updateMaintenanceWindowCount();
+  row.querySelector('.meta-window-start').focus();
+  $('meta-suggestion').hidden = true;
 }
 
 async function submitMetaEditor(event) {
@@ -620,6 +674,8 @@ if (typeof document !== 'undefined') {
       addMaintenanceWindowRow();
       updateMaintenanceWindowCount();
     });
+    $('meta-suggestion-confirm').addEventListener('click', confirmMaintenanceSuggestion);
+    $('meta-suggestion-adjust').addEventListener('click', adjustMaintenanceSuggestion);
     $('meta-modal').addEventListener('click', (event) => { if (event.target === $('meta-modal')) closeMetaEditor(); });
     $('meta-modal').addEventListener('keydown', trapModalFocus);
     Promise.allSettled([loadStats(), loadHistory(), loadScan(), loadServices(), loadEvents()]);
