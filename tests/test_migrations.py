@@ -20,6 +20,7 @@ from dashboard.beacon.migrations import (
     MigrationPreparationError,
     UnsupportedSchemaError,
     _migration_7_canonical_host_streams,
+    _migration_9_planned_maintenance,
     run_migrations,
 )
 
@@ -678,6 +679,91 @@ class MigrationTests(unittest.TestCase):
         upgrade = migration_body.index('fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX')
         maintenance = migration_body.index('exclusive_database_maintenance')
         self.assertLess(upgrade, maintenance)
+
+
+# Every legacy fixture the suite tracks, plus the operator production fixture --
+# the same set exercised by test_each_supported_fixture_upgrades_once_preserving_representative_rows,
+# extended with the CURRENT_V4/V6 "already partially current" fixtures so migration 9 is proven
+# against a legacy-from-scratch database and a database that already carries several prior
+# migrations. This is the suite's own notion of "every legacy fixture" advancing to version 9.
+_MIGRATION_NINE_FIXTURES = (
+    *FIXTURES,
+    'operator/production.db',
+    CURRENT_V4_FIXTURE,
+    CURRENT_V6_FIXTURE,
+)
+
+
+class MigrationNineTests(unittest.TestCase):
+    """Migration 9 (planned maintenance) is additive and idempotent against every legacy fixture."""
+
+    def _copied_fixture(self, directory, filename):
+        source_name = filename.replace('/', '-')
+        target = Path(directory) / source_name
+        copy2(FIXTURE_DIR / filename, target)
+        return target
+
+    def test_migration_nine_applies_to_every_legacy_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for filename in _MIGRATION_NINE_FIXTURES:
+                target = self._copied_fixture(directory, filename)
+                run_migrations(Settings(db_path=str(target)))
+                with sqlite3.connect(target) as conn:
+                    window_columns = {row[1] for row in conn.execute('PRAGMA table_info(maintenance_windows)')}
+                    self.assertEqual(
+                        window_columns,
+                        {
+                            'id', 'port', 'start_minute', 'duration_minutes', 'weekdays',
+                            'grace_minutes', 'enabled', 'created_ts', 'updated_ts',
+                        },
+                        f'{filename}: maintenance_windows columns missing after migration',
+                    )
+                    event_columns = {row[1] for row in conn.execute('PRAGMA table_info(events)')}
+                    self.assertTrue(
+                        {'suppressed_reason', 'maintenance_grace_until', 'down_since_ts'} <= event_columns,
+                        f'{filename}: events suppression columns missing after migration',
+                    )
+                    service_columns = {row[1] for row in conn.execute('PRAGMA table_info(services)')}
+                    self.assertIn(
+                        'overrun_raised_ts', service_columns,
+                        f'{filename}: services.overrun_raised_ts missing after migration',
+                    )
+
+    def test_migration_nine_preserves_pre_existing_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for filename in _MIGRATION_NINE_FIXTURES:
+                target = self._copied_fixture(directory, filename)
+                with sqlite3.connect(target) as before_conn:
+                    before_rows = snapshot_legacy_rows(before_conn, {
+                        'services': _LEGACY_PRESERVATION_COLUMNS['services'],
+                        'events': _LEGACY_PRESERVATION_COLUMNS['events'],
+                    })
+                run_migrations(Settings(db_path=str(target)))
+                with sqlite3.connect(target) as conn:
+                    assert_legacy_rows_preserved(self, before_rows, conn)
+
+    def test_migration_nine_is_a_no_op_on_re_application(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            run_migrations(Settings(db_path=str(target)))
+            with sqlite3.connect(target) as conn:
+                before_event_columns = sorted(row[1] for row in conn.execute('PRAGMA table_info(events)'))
+                before_service_columns = sorted(row[1] for row in conn.execute('PRAGMA table_info(services)'))
+                before_window_count = conn.execute('SELECT COUNT(*) FROM maintenance_windows').fetchone()[0]
+
+                _migration_9_planned_maintenance(conn)  # must not raise
+
+                after_event_columns = sorted(row[1] for row in conn.execute('PRAGMA table_info(events)'))
+                after_service_columns = sorted(row[1] for row in conn.execute('PRAGMA table_info(services)'))
+                after_window_count = conn.execute('SELECT COUNT(*) FROM maintenance_windows').fetchone()[0]
+
+                self.assertEqual(before_event_columns, after_event_columns)
+                self.assertEqual(before_service_columns, after_service_columns)
+                self.assertEqual(before_window_count, after_window_count)
+
+    def test_migration_nine_declares_itself_schema_changing(self):
+        migration_nine = next(migration for migration in MIGRATIONS if migration.version == 9)
+        self.assertTrue(migration_nine.schema_changing)
 
 
 class InventoryTests(unittest.TestCase):
