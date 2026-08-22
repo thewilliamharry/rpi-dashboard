@@ -522,6 +522,74 @@
     return `${Math.floor(seconds / 3600)} hours`;
   }
 
+  // Monday-first ISO weekday names (1..7), local to this file: D-01 keeps the
+  // read-only workspace's JavaScript wholly independent of the editor's own
+  // weekday vocabulary in app.js, so nothing here is shared or imported.
+  const WEEKDAY_NAMES = {
+    1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 4: 'Thursday',
+    5: 'Friday', 6: 'Saturday', 7: 'Sunday',
+  };
+
+  function formatClockMinutes(minutes) {
+    const wrapped = ((Math.trunc(minutes) % 1440) + 1440) % 1440;
+    const hours = String(Math.floor(wrapped / 60)).padStart(2, '0');
+    const mins = String(wrapped % 60).padStart(2, '0');
+    return `${hours}:${mins}`;
+  }
+
+  function formatWeekdayNames(weekdays) {
+    return (Array.isArray(weekdays) ? weekdays : [])
+      .map((day) => WEEKDAY_NAMES[day])
+      .filter((name) => Boolean(name))
+      .join(', ');
+  }
+
+  // A span of seconds rendered in its largest sensible whole unit. Distinct from
+  // formatDuration (the state-duration cell's own helper, left untouched) because
+  // this one also renders in days -- the maintenance attribution period is
+  // routinely a multi-day retention window, never just seconds/minutes/hours.
+  function formatSpan(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return 'an unknown period';
+    if (seconds < 60) return `${Math.round(seconds)} seconds`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours`;
+    return `${Math.floor(seconds / 86400)} days`;
+  }
+
+  // D-06/UI-SPEC "partial (advanced services)": always renders, with an explicit
+  // inactive sentence rather than a blank evidence-row cell. A malformed window
+  // (any required numeric field missing) is treated the same as inactive rather
+  // than surfacing a half-composed sentence.
+  function formatMaintenanceEvidence(maintenance) {
+    const block = maintenance && typeof maintenance === 'object' ? maintenance : {};
+    const window = block.window && typeof block.window === 'object' ? block.window : null;
+    if (!block.active || !window) return 'No active maintenance window.';
+    const startMinute = finiteMeasurement(window.start_minute);
+    const durationMinutes = finiteMeasurement(window.duration_minutes);
+    const graceMinutes = finiteMeasurement(window.grace_minutes);
+    if (startMinute === null || durationMinutes === null || graceMinutes === null) {
+      return 'No active maintenance window.';
+    }
+    const start = formatClockMinutes(startMinute);
+    const end = formatClockMinutes(startMinute + durationMinutes);
+    const weekdays = formatWeekdayNames(window.weekdays) || 'Unknown days';
+    const ending = displayTimestamp(block.covered_until_ts);
+    return `Covered by a confirmed window: ${start}–${end} on ${weekdays}, grace ${graceMinutes} minutes, ending ${ending}.`;
+  }
+
+  // D-09: a duration sentence, never a percentage -- this surface carries no
+  // second, competing availability figure at any weight. Always renders, with
+  // an explicit zero sentence rather than an omitted row.
+  function formatMaintenanceAttribution(attribution) {
+    const block = attribution && typeof attribution === 'object' ? attribution : {};
+    const attributedSeconds = finiteMeasurement(block.attributed_seconds);
+    const range = formatSpan(finiteMeasurement(block.period_seconds));
+    if (attributedSeconds === null || attributedSeconds <= 0) {
+      return `No downtime in the past ${range} was attributed to confirmed maintenance.`;
+    }
+    return `${formatSpan(attributedSeconds)} of the past ${range}'s downtime occurred during confirmed maintenance.`;
+  }
+
   function serviceTags(service) {
     return Array.isArray(service.tags) ? service.tags.filter((tag) => typeof tag === 'string') : [];
   }
@@ -713,6 +781,21 @@
       addEvidence(evidence, 'Last error', displayValue(service.last_error));
       addEvidence(evidence, 'Freshness', formatFreshnessEvidence(service.freshness, service.expected_cadence_seconds));
       addEvidence(evidence, 'Collection-gap evidence', formatServiceGapEvidence(service.collection_gaps));
+      // D-06/D-08/D-09: three evidence-row entries appended after the existing
+      // collection-gap evidence-row, reusing that same builder and grid --
+      // Maintenance and Maintenance attribution always render (no blank cell);
+      // Down since / Raised at render only while an overrun is genuinely open,
+      // and always as two separate evidence rows, never merged into one string.
+      addEvidence(evidence, 'Maintenance', formatMaintenanceEvidence(service.maintenance));
+      const overrun = service.overrun && typeof service.overrun === 'object' ? service.overrun : null;
+      if (overrun) {
+        addEvidence(evidence, 'Down since', displayTimestamp(overrun.down_since_ts));
+        addEvidence(evidence, 'Raised at', displayTimestamp(overrun.raised_at_ts));
+      }
+      addEvidence(evidence, 'Maintenance attribution', formatMaintenanceAttribution(service.maintenance_attribution));
+      // D-01: plain text, not a link -- the workspace stays strictly read-only and
+      // never implies an action can be performed from this surface.
+      addEvidence(evidence, 'Maintenance windows', "Maintenance windows are managed from the main dashboard's service editor.");
       detail.append(evidence); detailRow.append(detail); fragment.append(row, detailRow);
     });
     body.replaceChildren(fragment);
