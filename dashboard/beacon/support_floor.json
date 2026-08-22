@@ -6,49 +6,49 @@
       "fixture": "initial-2026-04.db",
       "source": "repository history c2e0e80",
       "minimum_schema_version": 0,
-      "target_version": 8
+      "target_version": 9
     },
     {
       "fingerprint": "8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef",
       "fixture": "metadata-events-2026-04.db",
       "source": "repository history 5b3d420",
       "minimum_schema_version": 0,
-      "target_version": 8
+      "target_version": 9
     },
     {
       "fingerprint": "791e5c1d380fb38b62e8c284349affb248acfaf5dbbd0e93a07b929b2ef59c91",
       "fixture": "runtime-queues-2026-07.db",
       "source": "repository history 51a4393",
       "minimum_schema_version": 1,
-      "target_version": 8
+      "target_version": 9
     },
     {
       "fingerprint": "6a7215ed74800ba1d4894563334304415c780135d295ced269c561c84b8b0c81",
       "fixture": "operator/production.db",
       "source": "operator-confirmed production.json",
       "minimum_schema_version": 1,
-      "target_version": 8
+      "target_version": 9
     },
     {
       "fingerprint": "25044cc30ecbfd0b8e1d46197b752b3a29a45655009d406492413bb8f362c660",
       "fixture": "current-v4.db",
       "source": "canonical Phase 1 migrations 1-4",
       "minimum_schema_version": 4,
-      "target_version": 8
+      "target_version": 9
     },
     {
       "fingerprint": "a1120723f0de239e1428952edef24f2ac6679832eb0413e56383e45f54d36622",
       "fixture": "current-v6.db",
       "source": "canonical Phase 2 migrations 1-6",
       "minimum_schema_version": 6,
-      "target_version": 8
+      "target_version": 9
     },
     {
       "fingerprint": "3f88834a2cfacc2bbecac2424a3bc36955f7a81727132ba18cbc88c7bb85f7f7",
       "fixture": "operator/production.db",
       "source": "canonical migrations 2-7 applied to operator/production.db",
       "minimum_schema_version": 7,
-      "target_version": 8
+      "target_version": 9
     }
   ]
 }

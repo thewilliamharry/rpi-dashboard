@@ -504,6 +504,39 @@ def _migration_8_background_job_health(conn):
     )
 
 
+def _migration_9_planned_maintenance(conn):
+    """Add operator-managed maintenance windows and suppression/overrun bookkeeping.
+
+    Additive only: no existing table is altered destructively, matching every
+    prior migration's compatibility contract. No FOREIGN KEY is declared on
+    ``port`` -- no existing port-keyed table in this file declares one either.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_windows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            port INTEGER NOT NULL,
+            start_minute INTEGER NOT NULL CHECK (start_minute >= 0 AND start_minute < 1440),
+            duration_minutes INTEGER NOT NULL CHECK (duration_minutes >= 1),
+            weekdays TEXT NOT NULL,
+            grace_minutes INTEGER NOT NULL CHECK (grace_minutes >= 0),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_ts INTEGER NOT NULL,
+            updated_ts INTEGER NOT NULL
+        )
+    """)
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_maintenance_windows_port '
+        'ON maintenance_windows(port, enabled)'
+    )
+    for column in (
+        'suppressed_reason TEXT',
+        'maintenance_grace_until INTEGER',
+        'down_since_ts INTEGER',
+    ):
+        _add_column(conn, 'events', column)
+    _add_column(conn, 'services', 'overrun_raised_ts INTEGER')
+
+
 MIGRATIONS = (
     Migration(1, 'baseline_schema', True, _migration_1_baseline),
     Migration(2, 'service_diagnostics', True, _migration_2_service_diagnostics),
@@ -513,6 +546,7 @@ MIGRATIONS = (
     Migration(6, 'rollup_latency_counts', True, _migration_6_rollup_latency_counts),
     Migration(7, 'canonical_host_streams', True, _migration_7_canonical_host_streams),
     Migration(8, 'background_job_health', True, _migration_8_background_job_health),
+    Migration(9, 'planned_maintenance', True, _migration_9_planned_maintenance),
 )
 
 

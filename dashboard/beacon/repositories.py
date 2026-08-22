@@ -768,6 +768,51 @@ def upsert_service_metadata(
     return enqueue_preview_in_transaction(conn, port, now=requested_ts)
 
 
+def get_maintenance_windows(conn, port):
+    """Return every stored window for a port, deterministically ordered.
+
+    Ordered by start time then id so the editor list never reshuffles
+    between opens.  Operates on the caller's connection and opens no
+    transaction of its own.
+    """
+    rows = conn.execute(
+        "SELECT id, port, start_minute, duration_minutes, weekdays, grace_minutes, "
+        "enabled, created_ts, updated_ts FROM maintenance_windows WHERE port=? "
+        "ORDER BY start_minute ASC, id ASC",
+        (port,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_open_down_transition(conn, port):
+    """Return the down transition row governing the current down period.
+
+    This is the most recent ``state_change`` row for the port with
+    ``online=0`` whose timestamp is not older than the most recent
+    ``state_change`` row with ``online=1`` -- the row whose frozen
+    suppression decision, once made, governs this down period for its
+    entire duration, never re-derived from live window configuration.
+    """
+    online_row = conn.execute(
+        "SELECT MAX(ts) AS ts FROM events WHERE port=? AND event_type='state_change' AND online=1",
+        (port,),
+    ).fetchone()
+    online_ts = online_row['ts'] if online_row and online_row['ts'] is not None else None
+    if online_ts is None:
+        row = conn.execute(
+            "SELECT * FROM events WHERE port=? AND event_type='state_change' AND online=0 "
+            "ORDER BY ts DESC LIMIT 1",
+            (port,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM events WHERE port=? AND event_type='state_change' AND online=0 "
+            "AND ts >= ? ORDER BY ts DESC LIMIT 1",
+            (port, online_ts),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def get_runtime_state(conn, key, default=None):
     row = conn.execute('SELECT value FROM runtime_state WHERE key=?', (key,)).fetchone()
     if not row:

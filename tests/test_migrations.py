@@ -190,12 +190,12 @@ class MigrationTests(unittest.TestCase):
                 conn.commit()
                 before_rows = snapshot_legacy_rows(conn)
 
-            self.assertEqual(run_migrations(settings).applied_versions, (8,))
+            self.assertEqual(run_migrations(settings).applied_versions, (8, 9))
             with sqlite3.connect(target) as conn:
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self.assertEqual(
                     conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
-                    8,
+                    9,
                 )
                 self.assertEqual(
                     conn.execute('SELECT COUNT(*) FROM background_job_health').fetchone()[0],
@@ -213,7 +213,7 @@ class MigrationTests(unittest.TestCase):
             target = Path(directory) / CURRENT_V4_FIXTURE
             copy2(source, target)
             result = run_migrations(Settings(db_path=str(target)))
-            self.assertEqual(result.applied_versions, (5, 6, 7, 8))
+            self.assertEqual(result.applied_versions, (5, 6, 7, 8, 9))
             with sqlite3.connect(target) as conn:
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self._assert_telemetry_schema(conn)
@@ -225,8 +225,8 @@ class MigrationTests(unittest.TestCase):
             settings = Settings(db_path=str(target))
 
             result = run_migrations(settings)
-            self.assertEqual(result.applied_versions, (7, 8))
-            self.assertEqual(len(result.backups), 2)
+            self.assertEqual(result.applied_versions, (7, 8, 9))
+            self.assertEqual(len(result.backups), 3)
 
             with sqlite3.connect(target) as conn:
                 streams = list(conn.execute(
@@ -403,7 +403,7 @@ class MigrationTests(unittest.TestCase):
                 )
                 conn.commit()
 
-            self.assertEqual(run_migrations(Settings(db_path=str(target))).applied_versions, (7, 8))
+            self.assertEqual(run_migrations(Settings(db_path=str(target))).applied_versions, (7, 8, 9))
 
             with sqlite3.connect(target) as conn:
                 self.assertEqual(conn.execute(
@@ -415,7 +415,7 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(conn.execute(
                     "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
                 ).fetchone()[0], expected_state)
-                self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 8)
+                self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 9)
 
     def test_operator_service_port_remains_the_service_rollup_stream_key(self):
         source = OPERATOR_FIXTURE_DIR / 'production.db'

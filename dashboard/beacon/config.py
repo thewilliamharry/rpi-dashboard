@@ -5,6 +5,7 @@ import ipaddress
 import os
 import socket
 from typing import Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 DEFAULT_TRUSTED_HOSTS = (
@@ -56,6 +57,7 @@ class Settings:
     telemetry_rollup_batch_buckets: int = 32
     telemetry_retry_base_seconds: int = 300
     telemetry_retry_max_seconds: int = 3_600
+    timezone: str = 'UTC'
 
 
 def _positive_int(environ, key, default):
@@ -94,6 +96,18 @@ def _scan_ports(value):
         if 1 <= port <= 65535:
             ports.add(port)
     return frozenset(ports)
+
+
+def _resolved_timezone(value):
+    """Fail closed to UTC on an empty, malformed, or unresolvable IANA zone name."""
+    name = str(value or '').strip()
+    if not name:
+        return 'UTC'
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return 'UTC'
+    return name
 
 
 def _outbound_hosts(value):
@@ -228,4 +242,5 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         telemetry_rollup_batch_buckets=telemetry['rollup_batch_buckets'],
         telemetry_retry_base_seconds=telemetry['retry_base_seconds'],
         telemetry_retry_max_seconds=telemetry['retry_max_seconds'],
+        timezone=_resolved_timezone(source.get('TZ', 'UTC')),
     )

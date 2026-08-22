@@ -540,7 +540,8 @@ class BackupRecoveryTests(unittest.TestCase):
                 conn.execute(
                     'CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, '
                     'port INTEGER, event_type TEXT NOT NULL, online INTEGER, previous_online INTEGER, '
-                    'latency_ms REAL, error_class TEXT, alert_status TEXT, details TEXT)'
+                    'latency_ms REAL, error_class TEXT, alert_status TEXT, details TEXT, '
+                    'suppressed_reason TEXT, maintenance_grace_until INTEGER, down_since_ts INTEGER)'
                 )
             writer = None
             try:

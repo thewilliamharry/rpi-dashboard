@@ -23,6 +23,7 @@ try:
     from .beacon.config import load_settings
     from .beacon import repositories as beacon_repositories
     from .beacon import diagnosis as beacon_diagnosis
+    from .beacon import maintenance as beacon_maintenance
     from .beacon import telemetry as beacon_telemetry
     from .beacon import web as beacon_web
     from .beacon import monitoring as beacon_monitoring
@@ -36,6 +37,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon.config import load_settings
     from beacon import repositories as beacon_repositories
     from beacon import diagnosis as beacon_diagnosis
+    from beacon import maintenance as beacon_maintenance
     from beacon import telemetry as beacon_telemetry
     from beacon import web as beacon_web
     from beacon import monitoring as beacon_monitoring
@@ -708,10 +710,12 @@ def _legacy_shutdown_browser():
 
 
 def _legacy_insert_event(conn, *, ts, event_type, port=None, online=None, previous_online=None,
-                  latency_ms=None, error_class=None, alert_status=None, details=None):
+                  latency_ms=None, error_class=None, alert_status=None, details=None,
+                  suppressed_reason=None, maintenance_grace_until=None, down_since_ts=None):
     conn.execute(
-        "INSERT INTO events (ts, port, event_type, online, previous_online, latency_ms, error_class, alert_status, details) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO events (ts, port, event_type, online, previous_online, latency_ms, error_class, "
+        "alert_status, details, suppressed_reason, maintenance_grace_until, down_since_ts) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             ts,
             port,
@@ -722,6 +726,9 @@ def _legacy_insert_event(conn, *, ts, event_type, port=None, online=None, previo
             (error_class or '')[:64] if error_class else None,
             (alert_status or '')[:64] if alert_status else None,
             (details or '')[:400] if details else None,
+            (suppressed_reason or '')[:64] if suppressed_reason else None,
+            maintenance_grace_until,
+            down_since_ts,
         )
     )
 
@@ -846,19 +853,56 @@ def _legacy_send_transition_alert(*, now, port, previous_online, online, title, 
         )
 
 
+def _maintenance_suppression_decision(conn, port, *, online, now):
+    """Decide the maintenance suppression tag for one transition.
+
+    Shares the caller's own transaction -- no transaction is opened here. A
+    down transition asks whether an enabled window covers ``now`` right now,
+    via ``beacon_maintenance``'s coverage function. A recovery inherits its
+    tag from the down period's own opening event row rather than
+    re-deriving live coverage (D-08 non-inference) -- it must never call
+    that coverage function itself.
+
+    Returns a two-tuple of suppression reason (or ``None``) and frozen grace
+    epoch (or ``None``).
+    """
+    if not online:
+        windows = beacon_repositories.get_maintenance_windows(conn, port)
+        covered, grace_until = beacon_maintenance.coverage(windows, now, SETTINGS.timezone)
+        if covered:
+            return beacon_maintenance.MAINTENANCE_REASON, grace_until
+        return None, None
+    opening = beacon_repositories.get_open_down_transition(conn, port)
+    if opening and opening.get('suppressed_reason') == beacon_maintenance.MAINTENANCE_REASON:
+        return beacon_maintenance.MAINTENANCE_REASON, None
+    return None, None
+
+
 def _legacy_handle_state_transition(*, port, previous_online, online, title, display_name,
                              url, critical, latency_ms, error_class):
     now = int(time.time())
     msg = "service recovered" if online else "service went down"
-    _record_event(
-        "state_change",
-        port=port,
-        online=online,
-        previous_online=previous_online,
-        latency_ms=latency_ms,
-        error_class=error_class,
-        details=msg,
-    )
+    with _mutation_write_transaction() as conn:
+        suppressed_reason, grace_until = _maintenance_suppression_decision(
+            conn, port, online=online, now=now,
+        )
+        _insert_event(
+            conn,
+            ts=now,
+            event_type="state_change",
+            port=port,
+            online=online,
+            previous_online=previous_online,
+            latency_ms=latency_ms,
+            error_class=error_class,
+            details=msg,
+            suppressed_reason=suppressed_reason,
+            maintenance_grace_until=grace_until,
+        )
+    if suppressed_reason is not None:
+        # Written and tagged, never withheld (D-10) -- but no alert is
+        # attempted at all, so nothing is recorded as sent or failed for it.
+        return
     _send_transition_alert(
         now=now,
         port=port,
@@ -1690,14 +1734,36 @@ def worker_send_transition_alert(authority, *, now, port, previous_online, onlin
 
 
 def worker_handle_state_transition(authority, **kwargs):
-    """Fence transition persistence and its optional external delivery separately."""
+    """Fence transition persistence and its optional external delivery separately.
+
+    The maintenance window read, the suppression decision, and the tagged
+    ``state_change`` INSERT all happen inside ONE opened
+    ``_worker_write_transaction`` block. ``_worker_record_event`` is not used
+    on this path because it opens its own transaction -- nesting it here
+    would re-enter ``BEGIN IMMEDIATE`` on a second connection (Pitfall 6).
+    """
     now = int(authority.now())
-    _worker_record_event(
-        authority, 'state_change', port=kwargs['port'], online=kwargs['online'],
-        previous_online=kwargs['previous_online'], latency_ms=kwargs['latency_ms'],
-        error_class=kwargs['error_class'],
-        details='service recovered' if kwargs['online'] else 'service went down',
-    )
+    with _worker_write_transaction(authority) as conn:
+        suppressed_reason, grace_until = _maintenance_suppression_decision(
+            conn, kwargs['port'], online=kwargs['online'], now=now,
+        )
+        _insert_event(
+            conn,
+            ts=now,
+            event_type='state_change',
+            port=kwargs['port'],
+            online=kwargs['online'],
+            previous_online=kwargs['previous_online'],
+            latency_ms=kwargs['latency_ms'],
+            error_class=kwargs['error_class'],
+            details='service recovered' if kwargs['online'] else 'service went down',
+            suppressed_reason=suppressed_reason,
+            maintenance_grace_until=grace_until,
+        )
+    if suppressed_reason is not None:
+        # Written and tagged, never withheld (D-10) -- but no alert is
+        # attempted at all, so nothing is recorded as sent or failed for it.
+        return False
     return worker_send_transition_alert(authority, now=now, **kwargs)
 
 
@@ -2483,6 +2549,7 @@ def api_events():
             rows = conn.execute(
                 "SELECT e.id, e.ts, e.port, e.event_type, e.online, e.previous_online, "
                 "e.latency_ms, e.error_class, e.alert_status, e.details, "
+                "e.suppressed_reason, e.maintenance_grace_until, e.down_since_ts, "
                 "COALESCE(m.display_name, s.title, ':' || e.port) AS service_name "
                 "FROM events e "
                 "LEFT JOIN services s ON s.port = e.port "
@@ -2494,6 +2561,7 @@ def api_events():
             rows = conn.execute(
                 "SELECT e.id, e.ts, e.port, e.event_type, e.online, e.previous_online, "
                 "e.latency_ms, e.error_class, e.alert_status, e.details, "
+                "e.suppressed_reason, e.maintenance_grace_until, e.down_since_ts, "
                 "COALESCE(m.display_name, s.title, ':' || e.port) AS service_name "
                 "FROM events e "
                 "LEFT JOIN services s ON s.port = e.port "
