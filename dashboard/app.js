@@ -319,6 +319,171 @@ function renderEvents(events) {
   $('events-label').textContent = `${visible.length} recent`;
 }
 
+const MAINTENANCE_WEEKDAYS = [
+  {abbr: 'Mo', label: 'Monday', iso: 1},
+  {abbr: 'Tu', label: 'Tuesday', iso: 2},
+  {abbr: 'We', label: 'Wednesday', iso: 3},
+  {abbr: 'Th', label: 'Thursday', iso: 4},
+  {abbr: 'Fr', label: 'Friday', iso: 5},
+  {abbr: 'Sa', label: 'Saturday', iso: 6},
+  {abbr: 'Su', label: 'Sunday', iso: 7},
+];
+const MAINTENANCE_DEFAULT_GRACE_MINUTES = 15;
+const MAINTENANCE_GRACE_HELP = 'How long the service may stay down after this window ends before Beacon raises a real outage.';
+
+function minutesToTimeValue(minutes) {
+  const total = Number(minutes);
+  if (!Number.isFinite(total) || total < 0) return '';
+  const hours = Math.floor(total / 60) % 24;
+  const mins = Math.floor(total % 60);
+  return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+}
+
+function timeValueToMinutes(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(value || '');
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function updateMaintenanceWindowCount() {
+  const rowCount = $('meta-window-list').children.length;
+  $('meta-window-count').hidden = rowCount === 0;
+  $('meta-window-empty').hidden = rowCount !== 0;
+  if (rowCount > 0) {
+    $('meta-window-count').textContent = rowCount === 1 ? '1 maintenance window' : `${rowCount} maintenance windows`;
+  }
+}
+
+function addMaintenanceWindowRow(values) {
+  const isNewRow = !values;
+  const data = values || {};
+  const row = document.createElement('div');
+  row.className = 'meta-window-row';
+
+  const startField = document.createElement('label');
+  startField.className = 'meta-field';
+  const startInput = document.createElement('input');
+  startInput.type = 'time';
+  startInput.className = 'meta-window-start';
+  startInput.value = data.start_minute === undefined ? '' : minutesToTimeValue(data.start_minute);
+  startField.append(
+    Object.assign(document.createElement('span'), {className: 'meta-label', textContent: 'Start'}),
+    startInput,
+  );
+
+  const durationField = document.createElement('label');
+  durationField.className = 'meta-field';
+  const durationInput = document.createElement('input');
+  durationInput.type = 'number';
+  durationInput.min = '1';
+  durationInput.className = 'meta-window-duration';
+  durationInput.value = data.duration_minutes === undefined ? '' : String(data.duration_minutes);
+  durationField.append(
+    Object.assign(document.createElement('span'), {className: 'meta-label', textContent: 'Duration (minutes)'}),
+    durationInput,
+  );
+
+  const weekdaysField = document.createElement('div');
+  weekdaysField.className = 'meta-field meta-window-weekdays';
+  const chipsWrap = document.createElement('div');
+  chipsWrap.className = 'meta-weekday-chips';
+  const selectedDays = new Set((data.weekdays || []).map(Number));
+  for (const day of MAINTENANCE_WEEKDAYS) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'meta-weekday-chip';
+    chip.textContent = day.abbr;
+    chip.setAttribute('aria-label', day.label);
+    chip.dataset.iso = String(day.iso);
+    chip.setAttribute('aria-pressed', String(selectedDays.has(day.iso)));
+    chip.addEventListener('click', () => {
+      const pressed = chip.getAttribute('aria-pressed') === 'true';
+      chip.setAttribute('aria-pressed', String(!pressed));
+    });
+    chipsWrap.appendChild(chip);
+  }
+  weekdaysField.append(
+    Object.assign(document.createElement('span'), {className: 'meta-label', textContent: 'Weekdays'}),
+    chipsWrap,
+  );
+
+  const graceField = document.createElement('label');
+  graceField.className = 'meta-field';
+  const graceInput = document.createElement('input');
+  graceInput.type = 'number';
+  graceInput.min = '0';
+  graceInput.className = 'meta-window-grace';
+  graceInput.value = data.grace_minutes === undefined ? String(MAINTENANCE_DEFAULT_GRACE_MINUTES) : String(data.grace_minutes);
+  graceField.append(
+    Object.assign(document.createElement('span'), {className: 'meta-label', textContent: 'Grace period (minutes)'}),
+    graceInput,
+    Object.assign(document.createElement('span'), {className: 'meta-help', textContent: MAINTENANCE_GRACE_HELP}),
+  );
+
+  const enabledField = document.createElement('label');
+  enabledField.className = 'meta-field meta-checkbox';
+  const enabledInput = document.createElement('input');
+  enabledInput.type = 'checkbox';
+  enabledInput.className = 'meta-window-enabled';
+  enabledInput.checked = data.enabled !== false;
+  enabledInput.addEventListener('change', () => {
+    row.classList.toggle('is-disabled', !enabledInput.checked);
+  });
+  enabledField.append(enabledInput, Object.assign(document.createElement('span'), {textContent: 'Enabled'}));
+
+  const removeButton = document.createElement('button');
+  removeButton.type = 'button';
+  removeButton.className = 'meta-window-remove';
+  removeButton.textContent = 'Remove';
+  let armed = false;
+  removeButton.addEventListener('click', () => {
+    if (!armed) {
+      armed = true;
+      removeButton.textContent = 'Confirm remove';
+      return;
+    }
+    row.remove();
+    updateMaintenanceWindowCount();
+  });
+
+  row.classList.toggle('is-disabled', data.enabled === false);
+  row.append(startField, durationField, weekdaysField, graceField, enabledField, removeButton);
+  $('meta-window-list').appendChild(row);
+  if (isNewRow) startInput.focus();
+  return row;
+}
+
+function renderMaintenanceWindows(windows) {
+  $('meta-window-list').replaceChildren();
+  for (const entry of windows || []) addMaintenanceWindowRow(entry);
+  updateMaintenanceWindowCount();
+}
+
+function readMaintenanceWindows() {
+  return [...$('meta-window-list').children].map((row) => ({
+    start_minute: timeValueToMinutes(row.querySelector('.meta-window-start').value),
+    duration_minutes: Number(row.querySelector('.meta-window-duration').value),
+    weekdays: [...row.querySelectorAll('.meta-weekday-chip')]
+      .filter((chip) => chip.getAttribute('aria-pressed') === 'true')
+      .map((chip) => Number(chip.dataset.iso))
+      .sort((a, b) => a - b),
+    grace_minutes: Number(row.querySelector('.meta-window-grace').value),
+    enabled: row.querySelector('.meta-window-enabled').checked,
+  }));
+}
+
+async function loadMaintenanceWindowsForEditor(service) {
+  let windows = service.windows || [];
+  try {
+    const meta = await apiFetch(`/api/service-meta/${service.port}`);
+    windows = meta.windows || [];
+  } catch (_) {
+    windows = service.windows || [];
+  }
+  if (!editingService || editingService.port !== service.port) return;
+  renderMaintenanceWindows(windows);
+}
+
 function openMetaEditor(service, returnFocus) {
   editingService = service;
   modalReturnFocus = returnFocus || document.activeElement;
@@ -329,11 +494,15 @@ function openMetaEditor(service, returnFocus) {
   $('meta-tags').value = (service.tags || []).join(', ');
   $('meta-url').value = service.url || '';
   $('meta-healthy-statuses').value = service.healthy_statuses || '200-399';
+  $('meta-window-list').replaceChildren();
+  $('meta-window-count').hidden = true;
+  $('meta-window-empty').hidden = true;
   $('meta-error').hidden = true;
   $('meta-stale-warning').hidden = !workerIsStale;
   $('meta-modal').hidden = false;
   document.body.classList.add('modal-open');
   $('meta-display-name').focus();
+  loadMaintenanceWindowsForEditor(service);
 }
 
 function closeMetaEditor() {
@@ -360,6 +529,7 @@ async function submitMetaEditor(event) {
       tags: $('meta-tags').value.trim(),
       url: $('meta-url').value.trim(),
       healthy_statuses: $('meta-healthy-statuses').value.trim(),
+      maintenance_windows: readMaintenanceWindows(),
     };
     const updated = await apiFetch(`/api/service-meta/${editingService.port}`, {
       method: 'PUT', headers: {...UI_HEADERS, 'Content-Type': 'application/json'}, body: JSON.stringify(payload),
@@ -373,7 +543,8 @@ async function submitMetaEditor(event) {
       : 'Service details saved.';
     closeMetaEditor();
   } catch (error) {
-    $('meta-error').textContent = 'Beacon could not use that destination. Review the service details and try again.';
+    const windowMessage = typeof error.message === 'string' && /^Window \d+: /.test(error.message) ? error.message : null;
+    $('meta-error').textContent = windowMessage || 'Beacon could not use that destination. Review the service details and try again.';
     $('meta-error').hidden = false;
     $('meta-error').focus();
   } finally {
@@ -445,6 +616,10 @@ if (typeof document !== 'undefined') {
     document.querySelector('.btn-scan').addEventListener('click', triggerScan);
     $('meta-form').addEventListener('submit', submitMetaEditor);
     $('meta-cancel').addEventListener('click', closeMetaEditor);
+    $('meta-window-add').addEventListener('click', () => {
+      addMaintenanceWindowRow();
+      updateMaintenanceWindowCount();
+    });
     $('meta-modal').addEventListener('click', (event) => { if (event.target === $('meta-modal')) closeMetaEditor(); });
     $('meta-modal').addEventListener('keydown', trapModalFocus);
     Promise.allSettled([loadStats(), loadHistory(), loadScan(), loadServices(), loadEvents()]);
