@@ -25,6 +25,7 @@ from dashboard.beacon.migrations import (
     UnsupportedSchemaError,
     _migration_7_canonical_host_streams,
     _migration_9_planned_maintenance,
+    exclusive_database_maintenance,
     run_migrations,
 )
 
@@ -991,6 +992,76 @@ class MigrationTests(unittest.TestCase):
                 with self.assertRaises(sqlite3.ProgrammingError):
                     conn.execute('SELECT 1')
 
+    def test_every_connection_the_applying_migration_path_opens_is_closed(self):
+        """WR-02 site 1: _apply_pending_migrations' apply connection
+        (migrations.py, inside the ``pending`` loop). The existing fast-path
+        spy above (test_the_pending_work_check_closes_every_connection_it_opens)
+        runs against an ALREADY-MIGRATED fixture and never reaches this loop --
+        that is exactly why this site went untested through three rounds. A
+        freshly copied, un-migrated legacy fixture forces the exclusive path
+        and the apply loop.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            settings = Settings(db_path=str(target))
+
+            opened = []
+            real_connect = sqlite3.connect
+
+            def spy_connect(*args, **kwargs):
+                conn = real_connect(*args, **kwargs)
+                opened.append(conn)
+                return conn
+
+            with mock.patch(
+                'dashboard.beacon.migrations.sqlite3.connect', side_effect=spy_connect,
+            ):
+                result = run_migrations(settings)
+
+            # Path-entry assertion: a non-empty applied-version set is the only
+            # way this test can pass, so it cannot pass by taking the fast path.
+            self.assertTrue(result.applied_versions)
+            self.assertTrue(opened)
+            for conn in opened:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    conn.execute('SELECT 1')
+
+    def test_every_connection_the_verified_backup_path_opens_is_closed(self):
+        """WR-02 site 2: create_verified_backup's three connections (source,
+        destination, read-only integrity-check). Only taken when the pending
+        set includes a schema-changing migration on a NON-EMPTY database --
+        migration 1 (schema_changing=True) against the un-migrated
+        initial-2026-04.db fixture satisfies exactly that, since the fixture
+        already carries real legacy tables.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            settings = Settings(db_path=str(target))
+
+            opened = []
+            real_connect = sqlite3.connect
+
+            def spy_connect(*args, **kwargs):
+                conn = real_connect(*args, **kwargs)
+                opened.append(conn)
+                return conn
+
+            with mock.patch(
+                'dashboard.beacon.migrations.sqlite3.connect', side_effect=spy_connect,
+            ):
+                result = run_migrations(settings)
+
+            # Path-entry assertion, checked BEFORE closure: a produced backup
+            # file is the only way this test can pass, so it cannot pass on a
+            # run that never entered create_verified_backup.
+            self.assertTrue(result.backups)
+            backup_files = list((target.parent / 'backups').glob('*.db'))
+            self.assertTrue(backup_files)
+            self.assertTrue(opened)
+            for conn in opened:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    conn.execute('SELECT 1')
+
     def test_exhausted_contention_is_reported_as_contention_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
             target = self._copied_fixture(directory, 'initial-2026-04.db')
@@ -1012,6 +1083,88 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), before)
             self.assertFalse((target.parent / 'backups').exists())
             self.assertFalse((target.parent / 'recovery-required.json').exists())
+
+    def test_the_contention_budget_is_a_hard_wall_clock_ceiling(self):
+        """03.1-REVIEW.md WR-01: the retry loop must cap each per-attempt
+        exclusive-maintenance timeout at the budget remaining, not pass the
+        full ``lock_timeout_seconds`` on every attempt. Uncapped, the loop's
+        deadline check only fires AFTER ``MaintenanceBusy`` is raised, so a
+        contended start can block for up to one further ``lock_timeout_seconds``
+        beyond the documented budget.
+
+        Band reasoning (both edges deliberately justified, per the plan):
+          - Lower edge (elapsed >= BUDGET): the capped loop cannot report
+            contention before the budget itself has actually elapsed --
+            the deadline check only fires once contention_deadline is
+            reached.
+          - Slack of 4s (elapsed <= BUDGET + 4): the deadline check fires
+            BEFORE the retry loop's own backoff sleep (capped at 2s), so
+            even the correctly capped loop can land a little past the
+            deadline once backoff, fixture setup, and lock-acquisition
+            jitter on slow hardware are accounted for. A slack floor of
+            three seconds is the documented minimum for surviving that
+            overshoot without flaking on a Pi; four gives headroom.
+          - Upper bound of the slack is deliberately far below
+            ``lock_timeout_seconds`` (30s): a slack anywhere near 30s would
+            let the uncapped, roughly-plus-30s defect shape pass this
+            assertion too, proving nothing.
+        """
+        budget = 5
+        slack = 4
+        lock_timeout = 30
+        self.assertGreaterEqual(slack, 3)
+        self.assertLess(slack, lock_timeout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            settings = Settings(db_path=str(target))
+
+            # Permanently held shared lease: the exclusive acquisition can
+            # never succeed for the life of this call.
+            holder = connect_db(target)
+
+            recorded_timeouts = []
+            recorded_call_times = []
+            real_exclusive = exclusive_database_maintenance
+
+            def spy_exclusive(*args, **kwargs):
+                recorded_call_times.append(time.monotonic())
+                recorded_timeouts.append(args[1] if len(args) > 1 else kwargs['timeout_seconds'])
+                return real_exclusive(*args, **kwargs)
+
+            try:
+                started = time.monotonic()
+                with mock.patch(
+                    'dashboard.beacon.migrations.exclusive_database_maintenance',
+                    side_effect=spy_exclusive,
+                ):
+                    with self.assertRaises(MigrationContended):
+                        run_migrations(
+                            settings,
+                            lock_timeout_seconds=lock_timeout,
+                            contention_budget_seconds=budget,
+                        )
+                elapsed = time.monotonic() - started
+            finally:
+                holder.close()
+
+            # Wall-clock (ceiling) assertion.
+            self.assertGreaterEqual(elapsed, budget)
+            self.assertLessEqual(elapsed, budget + slack)
+
+            # Structural (spy) assertion. Vacuity guard first: the spy must
+            # have recorded at least one attempt.
+            self.assertTrue(recorded_timeouts)
+            for call_time, timeout in zip(recorded_call_times, recorded_timeouts):
+                elapsed_at_call = call_time - started
+                # A small positive epsilon absorbs the few milliseconds
+                # between this test's `started` read and run_migrations'
+                # own contention_started read, plus float rounding -- not
+                # slack that could admit the uncapped defect shape, whose
+                # timeouts are a fixed 30s regardless of budget remaining.
+                remaining_budget_at_call = max(0.0, budget - elapsed_at_call)
+                self.assertLessEqual(timeout, lock_timeout)
+                self.assertLessEqual(timeout, remaining_budget_at_call + 0.5)
 
 
 # Every legacy fixture the suite tracks, plus the operator production fixture --
