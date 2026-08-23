@@ -111,7 +111,7 @@ console.log(JSON.stringify({
         ]:
             self.assertIn(token, compose)
         web_block = compose.split('\n  web:\n', 1)[1].split('\nvolumes:', 1)[0]
-        self.assertIn('data-init:', web_block)
+        self.assertIn('migrate:', web_block)
         self.assertIn('condition: service_completed_successfully', web_block)
         self.assertNotIn('worker:', web_block)
 

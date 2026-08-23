@@ -57,7 +57,7 @@ services:
       <<: *beacon-environment
       TZ: "${TZ:-UTC}"
     depends_on:
-      data-init:
+      migrate:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import json,sqlite3,time; c=sqlite3.connect('/data/dashboard.db'); r=c.execute(\"select value from runtime_state where key='worker_heartbeat'\").fetchone(); assert r and time.time()-json.loads(r[0])['ts'] < 20"]
@@ -73,6 +73,25 @@ services:
     network_mode: none
     mem_limit: 256m
     pids_limit: 64
+    profiles: ["recovery"]
+
+  # Position is load-bearing: this service must stay between `recovery` and
+  # `web` so it lands outside the text slices that tests/test_ui_contract.py
+  # and tests/test_maintenance_windows.py cut between service headers. See
+  # tests/test_startup_ordering.py for the regressions this depends on.
+  migrate:
+    <<: *beacon-common
+    command: ["python", "-m", "beacon.migrate"]
+    restart: "no"
+    network_mode: none
+    mem_limit: 256m
+    pids_limit: 64
+    environment:
+      <<: *beacon-environment
+      TZ: "${TZ:-UTC}"
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
 
   web:
     <<: *beacon-common
@@ -85,7 +104,7 @@ services:
       <<: *beacon-environment
       TZ: "${TZ:-UTC}"
     depends_on:
-      data-init:
+      migrate:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200"]
