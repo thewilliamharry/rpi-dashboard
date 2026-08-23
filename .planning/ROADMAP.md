@@ -274,7 +274,7 @@ Plans:
 **Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
 **Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
 **Depends on:** Phase 3
-**Plans:** 10/10 plans complete
+**Plans:** 10/13 plans complete (10 executed; 3 gap-closure plans pending after 03.1-UAT.md)
 
 **Success Criteria** (what must be TRUE):
 
@@ -295,6 +295,12 @@ Plans:
 - [x] 03.1-08-PLAN.md — Suggestion card with Confirm and Adjust
 - [x] 03.1-09-PLAN.md — Main dashboard: calm maintenance card and suppressed-entry reveal
 - [x] 03.1-10-PLAN.md — /advanced maintenance evidence, overrun timestamps, and attribution
+
+**Gap closure (after 03.1-UAT.md conversational verification on the real Pi, status diagnosed, 66/68 — two blockers found that no automated round could see: G-03.1-1, migration 9 could not apply to any deployed database, resolved directly in 80b8c3e with v8 support-floor entries and a version-agnostic guard test; G-03.1-2, a failed or slow migration takes the dashboard down and hides its own cause, open and planned below)**
+
+- [ ] 03.1-11-PLAN.md — Migration runs alone: a one-shot migrate step both long-running services must wait on, its real error as the process's own output, and the recovery command moved behind a compose profile (wave 1)
+- [ ] 03.1-12-PLAN.md — The exclusive lock is requested only when there is pending work, and a contended request backs off within a bounded budget instead of dying with a message that displaces the real schema error (wave 1)
+- [ ] 03.1-13-PLAN.md — Every web handler releases its shared maintenance lease on every exit path, so a request failing against an unmigrated schema can no longer starve the migrator (wave 2)
 
 ### Phase 4: Historical Investigation
 
