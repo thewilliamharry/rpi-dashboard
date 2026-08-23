@@ -134,6 +134,39 @@ class ModuleBoundaryTests(unittest.TestCase):
         self.assertNotIn('sqlite3.connect(', queue_source)
         self.assertIn('exclusive_database_maintenance', db_source)
 
+    def test_no_web_handler_binds_a_connection_outside_a_context_manager(self):
+        """T-03.1-53: forbid the bare-assignment shape that leaked shared leases (G-03.1-2).
+
+        A source-text search would match the seam's own definition, its docstring,
+        and any comment, and would silently stop matching if the local name
+        changed -- so this walks the AST instead and looks for the one shape
+        that leaks a lease: a plain assignment whose value is a call to the
+        ``get_db`` seam.  It deliberately does not flag every connection
+        binding: ``_worker_write_transaction`` binds a connection from
+        ``connect_db`` on the authority path and owns its close in its own
+        ``finally`` suite, and is not part of the seam this gate protects.
+        """
+        source = Path('dashboard/app.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+        offending_lines = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            value = node.value
+            if not isinstance(value, ast.Call):
+                continue
+            func = value.func
+            name = func.id if isinstance(func, ast.Name) else None
+            if name == 'get_db':
+                offending_lines.append(node.lineno)
+        self.assertEqual(
+            offending_lines, [],
+            f'connection seam bound outside a context manager at line(s): {offending_lines}',
+        )
+        # The gate forbids the binding, not the seam: get_db must remain
+        # defined and importable for the nine test modules that call it directly.
+        self.assertIn('def get_db():', source)
+
     def test_thumbnail_sql_stays_in_the_repository_boundary(self):
         repository_source = Path('dashboard/beacon/repositories.py').read_text(encoding='utf-8')
         preview_source = Path('dashboard/beacon/previews.py').read_text(encoding='utf-8')
