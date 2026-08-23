@@ -49,6 +49,34 @@
       "source": "canonical migrations 2-7 applied to operator/production.db",
       "minimum_schema_version": 7,
       "target_version": 9
+    },
+    {
+      "fingerprint": "c6278d881afc30573db03391377be3f075d3698eb28d3ecc0ddf98e251548d5a",
+      "fixture": "current-v6.db",
+      "source": "canonical migrations to 8 applied to initial-2026-04.db, current-v4.db, and current-v6.db (identical v8 shape)",
+      "minimum_schema_version": 8,
+      "target_version": 9
+    },
+    {
+      "fingerprint": "2f254a793516fc8ff7c543d91c0f0814c4cb423f08c4d60982f33a1568b4fb98",
+      "fixture": "metadata-events-2026-04.db",
+      "source": "canonical migrations to 8 applied to metadata-events-2026-04.db",
+      "minimum_schema_version": 8,
+      "target_version": 9
+    },
+    {
+      "fingerprint": "33f50b9b569c66a0340f230aac615440211166b849db22c40d01bdfc889f921c",
+      "fixture": "runtime-queues-2026-07.db",
+      "source": "canonical migrations to 8 applied to runtime-queues-2026-07.db",
+      "minimum_schema_version": 8,
+      "target_version": 9
+    },
+    {
+      "fingerprint": "f8d977dedd2fb494d7c94899b40639bed3c717238c049f1f70064c4a80c4075f",
+      "fixture": "operator/production.db",
+      "source": "canonical migrations 2-8 applied to operator/production.db (operator-confirmed deployed shape)",
+      "minimum_schema_version": 8,
+      "target_version": 9
     }
   ]
 }

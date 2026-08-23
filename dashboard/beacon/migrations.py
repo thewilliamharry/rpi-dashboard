@@ -656,7 +656,15 @@ def run_migrations(settings, *, clock=time.time, lock_timeout_seconds=30):
                         fingerprint = classify_schema(collect_inventory(database))
                         floor_entry = _support_floor().get(fingerprint)
                         if not floor_entry:
-                            raise UnsupportedSchemaError('unsupported Beacon database schema')
+                            # Name the fingerprint and the command that produces it: the
+                            # operator cannot otherwise tell which shape was rejected, nor
+                            # supply the evidence a new support floor entry requires.
+                            raise UnsupportedSchemaError(
+                                'unsupported Beacon database schema '
+                                f'(schema version {version}, fingerprint {fingerprint}). '
+                                'Capture evidence with: python -m beacon.inventory '
+                                '--db <database> --output <report.json>'
+                            )
                         # Sanitized fixtures intentionally contain no operational migration
                         # rows.  The evidence-backed floor supplies the compatible starting
                         # point only after an exact structural fingerprint match.

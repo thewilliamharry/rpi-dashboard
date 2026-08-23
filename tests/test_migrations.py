@@ -40,6 +40,18 @@ FIXTURES = {
 CURRENT_V4_FIXTURE = 'current-v4.db'
 CURRENT_V6_FIXTURE = 'current-v6.db'
 OPERATOR_V7_FINGERPRINT = '3f88834a2cfacc2bbecac2424a3bc36955f7a81727132ba18cbc88c7bb85f7f7'
+# Every tracked lineage carried forward to schema version 8 -- the shape a deployment
+# of the previous release actually sits at when migration 9 arrives.  Three lineages
+# converge on one v8 shape; the operator lineage keeps its own.  These are hashes of
+# raw sqlite_master DDL text, so they cannot be reasoned about -- only recomputed.
+V8_FINGERPRINTS = {
+    'initial-2026-04.db': 'c6278d881afc30573db03391377be3f075d3698eb28d3ecc0ddf98e251548d5a',
+    'current-v4.db': 'c6278d881afc30573db03391377be3f075d3698eb28d3ecc0ddf98e251548d5a',
+    'current-v6.db': 'c6278d881afc30573db03391377be3f075d3698eb28d3ecc0ddf98e251548d5a',
+    'metadata-events-2026-04.db': '2f254a793516fc8ff7c543d91c0f0814c4cb423f08c4d60982f33a1568b4fb98',
+    'runtime-queues-2026-07.db': '33f50b9b569c66a0340f230aac615440211166b849db22c40d01bdfc889f921c',
+    'operator/production.db': 'f8d977dedd2fb494d7c94899b40639bed3c717238c049f1f70064c4a80c4075f',
+}
 EXPECTED_FINGERPRINTS = {
     'initial-2026-04.db': '4330feaa6a22043681d7d55fec900b3279fec9302f68e41417df29653c7cf906',
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
@@ -142,7 +154,7 @@ class MigrationTests(unittest.TestCase):
             collect_inventory(FIXTURE_DIR / CURRENT_V4_FIXTURE)['schema_fingerprint'],
             collect_inventory(FIXTURE_DIR / CURRENT_V6_FIXTURE)['schema_fingerprint'],
             OPERATOR_V7_FINGERPRINT,
-        }
+        } | set(V8_FINGERPRINTS.values())
         self.assertEqual(set(supported), expected)
         for entry in supported.values():
             self.assertIn('fixture', entry)
@@ -202,6 +214,101 @@ class MigrationTests(unittest.TestCase):
                     conn.execute('SELECT COUNT(*) FROM background_job_health').fetchone()[0],
                     0,
                 )
+
+    def _carry_lineage_to(self, fixture_name, version, directory):
+        """Copy a tracked lineage fixture and migrate it up to ``version`` only."""
+        target = Path(directory) / 'dashboard.db'
+        copy2(FIXTURE_DIR / fixture_name, target)
+        settings = Settings(db_path=str(target))
+        with mock.patch(
+            'dashboard.beacon.migrations.MIGRATIONS',
+            tuple(m for m in MIGRATIONS if m.version <= version),
+        ):
+            run_migrations(settings)
+        return target, settings
+
+    def test_support_floor_admits_every_tracked_lineage_at_the_previous_version(self):
+        """A deployment of the previous release must be admitted by the newest one.
+
+        The floor is only consulted for a NON-empty database below the target
+        version, so the shape that matters in production is each tracked lineage
+        carried to ``MIGRATIONS[-1].version - 1``.  Migration 9 shipped without
+        those entries and no test caught it, because the suite only ever exercised
+        v7 -> (8, 9) in a single run and never a deployment already sitting at v8.
+        This guard fails the moment migration N ships without its N-1 entries.
+        """
+        newest = MIGRATIONS[-1].version
+        floor = {
+            entry['fingerprint']
+            for entry in json.loads(
+                Path('dashboard/beacon/support_floor.json').read_text(encoding='utf-8')
+            )['supported_schemas']
+        }
+        missing = {}
+        for fixture_name in V8_FINGERPRINTS:
+            with tempfile.TemporaryDirectory() as directory:
+                target, _ = self._carry_lineage_to(fixture_name, newest - 1, directory)
+                fingerprint = collect_inventory(target)['schema_fingerprint']
+                self.assertEqual(fingerprint, V8_FINGERPRINTS[fixture_name])
+                if fingerprint not in floor:
+                    missing[fixture_name] = fingerprint
+        self.assertEqual(
+            missing,
+            {},
+            f'support_floor.json has no entry for these lineages at schema version '
+            f'{newest - 1}; a deployment of the previous release cannot upgrade: {missing}',
+        )
+
+    def test_a_deployment_already_at_v8_applies_only_migration_nine(self):
+        """The real upgrade path: already at 8, not arriving from 7 in one run.
+
+        Regression for the operator report where every live deployment failed with
+        UnsupportedSchemaError because its v8 fingerprint was absent from the floor.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target, settings = self._carry_lineage_to('operator/production.db', 8, directory)
+            self.assertEqual(collect_inventory(target)['migration_versions'], [2, 3, 4, 5, 6, 7, 8])
+            self.assertEqual(
+                collect_inventory(target)['schema_fingerprint'],
+                V8_FINGERPRINTS['operator/production.db'],
+            )
+            with sqlite3.connect(target) as conn:
+                conn.execute(
+                    'INSERT INTO services(port, title, first_seen, last_seen, is_online) '
+                    'VALUES(?,?,?,?,?)',
+                    (8100, 'Deployed service', 1_700_000_000, 1_700_000_010, 1),
+                )
+                conn.execute(
+                    'INSERT INTO events(ts, port, event_type, online, previous_online) '
+                    'VALUES(?,?,?,?,?)',
+                    (1_700_000_010, 8100, 'state_change', 1, 0),
+                )
+                conn.commit()
+                before_rows = snapshot_legacy_rows(conn)
+
+            self.assertEqual(run_migrations(settings).applied_versions, (9,))
+
+            with sqlite3.connect(target) as conn:
+                assert_legacy_rows_preserved(self, before_rows, conn)
+                self.assertEqual(
+                    conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 9
+                )
+                self.assertTrue(conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='maintenance_windows'"
+                ).fetchone())
+
+    def test_unsupported_schema_error_names_the_fingerprint_and_the_evidence_command(self):
+        """An operator cannot supply floor evidence for a shape the error never names."""
+        with tempfile.TemporaryDirectory() as directory:
+            target, settings = self._carry_lineage_to('operator/production.db', 8, directory)
+            fingerprint = collect_inventory(target)['schema_fingerprint']
+            with mock.patch('dashboard.beacon.migrations._support_floor', return_value={}):
+                with self.assertRaises(UnsupportedSchemaError) as raised:
+                    run_migrations(settings)
+        message = str(raised.exception)
+        self.assertIn(fingerprint, message)
+        self.assertIn('schema version 8', message)
+        self.assertIn('beacon.inventory', message)
 
     def test_current_v4_fixture_is_canonical_and_migrates_preserving_rows(self):
         source = FIXTURE_DIR / CURRENT_V4_FIXTURE
