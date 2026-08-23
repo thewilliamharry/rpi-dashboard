@@ -274,7 +274,7 @@ Plans:
 **Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
 **Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
 **Depends on:** Phase 3
-**Plans:** 13/13 plans executed (10 original + 3 gap-closure plans for G-03.1-2, executed 2026-08-23; phase still pending — 03.1-VERIFICATION.md round 2 found G-03.1-2 defect 3 only partially closed)
+**Plans:** 15 plans (10 original + 3 gap-closure plans for G-03.1-2 executed 2026-08-23 + 2 gap-closure round-3 plans, planned 2026-08-23, pending — 03.1-VERIFICATION.md round 2 found G-03.1-2 defect 3 only partially closed and 03.1-REVIEW.md left CR-01, WR-01 and WR-02 open)
 
 **Success Criteria** (what must be TRUE):
 
@@ -301,6 +301,11 @@ Plans:
 - [x] 03.1-11-PLAN.md — Migration runs alone: a one-shot migrate step both long-running services must wait on, its real error as the process's own output, and the recovery command moved behind a compose profile (wave 1)
 - [x] 03.1-12-PLAN.md — The exclusive lock is requested only when there is pending work, and a contended request backs off within a bounded budget instead of dying with a message that displaces the real schema error (wave 1)
 - [x] 03.1-13-PLAN.md — Every web handler releases its shared maintenance lease on every exit path, so a request failing against an unmigrated schema can no longer starve the migrator (wave 2)
+
+**Gap closure round 3 (after 03.1-VERIFICATION.md round 2, status gaps_found, 8/9 truths — truth 8 failed at one unenumerated site, and 03.1-REVIEW.md round 1 left one Critical and two Warnings open. Rounds 1 and 2 each fixed the instances they enumerated and then wrote a gate recognising only the shape they had just fixed; this round closes the defect CLASS instead, and every fix already named in the review is made now rather than left to be rediscovered)**
+
+- [ ] 03.1-14-PLAN.md — One class-exhaustive connection-ownership gate, derived by module and by seam, watched failing on nine real sites before it was watched passing, with the class emptied beneath it (wave 1)
+- [ ] 03.1-15-PLAN.md — The contention budget becomes the hard ceiling its own comment claims, and G-03.1-2 is closed on evidence a verifier can re-run (wave 2)
 
 ### Phase 4: Historical Investigation
 
