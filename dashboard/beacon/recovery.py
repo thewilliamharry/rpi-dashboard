@@ -1,6 +1,7 @@
 """Offline, catalog-constrained recovery of verified Beacon migration backups."""
 
 import argparse
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -133,7 +134,7 @@ def _validated_migration_transition(conn, catalog_id):
 
 def _validate_supported_database(path, catalog_id=None):
     try:
-        with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as conn:
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
             integrity = conn.execute('PRAGMA integrity_check').fetchone()
             if not integrity or integrity[0] != 'ok':
                 raise RecoveryError('backup is not available')
@@ -228,7 +229,7 @@ def _read_recovery_authorization(root, *, now):
 
 def _authorization_matches_current_database(database, authorization):
     try:
-        with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as conn:
+        with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as conn:
             return _validated_migration_transition(conn, authorization.backup_catalog_id)
     except (OSError, sqlite3.Error, ValueError):
         return False
@@ -264,7 +265,7 @@ def list_verified_backups(data_dir):
 
 def _worker_is_stale(database, *, now, worker_ready_seconds):
     try:
-        with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as conn:
+        with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as conn:
             tables = {
                 row[0]
                 for row in conn.execute(
@@ -317,7 +318,7 @@ def _copy_and_fsync(source, staging):
 def _checkpoint_and_remove_sidecars(database):
     """Quiesce the current SQLite inode before it can be replaced."""
     try:
-        with sqlite3.connect(database) as conn:
+        with closing(sqlite3.connect(database)) as conn:
             checkpoint = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
         if not checkpoint or checkpoint[0] != 0:
             raise RecoveryError('restore did not complete')

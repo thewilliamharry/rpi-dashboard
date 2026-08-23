@@ -134,39 +134,6 @@ class ModuleBoundaryTests(unittest.TestCase):
         self.assertNotIn('sqlite3.connect(', queue_source)
         self.assertIn('exclusive_database_maintenance', db_source)
 
-    def test_no_web_handler_binds_a_connection_outside_a_context_manager(self):
-        """T-03.1-53: forbid the bare-assignment shape that leaked shared leases (G-03.1-2).
-
-        A source-text search would match the seam's own definition, its docstring,
-        and any comment, and would silently stop matching if the local name
-        changed -- so this walks the AST instead and looks for the one shape
-        that leaks a lease: a plain assignment whose value is a call to the
-        ``get_db`` seam.  It deliberately does not flag every connection
-        binding: ``_worker_write_transaction`` binds a connection from
-        ``connect_db`` on the authority path and owns its close in its own
-        ``finally`` suite, and is not part of the seam this gate protects.
-        """
-        source = Path('dashboard/app.py').read_text(encoding='utf-8')
-        tree = ast.parse(source)
-        offending_lines = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
-                continue
-            value = node.value
-            if not isinstance(value, ast.Call):
-                continue
-            func = value.func
-            name = func.id if isinstance(func, ast.Name) else None
-            if name == 'get_db':
-                offending_lines.append(node.lineno)
-        self.assertEqual(
-            offending_lines, [],
-            f'connection seam bound outside a context manager at line(s): {offending_lines}',
-        )
-        # The gate forbids the binding, not the seam: get_db must remain
-        # defined and importable for the nine test modules that call it directly.
-        self.assertIn('def get_db():', source)
-
     def test_thumbnail_sql_stays_in_the_repository_boundary(self):
         repository_source = Path('dashboard/beacon/repositories.py').read_text(encoding='utf-8')
         preview_source = Path('dashboard/beacon/previews.py').read_text(encoding='utf-8')
@@ -993,31 +960,52 @@ class ConnectionOwnershipGateTests(unittest.TestCase):
                     f"stale RECORDED entry: {entry['function']} no longer returns or binds an opening seam",
                 )
 
-    def test_the_unconverted_connection_sites_are_exactly_the_nine_this_round_closes(self):
-        """TEMPORARY. Task 2 deletes this test by name once its subject -- the nine
-        currently-unconverted sites -- no longer exists. Its purpose is to make the
-        detector's firing on the real, unfixed defect a committed, machine-checked
-        fact rather than a claim pasted into a summary.
-        """
+    def test_every_module_that_opens_a_sqlite_connection_guarantees_its_close(self):
+        """The standing class gate: successor to the retired shape-specific and
+        enumeration tests. Runs the same, unmodified helpers that reported nine
+        findings against the unfixed tree and asserts the remainder -- after
+        dropping the one reasoned SUPPRESSING entry -- is empty."""
         findings = _unguarded_bindings_in_scope()
         remainder = _drop_suppressed(findings)
-        pairs = sorted((f['module'], f['function']) for f in remainder)
-        expected_pairs = sorted([
-            ('dashboard/app.py', 'worker_process_preview_requests'),
-            ('dashboard/beacon/migrations.py', 'create_verified_backup'),
-            ('dashboard/beacon/migrations.py', 'create_verified_backup'),
-            ('dashboard/beacon/migrations.py', 'create_verified_backup'),
-            ('dashboard/beacon/migrations.py', '_apply_pending_migrations'),
-            ('dashboard/beacon/recovery.py', '_validate_supported_database'),
-            ('dashboard/beacon/recovery.py', '_authorization_matches_current_database'),
-            ('dashboard/beacon/recovery.py', '_worker_is_stale'),
-            ('dashboard/beacon/recovery.py', '_checkpoint_and_remove_sidecars'),
-        ])
-        self.assertEqual(len(remainder), 9, remainder)
-        self.assertEqual(pairs, expected_pairs, remainder)
+        self.assertEqual(
+            remainder, [],
+            'unguarded connection binding(s) found:\n' + '\n'.join(
+                f"  {f['module']} :: {f['function']} :: line {f['line']} :: callee={f['callee']}"
+                for f in remainder
+            ),
+        )
 
-        negative_control = [f for f in findings if f['function'] in {'_recorded_version', '_is_empty_database'}]
-        self.assertEqual(negative_control, [], negative_control)
+    def test_the_connection_gate_flags_the_defect_it_was_written_for(self):
+        """Sub-class A real-site proof (NAME callee). Reverts app.py's fixed
+        preview-request site to the exact defect shape this plan closed and
+        confirms the detector still catches it, entirely in memory -- this is
+        what keeps sub-class A permanently gated after the temporary
+        enumeration test above is retired."""
+        module_path = Path('dashboard/app.py')
+        source = module_path.read_text(encoding='utf-8')
+        marker = 'with database_access(authority.db_path) as conn:'
+        self.assertIn(marker, source)
+        reverted = source.replace(marker, 'with connect_db(authority.db_path) as conn:', 1)
+        self.assertNotEqual(reverted, source)
+        findings = _findings_for_sources({module_path: reverted}, module_path)
+        matching = [f for f in findings if f['function'] == 'worker_process_preview_requests']
+        self.assertTrue(matching, findings)
+
+    def test_the_connection_gate_flags_the_plain_handle_shape_it_was_written_for(self):
+        """Sub-class B real-site proof (ATTRIBUTE callee) -- the shape that is
+        eight of this round's nine sites. Reverts recovery.py's
+        _checkpoint_and_remove_sidecars site to the plain
+        ``with sqlite3.connect(...) as conn:`` shape and confirms the detector
+        still catches it, entirely in memory."""
+        module_path = Path('dashboard/beacon/recovery.py')
+        source = module_path.read_text(encoding='utf-8')
+        marker = 'with closing(sqlite3.connect(database)) as conn:'
+        self.assertIn(marker, source)
+        reverted = source.replace(marker, 'with sqlite3.connect(database) as conn:', 1)
+        self.assertNotEqual(reverted, source)
+        findings = _findings_for_sources({module_path: reverted}, module_path)
+        matching = [f for f in findings if f['function'] == '_checkpoint_and_remove_sidecars']
+        self.assertTrue(matching, findings)
 
 
 if __name__ == '__main__':

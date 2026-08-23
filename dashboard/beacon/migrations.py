@@ -1,6 +1,6 @@
 """Versioned, locked SQLite migrations with verified recovery snapshots."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -606,10 +606,10 @@ def create_verified_backup(db_path, *, target_version, clock=time.time):
     final_path = backup_dir / 'dashboard-{}-{}-pre-v{}.db'.format(timestamp, token, target_version)
     partial_path = final_path.with_suffix('.db.partial')
     try:
-        with sqlite3.connect(database, timeout=30) as source:
-            with sqlite3.connect(partial_path) as destination:
+        with closing(sqlite3.connect(database, timeout=30)) as source:
+            with closing(sqlite3.connect(partial_path)) as destination:
                 source.backup(destination)
-        with sqlite3.connect('file:{}?mode=ro'.format(partial_path), uri=True) as check:
+        with closing(sqlite3.connect('file:{}?mode=ro'.format(partial_path), uri=True)) as check:
             integrity = check.execute('PRAGMA integrity_check').fetchone()[0]
         if integrity != 'ok':
             raise MigrationPreparationError('backup integrity validation failed')
@@ -711,15 +711,16 @@ def _apply_pending_migrations(database, marker_path, clock):
             if migration.schema_changing and not new_database:
                 backup = create_verified_backup(database, target_version=migration.version, clock=clock)
                 backups.append(backup)
-            with sqlite3.connect(database, timeout=30) as conn:
-                conn.execute('PRAGMA foreign_keys=ON')
-                conn.execute('BEGIN IMMEDIATE')
-                migration.apply(conn)
-                conn.execute(
-                    'INSERT INTO schema_migrations(version, applied_ts) VALUES(?, ?)',
-                    (migration.version, int(clock())),
-                )
-                conn.commit()
+            with closing(sqlite3.connect(database, timeout=30)) as conn:
+                with conn:
+                    conn.execute('PRAGMA foreign_keys=ON')
+                    conn.execute('BEGIN IMMEDIATE')
+                    migration.apply(conn)
+                    conn.execute(
+                        'INSERT INTO schema_migrations(version, applied_ts) VALUES(?, ?)',
+                        (migration.version, int(clock())),
+                    )
+                    conn.commit()
             applied.append(migration.version)
             new_database = False
         except Exception as exc:
