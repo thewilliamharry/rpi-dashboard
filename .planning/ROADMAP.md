@@ -284,15 +284,34 @@ Plans:
   4. A service still down after its window and grace period produces one truthful outage event and alert, while the dashboard distinguishes active maintenance from an unresolved failure.
 
 Plans:
+**Wave 1**
 
 - [x] 03.1-01-PLAN.md — Tracer: one covered down-transition is tagged, retained, and never alerted
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [x] 03.1-02-PLAN.md — IANA time-zone data in the container (tzdata dependency + TZ plumbing)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [x] 03.1-03-PLAN.md — Window CRUD over the existing service-meta write surface
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [x] 03.1-04-PLAN.md — Overrun outage: one truthful event past window and grace
 - [x] 03.1-05-PLAN.md — Maintenance windows section in the service editor
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [x] 03.1-06-PLAN.md — Suggestion detector recomputed on every metadata read
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [x] 03.1-07-PLAN.md — Derived maintenance availability, exception exclusion, and attribution
 - [x] 03.1-08-PLAN.md — Suggestion card with Confirm and Adjust
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [x] 03.1-09-PLAN.md — Main dashboard: calm maintenance card and suppressed-entry reveal
 - [x] 03.1-10-PLAN.md — /advanced maintenance evidence, overrun timestamps, and attribution
 
