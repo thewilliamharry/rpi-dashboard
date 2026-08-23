@@ -274,7 +274,7 @@ Plans:
 **Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
 **Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
 **Depends on:** Phase 3
-**Plans:** 15 plans (10 original + 3 gap-closure plans for G-03.1-2 executed 2026-08-23 + 2 gap-closure round-3 plans, planned 2026-08-23, pending — 03.1-VERIFICATION.md round 2 found G-03.1-2 defect 3 only partially closed and 03.1-REVIEW.md left CR-01, WR-01 and WR-02 open)
+**Plans:** 14/15 plans executed (10 original + 3 gap-closure plans for G-03.1-2 executed 2026-08-23 + 2 gap-closure round-3 plans, planned 2026-08-23, pending — 03.1-VERIFICATION.md round 2 found G-03.1-2 defect 3 only partially closed and 03.1-REVIEW.md left CR-01, WR-01 and WR-02 open)
 
 **Success Criteria** (what must be TRUE):
 
@@ -323,7 +323,7 @@ Plans:
 
 **Gap closure round 3 (after 03.1-VERIFICATION.md round 2, status gaps_found, 8/9 truths — truth 8 failed at one unenumerated site, and 03.1-REVIEW.md round 1 left one Critical and two Warnings open. Rounds 1 and 2 each fixed the instances they enumerated and then wrote a gate recognising only the shape they had just fixed; this round closes the defect CLASS instead, and every fix already named in the review is made now rather than left to be rediscovered)**
 
-- [ ] 03.1-14-PLAN.md — A connection-ownership detector with package-wide seam resolution, proven firing on nine real sites against the unfixed tree, then the class emptied beneath a standing gate (wave 1)
+- [x] 03.1-14-PLAN.md — A connection-ownership detector with package-wide seam resolution, proven firing on nine real sites against the unfixed tree, then the class emptied beneath a standing gate (wave 1)
 - [ ] 03.1-15-PLAN.md — Close proofs that reach the migration paths they name, a contention budget that is the hard ceiling its comment claims, and G-03.1-2 closed on evidence a verifier can re-run (wave 2)
 
 ### Phase 4: Historical Investigation
