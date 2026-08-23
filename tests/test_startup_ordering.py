@@ -5,6 +5,7 @@ Beacon process starts (G-03.1-2)."""
 import ast
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -74,6 +75,75 @@ class MigrateCommandTests(unittest.TestCase):
         tree = ast.parse((DASHBOARD_ROOT / 'beacon' / 'migrate.py').read_text(encoding='utf-8'))
         has_try = any(isinstance(node, ast.Try) for node in ast.walk(tree))
         self.assertFalse(has_try)
+
+
+class ComposeStartupOrderingTests(unittest.TestCase):
+    """Structural regressions for the compose startup-order contract.
+
+    Both helpers below extract structure rather than substring-searching the
+    whole file: a service block is terminated on the *next* two-space header
+    (not a hard-coded sibling name), and depends_on is walked by indentation
+    rather than matched as a flat token, so a dependency declared under a
+    different service cannot be mistaken for one declared under the block
+    being examined.
+    """
+
+    def _compose_text(self):
+        return (PROJECT_ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
+
+    def _service_block(self, compose_text, service_name):
+        header = '\n  {}:\n'.format(service_name)
+        self.assertIn(header, compose_text, 'service {!r} not found in compose file'.format(service_name))
+        remainder = compose_text.split(header, 1)[1]
+        end_match = re.search(r'\n  [A-Za-z0-9_-]+:\n|\nvolumes:', remainder)
+        return remainder[:end_match.start()] if end_match else remainder
+
+    def _dependency_map(self, block):
+        """Return {service_name: condition} declared under this block's own depends_on."""
+        if 'depends_on:' not in block:
+            return {}
+        depends_text = block.split('depends_on:', 1)[1]
+        entries = {}
+        current_name = None
+        for line in depends_text.split('\n')[1:]:
+            if not line.strip():
+                continue
+            indent = len(line) - len(line.lstrip(' '))
+            if indent <= 4:
+                break
+            stripped = line.strip()
+            if stripped.endswith(':') and indent == 6:
+                current_name = stripped[:-1]
+            elif stripped.startswith('condition:') and current_name is not None:
+                entries[current_name] = stripped.split('condition:', 1)[1].strip()
+        return entries
+
+    def test_worker_depends_on_the_migration_service_completing(self):
+        deps = self._dependency_map(self._service_block(self._compose_text(), 'worker'))
+        self.assertEqual(deps.get('migrate'), 'service_completed_successfully')
+
+    def test_web_depends_on_the_migration_service_completing(self):
+        deps = self._dependency_map(self._service_block(self._compose_text(), 'web'))
+        self.assertEqual(deps.get('migrate'), 'service_completed_successfully')
+
+    def test_migration_service_runs_the_module_and_does_not_restart(self):
+        block = self._service_block(self._compose_text(), 'migrate')
+        self.assertIn('beacon.migrate', block)
+        self.assertIn('restart: "no"', block)
+
+    def test_recovery_service_is_behind_a_profile(self):
+        block = self._service_block(self._compose_text(), 'recovery')
+        self.assertIn('profiles:', block)
+
+    def test_migration_service_depends_on_the_data_ownership_initializer(self):
+        deps = self._dependency_map(self._service_block(self._compose_text(), 'migrate'))
+        self.assertEqual(deps.get('data-init'), 'service_completed_successfully')
+
+    def test_block_extractor_does_not_leak_a_dependency_from_another_service(self):
+        """The recovery service declares no depends_on of its own; the migration
+        service's dependency on data-init must not be attributed to it."""
+        deps = self._dependency_map(self._service_block(self._compose_text(), 'recovery'))
+        self.assertNotIn('migrate', deps)
 
 
 if __name__ == '__main__':
