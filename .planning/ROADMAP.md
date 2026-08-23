@@ -304,8 +304,8 @@ Plans:
 
 **Gap closure round 3 (after 03.1-VERIFICATION.md round 2, status gaps_found, 8/9 truths — truth 8 failed at one unenumerated site, and 03.1-REVIEW.md round 1 left one Critical and two Warnings open. Rounds 1 and 2 each fixed the instances they enumerated and then wrote a gate recognising only the shape they had just fixed; this round closes the defect CLASS instead, and every fix already named in the review is made now rather than left to be rediscovered)**
 
-- [ ] 03.1-14-PLAN.md — One class-exhaustive connection-ownership gate, derived by module and by seam, watched failing on nine real sites before it was watched passing, with the class emptied beneath it (wave 1)
-- [ ] 03.1-15-PLAN.md — The contention budget becomes the hard ceiling its own comment claims, and G-03.1-2 is closed on evidence a verifier can re-run (wave 2)
+- [ ] 03.1-14-PLAN.md — A connection-ownership detector with package-wide seam resolution, proven firing on nine real sites against the unfixed tree, then the class emptied beneath a standing gate (wave 1)
+- [ ] 03.1-15-PLAN.md — Close proofs that reach the migration paths they name, a contention budget that is the hard ceiling its comment claims, and G-03.1-2 closed on evidence a verifier can re-run (wave 2)
 
 ### Phase 4: Historical Investigation
 
