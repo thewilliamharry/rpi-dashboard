@@ -1,1 +1,1 @@
-No external API integration: phase 03.1 and its gap-closure rounds touch only local SQLite connection ownership, migration locking, docker-compose startup ordering, and the dashboard's own first-party HTTP routes — no third-party API, SDK, or service surface is integrated, so there is no external capability surface to enumerate or subtract from.
+No external API integration: phase 03.1 and its gap-closure rounds touch only local SQLite connection ownership, migration locking, compose startup ordering, and Beacon's own first-party Flask routes.
