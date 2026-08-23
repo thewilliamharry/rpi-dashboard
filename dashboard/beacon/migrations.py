@@ -36,7 +36,9 @@ SUPPORT_FLOOR_PATH = Path(__file__).with_name('support_floor.json')
 # occupy the database for up to 60 seconds. The compose web healthcheck
 # (docker-compose.yml) opens a fresh connection every 10 seconds. This budget
 # spans four worst-case ordinary connections (4 * 60s = 240s) and twenty-four
-# healthcheck cycles (24 * 10s = 240s).
+# healthcheck cycles (24 * 10s = 240s). This budget is enforced as a hard
+# ceiling: the retry loop below caps every per-attempt exclusive-maintenance
+# timeout at whatever remains of it, so it is binding, not aspirational.
 CONTENTION_BUDGET_SECONDS = 240
 
 # connect_db (db.py) sets PRAGMA busy_timeout=30000 (30 seconds) on every
@@ -783,10 +785,16 @@ def run_migrations(
                     # Only the acquisition sits inside this handler -- the work
                     # function below is invoked outside the try, so a real error
                     # it raises can never be caught here and reported as
-                    # contention.
+                    # contention. The per-attempt timeout is capped at whatever
+                    # budget actually remains (floored at zero) so a contended
+                    # start can never block past contention_deadline by up to
+                    # one further lock_timeout_seconds (03.1-REVIEW.md WR-01).
+                    remaining_budget = max(0.0, contention_deadline - time.monotonic())
                     try:
                         stack.enter_context(
-                            exclusive_database_maintenance(database, lock_timeout_seconds)
+                            exclusive_database_maintenance(
+                                database, min(lock_timeout_seconds, remaining_budget)
+                            )
                         )
                     except MaintenanceBusy:
                         elapsed = time.monotonic() - contention_started
