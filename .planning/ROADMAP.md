@@ -274,7 +274,7 @@ Plans:
 **Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
 **Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
 **Depends on:** Phase 3
-**Plans:** 13/13 plans executed (10 executed; 3 gap-closure plans pending after 03.1-UAT.md)
+**Plans:** 13/13 plans executed (10 original + 3 gap-closure plans for G-03.1-2, executed 2026-08-23; phase still pending — 03.1-VERIFICATION.md round 2 found G-03.1-2 defect 3 only partially closed)
 
 **Success Criteria** (what must be TRUE):
 
