@@ -2228,7 +2228,7 @@ def worker_process_preview_requests(authority):
         # An empty durable queue is a completed poll, not a failure -- see
         # worker_process_scan_requests for the full reasoning.
         return None
-    with connect_db(authority.db_path) as conn:
+    with database_access(authority.db_path) as conn:
         row = conn.execute(
             "SELECT COALESCE(url, '') AS url FROM service_meta WHERE port=?", (claim.port,)
         ).fetchone()
