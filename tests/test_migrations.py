@@ -5,6 +5,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import dataclass
 from shutil import copy2
@@ -796,6 +798,220 @@ class MigrationTests(unittest.TestCase):
         upgrade = migration_body.index('fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX')
         maintenance = migration_body.index('exclusive_database_maintenance')
         self.assertLess(upgrade, maintenance)
+
+    # -- G-03.1-2 gap-closure regressions: contention survival, real-error
+    # -- fidelity, the pending-work fast path, and its two newly exposed
+    # -- failure modes (racing a live writer, leaking a handle). --
+
+    def test_a_contention_window_that_ends_is_survived_rather_than_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            settings = Settings(db_path=str(target))
+            ready_event = threading.Event()
+
+            def hold_shared_lease_then_release():
+                # Opened and closed in the same thread: SQLite connections
+                # (and their held flock lease) are thread-affine.
+                access = connect_db(target)
+                ready_event.set()
+                time.sleep(0.2)
+                access.close()
+
+            holder = threading.Thread(target=hold_shared_lease_then_release)
+            holder.start()
+            self.assertTrue(ready_event.wait(timeout=5))
+            try:
+                with self.assertLogs('beacon.migrations', level='WARNING') as logs:
+                    result = run_migrations(
+                        settings, lock_timeout_seconds=0.05, contention_budget_seconds=5,
+                    )
+            finally:
+                holder.join(timeout=5)
+
+            self.assertEqual(result.applied_versions[-1], MIGRATIONS[-1].version)
+            self.assertTrue(
+                any('busy' in message.lower() for message in logs.output),
+                logs.output,
+            )
+
+    def test_a_real_schema_refusal_is_never_displaced_by_the_contention_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            with sqlite3.connect(target) as conn:
+                conn.execute('CREATE TABLE unmapped_extra_table (id INTEGER PRIMARY KEY)')
+            settings = Settings(db_path=str(target))
+            ready_event = threading.Event()
+
+            def hold_shared_lease_then_release():
+                access = connect_db(target)
+                ready_event.set()
+                time.sleep(0.2)
+                access.close()
+
+            holder = threading.Thread(target=hold_shared_lease_then_release)
+            holder.start()
+            self.assertTrue(ready_event.wait(timeout=5))
+            try:
+                with self.assertRaises(UnsupportedSchemaError) as raised:
+                    run_migrations(
+                        settings, lock_timeout_seconds=0.05, contention_budget_seconds=5,
+                    )
+            finally:
+                holder.join(timeout=5)
+
+            fingerprint = collect_inventory(target)['schema_fingerprint']
+            message = str(raised.exception)
+            self.assertIn(fingerprint, message)
+            self.assertIn('beacon.inventory', message)
+            self.assertNotIn('lock', message.lower())
+            self.assertNotIn('timeout', message.lower())
+
+    def test_an_already_current_database_never_requests_the_exclusive_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            settings = Settings(db_path=str(target))
+            run_migrations(settings)
+
+            access = connect_db(target)
+            try:
+                result = run_migrations(
+                    settings, lock_timeout_seconds=0, contention_budget_seconds=0,
+                )
+                self.assertEqual(result.applied_versions, ())
+
+                marker_path = target.parent / 'recovery-required.json'
+                marker_path.write_text('{}', encoding='utf-8')
+
+                def _never_called(*args, **kwargs):
+                    self.fail(
+                        'exclusive_database_maintenance must not be entered when '
+                        'nothing is pending'
+                    )
+
+                with mock.patch(
+                    'dashboard.beacon.migrations.exclusive_database_maintenance',
+                    side_effect=_never_called,
+                ):
+                    result = run_migrations(
+                        settings, lock_timeout_seconds=0, contention_budget_seconds=0,
+                    )
+                self.assertEqual(result.applied_versions, ())
+                self.assertFalse(marker_path.exists())
+            finally:
+                access.close()
+
+    def test_the_pending_work_check_waits_out_a_writer_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
+            settings = Settings(db_path=str(target))
+            run_migrations(settings)
+
+            def hold_writer(ready_event, release_event):
+                # Opened inside the thread that uses it: SQLite connections
+                # are thread-affine, and BEGIN EXCLUSIVE (never BEGIN
+                # IMMEDIATE -- see the plan's rationale) is what actually
+                # excludes the fast path's SELECT-only readers.
+                writer = connect_db(target)
+                try:
+                    writer.execute('BEGIN EXCLUSIVE')
+                    ready_event.set()
+                    release_event.wait(timeout=5)
+                finally:
+                    writer.rollback()
+                    writer.close()
+
+            # Positive control: constant patched ABOVE the writer's hold. On
+            # its own this proves the tolerance is real, but would also pass
+            # against unhardened code -- it detects nothing by itself.
+            ready_event = threading.Event()
+            release_event = threading.Event()
+            holder = threading.Thread(target=hold_writer, args=(ready_event, release_event))
+            holder.start()
+            try:
+                self.assertTrue(ready_event.wait(timeout=5))
+                releaser = threading.Timer(0.2, release_event.set)
+                releaser.start()
+                with mock.patch('dashboard.beacon.migrations.READ_BUSY_TIMEOUT_SECONDS', 2):
+                    result = run_migrations(settings, lock_timeout_seconds=5)
+            finally:
+                release_event.set()
+                holder.join(timeout=5)
+            self.assertEqual(result.applied_versions, ())
+
+            # Detector: constant patched BELOW the writer's hold. Hardened
+            # code reads the patched constant and gives up inside the hold;
+            # unhardened code ignores it, takes the stdlib default, waits the
+            # hold out, and would fail this assertion by succeeding instead.
+            ready_event = threading.Event()
+            release_event = threading.Event()
+            holder = threading.Thread(target=hold_writer, args=(ready_event, release_event))
+            holder.start()
+            try:
+                self.assertTrue(ready_event.wait(timeout=5))
+                releaser = threading.Timer(0.2, release_event.set)
+                releaser.start()
+                with mock.patch('dashboard.beacon.migrations.READ_BUSY_TIMEOUT_SECONDS', 0):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        run_migrations(settings, lock_timeout_seconds=5)
+            finally:
+                release_event.set()
+                holder.join(timeout=5)
+
+            # Pin the shipped value against a fact owned by db.py: it must be
+            # at least the busy timeout an ordinary Beacon connection gets.
+            probe = connect_db(target)
+            try:
+                configured_ms = probe.execute('PRAGMA busy_timeout').fetchone()[0]
+            finally:
+                probe.close()
+            self.assertGreaterEqual(READ_BUSY_TIMEOUT_SECONDS * 1000, configured_ms)
+
+    def test_the_pending_work_check_closes_every_connection_it_opens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, CURRENT_V6_FIXTURE)
+            settings = Settings(db_path=str(target))
+            run_migrations(settings)
+
+            opened = []
+            real_connect = sqlite3.connect
+
+            def spy_connect(*args, **kwargs):
+                conn = real_connect(*args, **kwargs)
+                opened.append(conn)
+                return conn
+
+            with mock.patch(
+                'dashboard.beacon.migrations.sqlite3.connect', side_effect=spy_connect,
+            ):
+                result = run_migrations(settings)
+
+            self.assertEqual(result.applied_versions, ())
+            self.assertTrue(opened)
+            for conn in opened:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    conn.execute('SELECT 1')
+
+    def test_exhausted_contention_is_reported_as_contention_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._copied_fixture(directory, 'initial-2026-04.db')
+            before = target.read_bytes()
+            access = connect_db(target)
+            try:
+                with self.assertRaises(MigrationContended) as raised:
+                    run_migrations(
+                        Settings(db_path=str(target)),
+                        lock_timeout_seconds=0,
+                        contention_budget_seconds=0.2,
+                    )
+            finally:
+                access.close()
+
+            message = str(raised.exception)
+            self.assertIn('another Beacon process', message)
+            self.assertRegex(message, r'\d')
+            self.assertEqual(target.read_bytes(), before)
+            self.assertFalse((target.parent / 'backups').exists())
+            self.assertFalse((target.parent / 'recovery-required.json').exists())
 
 
 # Every legacy fixture the suite tracks, plus the operator production fixture --
