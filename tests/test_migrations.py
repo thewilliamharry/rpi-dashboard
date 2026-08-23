@@ -17,7 +17,9 @@ from dashboard.beacon.inventory import InventoryError, classify_schema, collect_
 from dashboard.beacon.migrations import (
     MIGRATIONS,
     Migration,
+    MigrationContended,
     MigrationPreparationError,
+    READ_BUSY_TIMEOUT_SECONDS,
     UnsupportedSchemaError,
     _migration_7_canonical_host_streams,
     _migration_9_planned_maintenance,
@@ -769,8 +771,16 @@ class MigrationTests(unittest.TestCase):
             before = target.read_bytes()
             access = connect_db(target)
             try:
-                with self.assertRaisesRegex(MigrationPreparationError, 'maintenance'):
-                    run_migrations(Settings(db_path=str(target)), lock_timeout_seconds=0)
+                # Zero budget preserves the single-attempt behaviour this test
+                # exercised before contention retry existed -- without it, the
+                # suite would hang for the whole default contention budget
+                # rather than fail fast.
+                with self.assertRaisesRegex(MigrationContended, 'another Beacon process'):
+                    run_migrations(
+                        Settings(db_path=str(target)),
+                        lock_timeout_seconds=0,
+                        contention_budget_seconds=0,
+                    )
             finally:
                 access.close()
 

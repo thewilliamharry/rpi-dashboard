@@ -1,9 +1,11 @@
 """Versioned, locked SQLite migrations with verified recovery snapshots."""
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -20,10 +22,28 @@ from .db import (
 from .inventory import collect_inventory, classify_schema
 
 
+log = logging.getLogger('beacon.migrations')
+
 BACKUP_RETENTION = 3
 LOCK_NAME = UPGRADE_LOCK_NAME
 RECOVERY_MARKER = 'recovery-required.json'
 SUPPORT_FLOOR_PATH = Path(__file__).with_name('support_floor.json')
+
+# connect_db (db.py) grants each ordinary Beacon connection up to a 30-second
+# flock wait (db.py's _acquire_lock default timeout for the shared maintenance
+# lease) plus a 30-second SQLite busy timeout (connect_db's own
+# PRAGMA busy_timeout=30000) -- so one worst-case ordinary connection can
+# occupy the database for up to 60 seconds. The compose web healthcheck
+# (docker-compose.yml) opens a fresh connection every 10 seconds. This budget
+# spans four worst-case ordinary connections (4 * 60s = 240s) and twenty-four
+# healthcheck cycles (24 * 10s = 240s).
+CONTENTION_BUDGET_SECONDS = 240
+
+# connect_db (db.py) sets PRAGMA busy_timeout=30000 (30 seconds) on every
+# ordinary Beacon connection; the pre-escalation read helpers below match
+# that exact convention so a live ordinary writer is waited out instead of
+# racing it and raising a locked-database error.
+READ_BUSY_TIMEOUT_SECONDS = 30
 
 
 class UnsupportedSchemaError(RuntimeError):
@@ -32,6 +52,18 @@ class UnsupportedSchemaError(RuntimeError):
 
 class MigrationPreparationError(RuntimeError):
     """A migration failed after its verified recovery snapshot was created."""
+
+
+class MigrationContended(RuntimeError):
+    """Ordinary Beacon database access never yielded the exclusive maintenance
+    lease within the contention budget.
+
+    This is NOT a migration failure: no verified backup was created, no
+    recovery marker was written, and the database bytes are untouched. It
+    means another Beacon process -- an ordinary web request, a healthcheck
+    connection, or a second migrator -- held the database for the whole
+    contention budget.
+    """
 
 
 @dataclass(frozen=True)
@@ -598,11 +630,18 @@ def _support_floor():
 
 
 def _recorded_version(database):
-    with sqlite3.connect(database) as conn:
+    # An explicit busy timeout (matching connect_db's own convention) and a
+    # finally-scoped close: the standard library's connection context manager
+    # commits/rolls back but does NOT close, which would leak a handle on
+    # this hot path once it is called from outside exclusive maintenance.
+    conn = sqlite3.connect(database, timeout=READ_BUSY_TIMEOUT_SECONDS)
+    try:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if 'schema_migrations' not in tables:
             return 0
         return conn.execute('SELECT COALESCE(MAX(version), 0) FROM schema_migrations').fetchone()[0]
+    finally:
+        conn.close()
 
 
 def _write_recovery_marker(marker_path, *, target_version, reason_class, backup):
@@ -620,11 +659,90 @@ def _write_recovery_marker(marker_path, *, target_version, reason_class, backup)
 def _is_empty_database(database):
     if not database.exists() or database.stat().st_size == 0:
         return True
-    with sqlite3.connect(database) as conn:
+    # Guarded above: existence and size are checked before opening anything,
+    # so a non-existent or zero-byte database is never brought into being by
+    # this read-only check. An explicit busy timeout and a finally-scoped
+    # close mirror _recorded_version's hardening for the same reason.
+    conn = sqlite3.connect(database, timeout=READ_BUSY_TIMEOUT_SECONDS)
+    try:
         return not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
+    finally:
+        conn.close()
 
 
-def run_migrations(settings, *, clock=time.time, lock_timeout_seconds=30):
+def _apply_pending_migrations(database, marker_path, clock):
+    """Run the full inspect/back-up/apply sequence inside exclusive maintenance.
+
+    Moved verbatim out of ``run_migrations`` so the contention retry below can
+    wrap only the exclusive-maintenance acquisition, never this work.
+    """
+    new_database = _is_empty_database(database)
+    if new_database:
+        sqlite3.connect(database).close()
+        version = 0
+    else:
+        version = _recorded_version(database)
+        if version < MIGRATIONS[-1].version:
+            fingerprint = classify_schema(collect_inventory(database))
+            floor_entry = _support_floor().get(fingerprint)
+            if not floor_entry:
+                # Name the fingerprint and the command that produces it: the
+                # operator cannot otherwise tell which shape was rejected, nor
+                # supply the evidence a new support floor entry requires.
+                raise UnsupportedSchemaError(
+                    'unsupported Beacon database schema '
+                    f'(schema version {version}, fingerprint {fingerprint}). '
+                    'Capture evidence with: python -m beacon.inventory '
+                    '--db <database> --output <report.json>'
+                )
+            # Sanitized fixtures intentionally contain no operational migration
+            # rows.  The evidence-backed floor supplies the compatible starting
+            # point only after an exact structural fingerprint match.
+            version = max(version, floor_entry['minimum_schema_version'])
+    pending = tuple(migration for migration in MIGRATIONS if migration.version > version)
+    if not pending:
+        marker_path.unlink(missing_ok=True)
+        return MigrationResult((), ())
+    applied = []
+    backups = []
+    for migration in pending:
+        backup = None
+        try:
+            if migration.schema_changing and not new_database:
+                backup = create_verified_backup(database, target_version=migration.version, clock=clock)
+                backups.append(backup)
+            with sqlite3.connect(database, timeout=30) as conn:
+                conn.execute('PRAGMA foreign_keys=ON')
+                conn.execute('BEGIN IMMEDIATE')
+                migration.apply(conn)
+                conn.execute(
+                    'INSERT INTO schema_migrations(version, applied_ts) VALUES(?, ?)',
+                    (migration.version, int(clock())),
+                )
+                conn.commit()
+            applied.append(migration.version)
+            new_database = False
+        except Exception as exc:
+            _write_recovery_marker(
+                marker_path,
+                target_version=migration.version,
+                reason_class=type(exc).__name__,
+                backup=backup,
+            )
+            if isinstance(exc, (UnsupportedSchemaError, MigrationPreparationError)):
+                raise
+            raise MigrationPreparationError('migration preparation failed') from exc
+    marker_path.unlink(missing_ok=True)
+    return MigrationResult(tuple(applied), tuple(backups))
+
+
+def run_migrations(
+    settings,
+    *,
+    clock=time.time,
+    lock_timeout_seconds=30,
+    contention_budget_seconds=CONTENTION_BUDGET_SECONDS,
+):
     """Upgrade a supported database while holding the process-wide upgrade lock."""
     database, _, _, marker_path = _storage_paths(
         getattr(settings, 'db_path', settings)
@@ -645,66 +763,47 @@ def run_migrations(settings, *, clock=time.time, lock_timeout_seconds=30):
         try:
             # Every operation which can inspect, create, alter, back up, or mark the
             # database runs only after the fixed upgrade -> maintenance lock order.
-            with exclusive_database_maintenance(database, lock_timeout_seconds):
-                new_database = _is_empty_database(database)
-                if new_database:
-                    sqlite3.connect(database).close()
-                    version = 0
-                else:
-                    version = _recorded_version(database)
-                    if version < MIGRATIONS[-1].version:
-                        fingerprint = classify_schema(collect_inventory(database))
-                        floor_entry = _support_floor().get(fingerprint)
-                        if not floor_entry:
-                            # Name the fingerprint and the command that produces it: the
-                            # operator cannot otherwise tell which shape was rejected, nor
-                            # supply the evidence a new support floor entry requires.
-                            raise UnsupportedSchemaError(
-                                'unsupported Beacon database schema '
-                                f'(schema version {version}, fingerprint {fingerprint}). '
-                                'Capture evidence with: python -m beacon.inventory '
-                                '--db <database> --output <report.json>'
-                            )
-                        # Sanitized fixtures intentionally contain no operational migration
-                        # rows.  The evidence-backed floor supplies the compatible starting
-                        # point only after an exact structural fingerprint match.
-                        version = max(version, floor_entry['minimum_schema_version'])
-                pending = tuple(migration for migration in MIGRATIONS if migration.version > version)
-                if not pending:
+            #
+            # Pending-work fast path: read-only, and it runs only under the
+            # upgrade lock -- no other migrator or restorer can be inside
+            # exclusive maintenance while that lock is held, which is exactly
+            # the invariant that makes reading the recorded version here safe
+            # without ever escalating to the exclusive lock.
+            if not _is_empty_database(database):
+                if _recorded_version(database) >= MIGRATIONS[-1].version:
                     marker_path.unlink(missing_ok=True)
                     return MigrationResult((), ())
-                applied = []
-                backups = []
-                for migration in pending:
-                    backup = None
+
+            contention_started = time.monotonic()
+            contention_deadline = contention_started + contention_budget_seconds
+            attempt = 0
+            while True:
+                with ExitStack() as stack:
+                    # Only the acquisition sits inside this handler -- the work
+                    # function below is invoked outside the try, so a real error
+                    # it raises can never be caught here and reported as
+                    # contention.
                     try:
-                        if migration.schema_changing and not new_database:
-                            backup = create_verified_backup(database, target_version=migration.version, clock=clock)
-                            backups.append(backup)
-                        with sqlite3.connect(database, timeout=30) as conn:
-                            conn.execute('PRAGMA foreign_keys=ON')
-                            conn.execute('BEGIN IMMEDIATE')
-                            migration.apply(conn)
-                            conn.execute(
-                                'INSERT INTO schema_migrations(version, applied_ts) VALUES(?, ?)',
-                                (migration.version, int(clock())),
-                            )
-                            conn.commit()
-                        applied.append(migration.version)
-                        new_database = False
-                    except Exception as exc:
-                        _write_recovery_marker(
-                            marker_path,
-                            target_version=migration.version,
-                            reason_class=type(exc).__name__,
-                            backup=backup,
+                        stack.enter_context(
+                            exclusive_database_maintenance(database, lock_timeout_seconds)
                         )
-                        if isinstance(exc, (UnsupportedSchemaError, MigrationPreparationError)):
-                            raise
-                        raise MigrationPreparationError('migration preparation failed') from exc
-                marker_path.unlink(missing_ok=True)
-                return MigrationResult(tuple(applied), tuple(backups))
-        except MaintenanceBusy as exc:
-            raise MigrationPreparationError('migration maintenance lock timeout') from exc
+                    except MaintenanceBusy:
+                        elapsed = time.monotonic() - contention_started
+                        if time.monotonic() >= contention_deadline:
+                            raise MigrationContended(
+                                'exclusive database maintenance was busy for '
+                                f'{elapsed:.1f}s: another Beacon process is holding '
+                                'an ordinary database connection'
+                            )
+                        attempt += 1
+                        log.warning(
+                            'migration maintenance lock busy after %.1fs (attempt '
+                            '%d); another Beacon process is holding an ordinary '
+                            'connection, waiting and retrying',
+                            elapsed, attempt,
+                        )
+                        time.sleep(min(0.1 * (2 ** (attempt - 1)), 2.0))
+                        continue
+                    return _apply_pending_migrations(database, marker_path, clock)
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
