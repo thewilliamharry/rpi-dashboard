@@ -2,7 +2,9 @@ import inspect
 import json
 import time
 import unittest
+from contextlib import contextmanager
 
+from dashboard.beacon.db import exclusive_database_maintenance
 from tests.helpers import cleanup_db, load_app
 
 
@@ -11,6 +13,27 @@ class FakeResponse:
         self.text = text
         self.status_code = status_code
         self.headers = headers or {}
+
+
+def _install_connection_spy(appmod, real_database_access):
+    """Wrap ``real_database_access`` with a spy and patch it onto ``appmod``.
+
+    Every connection the seam hands out is appended to the returned list.
+    The list holding a strong reference to each connection is what makes the
+    release assertions deterministic rather than dependent on garbage
+    collection -- a leaked lease is guaranteed to still be held (or a
+    released one guaranteed to still show released) when the assertion runs.
+    """
+    captured = []
+
+    @contextmanager
+    def spying_database_access(settings_or_path):
+        with real_database_access(settings_or_path) as conn:
+            captured.append(conn)
+            yield conn
+
+    appmod.database_access = spying_database_access
+    return captured
 
 
 class ApiAndAuthTests(unittest.TestCase):
@@ -46,6 +69,78 @@ class ApiAndAuthTests(unittest.TestCase):
 
     def _worker_owner(self, worker_id='api-preview-worker'):
         return self.appmod.beacon_queues.acquire_worker_lease(self.db_path, worker_id)
+
+    def _drop_planned_maintenance_schema(self):
+        """Undo migration 9's additions so the database matches the Pi's schema version 8.
+
+        Reproduces G-03.1-2: the phase-03.1 bulk maintenance-window read
+        (``read_maintenance_windows_by_port``, used by ``/api/services``) and the
+        ``/api/events`` selection of ``suppressed_reason``/``maintenance_grace_until``/
+        ``down_since_ts`` both raise against this shape, the way they did on the Pi.
+        """
+        conn = self.appmod.get_db()
+        try:
+            conn.execute('DROP TABLE maintenance_windows')
+            conn.execute('ALTER TABLE events DROP COLUMN suppressed_reason')
+            conn.execute('ALTER TABLE events DROP COLUMN maintenance_grace_until')
+            conn.execute('ALTER TABLE events DROP COLUMN down_since_ts')
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_a_failing_request_releases_its_shared_maintenance_lease(self):
+        self._insert_service()
+        self._drop_planned_maintenance_schema()
+        real_database_access = self.appmod.database_access
+
+        for route_name, path in (('services', '/api/services'), ('events', '/api/events')):
+            with self.subTest(route=route_name):
+                captured = _install_connection_spy(self.appmod, real_database_access)
+
+                response = self.client.get(path)
+
+                # 1. A request that fails against an unmigrated schema is a loud
+                #    server error, never a silent success.
+                self.assertEqual(response.status_code, 500)
+                # A test that silently opened no connection would pass the
+                # remaining assertions vacuously -- forbid that.
+                self.assertTrue(captured, f'the spy recorded no connections for {path}')
+                # 2. Every connection the spy recorded has released its shared
+                #    maintenance lease.
+                for conn in captured:
+                    self.assertIsNone(
+                        getattr(conn, '_maintenance_handle', 'MISSING'),
+                        f'a connection opened while serving {path} still holds its maintenance lease',
+                    )
+                # 3. The migrator's own exclusive acquisition -- the thing that
+                #    was starved on the Pi -- is immediately available.
+                with exclusive_database_maintenance(self.db_path, timeout_seconds=0):
+                    pass
+
+    def test_a_handler_that_raises_for_any_reason_releases_its_lease(self):
+        self._insert_service()
+        real_database_access = self.appmod.database_access
+        captured = _install_connection_spy(self.appmod, real_database_access)
+
+        original = self.appmod.beacon_repositories.read_maintenance_windows_by_port
+
+        def _raise_unrelated_error(*_args, **_kwargs):
+            raise RuntimeError('unrelated handler failure')
+
+        self.appmod.beacon_repositories.read_maintenance_windows_by_port = _raise_unrelated_error
+        try:
+            response = self.client.get('/api/services')
+        finally:
+            self.appmod.beacon_repositories.read_maintenance_windows_by_port = original
+
+        # Same three assertions as above: this proves the release belongs to
+        # the exit path itself, not to one missing table.
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(captured, 'the spy recorded no connections')
+        for conn in captured:
+            self.assertIsNone(getattr(conn, '_maintenance_handle', 'MISSING'))
+        with exclusive_database_maintenance(self.db_path, timeout_seconds=0):
+            pass
 
     def test_trigger_scan_requires_ui_header_and_queues(self):
         self.assertEqual(self.client.post('/api/trigger-scan').status_code, 403)

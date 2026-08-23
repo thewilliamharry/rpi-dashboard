@@ -31,7 +31,7 @@ try:
     from .beacon import previews as beacon_previews
     from .beacon import queues as beacon_queues
     from .beacon import worker_main as beacon_worker_main
-    from .beacon.db import connect_db, MaintenanceBusy
+    from .beacon.db import connect_db, database_access, MaintenanceBusy
     from .beacon.migrations import RECOVERY_MARKER
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
@@ -45,7 +45,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import previews as beacon_previews
     from beacon import queues as beacon_queues
     from beacon import worker_main as beacon_worker_main
-    from beacon.db import connect_db, MaintenanceBusy
+    from beacon.db import connect_db, database_access, MaintenanceBusy
     from beacon.migrations import RECOVERY_MARKER
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
 
@@ -126,6 +126,7 @@ _bg_started = False
 
 
 def get_db():
+    """Open one connection outside the shared-lease seam; owned by tests that call it directly."""
     return connect_db(DB_PATH)
 
 
@@ -145,8 +146,7 @@ def init_db():
         # Preserve the established compatibility repair for records written by
         # older web processes.  Schema/data upgrades themselves remain owned by
         # the versioned migration runner above.
-        conn = get_db()
-        try:
+        with database_access(DB_PATH) as conn:
             conn.execute("""
                 UPDATE services
                    SET state_since = COALESCE(
@@ -159,33 +159,37 @@ def init_db():
                  WHERE state_since IS NULL
             """)
             conn.commit()
-        finally:
-            conn.close()
         return result
 
 
-def _set_runtime_state(key, value, *, conn=None, now=None):
-    owns_conn = conn is None
-    if owns_conn:
-        conn = get_db()
-    now = int(time.time()) if now is None else int(now)
+def _write_runtime_state_row(conn, key, value, now):
     conn.execute(
         "INSERT INTO runtime_state(key, value, updated_ts) VALUES(?,?,?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
         (key, json.dumps(value, separators=(',', ':')), now),
     )
-    if owns_conn:
+
+
+def _set_runtime_state(key, value, *, conn=None, now=None):
+    now = int(time.time()) if now is None else int(now)
+    if conn is not None:
+        _write_runtime_state_row(conn, key, value, now)
+        return
+    with database_access(DB_PATH) as conn:
+        _write_runtime_state_row(conn, key, value, now)
         conn.commit()
-        conn.close()
+
+
+def _read_runtime_state_row(conn, key):
+    return conn.execute("SELECT value, updated_ts FROM runtime_state WHERE key=?", (key,)).fetchone()
 
 
 def _get_runtime_state(key, default=None, *, conn=None):
-    owns_conn = conn is None
-    if owns_conn:
-        conn = get_db()
-    row = conn.execute("SELECT value, updated_ts FROM runtime_state WHERE key=?", (key,)).fetchone()
-    if owns_conn:
-        conn.close()
+    if conn is not None:
+        row = _read_runtime_state_row(conn, key)
+    else:
+        with database_access(DB_PATH) as conn:
+            row = _read_runtime_state_row(conn, key)
     if not row:
         return default
     try:
@@ -204,8 +208,7 @@ def recover_worker_state(now=None):
     """Requeue work interrupted by a worker/container restart."""
     now = int(time.time()) if now is None else int(now)
     beacon_queues.recover_queues(DB_PATH, now=now)
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
         heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
         try:
@@ -236,7 +239,6 @@ def recover_worker_state(now=None):
         })
         _set_runtime_state('scan_state', state, conn=conn)
         conn.commit()
-        conn.close()
 
 
 @contextmanager
@@ -264,16 +266,13 @@ def _mutation_write_transaction(authority=None, *, now=None):
         with _worker_write_transaction(authority) as conn:
             yield conn
         return
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         try:
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.close()
 
 
 def worker_recover_worker_state(authority, now=None):
@@ -350,13 +349,11 @@ def _update_scan_state(**changes):
             state.update(changes)
             _set_runtime_state('scan_state', state, conn=conn, now=authority.now())
         return
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         state = _read_scan_state(conn)
         state.update(changes)
         _set_runtime_state('scan_state', state, conn=conn)
         conn.commit()
-        conn.close()
     return state
 
 
@@ -817,8 +814,7 @@ def _legacy_record_event(event_type, port=None, online=None, previous_online=Non
                 error_class=error_class, alert_status=alert_status, details=details,
             )
         return
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         _insert_event(
             conn,
             ts=now,
@@ -832,18 +828,15 @@ def _legacy_record_event(event_type, port=None, online=None, previous_online=Non
             details=details,
         )
         conn.commit()
-        conn.close()
 
 
 def _legacy_should_send_alert(port, online, now):
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         row = conn.execute(
             "SELECT ts FROM events WHERE port=? AND event_type='alert_sent' AND online=? "
             "ORDER BY ts DESC LIMIT 1",
             (port, online),
         ).fetchone()
-        conn.close()
     if not row:
         return True
     return (now - int(row['ts'])) >= ALERT_COOLDOWN_SECONDS
@@ -1236,8 +1229,7 @@ def _legacy_collect_system_stats(now=None, persist_history=None):
         'temp': temp,
         'hostname': socket.gethostname(),
     }
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         conn.execute(
             "INSERT INTO system_stats(id,sample_ts,cpu,ram,ram_used,ram_available,ram_used_strict,ram_total,disk,disk_used,disk_total,temp,hostname) "
             "VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
@@ -1257,20 +1249,17 @@ def _legacy_collect_system_stats(now=None, persist_history=None):
                 (now, sample['cpu'], sample['ram'], sample['disk'], sample['temp']),
             )
         conn.commit()
-        conn.close()
     return sample
 
 
 def _legacy_cleanup_history(now=None):
     now = int(time.time()) if now is None else int(now)
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         conn.execute("DELETE FROM stats_history WHERE ts < ?", (now - 86400,))
         conn.execute("DELETE FROM service_checks WHERE ts < ?", (now - CHECK_RETENTION_SECONDS,))
         conn.execute("DELETE FROM events WHERE ts < ?", (now - (14 * 86400),))
         conn.execute("DELETE FROM scan_rate_hits WHERE ts < ?", (now - TRIGGER_SCAN_WINDOW_SECONDS,))
         conn.commit()
-        conn.close()
 
 
 def _legacy_do_discovery(source='scheduled'):
@@ -1305,13 +1294,11 @@ def _legacy_do_discovery(source='scheduled'):
         _update_scan_state(stage='probing', progress=0.35, current_candidates=len(open_ports), timings=timings)
 
         existing_probe_urls = {}
-        with _db_lock:
-            conn = get_db()
+        with _db_lock, database_access(DB_PATH) as conn:
             rows = conn.execute(
                 "SELECT s.port, COALESCE(m.url, '') AS url, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port"
             ).fetchall()
-            conn.close()
         for row in rows:
             existing_probe_urls[int(row['port'])] = (
                 _discovery_probe_url(int(row['port']), row['url']), row['healthy_statuses']
@@ -1504,8 +1491,7 @@ def _legacy_do_uptime_check(only_down=False):
     authority = _worker_mutation_authority.get()
     snapshot = beacon_telemetry.measure_storage(authority.db_path) if authority is not None else None
     try:
-        with _db_lock:
-            conn = get_db()
+        with _db_lock, database_access(DB_PATH) as conn:
             where = "WHERE s.last_seen >= ? AND s.is_online = 0" if only_down else "WHERE s.last_seen >= ?"
             rows = conn.execute(
                 "SELECT s.port, s.title, s.is_online, s.state_since, "
@@ -1515,7 +1501,6 @@ def _legacy_do_uptime_check(only_down=False):
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port " + where,
                 (expire_cutoff,),
             ).fetchall()
-            conn.close()
 
         # Network I/O is deliberately outside the SQLite lock so the metrics
         # executor can keep its five-second cadence during slow probes.
@@ -2198,18 +2183,15 @@ def process_preview_requests(worker_id, worker_owner_token):
     if not claim:
         return False
     port = claim.port
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         row = conn.execute(
             "SELECT COALESCE(url, '') AS url FROM service_meta WHERE port=?", (port,)
         ).fetchone()
-        conn.close()
     url = _safe_service_url(row['url'] if row else '', port)
     started = time.monotonic()
     title, data, mime, source, thumb_error, warning = _refresh_service_preview(port, url)
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         try:
             conn.execute('BEGIN IMMEDIATE')
             beacon_queues.finish_preview_in_transaction(
@@ -2233,8 +2215,6 @@ def process_preview_requests(worker_id, worker_owner_token):
         except beacon_queues.LeaseLost:
             conn.rollback()
             return False
-        finally:
-            conn.close()
     return True
 
 
@@ -2307,8 +2287,7 @@ def worker_process_preview_requests(authority):
 
 def _check_scan_rate_limit(client_key):
     now = int(time.time())
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         cutoff = now - TRIGGER_SCAN_WINDOW_SECONDS
         conn.execute("DELETE FROM scan_rate_hits WHERE ts < ?", (cutoff,))
         rows = conn.execute(
@@ -2318,11 +2297,9 @@ def _check_scan_rate_limit(client_key):
         if len(rows) >= TRIGGER_SCAN_RATE_LIMIT:
             retry_after = TRIGGER_SCAN_WINDOW_SECONDS - (now - int(rows[0]['ts']))
             conn.commit()
-            conn.close()
             return False, max(1, retry_after)
         conn.execute("INSERT INTO scan_rate_hits(client_key, ts) VALUES(?,?)", (client_key, now))
         conn.commit()
-        conn.close()
         return True, 0
 
 
@@ -2467,10 +2444,8 @@ def api_config():
 
 @app.route("/api/stats")
 def api_stats():
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         row = conn.execute("SELECT * FROM system_stats WHERE id=1").fetchone()
-        conn.close()
     if row is None:
         return jsonify({'error': 'metrics not yet sampled'}), 503
     payload = dict(row)
@@ -2481,13 +2456,11 @@ def api_stats():
 @app.route("/api/history")
 def api_history():
     now = int(time.time())
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT ts, cpu, ram, disk, temp FROM stats_history WHERE ts >= ? ORDER BY ts ASC",
             (now - 86400,),
         ).fetchall()
-        conn.close()
     return jsonify([dict(r) for r in rows])
 
 
@@ -2553,29 +2526,25 @@ def api_telemetry_history():
         return jsonify({'error': str(exc)}), 400
 
     try:
-        with _db_lock:
-            conn = get_db()
-            try:
-                if kind == 'host':
-                    sources = beacon_repositories.get_host_telemetry(
-                        conn, metric, requested.start_ts, requested.end_ts, resolution,
-                        policy.point_budget + 1, cutoffs,
-                    )
-                else:
-                    sources = beacon_repositories.get_service_telemetry(
-                        conn, port, requested.start_ts, requested.end_ts, resolution,
-                        policy.point_budget + 1, cutoffs,
-                    )
-                coverage_data = beacon_repositories.get_telemetry_coverage(
-                    conn, kind, stream_key, requested.start_ts, requested.end_ts,
-                    policy.point_budget + 1,
+        with _db_lock, database_access(DB_PATH) as conn:
+            if kind == 'host':
+                sources = beacon_repositories.get_host_telemetry(
+                    conn, metric, requested.start_ts, requested.end_ts, resolution,
+                    policy.point_budget + 1, cutoffs,
                 )
-                pending = beacon_repositories.get_pending_aggregation(
-                    conn, kind, stream_key, requested.start_ts, requested.end_ts,
-                    resolution, policy.point_budget + 1, cutoffs,
+            else:
+                sources = beacon_repositories.get_service_telemetry(
+                    conn, port, requested.start_ts, requested.end_ts, resolution,
+                    policy.point_budget + 1, cutoffs,
                 )
-            finally:
-                conn.close()
+            coverage_data = beacon_repositories.get_telemetry_coverage(
+                conn, kind, stream_key, requested.start_ts, requested.end_ts,
+                policy.point_budget + 1,
+            )
+            pending = beacon_repositories.get_pending_aggregation(
+                conn, kind, stream_key, requested.start_ts, requested.end_ts,
+                resolution, policy.point_budget + 1, cutoffs,
+            )
         history = beacon_telemetry.compose_historical_response(sources, kind)
         if len(history['points']) > policy.point_budget:
             raise ValueError('telemetry result exceeds point budget')
@@ -2612,8 +2581,7 @@ def api_services():
     now = int(time.time())
     expire_cutoff = now - EXPIRE_DAYS * 86400
 
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         services = conn.execute(
             "SELECT s.port, s.title, s.first_seen, s.last_seen, s.is_online, s.state_since, "
             "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
@@ -2707,8 +2675,6 @@ def api_services():
                 "maintenance_attributed_seconds": maintenance_attributed_seconds,
             })
 
-        conn.close()
-
     return jsonify(result)
 
 
@@ -2728,8 +2694,7 @@ def api_events():
         except ValueError:
             since_ts = None
 
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         if since_ts is None:
             rows = conn.execute(
                 "SELECT e.id, e.ts, e.port, e.event_type, e.online, e.previous_online, "
@@ -2755,7 +2720,6 @@ def api_events():
                 "ORDER BY e.ts DESC, e.id DESC LIMIT ?",
                 (since_ts, limit),
             ).fetchall()
-        conn.close()
 
     return jsonify([dict(r) for r in rows])
 
@@ -2763,10 +2727,8 @@ def api_events():
 @app.route('/api/service-meta/<int:port>', methods=['GET', 'PUT'])
 def api_service_meta(port):
     if request.method == 'GET':
-        with _db_lock:
-            conn = get_db()
+        with _db_lock, database_access(DB_PATH) as conn:
             row = _service_meta_row(conn, port)
-            conn.close()
         if not row:
             return jsonify({"error": "service not found"}), 404
         return jsonify(row)
@@ -2806,10 +2768,8 @@ def api_service_meta(port):
             return jsonify({'error': maintenance_windows_error}), 400
 
     next_url = None
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         if not beacon_repositories.service_exists(conn, port):
-            conn.close()
             return jsonify({"error": "service not found"}), 404
 
         current = beacon_repositories.get_service_metadata_values(conn, port)
@@ -2831,7 +2791,6 @@ def api_service_meta(port):
                 current.get('healthy_statuses', '200-399') if 'healthy_statuses' not in payload else payload.get('healthy_statuses')
             )
         except ValueError as exc:
-            conn.close()
             return jsonify({"error": str(exc)}), 400
 
         has_url = 'url' in payload
@@ -2845,10 +2804,8 @@ def api_service_meta(port):
                 next_url = base_url
             _outbound_policy().plan(next_url, OutboundPurpose.SERVICE_PROBE)
         except OutboundPolicyError:
-            conn.close()
             return jsonify({'error': 'policy_error'}), 400
         except ValueError as exc:
-            conn.close()
             return jsonify({"error": str(exc)}), 400
 
         try:
@@ -2872,9 +2829,7 @@ def api_service_meta(port):
             conn.commit()
         except sqlite3.Error:
             conn.rollback()
-            conn.close()
             return jsonify({'error': 'unable to save service metadata'}), 503
-        conn.close()
 
     _record_event('meta_updated', port=port, details='service metadata updated')
     payload = dict(row or {})
@@ -2888,13 +2843,11 @@ def api_service_meta(port):
 
 @app.route("/api/thumbnail/<int:port>")
 def api_thumbnail(port):
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         row = conn.execute(
             "SELECT thumb_data, thumb_mime FROM services WHERE port=? AND thumb_source='screenshot'",
             (port,),
         ).fetchone()
-        conn.close()
 
     if row and row['thumb_data']:
         resp = make_response(bytes(row['thumb_data']))
@@ -2907,15 +2860,13 @@ def api_thumbnail(port):
 
 @app.route("/api/thumbnail-status")
 def api_thumbnail_status():
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT s.port, s.thumb_source, s.thumb_ts, s.thumb_attempt_ts, s.thumb_error, "
             "COALESCE(m.url, '') AS url "
             "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
             "ORDER BY s.port ASC"
         ).fetchall()
-        conn.close()
 
     result = []
     for row in rows:
@@ -2935,8 +2886,7 @@ def api_thumbnail_status():
 @app.route("/api/scan-status")
 def api_scan_status():
     now = int(time.time())
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         state = _read_scan_state(conn)
         heartbeat = _get_runtime_state('worker_heartbeat', {}, conn=conn)
         owner = _get_runtime_state('worker_owner', {}, conn=conn)
@@ -2944,7 +2894,6 @@ def api_scan_status():
         latest_request = conn.execute(
             "SELECT id, status, deadline_ts, error FROM scan_requests ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        conn.close()
     heartbeat_ts = owner.get('heartbeat_ts') if isinstance(owner, dict) else None
     if heartbeat_ts is None:
         heartbeat_ts = heartbeat.get('ts') if isinstance(heartbeat, dict) else None
@@ -2992,10 +2941,8 @@ def api_trigger_scan():
 @app.route('/healthz')
 def healthz():
     try:
-        with _db_lock:
-            conn = get_db()
+        with _db_lock, database_access(DB_PATH) as conn:
             conn.execute('SELECT 1').fetchone()
-            conn.close()
         return jsonify({'status': 'ok'})
     except Exception as exc:
         return jsonify({'status': 'error', 'error': exc.__class__.__name__}), 503
@@ -3015,12 +2962,10 @@ def readyz():
 def prometheus_metrics():
     if not ENABLE_PROMETHEUS:
         return '', 404
-    with _db_lock:
-        conn = get_db()
+    with _db_lock, database_access(DB_PATH) as conn:
         stats = conn.execute('SELECT * FROM system_stats WHERE id=1').fetchone()
         online = conn.execute('SELECT COUNT(*) AS n FROM services WHERE is_online=1').fetchone()['n']
         total = conn.execute('SELECT COUNT(*) AS n FROM services').fetchone()['n']
-        conn.close()
     if stats is None:
         return '# metrics are not ready\n', 503, {'Content-Type': 'text/plain; version=0.0.4'}
     lines = [
