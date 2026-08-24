@@ -188,6 +188,23 @@ def coverage(windows, now_epoch, tz_name):
     return True, max(covering_grace_ends)
 
 
+_MINUTES_PER_DAY = 1440  # the day length Window.start_minute's own 0..1439 range already assumes
+
+
+def _circular_minute_distance(a, b):
+    """Return the distance in minutes between two clock positions on a dial that closes at one day.
+
+    Both ``a`` and ``b`` are minute-of-day clock positions (0..1439, the same
+    unit ``Window.start_minute`` and an observation's ``start_minute`` use).
+    The result is bounded by half a day (0..720). Duration is deliberately
+    never passed through this helper -- a duration is a magnitude, not a
+    position on a dial, and comparing it circularly would make a five-minute
+    restart and a near-day-long outage look close together.
+    """
+    raw = abs(a - b)
+    return min(raw, _MINUTES_PER_DAY - raw)
+
+
 def _observation_from_pair(pair, tz):
     """Translate one down/recovered pair into a clustering observation.
 
@@ -232,16 +249,29 @@ def detect_suggestion(
     duration, then clustered greedily: for every observation used as an
     anchor, every other observation within ``start_tolerance_seconds`` of the
     anchor's start minute *and* within ``duration_tolerance_seconds`` of the
-    anchor's duration joins its cluster. Occurrences are counted by distinct
-    local calendar date, not by row, so several observations on the same
-    date count once. The largest qualifying cluster (by distinct-date count)
-    wins; ties keep the first one found. Returns ``None`` when no cluster
-    reaches ``MAINTENANCE_MIN_OCCURRENCES``.
+    anchor's duration joins its cluster. Start minutes are compared as clock
+    positions on a dial that closes at one day (via
+    ``_circular_minute_distance``), so a pattern whose start time itself
+    jitters across midnight clusters exactly as the identical jitter around
+    any other hour does; durations are compared as plain magnitudes, never
+    circularly. Occurrences are counted by distinct local calendar date, not
+    by row, so several observations on the same date count once. The largest
+    qualifying cluster (by distinct-date count) wins; ties keep the first one
+    found. Returns ``None`` when no cluster reaches
+    ``MAINTENANCE_MIN_OCCURRENCES``.
 
     The returned mapping carries only the observed occurrence count, the
     cluster's median start minute and median duration in whole minutes, and
     the all-seven-day weekday set (RESEARCH A3) -- no score, no threshold,
-    no internal cluster detail.
+    no internal cluster detail. The reported start minute is the cluster's
+    median computed on that same closed dial, relative to the winning
+    anchor's own start minute: each member's signed offset to the anchor is
+    taken on the dial, the offsets are median-averaged, and the result is
+    added back to the anchor and reduced onto the dial before rounding to a
+    whole minute. A naive linear median over a midnight-straddling cluster
+    would report a time near midday instead of near midnight -- confidently
+    wrong rather than merely silent -- so the median must close the dial too,
+    not just the distance test.
     """
     tz = resolve_timezone(tz_name)
     observations = []
@@ -251,23 +281,32 @@ def detect_suggestion(
             observations.append(observation)
 
     best_cluster = None
+    best_anchor = None
     best_occurrence_count = 0
     for anchor in observations:
         cluster = [
             o for o in observations
-            if abs(o['start_minute'] - anchor['start_minute']) * 60 <= start_tolerance_seconds
+            if _circular_minute_distance(o['start_minute'], anchor['start_minute']) * 60 <= start_tolerance_seconds
             and abs(o['duration_seconds'] - anchor['duration_seconds']) <= duration_tolerance_seconds
         ]
         occurrence_count = len({o['date'] for o in cluster})
         if occurrence_count >= MAINTENANCE_MIN_OCCURRENCES and occurrence_count > best_occurrence_count:
             best_cluster = cluster
+            best_anchor = anchor
             best_occurrence_count = occurrence_count
 
     if best_cluster is None:
         return None
+    anchor_start_minute = best_anchor['start_minute']
+    half_day = _MINUTES_PER_DAY // 2
+    offsets = [
+        ((o['start_minute'] - anchor_start_minute + half_day) % _MINUTES_PER_DAY) - half_day
+        for o in best_cluster
+    ]
+    circular_start_minute = int((anchor_start_minute + median(offsets)) % _MINUTES_PER_DAY)
     return {
         'occurrence_count': best_occurrence_count,
-        'start_minute': int(median(o['start_minute'] for o in best_cluster)),
+        'start_minute': circular_start_minute,
         'duration_minutes': int(median(o['duration_seconds'] for o in best_cluster) // 60),
         'weekdays': MAINTENANCE_SUGGESTION_WEEKDAYS,
     }
@@ -287,7 +326,10 @@ def suggestion_overlaps_enabled_window(suggestion, windows, *, start_tolerance_s
     redundant "confirm what you already confirmed" proposal while the
     detector itself still sees the evidence (RESEARCH Q3) -- a disabled
     window is not a confirmed pattern the operator already owns, so it is
-    never treated as overlapping.
+    never treated as overlapping. The start comparison closes the dial for
+    the same reason ``detect_suggestion``'s does (via
+    ``_circular_minute_distance``), so the two agree about what "near"
+    means across midnight; the duration comparison deliberately does not.
     """
     if not suggestion:
         return False
@@ -301,7 +343,7 @@ def suggestion_overlaps_enabled_window(suggestion, windows, *, start_tolerance_s
         window = window_from_row(row)
         if window is None or not window.enabled:
             continue
-        if abs(window.start_minute - suggestion_start) > tolerance_minutes:
+        if _circular_minute_distance(window.start_minute, suggestion_start) > tolerance_minutes:
             continue
         if abs(window.duration_minutes - suggestion_duration) > tolerance_minutes:
             continue

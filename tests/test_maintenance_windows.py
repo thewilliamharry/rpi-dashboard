@@ -278,6 +278,77 @@ class DetectorTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result['occurrence_count'], 3)
 
+    def test_a_nightly_pattern_straddling_midnight_clusters_and_names_a_time_near_midnight(self):
+        # Start times themselves jitter across midnight: 23:55, 00:00, 00:05,
+        # 23:58 on four consecutive calendar dates -- start_minute values
+        # [1435, 0, 5, 1438]. The raw (non-circular) maximum pairwise distance
+        # is 1438 minutes, far outside the 15-minute tolerance; the circular
+        # distance is at most 10 minutes, inside it.
+        pairs = [
+            _pair((2026, 1, 5), 23, 55, 30),
+            _pair((2026, 1, 6), 0, 0, 30),
+            _pair((2026, 1, 7), 0, 5, 30),
+            _pair((2026, 1, 8), 23, 58, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['occurrence_count'], 4)
+        # Exact integer, not a range or a "near midnight" proximity check --
+        # the circular median of [1435, 0, 5, 1438] relative to any of the
+        # four possible anchors is 1439 (verified by hand for every anchor
+        # during planning; re-derived here rather than trusted).
+        self.assertEqual(result['start_minute'], 1439)
+        self.assertEqual(
+            set(result.keys()),
+            {'occurrence_count', 'start_minute', 'duration_minutes', 'weekdays'},
+        )
+
+    def test_the_same_jitter_away_from_midnight_is_unchanged(self):
+        # The identical +-5-minute jitter shape, shifted to a mid-morning
+        # hour that never crosses the wrap: 03:55, 04:00, 04:05, 03:58 ->
+        # start_minute [235, 240, 245, 238]. This is the control that proves
+        # the fix is a no-op off the wrap, and it would catch an
+        # implementation that quietly rotates every answer rather than only
+        # correcting the midnight case.
+        pairs = [
+            _pair((2026, 1, 5), 3, 55, 30),
+            _pair((2026, 1, 6), 4, 0, 30),
+            _pair((2026, 1, 7), 4, 5, 30),
+            _pair((2026, 1, 8), 3, 58, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['occurrence_count'], 4)
+        self.assertEqual(result['start_minute'], 239)
+
+    def test_a_fixed_time_restart_just_before_midnight_still_clusters(self):
+        # Narrowing note: a FIXED-time 23:55 restart already clustered before
+        # this fix -- every observation's start_minute is identically 1435,
+        # so the raw distance is zero and only the recovery crosses midnight.
+        # This case passes before and after; recording it here is what stops
+        # a future reader from "widening" the fix to cover a case that never
+        # needed it.
+        pairs = [
+            _pair((2026, 1, 5), 23, 55, 30),
+            _pair((2026, 1, 6), 23, 55, 30),
+            _pair((2026, 1, 7), 23, 55, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start_minute'], 1435)
+
+    def test_durations_are_compared_as_magnitudes_not_clock_positions(self):
+        # Near-identical start times, but one duration is a handful of
+        # minutes and another is close to a full day -- the duration
+        # comparison must stay linear, so these must not cluster even though
+        # their start times are close on the dial.
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 5),
+            _pair((2026, 1, 6), 2, 1, 1430),
+            _pair((2026, 1, 7), 2, 2, 5),
+        ]
+        self.assertIsNone(self._detect(pairs))
+
 
 class SuggestionOverlapTests(unittest.TestCase):
     """Pure, framework-free suggestion_overlaps_enabled_window() behavior."""
@@ -309,6 +380,55 @@ class SuggestionOverlapTests(unittest.TestCase):
     def test_an_unrelated_second_pattern_on_the_same_port_does_not_overlap(self):
         suggestion = self._suggestion(start_minute=120, duration_minutes=30)
         window = _window_row(start_minute=800, duration_minutes=30, enabled=1)
+        self.assertFalse(
+            beacon_maintenance.suggestion_overlaps_enabled_window(
+                suggestion, [window], start_tolerance_seconds=900,
+            )
+        )
+
+    def test_a_midnight_straddling_cluster_is_withheld_by_an_enabled_window_across_the_boundary(self):
+        # Suggestion at 23:59 (minute 1439), enabled window at midnight
+        # (minute 0), comparable durations. Raw distance is 1439 minutes,
+        # far outside the 15-minute tolerance; circular distance is 1
+        # minute, well inside it. Verified against the shipped code during
+        # planning: this pair reports no overlap today.
+        suggestion = self._suggestion(start_minute=1439, duration_minutes=30)
+        window = _window_row(start_minute=0, duration_minutes=30, enabled=1)
+        self.assertTrue(
+            beacon_maintenance.suggestion_overlaps_enabled_window(
+                suggestion, [window], start_tolerance_seconds=900,
+            )
+        )
+
+    def test_a_midnight_straddling_cluster_is_still_offered_when_the_window_is_disabled(self):
+        # The identical midnight-straddling pair, but the window is
+        # disabled -- a disabled window is not a pattern the operator has
+        # confirmed, and the circular comparison must not quietly acquire
+        # the power to silence one.
+        suggestion = self._suggestion(start_minute=1439, duration_minutes=30)
+        window = _window_row(start_minute=0, duration_minutes=30, enabled=0)
+        self.assertFalse(
+            beacon_maintenance.suggestion_overlaps_enabled_window(
+                suggestion, [window], start_tolerance_seconds=900,
+            )
+        )
+
+    def test_a_window_far_from_the_suggestion_on_the_dial_still_does_not_withhold(self):
+        suggestion = self._suggestion(start_minute=120, duration_minutes=30)
+        window = _window_row(start_minute=800, duration_minutes=30, enabled=1)
+        self.assertFalse(
+            beacon_maintenance.suggestion_overlaps_enabled_window(
+                suggestion, [window], start_tolerance_seconds=900,
+            )
+        )
+
+    def test_durations_are_compared_as_magnitudes_in_the_withholding_rule(self):
+        # Start times a minute apart across the midnight boundary (within
+        # the circular tolerance), but durations a full day apart -- the
+        # duration comparison here is not circular either, so this must not
+        # overlap.
+        suggestion = self._suggestion(start_minute=1439, duration_minutes=5)
+        window = _window_row(start_minute=0, duration_minutes=1430, enabled=1)
         self.assertFalse(
             beacon_maintenance.suggestion_overlaps_enabled_window(
                 suggestion, [window], start_tolerance_seconds=900,
@@ -1961,6 +2081,49 @@ class SuggestionLifecycleTests(unittest.TestCase):
         self.assertEqual(advanced_response.status_code, 200)
         for service in advanced_response.get_json().get('services', []):
             self.assertNotIn('suggestion', service)
+
+    def test_the_detector_and_withholding_rule_agree_across_the_midnight_boundary(self):
+        # Proves the detector fix (Task 1) and the withholding fix (Task 2)
+        # agree through the live API, not merely in isolation: a
+        # midnight-straddling pattern is withheld while a matching enabled
+        # window exists, and offered -- with the exact circular start
+        # minute Task 1 established -- once that window is disabled.
+        port = 9361
+        self._insert_service(port)
+        self._freeze_clock(_epoch(2026, 1, 13, 12, 0, 0))
+        # Spaced two calendar days apart so each occurrence's recovery
+        # finishes well before the next one's down transition begins --
+        # otherwise the repository's sequential down/recovery pairing would
+        # misattribute recoveries across occurrences. The clock-time values
+        # (23:55, 00:00, 00:05, 23:58) are what matters for clustering, not
+        # the specific dates.
+        self._seed_occurrence(port, (2026, 1, 5), 23, 55, 30)
+        self._seed_occurrence(port, (2026, 1, 7), 0, 0, 30)
+        self._seed_occurrence(port, (2026, 1, 9), 0, 5, 30)
+        self._seed_occurrence(port, (2026, 1, 11), 23, 58, 30)
+        self._insert_window(
+            port=port, start_minute=0, duration_minutes=30,
+            weekdays='1,2,3,4,5,6,7', grace_minutes=0, enabled=1,
+        )
+
+        withheld_body = self._get_meta(port).get_json()
+        self.assertIn('suggestion', withheld_body)
+        self.assertIsNone(withheld_body['suggestion'])
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "UPDATE maintenance_windows SET enabled = 0 WHERE port = ?",
+                (port,),
+            )
+            conn.commit()
+            conn.close()
+
+        offered_body = self._get_meta(port).get_json()
+        offered_suggestion = offered_body.get('suggestion')
+        self.assertIsNotNone(offered_suggestion)
+        self.assertEqual(offered_suggestion['occurrence_count'], 4)
+        self.assertEqual(offered_suggestion['start_minute'], 1439)
 
 
 class SuggestionEvidenceTests(unittest.TestCase):
