@@ -83,6 +83,9 @@ class UiStateTests(unittest.TestCase):
         self.assertIn('Run a scan to look for configured services.', self.js)
         self.assertIn('no recent incidents', self.js)
 
+    def test_the_maintenance_editor_consumes_the_servers_published_default_grace(self):
+        self.assertIn('default_grace_minutes', self.js)
+
 
 class UiStateBrowserTests(unittest.TestCase):
     """Exercise the dependency-free dashboard against deterministic API fixtures."""
@@ -118,12 +121,13 @@ class UiStateBrowserTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _service_meta(port, *, windows=None, display_name='', critical=False, tags=None, healthy_statuses='200-399', suggestion=None):
+    def _service_meta(port, *, windows=None, display_name='', critical=False, tags=None, healthy_statuses='200-399', suggestion=None, default_grace_minutes=15):
         return {
             'port': port, 'display_name': display_name, 'url': f'http://127.0.0.1:{port}',
             'path': '/', 'critical': critical, 'pinned_order': port,
             'tags': tags or [], 'healthy_statuses': healthy_statuses,
             'windows': windows or [], 'suggestion': suggestion,
+            'default_grace_minutes': default_grace_minutes,
         }
 
     @staticmethod
@@ -254,6 +258,133 @@ class UiStateBrowserTests(unittest.TestCase):
             row.wait_for(state='visible', timeout=4_000)
             self.assertEqual(row.locator('.meta-window-grace').input_value(), '15')
             self.assertTrue(row.locator('.meta-window-start').evaluate('(node) => document.activeElement === node'))
+        finally:
+            page.close()
+
+    def test_the_add_control_prefills_the_servers_configured_default_grace(self):
+        """Also the per-window assertion: a stored window's own grace (5) differs from the
+        published default (45) and must render as stored, verbatim, unaffected by it."""
+        stored_window = {'start_minute': 60, 'duration_minutes': 30, 'weekdays': [1], 'grace_minutes': 5, 'enabled': True}
+        fixture = {
+            'services': [self._service(8232)],
+            'service_meta': {8232: self._service_meta(8232, windows=[stored_window], default_grace_minutes=45)},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-count').wait_for(state='visible', timeout=8_000)
+            stored_row = page.locator('.meta-window-row').first
+            self.assertEqual(stored_row.locator('.meta-window-grace').input_value(), '5')
+
+            page.locator('#meta-window-add').click()
+            new_row = page.locator('.meta-window-row').nth(1)
+            new_row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(new_row.locator('.meta-window-grace').input_value(), '45')
+        finally:
+            page.close()
+
+    def test_both_suggestion_actions_prefill_the_servers_configured_default_grace(self):
+        suggestion_a = {'occurrence_count': 3, 'start_minute': 60, 'duration_minutes': 20, 'weekdays': [1, 2, 3]}
+        suggestion_b = {'occurrence_count': 4, 'start_minute': 300, 'duration_minutes': 15, 'weekdays': [4]}
+        fixture = {
+            'services': [self._service(8233), self._service(8234)],
+            'service_meta': {
+                8233: self._service_meta(8233, windows=[], suggestion=suggestion_a, default_grace_minutes=30),
+                8234: self._service_meta(8234, windows=[], suggestion=suggestion_b, default_grace_minutes=30),
+            },
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').nth(0).click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-suggestion-confirm').click()
+            confirmed_row = page.locator('.meta-window-row').first
+            confirmed_row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(confirmed_row.locator('.meta-window-grace').input_value(), '30')
+            page.locator('#meta-cancel').click()
+
+            page.locator('.svc-edit').nth(1).click()
+            page.locator('#meta-suggestion').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-suggestion-adjust').click()
+            adjusted_row = page.locator('.meta-window-row').first
+            adjusted_row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(adjusted_row.locator('.meta-window-grace').input_value(), '30')
+            self.assertTrue(adjusted_row.locator('.meta-window-start').evaluate('(node) => document.activeElement === node'))
+        finally:
+            page.close()
+
+    def test_a_metadata_payload_without_the_default_grace_falls_back_to_the_documented_default(self):
+        meta_without_key = self._service_meta(8235, windows=[])
+        del meta_without_key['default_grace_minutes']
+        fixture = {
+            'services': [self._service(8235)],
+            'service_meta': {8235: meta_without_key},
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-window-add').click()
+            row = page.locator('.meta-window-row').first
+            row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(row.locator('.meta-window-grace').input_value(), '15')
+        finally:
+            page.close()
+
+        failed_fetch_fixture = {
+            'services': [self._service(8236)],
+            'service_meta': {8236: self._service_meta(8236, windows=[])},
+            'get_error': True,
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(failed_fetch_fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-window-add').click()
+            row = page.locator('.meta-window-row').first
+            row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(row.locator('.meta-window-grace').input_value(), '15')
+        finally:
+            page.close()
+
+    def test_a_later_failed_fetch_retains_the_previously_learned_default_grace(self):
+        """The complement of the fallback test: the binding is a deployment-wide fact, not
+        stale per-service data, so a later failing fetch must NOT reset a value already
+        learned from an earlier successful one (must_haves.truths / action step 3)."""
+        fixture = {
+            'services': [self._service(8237), self._service(8238)],
+            'service_meta': {
+                8237: self._service_meta(8237, windows=[], default_grace_minutes=50),
+                8238: self._service_meta(8238, windows=[]),
+            },
+        }
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        page.route('**/api/**', self._maintenance_route(fixture))
+        try:
+            page.goto(self.base_url, wait_until='networkidle')
+            page.locator('.svc-edit').nth(0).click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-window-add').click()
+            first_row = page.locator('.meta-window-row').first
+            first_row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(first_row.locator('.meta-window-grace').input_value(), '50')
+            page.locator('#meta-cancel').click()
+
+            fixture['get_error'] = True
+            page.locator('.svc-edit').nth(1).click()
+            page.locator('#meta-window-empty').wait_for(state='visible', timeout=8_000)
+            page.locator('#meta-window-add').click()
+            second_row = page.locator('.meta-window-row').first
+            second_row.wait_for(state='visible', timeout=4_000)
+            self.assertEqual(second_row.locator('.meta-window-grace').input_value(), '50')
         finally:
             page.close()
 
