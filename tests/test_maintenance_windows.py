@@ -278,6 +278,77 @@ class DetectorTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result['occurrence_count'], 3)
 
+    def test_a_nightly_pattern_straddling_midnight_clusters_and_names_a_time_near_midnight(self):
+        # Start times themselves jitter across midnight: 23:55, 00:00, 00:05,
+        # 23:58 on four consecutive calendar dates -- start_minute values
+        # [1435, 0, 5, 1438]. The raw (non-circular) maximum pairwise distance
+        # is 1438 minutes, far outside the 15-minute tolerance; the circular
+        # distance is at most 10 minutes, inside it.
+        pairs = [
+            _pair((2026, 1, 5), 23, 55, 30),
+            _pair((2026, 1, 6), 0, 0, 30),
+            _pair((2026, 1, 7), 0, 5, 30),
+            _pair((2026, 1, 8), 23, 58, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['occurrence_count'], 4)
+        # Exact integer, not a range or a "near midnight" proximity check --
+        # the circular median of [1435, 0, 5, 1438] relative to any of the
+        # four possible anchors is 1439 (verified by hand for every anchor
+        # during planning; re-derived here rather than trusted).
+        self.assertEqual(result['start_minute'], 1439)
+        self.assertEqual(
+            set(result.keys()),
+            {'occurrence_count', 'start_minute', 'duration_minutes', 'weekdays'},
+        )
+
+    def test_the_same_jitter_away_from_midnight_is_unchanged(self):
+        # The identical +-5-minute jitter shape, shifted to a mid-morning
+        # hour that never crosses the wrap: 03:55, 04:00, 04:05, 03:58 ->
+        # start_minute [235, 240, 245, 238]. This is the control that proves
+        # the fix is a no-op off the wrap, and it would catch an
+        # implementation that quietly rotates every answer rather than only
+        # correcting the midnight case.
+        pairs = [
+            _pair((2026, 1, 5), 3, 55, 30),
+            _pair((2026, 1, 6), 4, 0, 30),
+            _pair((2026, 1, 7), 4, 5, 30),
+            _pair((2026, 1, 8), 3, 58, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['occurrence_count'], 4)
+        self.assertEqual(result['start_minute'], 239)
+
+    def test_a_fixed_time_restart_just_before_midnight_still_clusters(self):
+        # Narrowing note: a FIXED-time 23:55 restart already clustered before
+        # this fix -- every observation's start_minute is identically 1435,
+        # so the raw distance is zero and only the recovery crosses midnight.
+        # This case passes before and after; recording it here is what stops
+        # a future reader from "widening" the fix to cover a case that never
+        # needed it.
+        pairs = [
+            _pair((2026, 1, 5), 23, 55, 30),
+            _pair((2026, 1, 6), 23, 55, 30),
+            _pair((2026, 1, 7), 23, 55, 30),
+        ]
+        result = self._detect(pairs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start_minute'], 1435)
+
+    def test_durations_are_compared_as_magnitudes_not_clock_positions(self):
+        # Near-identical start times, but one duration is a handful of
+        # minutes and another is close to a full day -- the duration
+        # comparison must stay linear, so these must not cluster even though
+        # their start times are close on the dial.
+        pairs = [
+            _pair((2026, 1, 5), 2, 0, 5),
+            _pair((2026, 1, 6), 2, 1, 1430),
+            _pair((2026, 1, 7), 2, 2, 5),
+        ]
+        self.assertIsNone(self._detect(pairs))
+
 
 class SuggestionOverlapTests(unittest.TestCase):
     """Pure, framework-free suggestion_overlaps_enabled_window() behavior."""
