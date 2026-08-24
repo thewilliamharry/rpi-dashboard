@@ -342,9 +342,26 @@ class DetectorTests(unittest.TestCase):
         # minutes and another is close to a full day -- the duration
         # comparison must stay linear, so these must not cluster even though
         # their start times are close on the dial.
+        #
+        # The 1438 is load-bearing and was chosen by measurement, not by
+        # eye. This gate only earns its name if it goes red against the
+        # defect it describes -- duration routed through
+        # _circular_minute_distance like the start comparison is. That
+        # defect clusters these three only when the circular distance
+        # between 5 and the long duration falls within
+        # duration_tolerance_seconds (600s = 10 minutes). At the original
+        # 1430 the circular distance is 15 minutes, outside the tolerance,
+        # so the defective code also returned None and this assertion could
+        # not fail -- it passed against the very shape it was written to
+        # catch (T-03.1-94). At 1438 the circular distance is 7 minutes,
+        # inside the tolerance with margin, so the defect now clusters and
+        # turns this red; the linear distance is still 1433 minutes, so the
+        # correct code is unaffected. Margin matters: 1435 would sit at
+        # exactly 10 minutes and the gate's non-vacuity would then hinge on
+        # the comparison being <= rather than <.
         pairs = [
             _pair((2026, 1, 5), 2, 0, 5),
-            _pair((2026, 1, 6), 2, 1, 1430),
+            _pair((2026, 1, 6), 2, 1, 1438),
             _pair((2026, 1, 7), 2, 2, 5),
         ]
         self.assertIsNone(self._detect(pairs))
