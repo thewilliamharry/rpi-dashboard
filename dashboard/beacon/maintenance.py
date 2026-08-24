@@ -326,7 +326,10 @@ def suggestion_overlaps_enabled_window(suggestion, windows, *, start_tolerance_s
     redundant "confirm what you already confirmed" proposal while the
     detector itself still sees the evidence (RESEARCH Q3) -- a disabled
     window is not a confirmed pattern the operator already owns, so it is
-    never treated as overlapping.
+    never treated as overlapping. The start comparison closes the dial for
+    the same reason ``detect_suggestion``'s does (via
+    ``_circular_minute_distance``), so the two agree about what "near"
+    means across midnight; the duration comparison deliberately does not.
     """
     if not suggestion:
         return False
@@ -340,7 +343,7 @@ def suggestion_overlaps_enabled_window(suggestion, windows, *, start_tolerance_s
         window = window_from_row(row)
         if window is None or not window.enabled:
             continue
-        if abs(window.start_minute - suggestion_start) > tolerance_minutes:
+        if _circular_minute_distance(window.start_minute, suggestion_start) > tolerance_minutes:
             continue
         if abs(window.duration_minutes - suggestion_duration) > tolerance_minutes:
             continue
