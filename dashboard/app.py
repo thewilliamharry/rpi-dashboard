@@ -2315,6 +2315,7 @@ def _service_meta_row(conn, port):
         start_tolerance_seconds=SETTINGS.maintenance_start_tolerance_seconds,
         duration_tolerance_seconds=SETTINGS.maintenance_duration_tolerance_seconds,
         lookback_days=SETTINGS.maintenance_suggestion_lookback_days,
+        default_grace_minutes=SETTINGS.maintenance_default_grace_minutes,
     )
 
 

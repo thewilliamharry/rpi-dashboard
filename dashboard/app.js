@@ -408,7 +408,13 @@ const MAINTENANCE_WEEKDAYS = [
   {abbr: 'Sa', label: 'Saturday', iso: 6},
   {abbr: 'Su', label: 'Sunday', iso: 7},
 ];
-const MAINTENANCE_DEFAULT_GRACE_MINUTES = 15;
+// The fail-closed fallback used until the server's configured default_grace_minutes
+// arrives, and whenever a metadata fetch fails outright. This deliberately matches
+// the server's own documented default (config.py) so the two cannot drift apart
+// silently. Once a fetch has successfully published a value, it is retained here
+// -- a later failed fetch must NOT reset it, because the setting is a deployment-wide
+// fact (SETTINGS.maintenance_default_grace_minutes), not stale per-service data.
+let currentDefaultGraceMinutes = 15;
 const MAINTENANCE_GRACE_HELP = 'How long the service may stay down after this window ends before Beacon raises a real outage.';
 let currentSuggestion = null;
 
@@ -494,7 +500,7 @@ function addMaintenanceWindowRow(values) {
   graceInput.type = 'number';
   graceInput.min = '0';
   graceInput.className = 'meta-window-grace';
-  graceInput.value = data.grace_minutes === undefined ? String(MAINTENANCE_DEFAULT_GRACE_MINUTES) : String(data.grace_minutes);
+  graceInput.value = data.grace_minutes === undefined ? String(currentDefaultGraceMinutes) : String(data.grace_minutes);
   graceField.append(
     Object.assign(document.createElement('span'), {className: 'meta-label', textContent: 'Grace period (minutes)'}),
     graceInput,
@@ -579,6 +585,12 @@ async function loadMaintenanceWindowsForEditor(service) {
     const meta = await apiFetch(`/api/service-meta/${service.port}`);
     windows = meta.windows || [];
     suggestion = meta.suggestion || null;
+    // Server-global setting, not per-service: a value already learned from a
+    // previous successful fetch is deliberately retained if a later fetch for
+    // a different service fails (see the comment on the binding's declaration).
+    if (Number.isFinite(meta.default_grace_minutes) && meta.default_grace_minutes >= 0) {
+      currentDefaultGraceMinutes = meta.default_grace_minutes;
+    }
   } catch (_) {
     windows = service.windows || [];
   }
@@ -629,7 +641,7 @@ function confirmMaintenanceSuggestion() {
     start_minute: currentSuggestion.start_minute,
     duration_minutes: currentSuggestion.duration_minutes,
     weekdays: currentSuggestion.weekdays,
-    grace_minutes: MAINTENANCE_DEFAULT_GRACE_MINUTES,
+    grace_minutes: currentDefaultGraceMinutes,
     enabled: true,
   });
   updateMaintenanceWindowCount();
@@ -642,7 +654,7 @@ function adjustMaintenanceSuggestion() {
     start_minute: currentSuggestion.start_minute,
     duration_minutes: currentSuggestion.duration_minutes,
     weekdays: currentSuggestion.weekdays,
-    grace_minutes: MAINTENANCE_DEFAULT_GRACE_MINUTES,
+    grace_minutes: currentDefaultGraceMinutes,
     enabled: true,
   });
   updateMaintenanceWindowCount();
