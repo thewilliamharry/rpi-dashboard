@@ -778,6 +778,134 @@ class AttributionTests(unittest.TestCase):
         seconds = beacon_maintenance.attributed_downtime_seconds([interval], [bad_row], 'UTC')
         self.assertEqual(seconds, 0)
 
+    # G-03.1-71 / 03.1-REVIEW.md WR-05: the anchor-step budget used to be a
+    # fixed constant (64) that bounded boundary discovery to ~129 days
+    # regardless of the interval asked for. These four tests pin the fix: a
+    # budget derived from the interval itself, an absolute ceiling that is
+    # honest about its reach and reports itself when it binds, and a
+    # measured cost bound so correctness at long intervals is not paid for
+    # with an unservable endpoint on a Pi.
+    #
+    # All four use a daily, all-weekday, 60-minute, zero-grace window and an
+    # interval that starts and ends at local noon -- a time never covered by
+    # this window -- so every occurrence inside the interval is fully
+    # contained and the expected total is exactly (interval length in days)
+    # hours; the interval's own start instant is provably uncovered, which
+    # is what makes the shipped (pre-fix) bound's failure mode an
+    # under-count rather than an accidental over-count from a lucky
+    # boundary alignment.
+
+    def _noon_aligned_daily_window_interval(self, days):
+        start = _epoch(2026, 1, 5, 0, 0, 0) + 43200  # a Monday at local noon
+        row = _window_row(
+            start_minute=0, duration_minutes=60, weekdays='1,2,3,4,5,6,7', grace_minutes=0,
+        )
+        return row, (start, start + days * 86400)
+
+    def test_an_offline_interval_longer_than_the_shipped_anchor_bound_is_fully_attributed(self):
+        # Planning measured 150d -> 150.0h and 400d -> 400.0h against the
+        # fixed derivation below, versus 129.0h for both against the shipped
+        # (pre-fix) bound of 64 steps -- the plateau documented in
+        # 03.1-REVIEW.md WR-05 and G-03.1-71 (2N+1 = 129 days at N=64;
+        # truncation begins at 130 days).
+        for days in (150, 400):
+            with self.subTest(days=days):
+                row, interval = self._noon_aligned_daily_window_interval(days)
+                # Expected total derived from the window's own arithmetic:
+                # one fully-contained 60-minute occurrence per day across
+                # the interval (see the noon-alignment note above), never a
+                # pasted number.
+                expected_seconds = days * 3600
+                seconds = beacon_maintenance.attributed_downtime_seconds(
+                    [interval], [row], 'UTC',
+                )
+                self.assertEqual(seconds, expected_seconds)
+
+    def _natural_anchor_iterations(self, interval_start, interval_end):
+        """Independent, non-formula cross-check: literally walk the anchor.
+
+        A separate, deliberately naive re-implementation of
+        ``_covering_boundaries``'s own loop condition (not a call to
+        ``_anchor_step_budget``), so this test cannot pass merely because it
+        recomputes the same closed-form expression the production code
+        uses.
+        """
+        step_seconds = beacon_maintenance.MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS * 86400
+        anchor = interval_end
+        count = 0
+        while anchor >= interval_start - 86400:
+            anchor -= step_seconds
+            count += 1
+        return count
+
+    def test_the_anchor_step_budget_is_derived_from_the_interval_it_must_cover(self):
+        interval_end = _epoch(2026, 1, 5, 0, 0, 0) + 43200
+        budgets = []
+        for days in (7, 30, 150, 400, 1000):
+            interval_start = interval_end - days * 86400
+            natural = self._natural_anchor_iterations(interval_start, interval_end)
+            budget = beacon_maintenance._anchor_step_budget(interval_start, interval_end)
+            # Sufficiency: the derived budget must be enough steps that the
+            # loop terminates naturally (via its own anchor condition)
+            # rather than being cut off by the budget.
+            self.assertGreaterEqual(
+                budget, natural,
+                f'budget {budget} insufficient for a {days}-day interval needing {natural} steps',
+            )
+            budgets.append(budget)
+        # Structural: the budget must actually grow with the interval, not
+        # merely be "big enough" for the lengths tested here -- a future
+        # change that raises the fixed constant to a bigger fixed number
+        # would satisfy the sufficiency assertions above for these specific
+        # lengths but fail this one, since a constant does not grow.
+        self.assertEqual(budgets, sorted(budgets))
+        self.assertLess(budgets[0], budgets[-1])
+
+    def test_an_interval_beyond_the_absolute_ceiling_says_so_instead_of_returning_a_short_number(self):
+        row, interval = self._noon_aligned_daily_window_interval(400)
+        original_ceiling = beacon_maintenance._ATTRIBUTION_MAX_ANCHOR_STEPS
+        # Reduce the ceiling for the duration of this test rather than
+        # constructing a multi-decade fixture, and restore it in a finally
+        # regardless of outcome.
+        beacon_maintenance._ATTRIBUTION_MAX_ANCHOR_STEPS = 3
+        try:
+            with self.assertLogs('beacon.maintenance', level='WARNING') as captured:
+                seconds = beacon_maintenance.attributed_downtime_seconds(
+                    [interval], [row], 'UTC',
+                )
+        finally:
+            beacon_maintenance._ATTRIBUTION_MAX_ANCHOR_STEPS = original_ceiling
+        # No-raise: attributed_downtime_seconds still returns an integer --
+        # both its callers (get_current_diagnosis and app.py's /api/services
+        # path) consume an integer, and a live deployment must not acquire
+        # a new failure mode from a long retention setting.
+        self.assertIsInstance(seconds, int)
+        self.assertEqual(len(captured.records), 1)
+        message = captured.records[0].getMessage()
+        # Non-silence: the warning names both the requested extent (400.0
+        # days) and the actually-covered extent (2*3+1 = 7 days at the
+        # reduced ceiling of 3 steps), so the log line is diagnostic rather
+        # than decorative.
+        self.assertIn('400.0 days', message)
+        self.assertIn('7 days', message)
+
+    def test_a_long_attribution_stays_within_its_stated_cost_ceiling(self):
+        # Planning measured ~0.011s for a single-port 400-day attribution
+        # (and ~0.091s for eight ports at that length) on development
+        # hardware. A ceiling of 2.0s is roughly two orders of magnitude of
+        # headroom for slower ARM hardware while still failing loudly on a
+        # quadratic blow-up, which would land in the tens of seconds or
+        # worse -- both edges reasoned, not an arbitrary round number.
+        cost_ceiling_seconds = 2.0
+        row, interval = self._noon_aligned_daily_window_interval(400)
+        timings = []
+        for _ in range(3):
+            started = time.monotonic()
+            beacon_maintenance.attributed_downtime_seconds([interval], [row], 'UTC')
+            timings.append(time.monotonic() - started)
+        for elapsed in timings:
+            self.assertLess(elapsed, cost_ceiling_seconds)
+
 
 class SettingsBoundsTests(unittest.TestCase):
     """The maintenance grace prefill and per-port window cap are safe-default Settings fields.

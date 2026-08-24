@@ -1,15 +1,21 @@
 """Framework-free coverage evaluation for planned maintenance windows.
 
-This module imports only ``dataclasses``, ``datetime``, and ``zoneinfo`` --
-no SQLite driver, no Flask, nothing from the application edge module -- which
-keeps it importable by worker jobs and unit tests alike, matching the
-"operations interface" discipline ``monitoring.py`` already establishes.
+This module imports only ``dataclasses``, ``datetime``, ``logging``,
+``statistics``, and ``zoneinfo`` -- all standard library, no SQLite driver,
+no Flask, nothing from the application edge module -- which keeps it
+importable by worker jobs and unit tests alike, matching the "operations
+interface" discipline ``monitoring.py`` already establishes.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import median
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# Matches dashboard/beacon/migrations.py:25's established package logger
+# naming style (``beacon.<module>``).
+log = logging.getLogger('beacon.maintenance')
 
 
 # The single suppression tag literal every other module references rather
@@ -351,14 +357,54 @@ def suggestion_overlaps_enabled_window(suggestion, windows, *, start_tolerance_s
     return False
 
 
-# A generous, bounded cap on how many times boundary discovery may step its
-# search anchor backward for a single window inside a single offline
-# interval -- guards against a pathologically long offline interval turning
-# attribution into an unbounded loop, while comfortably covering any
-# interval this codebase's retention windows can produce (each step covers
-# MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS days, so 64 steps covers well over a
-# year).
-_ATTRIBUTION_MAX_ANCHOR_STEPS = 64
+# The step budget _covering_boundaries actually uses per call is DERIVED
+# (see _anchor_step_budget below) from the interval it must cover, so it
+# cannot fall behind the interval the way a fixed constant did. This is the
+# absolute anti-runaway ceiling that remains: the derived budget is capped
+# at this value so a pathologically long or malformed interval cannot turn
+# boundary discovery into an unbounded loop. Each step covers
+# MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS calendar days of NEW ground (the
+# first step covers MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS + 1 days, every
+# step after it covers MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS more), so N
+# steps reach MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS * N + 1 days -- the
+# PREVIOUS value of this constant, 64, actually reached 2*64+1 = 129 days,
+# not the "well over a year" its old comment claimed (365 days would have
+# needed 183 steps). This value, 4096, reaches 2*4096+1 = 8193 days
+# (~22.4 years), far beyond any EXPIRE_DAYS an operator would reasonably
+# configure. If the derived budget for a given interval ever exceeds this
+# ceiling, _covering_boundaries logs a named warning (naming the requested
+# and the actually-covered extent) and still returns normally rather than
+# raising or truncating silently -- see the non-silence note on
+# _covering_boundaries below.
+#
+# EXPIRE_DAYS is deliberately NOT capped or clamped in
+# dashboard/beacon/config.py to fit this bound. Deriving the working budget
+# per interval (below) removes the need, and clamping an operator's
+# configured retention to fit an internal loop bound would be a second
+# silent truncation one layer down -- exactly the failure mode this fix
+# eliminates, just moved one layer out.
+_ATTRIBUTION_MAX_ANCHOR_STEPS = 4096
+
+
+def _anchor_step_budget(interval_start, interval_end):
+    """Return the number of anchor steps needed to walk ``[interval_start, interval_end)`` in full.
+
+    Derived directly from ``_covering_boundaries``'s own loop termination
+    arithmetic -- the loop's real end condition is
+    ``anchor >= interval_start - 86400``, stepping ``anchor`` backward by
+    ``MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS * 86400`` seconds each time -- so
+    this is not a restated days formula that could drift out of sync with
+    the loop; it is computed from the same span and the same stride the loop
+    itself walks. The span the anchor must traverse, starting at
+    ``interval_end`` and ending once it drops below
+    ``interval_start - 86400``, divided by the stride, plus the one step the
+    anchor starts on, plus one step of slack for integer-division rounding.
+    """
+    step_seconds = MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS * 86400
+    span = interval_end - (interval_start - 86400)
+    if span <= 0:
+        return 1
+    return span // step_seconds + 2
 
 
 def _covering_boundaries(window, interval_start, interval_end, tz):
@@ -366,14 +412,35 @@ def _covering_boundaries(window, interval_start, interval_end, tz):
     ``[interval_start, interval_end)``, discovered by stepping the boundary
     search anchor backward in ``MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS``-sized
     strides so an interval spanning more calendar days than one search
-    covers is still searched exhaustively, bounded by
-    ``_ATTRIBUTION_MAX_ANCHOR_STEPS``.
+    covers is still searched exhaustively. The number of steps permitted is
+    ``_anchor_step_budget(interval_start, interval_end)`` -- derived from the
+    interval this call must actually cover, not a fixed constant -- capped
+    at the absolute anti-runaway ceiling ``_ATTRIBUTION_MAX_ANCHOR_STEPS``.
+    When the derived budget exceeds that ceiling, the only circumstance
+    under which a boundary can now be missed, a named warning is logged
+    identifying both the requested and the actually-covered extent before
+    the (necessarily incomplete) walk proceeds -- this function still
+    returns normally in that case rather than raising, since its caller,
+    ``attributed_downtime_seconds``, returns an integer to callers that
+    must never see a new exception type on a long retention setting.
     """
     seen = set()
     anchor = interval_end
     step_seconds = MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS * 86400
     steps = 0
-    while anchor >= interval_start - 86400 and steps < _ATTRIBUTION_MAX_ANCHOR_STEPS:
+    required_steps = _anchor_step_budget(interval_start, interval_end)
+    max_steps = min(required_steps, _ATTRIBUTION_MAX_ANCHOR_STEPS)
+    if required_steps > _ATTRIBUTION_MAX_ANCHOR_STEPS:
+        requested_days = (interval_end - interval_start) / 86400
+        covered_days = MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS * _ATTRIBUTION_MAX_ANCHOR_STEPS + 1
+        log.warning(
+            'Maintenance attribution boundary discovery hit its absolute anchor-step '
+            'ceiling (%d steps): the interval requested spans approximately %.1f days, '
+            'but only the most recent %d days could be walked. Maintenance occurrences '
+            'older than that inside this interval will not be attributed.',
+            _ATTRIBUTION_MAX_ANCHOR_STEPS, requested_days, covered_days,
+        )
+    while anchor >= interval_start - 86400 and steps < max_steps:
         for start_epoch in _local_occurrence_epochs(window, anchor, tz):
             grace_end = start_epoch + (window.duration_minutes + window.grace_minutes) * 60
             if grace_end <= interval_start or start_epoch >= interval_end:
