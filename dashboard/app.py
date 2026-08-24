@@ -1003,7 +1003,6 @@ def _thumb_error(exc):
 
 def _legacy_screenshot_service(port, target_url=None):
     """Capture a service screenshot using Chromium. Returns (bytes, mime, error)."""
-    _screenshot_sem.acquire()
     policy = _outbound_policy()
     try:
         navigate_url = _normalize_service_url(target_url, port) if target_url else _default_service_url(port)
@@ -1013,6 +1012,11 @@ def _legacy_screenshot_service(port, target_url=None):
         return None, None, 'policy_error'
     except ValueError:
         navigate_url = _default_service_url(port)
+    # Acquire only once no path can still return before the `finally` below
+    # releases: planning refuses a target by returning, and a return between
+    # acquire() and that finally leaks the single permit permanently.
+    # Kept above `started` so the browser budget still excludes queue wait.
+    _screenshot_sem.acquire()
     context = None
     started = time.monotonic()
     deadline = started + PREVIEW_BROWSER_BUDGET_MS / 1000

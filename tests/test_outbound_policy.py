@@ -583,6 +583,78 @@ class OutboundPolicyTests(unittest.TestCase):
                 self.assertTrue(proxy._slots.acquire(blocking=False))
                 proxy._slots.release()
 
+    def test_a_refused_preview_target_releases_the_screenshot_permit(self):
+        """A planning refusal must not leak the single browser permit.
+
+        `_legacy_screenshot_service` serializes Chromium behind a
+        `Semaphore(1)`. The refusal path returns before the browser work
+        begins, so if the permit is taken before that return, one refused
+        target wedges every later preview in the process for good -- and,
+        because a block is not an exception, the worker's admission drain
+        never completes either. Mirrors the PolicyProxy slot discipline above.
+
+        Each case runs against a fresh semaphore, and availability is checked
+        BEFORE each call, so a leak fails loudly instead of hanging the suite
+        on the blocking acquire it causes.
+        """
+        from dashboard import app as beacon_app
+
+        class _RefusingPolicy:
+            def __init__(self, reason):
+                self.reason = reason
+
+            def plan(self, url, purpose):
+                raise OutboundPolicyError(self.reason)
+
+        # Both refusal reasons a normalized local target can genuinely draw:
+        # a transient LAN/mDNS resolution failure, and the rebinding answer
+        # the outbound policy exists to reject.
+        for reason in ('resolution_failed', 'resolved_address_not_allowed'):
+            with self.subTest(reason=reason):
+                sem = threading.Semaphore(1)
+                with patch.object(beacon_app, '_screenshot_sem', sem), \
+                        patch.object(beacon_app, '_outbound_policy',
+                                     return_value=_RefusingPolicy(reason)):
+                    result = beacon_app._legacy_screenshot_service(9999)
+
+                self.assertEqual(result, (None, None, 'policy_error'))
+                released = sem.acquire(blocking=False)
+                if released:
+                    sem.release()
+                self.assertTrue(released, f'permit leaked after a {reason} refusal')
+
+    def test_repeated_refused_preview_targets_leave_capacity_for_a_real_capture(self):
+        """Refusals must not accumulate -- capacity survives a run of them.
+
+        A leak is permanent, so the second call onward would block forever on
+        the unfixed code. Availability is asserted before each call so this
+        reports the leak rather than hanging.
+        """
+        from dashboard import app as beacon_app
+
+        class _RefusingPolicy:
+            def plan(self, url, purpose):
+                raise OutboundPolicyError('resolution_failed')
+
+        sem = threading.Semaphore(1)
+        with patch.object(beacon_app, '_screenshot_sem', sem), \
+                patch.object(beacon_app, '_outbound_policy',
+                             return_value=_RefusingPolicy()):
+            for attempt in range(5):
+                free = sem.acquire(blocking=False)
+                if free:
+                    sem.release()
+                self.assertTrue(
+                    free,
+                    f'permit already exhausted before refusal {attempt + 1}',
+                )
+                beacon_app._legacy_screenshot_service(9999)
+
+        remaining = sem.acquire(blocking=False)
+        if remaining:
+            sem.release()
+        self.assertTrue(remaining, 'permits exhausted by repeated refusals')
+
     def test_repeated_pre_relay_failures_leave_capacity_for_a_real_proxy_get(self):
         with _LocalOrigin() as origin, PolicyProxy(
                 OutboundPolicy(self.settings, resolver=_resolver('127.0.0.1')),
