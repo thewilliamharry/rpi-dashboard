@@ -40,6 +40,7 @@ def _suggestion_response(suggestion):
 def metadata_response(
     conn, port, *, safe_url, path_from_url, parse_tags,
     now_epoch, tz_name, start_tolerance_seconds, duration_tolerance_seconds, lookback_days,
+    default_grace_minutes,
 ):
     """Translate a repository row into the established metadata response shape.
 
@@ -49,7 +50,10 @@ def metadata_response(
     port already has enabled (RESEARCH Q3) so the operator is never asked to
     confirm what they already own. The ``suggestion`` key is always present:
     a mapping when a qualifying pattern exists, ``None`` otherwise -- an
-    absence, never an empty-state object.
+    absence, never an empty-state object. The ``default_grace_minutes`` key
+    is likewise always present: the deployment's configured default grace,
+    in whole minutes, which is the prefill the editor offers for a NEW row
+    -- it is never applied to a stored window's own grace value.
     """
     row = repositories.get_service_metadata(conn, port)
     if not row:
@@ -60,6 +64,7 @@ def metadata_response(
     row['critical'] = bool(row.get('critical'))
     stored_windows = repositories.get_maintenance_windows(conn, port)
     row['windows'] = [_window_response(window) for window in stored_windows]
+    row['default_grace_minutes'] = int(default_grace_minutes)
 
     since_ts = int(now_epoch) - int(lookback_days) * 86400
     evidence = repositories.get_maintenance_suggestion_evidence(conn, port, since_ts=since_ts)

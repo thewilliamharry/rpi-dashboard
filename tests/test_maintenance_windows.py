@@ -660,7 +660,14 @@ class AttributionTests(unittest.TestCase):
 
 
 class SettingsBoundsTests(unittest.TestCase):
-    """The maintenance grace prefill and per-port window cap are safe-default Settings fields."""
+    """The maintenance grace prefill and per-port window cap are safe-default Settings fields.
+
+    These two assertions cover the PARSE only -- that ``Settings`` recovers a safe
+    default from a missing or malformed environment value. They do not prove the
+    parsed value reaches anything: see ``DefaultGraceMetadataTests`` below for the
+    behavioural proof that the configured default grace, and its fail-closed
+    fallback, actually reach the metadata payload the editor reads (G-03.1-69).
+    """
 
     def test_the_default_grace_prefill_and_window_cap_have_defaults(self):
         settings = load_settings({})
@@ -722,6 +729,73 @@ class MetadataPayloadTests(unittest.TestCase):
         populated_row = self._meta_row(port)
         self.assertEqual(len(populated_row['windows']), 1)
         self.assertIsInstance(populated_row['windows'][0], dict)
+
+
+class DefaultGraceMetadataTests(unittest.TestCase):
+    """The configured default grace reaches the metadata payload the editor reads.
+
+    Each test here reloads the app with its own environment, because the value
+    under test (``MAINTENANCE_DEFAULT_GRACE_MINUTES``) must differ per test. The
+    environment key is always restored via ``addCleanup`` so no later test -- in
+    this class or any other -- inherits a value set here.
+    """
+
+    def _load(self, extra_env):
+        appmod, db_path = load_app(extra_env)
+        self.addCleanup(cleanup_db, db_path)
+        for key in extra_env:
+            self.addCleanup(os.environ.pop, key, None)
+        return appmod
+
+    def _insert_service(self, appmod, port):
+        _insert_meta_service(appmod, port)
+
+    def test_the_metadata_response_publishes_the_configured_default_grace(self):
+        appmod = self._load({'MAINTENANCE_DEFAULT_GRACE_MINUTES': '45'})
+        port = 9301
+        self._insert_service(appmod, port)
+        client = appmod.app.test_client()
+
+        response = client.get(f'/api/service-meta/{port}')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['default_grace_minutes'], 45)
+        self.assertIsInstance(body['default_grace_minutes'], int)
+        self.assertNotIsInstance(body['default_grace_minutes'], bool)
+
+    def test_a_malformed_default_grace_environment_value_publishes_the_documented_default(self):
+        appmod = self._load({'MAINTENANCE_DEFAULT_GRACE_MINUTES': 'not-a-number'})
+        port = 9302
+        self._insert_service(appmod, port)
+        client = appmod.app.test_client()
+
+        response = client.get(f'/api/service-meta/{port}')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['default_grace_minutes'], 15)
+
+    def test_a_stored_windows_own_grace_is_not_replaced_by_the_published_default(self):
+        appmod = self._load({})
+        port = 9303
+        self._insert_service(appmod, port)
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            beacon_repositories.upsert_maintenance_windows(
+                conn, port=port, windows=[_window_payload(grace_minutes=5)], now=1_700_000_000,
+            )
+            conn.commit()
+            conn.close()
+        client = appmod.app.test_client()
+
+        response = client.get(f'/api/service-meta/{port}')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['default_grace_minutes'], 15)
+        self.assertEqual(len(body['windows']), 1)
+        self.assertEqual(body['windows'][0]['grace_minutes'], 5)
 
 
 def _insert_meta_service(appmod, port):
