@@ -274,7 +274,7 @@ Plans:
 **Goal:** The operator can confirm or define expected recurring service restarts so Beacon suppresses routine transition noise without hiding failed probes, reducing uptime impact, or overlooking an overrun.
 **Requirements**: MNT-01, MNT-02, MNT-03, MNT-04
 **Depends on:** Phase 3
-**Plans:** 16/18 plans executed (10 original + 3 gap-closure plans for G-03.1-2 + 2 gap-closure round-3 plans, all executed 2026-08-23 + 3 gap-closure round-4 plans, planned 2026-08-24, pending — 03.1-UAT.md's human dispositions of 03.1-REVIEW.md WR-03, WR-04 and WR-05 produced gaps G-03.1-69, G-03.1-70 and G-03.1-71, all decided "fix now")
+**Plans:** 17/18 plans executed (10 original + 3 gap-closure plans for G-03.1-2 + 2 gap-closure round-3 plans, all executed 2026-08-23 + 3 gap-closure round-4 plans, planned 2026-08-24, pending — 03.1-UAT.md's human dispositions of 03.1-REVIEW.md WR-03, WR-04 and WR-05 produced gaps G-03.1-69, G-03.1-70 and G-03.1-71, all decided "fix now")
 
 **Success Criteria** (what must be TRUE):
 
@@ -329,7 +329,7 @@ Plans:
 **Gap closure round 4 (after 03.1-UAT.md human dispositions of 03.1-REVIEW.md's three remaining Warnings, all decided "fix now" 2026-08-24 — G-03.1-69, a configuration knob parsed and validated with zero consumers; G-03.1-70, midnight wraparound in the suggestion detector; G-03.1-71, an attribution bound covering 129 days behind a comment claiming over a year. All three diagnosed at runtime before planning, and two of the three corrected 03.1-REVIEW.md's own analysis. The three plans are serialized rather than parallel because all three touch `tests/test_maintenance_windows.py`)**
 
 - [x] 03.1-16-PLAN.md — A configuration knob that means something: the parsed default grace reaches the editor's prefill through the payload the editor already reads, proven at all three client sites (wave 1)
-- [ ] 03.1-17-PLAN.md — The clustering dial closes at midnight, and so does the cluster's own median start minute, so a nightly restart is offered at the hour it actually happens rather than not at all (wave 2)
+- [x] 03.1-17-PLAN.md — The clustering dial closes at midnight, and so does the cluster's own median start minute, so a nightly restart is offered at the hour it actually happens rather than not at all (wave 2)
 - [ ] 03.1-18-PLAN.md — An attribution bound derived from the interval it must cover, never silent when it binds, plus the round's closure record for all three gaps (wave 3)
 
 ### Phase 4: Historical Investigation
