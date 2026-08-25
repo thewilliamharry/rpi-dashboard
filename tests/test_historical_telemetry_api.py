@@ -45,6 +45,32 @@ class HistoricalTelemetryApiTests(unittest.TestCase):
             'end_ts': str(end_ts),
         })
 
+    def test_api_config_reports_configured_timezone_and_fails_closed_to_utc(self):
+        # D-05/Research Pitfall 1: the browser has no way to know the Pi's
+        # configured local time without this field -- the two existing
+        # client-side toLocaleString() call sites both render in the
+        # *browser's* zone, which is the wrong contract for History.
+        appmod, db_path = load_app({'TZ': 'Australia/Sydney'})
+        try:
+            client = appmod.app.test_client()
+            response = client.get('/api/config')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()['timezone'], 'Australia/Sydney')
+        finally:
+            cleanup_db(db_path)
+
+        # config.py's _resolved_timezone fails closed to UTC on an unresolvable
+        # IANA zone name; the wire contract must carry that same fail-closed
+        # value rather than echoing the raw, invalid configured string.
+        appmod, db_path = load_app({'TZ': 'Not/ARealZone'})
+        try:
+            client = appmod.app.test_client()
+            response = client.get('/api/config')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()['timezone'], 'UTC')
+        finally:
+            cleanup_db(db_path)
+
     def test_real_sqlite_rows_return_ordered_bounded_history(self):
         start_ts = self.now - 300
         end_ts = self.now - 60

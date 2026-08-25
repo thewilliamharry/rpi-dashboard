@@ -1,11 +1,28 @@
 (() => {
   const PREFS_KEY = 'beacon-advanced-preferences-v1';
-  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}};
+  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}, historyRange: {preset: '24h'}};
   const REFRESH_CHOICES = new Set([5, 15, 30, 60]);
+  // D-02 preset ladder, mapped onto the Phase 2 retention-tier boundaries.
+  const HISTORY_PRESETS = {'1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000, '90d': 7776000};
+  const HISTORY_PRESET_ORDER = ['1h', '6h', '24h', '7d', '30d', '90d'];
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const HIST_CHART_WIDTH = 1000;
+  const HIST_CHART_HEIGHT = 96;
+  const HIST_STRIP_HEIGHT = 16;
+  const HIST_MIN_SEGMENT_WIDTH = 3;
+  // CPU/RAM/disk are percentages; only CPU exists in this plan (04-01) -- the
+  // remaining three metrics (04-03) extend this map, not the rendering code.
+  const METRIC_VALUE_DOMAIN = {cpu: [0, 100]};
+  // The render loop, loading/empty/error wiring, and Copywriting Contract
+  // sentence below are all keyed by this list and by metric id -- 04-03 adds
+  // 'ram', 'disk', 'temp' here plus their markup; no rendering code changes.
+  const HISTORY_METRICS = ['cpu'];
+  const METRIC_LABELS = {cpu: 'CPU'};
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
     expandedPorts: new Set(), connectionUnavailable: false, requestGeneration: 0,
+    timezone: 'UTC', historyRequestGeneration: 0,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -13,6 +30,19 @@
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
     const allowed = new Set(['query', 'status', 'criticality', 'freshness', 'tags']);
     return Object.fromEntries(Object.entries(value).filter(([key, item]) => allowed.has(key) && typeof item === 'string'));
+  }
+
+  // D-04/D-18: never trust stored data. Only an object carrying a `preset` that
+  // is a known key of HISTORY_PRESETS is accepted; anything else -- an array, a
+  // nested object, an unknown string -- resolves to the documented 24h default
+  // without ever building a request from the untrusted value.
+  function validHistoryRange(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {preset: '24h'};
+    const preset = value.preset;
+    if (typeof preset !== 'string' || !Object.prototype.hasOwnProperty.call(HISTORY_PRESETS, preset)) {
+      return {preset: '24h'};
+    }
+    return {preset};
   }
 
   function loadPreferences() {
@@ -28,6 +58,7 @@
       density: stored.density === 'comfortable' || stored.density === 'compact' ? stored.density : null,
       range: stored.range === '24h' ? stored.range : DEFAULT_PREFERENCES.range,
       filters: validFilters(stored.filters),
+      historyRange: validHistoryRange(stored.historyRange),
     };
     state.filters = state.preferences.filters;
     return state.preferences;
@@ -41,6 +72,7 @@
       density: prefs.density,
       range: prefs.range,
       filters: validFilters(state.filters),
+      historyRange: validHistoryRange(prefs.historyRange),
     }));
   }
 
@@ -206,6 +238,295 @@
   // reasons and are never shown to the operator.
   function serverSuppliedReason(error) {
     return error instanceof Error && error.constructor === Error ? error.message : null;
+  }
+
+  // ------------------------------------------------------------------
+  // History section (Phase 4, 04-01): shared range control, gap-honest
+  // CPU chart, per-chart coverage strip, and a Pi-local-time shared axis.
+  // ------------------------------------------------------------------
+
+  // D-05: reads state.timezone (fetched once from /api/config) rather than the
+  // browser's own zone -- the bare toLocaleString() pattern at line ~87 above
+  // is the wrong contract for History and must never be reused here.
+  function formatLocalTimestamp(ts, options = {}) {
+    if (!Number.isFinite(ts)) return 'Unknown';
+    const formatter = new Intl.DateTimeFormat(undefined, {timeZone: state.timezone || 'UTC', ...options});
+    return formatter.format(new Date(ts * 1000));
+  }
+
+  async function fetchRuntimeConfig() {
+    try {
+      const response = await fetch('/api/config', {cache: 'no-store'});
+      const data = response.ok ? await response.json() : {};
+      state.timezone = typeof data.timezone === 'string' && data.timezone ? data.timezone : 'UTC';
+    } catch (_) {
+      state.timezone = 'UTC';
+    }
+  }
+
+  // D-18 scope note: the two integers this returns are the only values ever
+  // interpolated into a history request URL -- never a raw stored preference.
+  function resolveRangeBounds() {
+    const end_ts = Math.floor(Date.now() / 1000);
+    const preset = state.preferences.historyRange.preset;
+    const span = Object.prototype.hasOwnProperty.call(HISTORY_PRESETS, preset)
+      ? HISTORY_PRESETS[preset]
+      : HISTORY_PRESETS['24h'];
+    return {start_ts: end_ts - span, end_ts};
+  }
+
+  async function fetchHostMetricHistory(metric, startTs, endTs) {
+    const url = `/api/telemetry/history?kind=host&metric=${encodeURIComponent(metric)}&start_ts=${startTs}&end_ts=${endTs}`;
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json()).error || message; } catch (_) { /* bounded status evidence */ }
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  function histTimeToX(ts, startTs, endTs) {
+    const span = Math.max(1, endTs - startTs);
+    return ((ts - startTs) / span) * HIST_CHART_WIDTH;
+  }
+
+  function histValueToY(value, metric) {
+    const [min, max] = METRIC_VALUE_DOMAIN[metric] || [0, 100];
+    const clamped = Math.min(max, Math.max(min, value));
+    return HIST_CHART_HEIGHT - ((clamped - min) / (max - min || 1)) * HIST_CHART_HEIGHT;
+  }
+
+  // D-06/Pitfall 2: gate line-drawing exclusively on state === 'observed'; every
+  // other state (collection_gap, unknown, expired, not_yet_monitored) is equally
+  // "do not connect here", so an interval can straddle several non-observed
+  // reasons and still correctly refuse to connect. Contiguous 'observed'
+  // intervals are walked with a cursor so a multi-segment observed span still
+  // counts as fully covering [startTs, endTs).
+  function intervalFullyObserved(startTs, endTs, coverage) {
+    if (startTs >= endTs) return true;
+    const observed = (Array.isArray(coverage) ? coverage : [])
+      .filter((interval) => interval && interval.state === 'observed')
+      .slice()
+      .sort((left, right) => left.start_ts - right.start_ts);
+    let cursor = startTs;
+    for (const interval of observed) {
+      if (interval.start_ts > cursor) break;
+      if (interval.end_ts > cursor) cursor = interval.end_ts;
+      if (cursor >= endTs) return true;
+    }
+    return false;
+  }
+
+  // D-06: emits an `L` only when the half-open interval between the previous and
+  // current point is entirely covered by `observed` evidence; otherwise the pen
+  // lifts (`M`). A point with a null avg_value is skipped entirely (not drawn,
+  // not treated as a connectable neighbour), per the host bucket contract.
+  function buildSeriesPath(points, coverage, scale) {
+    let d = '';
+    let previous = null;
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      if (point.avg_value === null || point.avg_value === undefined) { previous = null; return; }
+      const x = scale.xFor(point.ts);
+      const y = scale.yFor(point.avg_value);
+      const canConnect = previous !== null && intervalFullyObserved(previous.ts, point.ts, coverage);
+      d += `${canConnect ? 'L' : 'M'}${x},${y} `;
+      previous = point;
+    });
+    return d.trim();
+  }
+
+  // D-06/UI-SPEC Chart Contract: branches on (state, detail) together --
+  // storage_pressure is a detail under collection_gap, never a sixth state.
+  const COVERAGE_STRIP_VOCABULARY = {
+    collection_gap: {
+      default: {pattern: 'dots', label: 'Collection gap'},
+      storage_pressure: {pattern: 'diagonal-hatch', label: 'Storage pressure (no persistence)'},
+    },
+    unknown: {default: {pattern: 'dashed', label: 'Unknown'}},
+    expired: {default: {pattern: 'diagonal-thin', label: 'Expired (outside retention)'}},
+    not_yet_monitored: {default: {pattern: 'solid-muted', label: 'Not yet monitored'}},
+  };
+
+  function stripSegmentShape(interval) {
+    const vocabulary = COVERAGE_STRIP_VOCABULARY[interval.state];
+    if (!vocabulary) return null; // 'observed' (or an unrecognised state) draws no segment
+    if (interval.state === 'collection_gap' && interval.detail === 'storage_pressure') return vocabulary.storage_pressure;
+    return vocabulary.default;
+  }
+
+  function coverageStripSegments(coverage) {
+    return (Array.isArray(coverage) ? coverage : [])
+      .map((interval) => {
+        const shape = stripSegmentShape(interval || {});
+        if (!shape) return null;
+        return {start_ts: interval.start_ts, end_ts: interval.end_ts, pattern: shape.pattern, label: shape.label};
+      })
+      .filter(Boolean);
+  }
+
+  function renderHistoryChart(metric, result) {
+    const svg = $(`chart-${metric}`);
+    if (!svg) return;
+    const path = svg.querySelector('.hist-series');
+    if (!path) return;
+    const requested = result.requested || resolveRangeBounds();
+    const scale = {
+      xFor: (ts) => histTimeToX(ts, requested.start_ts, requested.end_ts),
+      yFor: (value) => histValueToY(value, metric),
+    };
+    path.setAttribute('d', buildSeriesPath(result.points, result.coverage, scale));
+  }
+
+  // UI-SPEC Coverage Strip Mechanics: every rendered segment is at least 3px
+  // wide regardless of its true time span, so a sub-pixel-duration reason at
+  // the 90d preset is never visually hidden or rounded away.
+  function renderCoverageStrip(metric, coverage, requestedRange) {
+    const svg = $(`strip-${metric}`);
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const range = requestedRange || resolveRangeBounds();
+    coverageStripSegments(coverage).forEach((segment) => {
+      const x1 = histTimeToX(segment.start_ts, range.start_ts, range.end_ts);
+      const x2 = histTimeToX(segment.end_ts, range.start_ts, range.end_ts);
+      const width = Math.max(HIST_MIN_SEGMENT_WIDTH, x2 - x1);
+      const rect = document.createElementNS(SVG_NS, 'rect');
+      rect.setAttribute('x', String(x1));
+      rect.setAttribute('y', '0');
+      rect.setAttribute('width', String(width));
+      rect.setAttribute('height', String(HIST_STRIP_HEIGHT));
+      rect.setAttribute('class', `hist-coverage-segment hist-pattern-${segment.pattern}`);
+      const title = document.createElementNS(SVG_NS, 'title');
+      title.textContent = segment.label;
+      rect.append(title);
+      svg.append(rect);
+    });
+  }
+
+  function renderSharedTimeAxis(startTs, endTs) {
+    const svg = $('history-time-axis');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return;
+    const tickCount = 6;
+    for (let index = 0; index <= tickCount; index += 1) {
+      const ts = startTs + ((endTs - startTs) * index) / tickCount;
+      const text = document.createElementNS(SVG_NS, 'text');
+      text.setAttribute('x', String(histTimeToX(ts, startTs, endTs)));
+      text.setAttribute('y', '16');
+      text.textContent = formatLocalTimestamp(ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+      svg.append(text);
+    }
+  }
+
+  // D-02: the server, not the client, owns resolution selection -- this only
+  // renders the value select_resolution() already reported.
+  function updateRangeResolutionNote(effectiveResolutionSeconds) {
+    const note = $('range-resolution-note');
+    if (!note) return;
+    note.textContent = Number.isFinite(effectiveResolutionSeconds)
+      ? `Showing ${effectiveResolutionSeconds}-second resolution`
+      : '';
+  }
+
+  function syncHistoryPresetButtons() {
+    const active = state.preferences.historyRange.preset;
+    HISTORY_PRESET_ORDER.forEach((preset) => {
+      const button = $(`range-preset-${preset}`);
+      if (button) button.setAttribute('aria-pressed', String(preset === active));
+    });
+  }
+
+  function historyStateElement(metric, suffix) {
+    return $(`history-${metric}-${suffix}`);
+  }
+
+  // Never renders a zeroed chart, an empty-looking plot frame, or a bare axis
+  // while loading: the previous series/strip content is cleared up front, and
+  // the loading skeleton is the only thing visible until the fetch settles.
+  function beginMetricLoadingState(metric) {
+    const loading = historyStateElement(metric, 'loading');
+    const empty = historyStateElement(metric, 'empty');
+    const error = historyStateElement(metric, 'error');
+    if (loading) loading.hidden = false;
+    if (empty) empty.hidden = true;
+    if (error) error.hidden = true;
+    const chartSvg = $(`chart-${metric}`);
+    const path = chartSvg ? chartSvg.querySelector('.hist-series') : null;
+    if (path) path.setAttribute('d', '');
+    const stripSvg = $(`strip-${metric}`);
+    if (stripSvg) while (stripSvg.firstChild) stripSvg.removeChild(stripSvg.firstChild);
+  }
+
+  // One metric's fetch-and-render, isolated from every other metric's outcome
+  // (Research Pattern 1): a rejected fetch here renders only this metric's own
+  // error copy and never blanks the loading/empty/chart state of its siblings.
+  // Never throws -- every branch resolves so Promise.allSettled in the caller
+  // is a defensive composition boundary, not a required error path.
+  async function renderMetricHistory(metric, bounds, requestId) {
+    beginMetricLoadingState(metric);
+    const loading = historyStateElement(metric, 'loading');
+    const empty = historyStateElement(metric, 'empty');
+    const error = historyStateElement(metric, 'error');
+    try {
+      const result = await fetchHostMetricHistory(metric, bounds.start_ts, bounds.end_ts);
+      if (requestId !== state.historyRequestGeneration) return null;
+      if (loading) loading.hidden = true;
+      const points = Array.isArray(result.points) ? result.points : [];
+      const hasObservedValue = points.some((point) => point.avg_value !== null && point.avg_value !== undefined);
+      if (empty) empty.hidden = hasObservedValue;
+      renderHistoryChart(metric, result);
+      const requested = result.requested || bounds;
+      renderCoverageStrip(metric, result.coverage, requested);
+      return {metric, result};
+    } catch (fetchError) {
+      if (requestId !== state.historyRequestGeneration) return null;
+      if (loading) loading.hidden = true;
+      if (error) {
+        const reason = serverSuppliedReason(fetchError);
+        const label = METRIC_LABELS[metric] || metric;
+        error.textContent = `This chart could not load. ${label} data is unavailable — other charts and the coverage evidence below are unaffected.${reason ? ` Server reported: ${reason}` : ''}`;
+        error.hidden = false;
+      }
+      return null;
+    }
+  }
+
+  async function renderHistorySection() {
+    // A dedicated counter, not state.requestGeneration: that counter belongs to
+    // refreshCurrentDiagnosis's own periodic poll (every refreshSeconds), and
+    // sharing it would let an unrelated overview refresh discard an in-flight,
+    // still-current History render. Same staleness-guard idiom, own generation.
+    const requestId = ++state.historyRequestGeneration;
+    const bounds = resolveRangeBounds();
+    const settled = await Promise.allSettled(
+      HISTORY_METRICS.map((metric) => renderMetricHistory(metric, bounds, requestId)),
+    );
+    if (requestId !== state.historyRequestGeneration) return;
+    const firstSucceeded = settled
+      .filter((entry) => entry.status === 'fulfilled' && entry.value)
+      .map((entry) => entry.value)[0];
+    if (firstSucceeded) {
+      const requested = firstSucceeded.result.requested || bounds;
+      updateRangeResolutionNote(firstSucceeded.result.effective_resolution_seconds);
+      renderSharedTimeAxis(requested.start_ts, requested.end_ts);
+    } else {
+      // Every metric failed (or returned nothing to anchor the axis on): the
+      // shared axis still renders from the requested bounds so it never
+      // disappears alongside a per-metric fetch failure.
+      updateRangeResolutionNote(null);
+      renderSharedTimeAxis(bounds.start_ts, bounds.end_ts);
+    }
+  }
+
+  // D-04: validated before assignment, persisted, then re-rendered -- never a
+  // request built from anything but the two integers resolveRangeBounds emits.
+  function selectRangePreset(preset) {
+    if (!Object.prototype.hasOwnProperty.call(HISTORY_PRESETS, preset)) return;
+    state.preferences.historyRange = {preset};
+    savePreferences();
+    syncHistoryPresetButtons();
+    renderHistorySection();
   }
 
   function renderSafety(snapshot) {
@@ -914,6 +1235,23 @@
     };
     Object.entries(sortButtons).forEach(([field, button]) => button.addEventListener('click', () => setServiceSort(field)));
   }
+  // History section (04-01): the generic selectSection() above needs no change --
+  // it already toggles history-section by the same data-section/{id}-heading
+  // convention every other section uses. This adds only the History-specific
+  // hook (one render on entry) and the six preset buttons.
+  syncHistoryPresetButtons();
+  HISTORY_PRESET_ORDER.forEach((preset) => {
+    const button = $(`range-preset-${preset}`);
+    if (button) button.addEventListener('click', () => selectRangePreset(preset));
+  });
+  const historyNavButton = document.querySelector('[data-section="history"]');
+  if (historyNavButton) historyNavButton.addEventListener('click', renderHistorySection);
+  // refreshCurrentDiagnosis() must be invoked before fetchRuntimeConfig(): both
+  // dispatch their fetch() call synchronously (before their first await), so
+  // this order keeps /api/advanced/current the first network call the page
+  // ever makes -- the exact assumption test_advanced_ui.py's reverse-order
+  // regression harness pins its "first call held, second call wins" scenario on.
   scheduleRefresh();
   refreshCurrentDiagnosis();
+  fetchRuntimeConfig();
 })();

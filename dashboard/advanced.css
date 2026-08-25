@@ -70,3 +70,26 @@ html:not(.light) #advanced-refresh:hover { background: rgba(0, 212, 255, 0.12); 
 html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 @media (max-width: 959px) { .advanced-workspace { grid-template-columns: minmax(0, 1fr); padding: 16px; } .section-navigation { position: static; flex-direction: row; overflow-x: auto; scrollbar-width: thin; } .section-navigation button { flex: 0 0 auto; } .service-identity { position: sticky; left: 0; z-index: 1; background: var(--bg3); box-shadow: 1px 0 var(--border); } }
 @media (max-width: 719px) { .advanced-header { padding: 8px 12px; } .advanced-header h1 { flex: 1 1 160px; } .advanced-header-controls { flex-basis: 100%; justify-content: flex-start; } .advanced-header-controls > span { flex-basis: 100%; } .summary-grid { grid-template-columns: minmax(0, 1fr); } .evidence-row { grid-template-columns: minmax(0, 1fr); gap: 4px; } .advanced-error { margin: 12px; } }
+
+/* Phase 4 (04-01) -- History section: shared range control, gap-honest chart, coverage strip. */
+.hist-range { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 24px; }
+.hist-preset { min-height: 44px; min-width: 44px; color: var(--text); background: var(--bg3); border: 1px solid var(--border); padding: 0 12px; font: inherit; cursor: pointer; }
+.hist-preset[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+#range-resolution-note { margin: 0; font-size: 12px; font-family: var(--font-mono); color: var(--muted); flex-basis: 100%; }
+#range-error { margin: 0; color: var(--accent2); flex-basis: 100%; }
+.hist-chart { margin: 0 0 16px; border: 1px solid var(--border); background: var(--bg3); padding: 8px; position: relative; }
+.hist-chart h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.hist-plot { display: block; width: 100%; height: 96px; }
+.hist-series { fill: none; stroke: var(--accent); stroke-width: 2; }
+.hist-coverage-strip { display: block; width: 100%; height: 16px; margin-top: 4px; }
+.hist-coverage-segment { stroke: var(--border2); stroke-width: 1; }
+.hist-pattern-dots { fill: url(#hist-pattern-dots); }
+.hist-pattern-diagonal-hatch { fill: url(#hist-pattern-diagonal-hatch); }
+.hist-pattern-dashed { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 2; }
+.hist-pattern-diagonal-thin { fill: url(#hist-pattern-diagonal-thin); }
+.hist-pattern-solid-muted { fill: var(--muted); opacity: 0.6; }
+.hist-axis { display: block; width: 100%; height: 24px; }
+.hist-axis text { font-family: var(--font-mono); font-size: 12px; fill: var(--muted); }
+.hist-empty, .hist-error { margin-top: 8px; padding: 8px; overflow-wrap: anywhere; }
+.hist-error { border: 1px solid var(--accent2); color: var(--accent2); }
+.hist-skeleton { min-height: 96px; background: linear-gradient(90deg, var(--bg3), var(--border2), var(--bg3)); border: 1px solid var(--border); }

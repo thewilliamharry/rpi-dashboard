@@ -132,7 +132,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | DIA-05 | Phase 4 | Pending |
 | DIA-06 | Phase 4 | Pending |
 | DIA-07 | Phase 4 | Pending |
-| DIA-08 | Phase 3 | Deferred to Phase 4 |
+| DIA-08 | Phase 3 + Phase 4 | Complete |
 | HIS-01 | Phase 4 | Pending |
 | HIS-02 | Phase 4 | Pending |
 | HIS-03 | Phase 4 | Pending |
@@ -153,6 +153,12 @@ Every v1 requirement maps to exactly one roadmap phase.
 | OPS-05 | Phase 1 | Complete |
 | OPS-06 | Phase 5 | Pending |
 | OPS-07 | Phase 6 | Pending |
+
+DIA-08 splits across two phases: the effective-settings view, refresh controls, and
+service filtering half shipped in Phase 3 (recorded in `PROJECT.md`'s Phase 3 Validated
+line); the range and history-filter presentation preference half ships in Phase 4
+(04-01, 04-07), because a range preference could not exist before this phase introduced
+a range.
 
 **Coverage:**
 
