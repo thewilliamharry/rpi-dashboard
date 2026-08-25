@@ -762,20 +762,87 @@
     });
   }
 
+  // D-05/Research Pitfall 6: a "naive" local wall-clock minute index built
+  // from Intl.DateTimeFormat's own year/month/day/hour/minute parts for the
+  // configured zone -- never manual UTC-offset arithmetic. Treating those
+  // components as if they were UTC (via Date.UTC) gives a number that is
+  // directly comparable across two ticks, correctly handling a date
+  // rollover, so its difference from the fixed epoch interval that produced
+  // the two ticks is exactly zero except across a genuine DST transition.
+  function localWallClockMinutes(ts) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: state.timezone || 'UTC', hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(new Date(ts * 1000));
+    const get = (type) => Number(parts.find((part) => part.type === type).value);
+    return Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute')) / 60000;
+  }
+
+  // A DST transition always moves the local wall clock by exactly one hour
+  // relative to the fixed epoch interval that produced it, regardless of the
+  // surrounding tick spacing -- so a signed 60-minute mismatch between the
+  // local-label delta and the epoch delta is sufficient to detect and
+  // classify it, with no hand-rolled transition table and no hard-coded
+  // date. When state.timezone is UTC (including the fail-closed case), local
+  // minutes always advance exactly as fast as epoch minutes, so this can
+  // never fire. Returns one entry per tick, null unless that tick is part of
+  // a detected transition.
+  function dstAnnotations(tickTimestamps) {
+    const ticks = Array.isArray(tickTimestamps) ? tickTimestamps : [];
+    const annotations = ticks.map(() => null);
+    for (let index = 1; index < ticks.length; index += 1) {
+      const epochDiffMinutes = (ticks[index] - ticks[index - 1]) / 60;
+      const localDiffMinutes = localWallClockMinutes(ticks[index]) - localWallClockMinutes(ticks[index - 1]);
+      const delta = localDiffMinutes - epochDiffMinutes;
+      if (delta === -60) {
+        // Fall-back: the local clock repeated an hour, so both adjacent
+        // ticks read the same wall-clock label despite differing epoch
+        // values. Both are annotated.
+        const label = formatLocalTimestamp(ticks[index - 1], {hour: '2-digit', minute: '2-digit'});
+        const title = `The local time ${label} occurs twice here (DST fall-back) -- both ticks read the same clock time.`;
+        annotations[index - 1] = {title};
+        annotations[index] = {title};
+      } else if (delta === 60) {
+        // Spring-forward: an hour of local wall-clock time never occurred.
+        // Only the tick after the skip is annotated.
+        const label = formatLocalTimestamp(ticks[index - 1], {hour: '2-digit', minute: '2-digit'});
+        annotations[index] = {title: `The hour after ${label} is absent here (DST spring-forward).`};
+      }
+    }
+    return annotations;
+  }
+
   function renderSharedTimeAxis(startTs, endTs) {
     const svg = $('history-time-axis');
     if (!svg) return;
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return;
     const tickCount = 6;
+    const ticks = [];
     for (let index = 0; index <= tickCount; index += 1) {
-      const ts = startTs + ((endTs - startTs) * index) / tickCount;
+      ticks.push(startTs + ((endTs - startTs) * index) / tickCount);
+    }
+    const annotations = dstAnnotations(ticks);
+    ticks.forEach((ts, index) => {
       const text = document.createElementNS(SVG_NS, 'text');
       text.setAttribute('x', String(histTimeToX(ts, startTs, endTs)));
       text.setAttribute('y', '16');
-      text.textContent = formatLocalTimestamp(ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+      const annotation = annotations[index];
+      if (annotation) {
+        // Never re-spaced to hide the discontinuity: the tick keeps its
+        // computed x position, but its label is replaced by the explicit
+        // warning instead of a compressed hour or a duplicate-looking
+        // timestamp -- text and glyph, never colour alone.
+        text.setAttribute('class', 'hist-dst-tick');
+        text.textContent = '⚠ DST transition';
+        const title = document.createElementNS(SVG_NS, 'title');
+        title.textContent = annotation.title;
+        text.append(title);
+      } else {
+        text.textContent = formatLocalTimestamp(ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+      }
       svg.append(text);
-    }
+    });
   }
 
   // D-02: the server, not the client, owns resolution selection -- this only

@@ -1,6 +1,8 @@
+import calendar
 import re
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
@@ -1295,6 +1297,205 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             self.assertIn('Average: 50.0%', text)
             self.assertIn('Latest: 50.0%', text)
             self.assertIn('steady', text)
+        finally:
+            page.close()
+
+
+class HistoryDstAnnotationLondonTests(unittest.TestCase):
+    """04-04 Task 3: a zone that observes DST annotates its two transitions.
+
+    A separate class (own app/server instance, own TZ) rather than reusing
+    HistoryInvestigationUiTests -- that class's app is loaded once for
+    Australia/Sydney via a module-level importlib.reload() in load_app(),
+    and reloading dashboard.app again mid-class would rewrite the shared
+    module namespace every already-bound route handler on that class's
+    still-running server reads its SETTINGS from.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.appmod, cls.db_path = load_app({'TZ': 'Europe/London'})
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=cls.playwright.chromium.executable_path,
+        )
+        cls.base_url = f'http://127.0.0.1:{cls.server.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
+
+    @staticmethod
+    def _last_sunday(year, month):
+        last_day = calendar.monthrange(year, month)[1]
+        date = datetime(year, month, last_day, tzinfo=timezone.utc)
+        offset = (date.weekday() - 6) % 7  # weekday(): Monday=0 .. Sunday=6
+        return date - timedelta(days=offset)
+
+    @classmethod
+    def _spring_forward_epoch(cls, year=2024):
+        # UK/EU rule: clocks spring forward at 01:00 UTC on the last Sunday
+        # of March. Computed from the calendar, not a hard-coded date.
+        return int(cls._last_sunday(year, 3).replace(hour=1, minute=0, second=0).timestamp())
+
+    @classmethod
+    def _fall_back_epoch(cls, year=2024):
+        # UK/EU rule: clocks fall back at 01:00 UTC on the last Sunday of
+        # October.
+        return int(cls._last_sunday(year, 10).replace(hour=1, minute=0, second=0).timestamp())
+
+    @staticmethod
+    def _dst_fixture(metric, start_ts, end_ts):
+        return {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'host', 'metric': metric},
+            'effective_resolution_seconds': 3600,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [3600],
+            'points': [],
+            'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'}],
+            'aggregation_pending': [],
+        }
+
+    @staticmethod
+    def _config_fixture(tz):
+        return {
+            'timezone': tz, 'alerting_enabled': False,
+            'uptime_buckets': [], 'trigger_rate_limit': 4, 'trigger_rate_window_seconds': 60,
+        }
+
+    def _load_history_with_range(self, start_ts, end_ts, tz='Europe/London'):
+        snapshot = HistoryInvestigationUiTests._snapshot()
+        config_fixture = self._config_fixture(tz)
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', ['cpu'])[0]
+                route.fulfill(status=200, json=self._dst_fixture(metric, start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-time-axis text').first.wait_for(timeout=5_000)
+        return page
+
+    def test_spring_forward_annotates_exactly_one_tick_naming_absent_hour(self):
+        transition = self._spring_forward_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            annotated = page.locator('#history-time-axis .hist-dst-tick')
+            self.assertEqual(annotated.count(), 1)
+            # text_content() concatenates the <title> child's text too --
+            # startswith isolates the tick's own visible label.
+            self.assertTrue(annotated.first.text_content().startswith('⚠ DST transition'))
+            self.assertIn('absent', annotated.first.locator('title').text_content().lower())
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
+        finally:
+            page.close()
+
+    def test_fall_back_annotates_the_two_identical_local_label_ticks(self):
+        transition = self._fall_back_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            annotated = page.locator('#history-time-axis .hist-dst-tick')
+            self.assertEqual(annotated.count(), 2)
+            for index in range(2):
+                self.assertTrue(annotated.nth(index).text_content().startswith('⚠ DST transition'))
+                self.assertIn('twice', annotated.nth(index).locator('title').text_content().lower())
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
+        finally:
+            page.close()
+
+
+class HistoryDstAnnotationUtcTests(unittest.TestCase):
+    """04-04 Task 3: UTC never observes DST, so no annotation can ever fire
+    -- same two ranges as HistoryDstAnnotationLondonTests, different zone.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.appmod, cls.db_path = load_app({'TZ': 'UTC'})
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=cls.playwright.chromium.executable_path,
+        )
+        cls.base_url = f'http://127.0.0.1:{cls.server.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
+
+    def _load_history_with_range(self, start_ts, end_ts):
+        snapshot = HistoryInvestigationUiTests._snapshot()
+        config_fixture = HistoryDstAnnotationLondonTests._config_fixture('UTC')
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', ['cpu'])[0]
+                route.fulfill(
+                    status=200,
+                    json=HistoryDstAnnotationLondonTests._dst_fixture(metric, start_ts, end_ts),
+                )
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-time-axis text').first.wait_for(timeout=5_000)
+        return page
+
+    def test_spring_forward_range_under_utc_has_no_annotation(self):
+        transition = HistoryDstAnnotationLondonTests._spring_forward_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            self.assertEqual(page.locator('#history-time-axis .hist-dst-tick').count(), 0)
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
+        finally:
+            page.close()
+
+    def test_fall_back_range_under_utc_has_no_annotation(self):
+        transition = HistoryDstAnnotationLondonTests._fall_back_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            self.assertEqual(page.locator('#history-time-axis .hist-dst-tick').count(), 0)
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
         finally:
             page.close()
 
