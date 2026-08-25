@@ -1,6 +1,10 @@
 (() => {
   const PREFS_KEY = 'beacon-advanced-preferences-v1';
-  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}, historyRange: {preset: '24h'}, selectedService: null};
+  const DEFAULT_HISTORY_FILTERS = {service: null, criticality: null, eventType: null};
+  const DEFAULT_PREFERENCES = {
+    refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {},
+    historyRange: {preset: '24h'}, selectedService: null, historyFilters: {...DEFAULT_HISTORY_FILTERS},
+  };
   const REFRESH_CHOICES = new Set([5, 15, 30, 60]);
   // D-02 preset ladder, mapped onto the Phase 2 retention-tier boundaries.
   const HISTORY_PRESETS = {'1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000, '90d': 7776000};
@@ -39,6 +43,16 @@
   // into an unreasonably wide window.
   const INCIDENT_PAD_FRACTION = 0.15;
   const INCIDENT_PAD_FLOOR_SECONDS = 300;
+  // D-12/D-13 (Phase 4 04-07): mirrored verbatim from dashboard/beacon/incidents.py's
+  // EVENT_TYPES/CRITICALITY_VALUES/MAINTENANCE_MODES so a stored or selected
+  // filter value can never diverge from what the server itself accepts --
+  // the server independently re-validates and rejects with a 400 regardless.
+  const INCIDENT_EVENT_TYPES = [
+    'state_change', 'monitoring_gap', 'alert_sent', 'alert_failed',
+    'preview_capture', 'preview_complete', 'maintenance_overrun',
+  ];
+  const INCIDENT_CRITICALITY_VALUES = ['critical', 'standard'];
+  const INCIDENT_MAINTENANCE_MODES = ['exclude', 'only'];
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
@@ -53,6 +67,11 @@
     // (the host stack's own guard) -- a service selection change must not
     // discard an in-flight host-metric render, and vice versa.
     serviceHistoryRequestGeneration: 0,
+    // A dedicated staleness-guard generation for the Incidents list's own
+    // fetch pair (filtered + unfiltered-baseline), independent of every
+    // other section's own generation counter -- same idiom as
+    // serviceHistoryRequestGeneration above.
+    incidentsRequestGeneration: 0,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -105,6 +124,36 @@
     return value;
   }
 
+  // D-13/T-04-04 (Phase 4 04-07): the Incidents filter object, validated
+  // against exactly the server's own allowlists (CRITICALITY_VALUES,
+  // EVENT_TYPES, MAINTENANCE_MODES, plus the same bounded-port rule
+  // validSelectedService already applies) before it is ever persisted or
+  // read back. A stored value outside any of these resolves to that one
+  // field's documented default rather than reaching a request URL --
+  // `service` in particular is kept identical to `selectedService`
+  // (D-16: the two must never disagree about which service is under
+  // investigation), so it is re-derived from the validated selection
+  // rather than trusted independently.
+  //
+  // `eventType` carries one of two disjoint namespaces in a single string,
+  // since the UI-SPEC's "event type" filter combines EVENT_TYPES with the
+  // two maintenance-visibility options onto one control:
+  //   'event_type:<EVENT_TYPES member>' -> the `event_type` query parameter
+  //   'maintenance:exclude'|'maintenance:only' -> the `maintenance` parameter
+  function validHistoryFilters(value, selectedService) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const criticality = INCIDENT_CRITICALITY_VALUES.includes(source.criticality) ? source.criticality : null;
+    let eventType = null;
+    if (typeof source.eventType === 'string') {
+      if (source.eventType.startsWith('event_type:') && INCIDENT_EVENT_TYPES.includes(source.eventType.slice('event_type:'.length))) {
+        eventType = source.eventType;
+      } else if (source.eventType.startsWith('maintenance:') && INCIDENT_MAINTENANCE_MODES.includes(source.eventType.slice('maintenance:'.length))) {
+        eventType = source.eventType;
+      }
+    }
+    return {service: validSelectedService(selectedService), criticality, eventType};
+  }
+
   function loadPreferences() {
     let stored = {};
     try {
@@ -120,6 +169,7 @@
       filters: validFilters(stored.filters),
       historyRange: validHistoryRange(stored.historyRange),
       selectedService: validSelectedService(stored.selectedService),
+      historyFilters: validHistoryFilters(stored.historyFilters, stored.selectedService),
     };
     state.filters = state.preferences.filters;
     return state.preferences;
@@ -135,6 +185,7 @@
       filters: validFilters(state.filters),
       historyRange: validHistoryRange(prefs.historyRange),
       selectedService: validSelectedService(prefs.selectedService),
+      historyFilters: validHistoryFilters(prefs.historyFilters, prefs.selectedService),
     }));
   }
 
@@ -435,12 +486,20 @@
   // selecting a service from the Services table must not itself issue a
   // request while History is not even visible.
   function setSelectedService(port) {
-    state.preferences.selectedService = validSelectedService(port);
+    const validated = validSelectedService(port);
+    state.preferences.selectedService = validated;
+    // D-16 (Phase 4 04-07): the Incidents service filter is never an
+    // independent second fact about "which service is under investigation"
+    // -- it is always re-derived from the one carried selection, so the two
+    // can never quietly disagree.
+    state.preferences.historyFilters = {...state.preferences.historyFilters, service: validated};
     savePreferences();
     renderInvestigatingIndicator();
     renderHistoryServicePicker();
+    syncIncidentServiceFilterControl();
     renderServices();
     if (state.activeSection === 'history') renderServiceHistorySection();
+    if (state.activeSection === 'incidents') renderIncidentsSection();
   }
 
   // Unsets the subject without touching the range -- clearing who is being
@@ -943,6 +1002,398 @@
   }
 
   // ------------------------------------------------------------------
+  // Incidents section (Phase 4 04-07, D-12/D-13/D-14): a filterable list
+  // where one row is one grouped down-to-recovered episode. Governed by the
+  // same shared range control as History (D-16) -- never a second, section-
+  // owned range.
+  // ------------------------------------------------------------------
+
+  // Builds the exact query params /api/events/history accepts. `filters`
+  // carries the validated {service, criticality, eventType} shape
+  // validHistoryFilters produces; a null/absent field is simply omitted
+  // from the URL rather than sent as an empty string, matching the "no
+  // maintenance parameter at all" default the server itself documents.
+  function incidentQueryParams(startTs, endTs, filters) {
+    const params = new URLSearchParams();
+    params.set('start_ts', String(startTs));
+    params.set('end_ts', String(endTs));
+    const source = filters || DEFAULT_HISTORY_FILTERS;
+    if (source.service !== null && source.service !== undefined) params.set('port', String(source.service));
+    if (source.criticality) params.set('criticality', source.criticality);
+    if (typeof source.eventType === 'string' && source.eventType.startsWith('event_type:')) {
+      params.set('event_type', source.eventType.slice('event_type:'.length));
+    } else if (typeof source.eventType === 'string' && source.eventType.startsWith('maintenance:')) {
+      params.set('maintenance', source.eventType.slice('maintenance:'.length));
+    }
+    return params;
+  }
+
+  async function fetchIncidents(startTs, endTs, filters) {
+    const url = `/api/events/history?${incidentQueryParams(startTs, endTs, filters).toString()}`;
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json()).error || message; } catch (_) { /* bounded status evidence */ }
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  function incidentsElement(suffix) {
+    return $(`incidents-${suffix}`);
+  }
+
+  function beginIncidentsLoadingState() {
+    const loading = incidentsElement('loading');
+    const empty = incidentsElement('empty');
+    const error = incidentsElement('error');
+    const truncated = incidentsElement('truncated');
+    const list = incidentsElement('list');
+    if (loading) loading.hidden = false;
+    if (empty) empty.hidden = true;
+    if (error) { error.hidden = true; error.textContent = ''; }
+    if (truncated) { truncated.hidden = true; truncated.textContent = ''; }
+    if (list) list.replaceChildren();
+  }
+
+  function updateMatchingIncidentCount(matching, total) {
+    const el = $('matching-incident-count');
+    if (el) el.textContent = `${matching} of ${total} incidents`;
+  }
+
+  // Populated from the same current snapshot's service list the Services
+  // table and the History picker already read -- never a second,
+  // independently-fetched list (mirrors renderHistoryServicePicker).
+  function populateIncidentServiceFilterOptions() {
+    const select = $('incident-service-filter');
+    if (!select) return;
+    const services = Array.isArray(state.snapshot && state.snapshot.services) ? state.snapshot.services : [];
+    const unique = new Map();
+    services.forEach((service) => {
+      const port = Number(service.port);
+      if (Number.isFinite(port) && !unique.has(port)) unique.set(port, service);
+    });
+    const sorted = [...unique.values()].sort((left, right) => (
+      String(left.name || left.title || '').localeCompare(String(right.name || right.title || ''))
+      || Number(left.port) - Number(right.port)
+    ));
+    const currentValue = state.preferences.historyFilters.service === null ? '' : String(state.preferences.historyFilters.service);
+    select.replaceChildren(Object.assign(document.createElement('option'), {value: '', textContent: 'All services'}));
+    sorted.forEach((service) => {
+      const option = document.createElement('option');
+      option.value = String(Number(service.port));
+      option.textContent = `${service.name || service.title || `Port ${service.port}`} :${service.port}`;
+      select.append(option);
+    });
+    select.value = currentValue;
+  }
+
+  // D-16: the filter's own value is never an independent fact -- it always
+  // states the one carried selection (setSelectedService is what mutates
+  // it; this only reflects that state into the control after a change made
+  // from elsewhere, e.g. the Services table or an incident focus).
+  function syncIncidentServiceFilterControl() {
+    const select = $('incident-service-filter');
+    if (!select) return;
+    const value = state.preferences.historyFilters.service;
+    select.value = value === null ? '' : String(value);
+  }
+
+  function syncIncidentFilterControls() {
+    syncIncidentServiceFilterControl();
+    const criticality = $('incident-criticality-filter');
+    if (criticality) criticality.value = state.preferences.historyFilters.criticality || '';
+    const eventType = $('incident-event-type-filter');
+    if (eventType) eventType.value = state.preferences.historyFilters.eventType || '';
+  }
+
+  // D-14: renders the full down_ts-to-recovered_ts span split at grace
+  // expiry into a grace-covered sub-segment and a post-grace unplanned-
+  // fault sub-segment, sized by the server's own grace_seconds/fault_seconds
+  // -- never recomputed client-side. A non-overrun closed episode is simply
+  // the degenerate case (grace_seconds 0, fault_seconds the whole span), so
+  // no special-case branch is needed for the common incident. An open
+  // episode renders no bar at all: its fault portion cannot be measured
+  // against a clock nobody observed (D-12 Pitfall 4).
+  function incidentDurationBar(episode) {
+    const bar = document.createElement('div');
+    bar.className = 'incident-duration-bar';
+    if (episode.open) return bar;
+    const grace = Number(episode.grace_seconds) || 0;
+    const fault = Number(episode.fault_seconds) || 0;
+    const total = grace + fault;
+    if (total <= 0) return bar;
+    if (grace > 0) {
+      const graceEl = document.createElement('span');
+      graceEl.className = 'incident-duration-grace';
+      graceEl.style.width = `${(grace / total) * 100}%`;
+      graceEl.title = `Grace-covered: ${formatSpan(grace)}`;
+      bar.append(graceEl);
+    }
+    if (fault > 0) {
+      const faultEl = document.createElement('span');
+      faultEl.className = 'incident-duration-fault';
+      faultEl.style.width = `${(fault / total) * 100}%`;
+      faultEl.title = `Unplanned fault: ${formatSpan(fault)}`;
+      bar.append(faultEl);
+    }
+    return bar;
+  }
+
+  const INCIDENT_TIMESTAMP_OPTIONS = {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'};
+
+  // One grouped down-to-recovered episode (D-12), rendered in the existing
+  // .diagnosis-card/.evidence-row visual language rather than a dense table
+  // cell -- incident rows carry more prose than the Services table's
+  // compact cells warrant. Every timestamp goes through formatLocalTimestamp.
+  function incidentRow(episode) {
+    const serviceLabel = `${displayValue(episode.service_name)} :${displayValue(episode.port)}`;
+    const startLabel = formatLocalTimestamp(episode.down_ts, INCIDENT_TIMESTAMP_OPTIONS);
+
+    const row = document.createElement('div');
+    row.className = 'incident-row';
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-label', `Investigate ${serviceLabel} incident starting ${startLabel}`);
+
+    const header = document.createElement('div');
+    header.className = 'incident-row-header';
+    const service = document.createElement('span');
+    service.className = 'incident-service';
+    service.textContent = serviceLabel;
+    header.append(service);
+    if (episode.suppressed_reason) {
+      const chip = document.createElement('span');
+      chip.className = 'incident-chip-expected';
+      chip.textContent = 'Expected';
+      header.append(chip);
+    }
+    // D-12/Pitfall 4: never a synthesized end-time or a duration computed
+    // against "now" -- the badge is text plus glyph so it never depends on
+    // colour alone (UI-SPEC Copywriting Contract).
+    if (episode.open) {
+      const badge = document.createElement('span');
+      badge.className = 'incident-badge-open';
+      badge.textContent = '▶ Ongoing — not yet recovered';
+      header.append(badge);
+    }
+    row.append(header);
+
+    const timestamps = document.createElement('div');
+    timestamps.className = 'incident-timestamps';
+    if (!episode.open && episode.overrun) {
+      // D-14: both durable timestamps, always two separate lines, never
+      // merged into one string -- matching the existing Down since/Raised
+      // at precedent this file already established for the Services
+      // section's own overrun evidence rows.
+      const downLine = document.createElement('p');
+      downLine.textContent = `Down since ${formatLocalTimestamp(episode.down_ts, INCIDENT_TIMESTAMP_OPTIONS)}`;
+      const raisedLine = document.createElement('p');
+      raisedLine.textContent = `Raised at ${formatLocalTimestamp(episode.raised_ts, INCIDENT_TIMESTAMP_OPTIONS)}`;
+      timestamps.append(downLine, raisedLine);
+    } else {
+      const startLine = document.createElement('p');
+      startLine.textContent = `Start: ${formatLocalTimestamp(episode.down_ts, INCIDENT_TIMESTAMP_OPTIONS)}`;
+      timestamps.append(startLine);
+      // D-12/Pitfall 4: an open episode renders no end line at all -- never
+      // a synthesized end-time, not even a placeholder word in an "End:"
+      // slot -- so "the row contains no end timestamp" is literal, not
+      // merely un-dated text.
+      if (!episode.open) {
+        const endLine = document.createElement('p');
+        endLine.textContent = `End: ${formatLocalTimestamp(episode.recovered_ts, INCIDENT_TIMESTAMP_OPTIONS)}`;
+        timestamps.append(endLine);
+      }
+    }
+    row.append(timestamps);
+    row.append(incidentDurationBar(episode));
+
+    // UI-SPEC "Incidents list": duration, failure class and criticality are
+    // one wrapping inline-metadata group that collapses to a second line at
+    // narrow widths rather than truncating any of it.
+    const meta = document.createElement('div');
+    meta.className = 'incident-meta';
+    const criticalityEl = document.createElement('span');
+    criticalityEl.textContent = episode.critical ? 'Critical' : 'Standard';
+    meta.append(criticalityEl);
+    const durationEl = document.createElement('span');
+    durationEl.textContent = episode.open ? 'Duration: Ongoing' : `Duration: ${formatSpan(episode.duration_seconds)}`;
+    meta.append(durationEl);
+    const failureClassEl = document.createElement('span');
+    failureClassEl.textContent = `Failure class: ${displayValue(episode.failure_class)}`;
+    meta.append(failureClassEl);
+    row.append(meta);
+
+    // D-12: the raw state_change transitions this episode was grouped from,
+    // available on expand -- reusing the existing expand-on-click
+    // detail-row pattern (toggleServiceDetails's own aria-expanded idiom).
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'incident-transitions-toggle';
+    toggle.textContent = 'Show transitions';
+    toggle.setAttribute('aria-expanded', 'false');
+    const transitionsList = document.createElement('div');
+    transitionsList.className = 'incident-transitions';
+    transitionsList.hidden = true;
+    (Array.isArray(episode.transitions) ? episode.transitions : []).forEach((transition) => {
+      const line = document.createElement('p');
+      const onlineWord = transition.online === 1 ? 'online' : transition.online === 0 ? 'offline' : 'unknown';
+      line.textContent = `${displayValue(transition.event_type)} — ${formatLocalTimestamp(transition.ts, INCIDENT_TIMESTAMP_OPTIONS)} — ${onlineWord}`;
+      transitionsList.append(line);
+    });
+    toggle.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const expanded = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', String(!expanded));
+      toggle.textContent = expanded ? 'Show transitions' : 'Hide transitions';
+      transitionsList.hidden = expanded;
+    });
+    row.append(toggle, transitionsList);
+
+    // Task 3 (D-15): the whole row is the focus target rather than a
+    // separate button -- guarded so a click/keypress on the nested
+    // transitions toggle never also triggers a focus push.
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('.incident-transitions-toggle')) return;
+      focusIncident(episode);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.target !== row) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        focusIncident(episode);
+      }
+    });
+    return row;
+  }
+
+  // A purely presentational grouping label above a dense run of same-service
+  // episodes (Claude's Discretion resolved, D-12): it merges no rows,
+  // filters nothing, and creates no record. Every episode in the group
+  // still renders as its own row.
+  function renderFlappingBanner(group) {
+    const banner = document.createElement('div');
+    banner.className = 'incident-flapping-banner';
+    banner.textContent = `Flapping — ${group.count} episodes in ${formatSpan(group.span_seconds)}`;
+    return banner;
+  }
+
+  function renderIncidents(episodes, flappingGroups) {
+    const list = $('incidents-list');
+    if (!list) return;
+    const groupsById = new Map((Array.isArray(flappingGroups) ? flappingGroups : []).map((group) => [group.id, group]));
+    const seenGroups = new Set();
+    const fragment = document.createDocumentFragment();
+    episodes.forEach((episode) => {
+      const groupId = episode.flapping_group_id;
+      if (groupId !== null && groupId !== undefined && groupsById.has(groupId) && !seenGroups.has(groupId)) {
+        seenGroups.add(groupId);
+        fragment.append(renderFlappingBanner(groupsById.get(groupId)));
+      }
+      fragment.append(incidentRow(episode));
+    });
+    list.replaceChildren(fragment);
+  }
+
+  // Fetches the currently-filtered list and an unfiltered baseline for the
+  // same range in parallel -- "N of M incidents" needs both numbers (M is
+  // deliberately never narrowed by the operator's own filter selection),
+  // and the two are otherwise independent reads of the same range.
+  async function renderIncidentsSection() {
+    const requestId = ++state.incidentsRequestGeneration;
+    const bounds = state.historyBounds || resolveRangeBounds();
+    const filters = state.preferences.historyFilters;
+    populateIncidentServiceFilterOptions();
+    syncIncidentFilterControls();
+    beginIncidentsLoadingState();
+    const [filteredOutcome, totalOutcome] = await Promise.allSettled([
+      fetchIncidents(bounds.start_ts, bounds.end_ts, filters),
+      fetchIncidents(bounds.start_ts, bounds.end_ts, DEFAULT_HISTORY_FILTERS),
+    ]);
+    if (requestId !== state.incidentsRequestGeneration) return;
+    const loading = incidentsElement('loading');
+    if (loading) loading.hidden = true;
+    const errorEl = incidentsElement('error');
+    const emptyEl = incidentsElement('empty');
+    const truncatedEl = incidentsElement('truncated');
+    const listEl = incidentsElement('list');
+    if (filteredOutcome.status !== 'fulfilled') {
+      if (errorEl) {
+        errorEl.textContent = 'Beacon could not load incidents for this range. Try again, or narrow the range.';
+        errorEl.hidden = false;
+      }
+      if (emptyEl) emptyEl.hidden = true;
+      if (listEl) listEl.replaceChildren();
+      return;
+    }
+    if (errorEl) { errorEl.hidden = true; errorEl.textContent = ''; }
+    const payload = filteredOutcome.value;
+    const episodes = Array.isArray(payload.episodes) ? payload.episodes : [];
+    const flappingGroups = Array.isArray(payload.flapping_groups) ? payload.flapping_groups : [];
+    const total = totalOutcome.status === 'fulfilled' && Array.isArray(totalOutcome.value.episodes)
+      ? totalOutcome.value.episodes.length
+      : episodes.length;
+    updateMatchingIncidentCount(episodes.length, total);
+    if (truncatedEl) {
+      if (payload.truncated) {
+        truncatedEl.textContent = 'This incidents list was truncated at the row budget; not every matching incident in this range and these filters is shown.';
+        truncatedEl.hidden = false;
+      } else {
+        truncatedEl.hidden = true;
+        truncatedEl.textContent = '';
+      }
+    }
+    if (episodes.length === 0) {
+      if (emptyEl) emptyEl.hidden = false;
+      if (listEl) listEl.replaceChildren();
+      return;
+    }
+    if (emptyEl) emptyEl.hidden = true;
+    renderIncidents(episodes, flappingGroups);
+  }
+
+  // ------------------------------------------------------------------
+  // Investigation focus (Phase 4 04-07 Task 3, D-15): choosing an incident
+  // moves the whole investigation -- range, carried service, and every
+  // range-aware/service-aware view -- together, non-destructively.
+  // ------------------------------------------------------------------
+
+  // The window to push onto the shared navigation stack (D-15's resolved
+  // padding rule): 15% of the episode's own span on each side, floored at
+  // INCIDENT_PAD_FLOOR_SECONDS -- so a one-minute blip stays legible and a
+  // long outage is not padded into an unreasonably wide window. An open
+  // episode's end is `now`, capped at the current shared range's own
+  // end_ts, both before AND after padding, so a focus can never ask for a
+  // window later than the range control can state. The padded window is
+  // then clamped to the 90-day retention bound the server itself enforces,
+  // so a focus can never request a span the server will reject.
+  function incidentFocusWindow(episode, currentRange) {
+    const nowTs = Math.floor(Date.now() / 1000);
+    const baseEnd = episode.open ? Math.min(nowTs, currentRange.end_ts) : episode.recovered_ts;
+    const baseStart = episode.down_ts;
+    const span = Math.max(0, baseEnd - baseStart);
+    const pad = Math.max(INCIDENT_PAD_FLOOR_SECONDS, Math.round(span * INCIDENT_PAD_FRACTION));
+    let start_ts = baseStart - pad;
+    let end_ts = baseEnd + pad;
+    if (episode.open) end_ts = Math.min(end_ts, currentRange.end_ts);
+    const retentionSeconds = HISTORY_PRESETS['90d'];
+    if (end_ts - start_ts > retentionSeconds) start_ts = end_ts - retentionSeconds;
+    return {start_ts, end_ts};
+  }
+
+  // Does exactly two things, in this order (Task 3 action text): the
+  // episode's own service becomes the carried selection, then its padded
+  // window is pushed onto the shared range stack -- so the host charts, the
+  // service views and the incident list all move together.
+  function focusIncident(episode) {
+    const currentRange = state.historyBounds || resolveRangeBounds();
+    const window = incidentFocusWindow(episode, currentRange);
+    const label = currentRangeLabel();
+    setSelectedService(Number(episode.port));
+    setInvestigationRange({...window, origin: 'incident', label});
+  }
+
+  // ------------------------------------------------------------------
   // Custom local-time range entry (Phase 4 04-05, D-03): explicit start/end
   // fields are the canonical, statable entry -- interpreted in the Pi's
   // configured timezone (state.timezone), never the browser's.
@@ -1109,6 +1560,11 @@
     renderRangeFields();
     renderBackControl();
     renderHistorySection();
+    // D-16: the shared range governs both range-aware sections at once --
+    // Incidents must reflect a drag/incident-focus/Back range change even
+    // while History is the one currently visible, so switching tabs never
+    // shows a stale list.
+    renderIncidentsSection();
   }
 
   // D-15: the single entry point every range change -- preset, custom apply,
@@ -2678,6 +3134,13 @@
       button.setAttribute('aria-selected', String(selected));
     });
     document.querySelectorAll('.advanced-detail > section').forEach((node) => { node.hidden = node.id !== `${section}-section`; });
+    // D-16/UI-SPEC "Shared range control": one range-control header governs
+    // History and Incidents only -- the querySelector above already leaves
+    // this explicit `<div>` (not a `<section>`) untouched, so this is the
+    // one added hook selecting it in or out. The five Phase 3 sections
+    // remain untouched by this and stay strictly current-state.
+    const investigationHeader = $('investigation-header');
+    if (investigationHeader) investigationHeader.hidden = section !== 'history' && section !== 'incidents';
     heading.focus();
     $('advanced-status').textContent = `${heading.textContent} selected`;
   }
@@ -2801,6 +3264,58 @@
   }
   const clearSelectedServiceButton = $('clear-selected-service');
   if (clearSelectedServiceButton) clearSelectedServiceButton.addEventListener('click', clearSelectedService);
+  // Phase 4 04-07: entering Incidents (directly, not via a range change)
+  // must fetch too -- applyRangeAndRender only covers the range-change path.
+  const incidentsNavButton = document.querySelector('[data-section="incidents"]');
+  if (incidentsNavButton) incidentsNavButton.addEventListener('click', renderIncidentsSection);
+  syncIncidentFilterControls();
+  const incidentCriticalityFilter = $('incident-criticality-filter');
+  if (incidentCriticalityFilter) {
+    incidentCriticalityFilter.addEventListener('change', () => {
+      state.preferences.historyFilters = {
+        ...state.preferences.historyFilters,
+        criticality: incidentCriticalityFilter.value === '' ? null : incidentCriticalityFilter.value,
+      };
+      savePreferences();
+      renderIncidentsSection();
+    });
+  }
+  const incidentEventTypeFilter = $('incident-event-type-filter');
+  if (incidentEventTypeFilter) {
+    incidentEventTypeFilter.addEventListener('change', () => {
+      state.preferences.historyFilters = {
+        ...state.preferences.historyFilters,
+        eventType: incidentEventTypeFilter.value === '' ? null : incidentEventTypeFilter.value,
+      };
+      savePreferences();
+      renderIncidentsSection();
+    });
+  }
+  // D-16: selecting a service here is the same carried selection every
+  // other affordance publishes to -- never an independent second fact.
+  const incidentServiceFilter = $('incident-service-filter');
+  if (incidentServiceFilter) {
+    incidentServiceFilter.addEventListener('change', () => {
+      setSelectedService(incidentServiceFilter.value === '' ? null : Number(incidentServiceFilter.value));
+    });
+  }
+  const clearIncidentFiltersButton = $('clear-incident-filters');
+  if (clearIncidentFiltersButton) {
+    clearIncidentFiltersButton.addEventListener('click', () => {
+      // UI-SPEC "Filters": service, criticality, and event type are all
+      // four AND-combined filters this control resets -- only the shared
+      // range (the investigation context itself, per D-16) is untouched.
+      // Clearing the service filter routes through setSelectedService so
+      // the carried selection and the filter can never disagree afterward.
+      state.preferences.historyFilters = {...state.preferences.historyFilters, criticality: null, eventType: null};
+      savePreferences();
+      setSelectedService(null);
+      syncIncidentFilterControls();
+      $('advanced-status').textContent = 'All incident filters cleared';
+    });
+  }
+  // Test-only hook, same pattern as window.__historyRangeTestHooks.
+  window.__incidentTestHooks = {incidentFocusWindow, focusIncident, INCIDENT_PAD_FRACTION, INCIDENT_PAD_FLOOR_SECONDS};
   // refreshCurrentDiagnosis() must be invoked before fetchRuntimeConfig(): both
   // dispatch their fetch() call synchronously (before their first await), so
   // this order keeps /api/advanced/current the first network call the page

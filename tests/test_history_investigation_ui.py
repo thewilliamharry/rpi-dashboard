@@ -2767,6 +2767,338 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # ------------------------------------------------------------------
+    # 04-07: the Incidents section -- shared range header, four filters,
+    # incident-row anatomy (open/overrun/expected/flapping), and
+    # focusIncident's investigation-context handoff.
+    # ------------------------------------------------------------------
+
+    def _incidents_route(
+        self, snapshot, config_fixture, *,
+        events_payload_fn=None, events_status=200, record_events_urls=None,
+    ):
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/events/history':
+                if record_events_urls is not None:
+                    record_events_urls.append(route.request.url)
+                if events_status != 200:
+                    route.fulfill(status=events_status, json={'error': 'incidents unavailable'})
+                    return
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                payload = (
+                    events_payload_fn(start_ts, end_ts, query) if events_payload_fn
+                    else self._events_history_fixture(start_ts, end_ts)
+                )
+                route.fulfill(status=200, json=payload)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+        return route_api
+
+    def _goto_incidents(self, page):
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="incidents"]').click()
+        page.locator('#incidents-section').wait_for(state='visible', timeout=5_000)
+
+    def test_incidents_nav_reveals_section_and_shares_one_range_header(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self.assertIsNotNone(page.locator('#investigation-header').get_attribute('hidden'))
+            self.assertEqual(page.locator('#investigation-range').count(), 1)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            self.assertIsNone(page.locator('#investigation-header').get_attribute('hidden'))
+            page.locator('[data-section="incidents"]').click()
+            page.locator('#incidents-section').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.evaluate('document.activeElement.id'), 'incidents-heading')
+            self.assertIsNone(page.locator('#investigation-header').get_attribute('hidden'))
+            page.locator('[data-section="services"]').click()
+            page.locator('#services-section').wait_for(state='visible', timeout=5_000)
+            self.assertIsNotNone(page.locator('#investigation-header').get_attribute('hidden'))
+            self.assertEqual(page.locator('#investigation-range').count(), 1)
+        finally:
+            page.close()
+
+    def test_incident_criticality_filter_issues_request_and_narrows_count(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        standard_episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+        critical_episode = self._episode(8081, 1_700_000_100, 1_700_000_160, critical=True)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            if query.get('criticality', [''])[0] == 'critical':
+                return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode])
+            return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode, standard_episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('.incident-row').count(), 2)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/events/history'
+                and parse_qs(urlparse(request.url).query).get('criticality', [''])[0] == 'critical',
+            ):
+                page.locator('#incident-criticality-filter').select_option('critical')
+            page.wait_for_function("() => document.querySelectorAll('.incident-row').length === 1", timeout=5_000)
+            self.assertEqual(page.locator('#matching-incident-count').inner_text(), '1 of 2 incidents')
+        finally:
+            page.close()
+
+    def test_incident_filters_persist_across_reload_and_hostile_stored_value_falls_back(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060, critical=True)
+        recorded = []
+
+        def events_payload_fn(start_ts, end_ts, query):
+            recorded.append(dict(query))
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            page.locator('#incident-criticality-filter').select_option('critical')
+            page.locator('#incident-event-type-filter').select_option('event_type:state_change')
+            page.wait_for_timeout(50)
+
+            page.reload(wait_until='domcontentloaded')
+            page.locator('[data-section="incidents"]').click()
+            page.locator('#incidents-section').wait_for(state='visible', timeout=5_000)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#incident-criticality-filter').input_value(), 'critical')
+            self.assertEqual(page.locator('#incident-event-type-filter').input_value(), 'event_type:state_change')
+
+            # T-04-04: a hostile stored historyFilters value -- outside
+            # CRITICALITY_VALUES/EVENT_TYPES -- resolves to the documented
+            # default rather than ever reaching a request URL.
+            recorded.clear()
+            page.evaluate("""
+                const stored = JSON.parse(localStorage.getItem('beacon-advanced-preferences-v1'));
+                stored.historyFilters = {service: null, criticality: 'lethal', eventType: 'event_type:not_a_real_type'};
+                localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify(stored));
+            """)
+            page.reload(wait_until='domcontentloaded')
+            page.locator('[data-section="incidents"]').click()
+            page.locator('#incidents-section').wait_for(state='visible', timeout=5_000)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#incident-criticality-filter').input_value(), '')
+            self.assertEqual(page.locator('#incident-event-type-filter').input_value(), '')
+            for query in recorded:
+                self.assertNotIn('criticality', query)
+                self.assertNotIn('event_type', query)
+        finally:
+            page.close()
+
+    def test_maintenance_visibility_options_issue_maintenance_param_and_default_shows_suppressed(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        suppressed_episode = self._episode(8080, 1_700_000_000, 1_700_000_060, suppressed_reason='confirmed_maintenance')
+        plain_episode = self._episode(8081, 1_700_000_100, 1_700_000_160)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            maintenance = query.get('maintenance', [''])[0]
+            if maintenance == 'exclude':
+                return self._events_history_fixture(start_ts, end_ts, episodes=[plain_episode])
+            if maintenance == 'only':
+                return self._events_history_fixture(start_ts, end_ts, episodes=[suppressed_episode])
+            return self._events_history_fixture(start_ts, end_ts, episodes=[suppressed_episode, plain_episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            # Default: no maintenance param needed to see suppressed evidence
+            # by default (D-13) -- the opposite of the main dashboard's feed.
+            self.assertEqual(page.locator('.incident-chip-expected').count(), 1)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/events/history'
+                and parse_qs(urlparse(request.url).query).get('maintenance', [''])[0] == 'exclude',
+            ):
+                page.locator('#incident-event-type-filter').select_option('maintenance:exclude')
+            page.wait_for_function("() => document.querySelectorAll('.incident-row').length === 1", timeout=5_000)
+            self.assertEqual(page.locator('.incident-chip-expected').count(), 0)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/events/history'
+                and parse_qs(urlparse(request.url).query).get('maintenance', [''])[0] == 'only',
+            ):
+                page.locator('#incident-event-type-filter').select_option('maintenance:only')
+            page.wait_for_function("() => document.querySelectorAll('.incident-chip-expected').length === 1", timeout=5_000)
+        finally:
+            page.close()
+
+    def test_combining_criticality_and_event_type_filters_issues_one_request_with_both(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060, critical=True)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            page.locator('#incident-criticality-filter').select_option('critical')
+            page.wait_for_timeout(50)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/events/history'
+                and parse_qs(urlparse(request.url).query).get('criticality', [''])[0] == 'critical'
+                and parse_qs(urlparse(request.url).query).get('event_type', [''])[0] == 'state_change',
+            ):
+                page.locator('#incident-event-type-filter').select_option('event_type:state_change')
+        finally:
+            page.close()
+
+    def test_clear_all_incident_filters_resets_and_leaves_range_unchanged(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060, critical=True)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            page.locator('#incident-criticality-filter').select_option('critical')
+            page.locator('#incident-event-type-filter').select_option('maintenance:exclude')
+            page.locator('#incident-service-filter').select_option('8080')
+            page.wait_for_timeout(50)
+            range_start_before = page.locator('#range-start').input_value()
+            range_end_before = page.locator('#range-end').input_value()
+            with page.expect_request(lambda request: urlparse(request.url).path == '/api/events/history') as request_info:
+                page.locator('#clear-incident-filters').click()
+            query = parse_qs(urlparse(request_info.value.url).query)
+            self.assertNotIn('criticality', query)
+            self.assertNotIn('maintenance', query)
+            self.assertNotIn('port', query)
+            self.assertEqual(page.locator('#incident-criticality-filter').input_value(), '')
+            self.assertEqual(page.locator('#incident-event-type-filter').input_value(), '')
+            self.assertEqual(page.locator('#incident-service-filter').input_value(), '')
+            self.assertEqual(page.locator('#range-start').input_value(), range_start_before)
+            self.assertEqual(page.locator('#range-end').input_value(), range_end_before)
+        finally:
+            page.close()
+
+    def test_zero_match_incidents_renders_empty_copy_and_matching_count(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            if query.get('criticality', [''])[0] == 'critical':
+                return self._events_history_fixture(start_ts, end_ts, episodes=[])
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            page.locator('#incident-criticality-filter').select_option('critical')
+            page.locator('#incidents-empty').wait_for(state='visible', timeout=5_000)
+            self.assertIn(
+                'No incidents match this range and these filters.',
+                page.locator('#incidents-empty').inner_text(),
+            )
+            self.assertIn('Clear filters to see every recorded incident in this range.', page.locator('#incidents-empty').inner_text())
+            self.assertEqual(page.locator('#matching-incident-count').inner_text(), '0 of 1 incidents')
+            self.assertEqual(page.locator('.incident-row').count(), 0)
+        finally:
+            page.close()
+
+    def test_incidents_fetch_failure_renders_error_and_keeps_filters_enabled(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_status=503))
+        try:
+            self._goto_incidents(page)
+            page.locator('#incidents-error').wait_for(state='visible', timeout=5_000)
+            self.assertIn(
+                'Beacon could not load incidents for this range.',
+                page.locator('#incidents-error').inner_text(),
+            )
+            self.assertFalse(page.locator('#incident-criticality-filter').is_disabled())
+            self.assertFalse(page.locator('#incident-event-type-filter').is_disabled())
+            self.assertFalse(page.locator('#incident-service-filter').is_disabled())
+            self.assertFalse(page.locator('#clear-incident-filters').is_disabled())
+        finally:
+            page.close()
+
+    def test_truncated_incidents_response_renders_disclosure(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            fixture = self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+            fixture['truncated'] = True
+            return fixture
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('#incidents-truncated').wait_for(state='visible', timeout=5_000)
+        finally:
+            page.close()
+
+    def test_incidents_section_has_no_action_affordances(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060, suppressed_reason='confirmed_maintenance')
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            forbidden = re.compile(r'restart|stop|retry|\bfix\b|remediate', re.IGNORECASE)
+            elements = page.locator(
+                '#incidents-section button, #incidents-section a, #incidents-section input, #incidents-section select',
+            )
+            count = elements.count()
+            self.assertGreater(count, 0)
+            for index in range(count):
+                el = elements.nth(index)
+                name = ' '.join(filter(None, [
+                    el.get_attribute('aria-label'), el.text_content(), el.get_attribute('title'),
+                ]))
+                self.assertNotRegex(name, forbidden)
+        finally:
+            page.close()
+
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):
     """04-04 Task 3: a zone that observes DST annotates its two transitions.
