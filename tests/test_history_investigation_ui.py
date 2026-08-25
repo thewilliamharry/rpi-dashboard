@@ -431,16 +431,24 @@ class HistoryInvestigationUiTests(unittest.TestCase):
     # held back until the test explicitly releases it. This avoids blocking
     # the Playwright driver's single-threaded sync-API connection, which a
     # Python-side time.sleep() inside a route handler would otherwise starve.
+    # 04-03 fetches all four host metrics in parallel, so the harness must hold
+    # (and later release) all four concurrent /api/telemetry/history fetches,
+    # not just one -- collecting them in an array rather than a single slot.
     HISTORY_FETCH_HOLD_HARNESS = """
-        window.__heldHistoryRelease = null;
+        window.__heldHistoryReleases = [];
         const realFetch = window.fetch.bind(window);
         window.fetch = (...args) => {
           const url = String(args[0] || '');
           if (!url.includes('/api/telemetry/history')) return realFetch(...args);
           const pending = realFetch(...args);
           return new Promise((resolve, reject) => {
-            window.__heldHistoryRelease = () => pending.then(resolve, reject);
+            window.__heldHistoryReleases.push(() => pending.then(resolve, reject));
           });
+        };
+        window.__releaseAllHeldHistoryFetches = () => {
+          const releases = window.__heldHistoryReleases;
+          window.__heldHistoryReleases = [];
+          releases.forEach((release) => release());
         };
     """
 
@@ -480,14 +488,543 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
             page.locator('[data-section="history"]').click()
             page.locator('#history-cpu-loading').wait_for(state='visible', timeout=5_000)
-            page.wait_for_function('window.__heldHistoryRelease !== null', timeout=5_000)
+            page.wait_for_function('window.__heldHistoryReleases.length === 4', timeout=5_000)
             path_d = page.locator('#chart-cpu path').get_attribute('d')
             self.assertFalse(path_d)
-            # Now release the held fetch and confirm the loading skeleton
-            # clears and the chart draws.
-            page.evaluate('window.__heldHistoryRelease()')
+            # Now release all four held fetches and confirm the loading
+            # skeleton clears and the chart draws.
+            page.evaluate('window.__releaseAllHeldHistoryFetches()')
             page.locator('#history-cpu-loading').wait_for(state='hidden', timeout=5_000)
             self.assertTrue(page.locator('#chart-cpu path').get_attribute('d'))
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-03: memory, disk, and temperature join CPU on the shared axis.
+    # ------------------------------------------------------------------
+
+    def _metric_fixture(self, metric, points, start_ts=1_700_000_000, end_ts=None, coverage=None):
+        end_ts = end_ts if end_ts is not None else start_ts + 3600
+        return {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'host', 'metric': metric},
+            'effective_resolution_seconds': 60,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [60],
+            'points': points,
+            'coverage': coverage if coverage is not None else [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}],
+            'aggregation_pending': [],
+        }
+
+    def test_four_charts_render_in_fixed_order_with_independent_coverage_strips(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        per_metric_points = {
+            'cpu': [self._point(start_ts, 10.0), self._point(start_ts + 60, 20.0)],
+            'ram': [self._point(start_ts, 30.0), self._point(start_ts + 60, 40.0)],
+            'disk': [self._point(start_ts, 50.0), self._point(start_ts + 60, 55.0)],
+            'temp': [self._point(start_ts, 41.0), self._point(start_ts + 60, 42.0)],
+        }
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query['metric'][0]
+                route.fulfill(status=200, json=self._metric_fixture(metric, per_metric_points[metric], start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            for metric in ('cpu', 'ram', 'disk', 'temp'):
+                page.wait_for_function(
+                    "() => { const d = document.querySelector('#chart-%s path').getAttribute('d') || ''; "
+                    "return d.length > 0; }" % metric,
+                    timeout=5_000,
+                )
+            chart_ids = page.eval_on_selector_all('.hist-plot', 'nodes => nodes.map(n => n.id)')
+            self.assertEqual(chart_ids, ['chart-cpu', 'chart-ram', 'chart-disk', 'chart-temp'])
+            strip_ids = page.eval_on_selector_all('.hist-coverage-strip', 'nodes => nodes.map(n => n.id)')
+            self.assertEqual(strip_ids, ['strip-cpu', 'strip-ram', 'strip-disk', 'strip-temp'])
+            self.assertEqual(page.locator('#history-time-axis').count(), 1)
+            self.assertEqual(page.locator('#unit-cpu').text_content(), '%')
+            self.assertEqual(page.locator('#unit-ram').text_content(), '%')
+            self.assertEqual(page.locator('#unit-disk').text_content(), '%')
+            self.assertEqual(page.locator('#unit-temp').text_content(), '°C')
+        finally:
+            page.close()
+
+    def test_temperature_failure_isolates_other_three_charts(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        ok_fixture = self._metric_fixture('cpu', [self._point(start_ts, 10.0), self._point(start_ts + 60, 20.0)], start_ts, end_ts)
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query['metric'][0]
+                if metric == 'temp':
+                    route.fulfill(status=503, json={'error': 'temperature sensor unavailable'})
+                    return
+                route.fulfill(status=200, json=ok_fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-temp-error').wait_for(state='visible', timeout=5_000)
+            for metric in ('cpu', 'ram', 'disk'):
+                page.wait_for_function(
+                    "() => { const d = document.querySelector('#chart-%s path').getAttribute('d') || ''; "
+                    "return d.length > 0; }" % metric,
+                    timeout=5_000,
+                )
+            self.assertTrue(page.locator('#history-cpu-error').is_hidden())
+            self.assertTrue(page.locator('#history-ram-error').is_hidden())
+            self.assertTrue(page.locator('#history-disk-error').is_hidden())
+            error_text = page.locator('#history-temp-error').text_content()
+            self.assertIn('This chart could not load.', error_text)
+            self.assertIn('temperature sensor unavailable', error_text)
+        finally:
+            page.close()
+
+    def test_disk_empty_response_keeps_chart_frame_present(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        ok_fixture = self._metric_fixture('cpu', [self._point(start_ts, 10.0)], start_ts, end_ts)
+        empty_disk_fixture = self._metric_fixture(
+            'disk', [], start_ts, end_ts,
+            coverage=[{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'}],
+        )
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query['metric'][0]
+                route.fulfill(status=200, json=empty_disk_fixture if metric == 'disk' else ok_fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-disk-empty').wait_for(state='visible', timeout=5_000)
+            self.assertIn('No Disk data in this range.', page.locator('#history-disk-empty').text_content())
+            self.assertEqual(page.locator('#chart-disk').count(), 1)
+        finally:
+            page.close()
+
+    def test_narrow_viewport_keeps_four_charts_full_width_with_scrollable_axis(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page(viewport={'width': 400, 'height': 900})
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            for metric in ('cpu', 'ram', 'disk', 'temp'):
+                box = page.locator(f'#chart-{metric}').bounding_box()
+                self.assertIsNotNone(box)
+                self.assertGreater(box['width'], 300)
+            scroll = page.locator('#history-axis-scroll')
+            self.assertEqual(scroll.get_attribute('role'), 'region')
+            self.assertEqual(scroll.get_attribute('aria-label'), 'Shared history time axis')
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-03: threshold lines drawn only where a documented hardware or
+    # filesystem fact exists.
+    # ------------------------------------------------------------------
+
+    def test_temperature_and_disk_thresholds_carry_provenance_cpu_ram_carry_none(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        fixtures = {
+            'cpu': self._metric_fixture('cpu', [self._point(start_ts, 10.0)], start_ts, end_ts),
+            'ram': self._metric_fixture('ram', [self._point(start_ts, 20.0)], start_ts, end_ts),
+            'disk': self._metric_fixture('disk', [self._point(start_ts, 30.0)], start_ts, end_ts),
+            'temp': self._metric_fixture('temp', [self._point(start_ts, 41.0)], start_ts, end_ts),
+        }
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query['metric'][0]
+                route.fulfill(status=200, json=fixtures[metric])
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#chart-temp .hist-threshold').first.wait_for(state='attached', timeout=5_000)
+            temp_thresholds = page.locator('#chart-temp .hist-threshold')
+            self.assertEqual(temp_thresholds.count(), 2)
+            expected_temp = (
+                'Raspberry Pi documented default soft/hard thermal throttle point '
+                '— not a Beacon-configured alert.'
+            )
+            titles = [temp_thresholds.nth(i).locator('title').text_content() for i in range(2)]
+            self.assertEqual(titles, [expected_temp, expected_temp])
+            disk_thresholds = page.locator('#chart-disk .hist-threshold')
+            self.assertEqual(disk_thresholds.count(), 1)
+            self.assertEqual(
+                disk_thresholds.first.locator('title').text_content(),
+                'Filesystem-reported total capacity — the disk cannot exceed this line.',
+            )
+            self.assertEqual(page.locator('#chart-cpu .hist-threshold').count(), 0)
+            self.assertEqual(page.locator('#chart-ram .hist-threshold').count(), 0)
+            stroke = page.eval_on_selector('#chart-temp .hist-threshold', 'el => getComputedStyle(el).stroke')
+            self.assertNotEqual(stroke, 'none')
+        finally:
+            page.close()
+
+    def test_temperature_domain_includes_85_even_when_observed_max_is_41(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        fixture = self._metric_fixture('temp', [self._point(start_ts, 41.0)], start_ts, end_ts)
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#chart-temp .hist-threshold').first.wait_for(state='attached', timeout=5_000)
+            ys = page.eval_on_selector_all(
+                '#chart-temp .hist-threshold',
+                'nodes => nodes.map(n => parseFloat(n.getAttribute("y1")))',
+            )
+            self.assertEqual(len(ys), 2)
+            for y in ys:
+                self.assertGreaterEqual(y, 0)
+                self.assertLessEqual(y, 96)
+            # The 85-degree line renders strictly above (smaller y) the
+            # 80-degree line -- proving the domain grew to include both
+            # rather than clipping the higher one off-screen.
+            self.assertLess(min(ys), max(ys))
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-03: point tooltips and honest sub-pixel segment disclosure.
+    # ------------------------------------------------------------------
+
+    def test_point_tooltip_discloses_value_unit_and_local_timestamp(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        fixture = self._metric_fixture('temp', [self._point(start_ts, 41.5)], start_ts, end_ts)
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        # Browser pinned to UTC; server configured for Australia/Sydney --
+        # 1_700_000_000 is 2023-11-15 in Sydney, 2023-11-14 in UTC (D-05).
+        page = self.browser.new_page(timezone_id='UTC')
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#chart-temp .hist-point-target').first.wait_for(timeout=5_000)
+            page.locator('#chart-temp .hist-point-target').first.hover()
+            page.locator('#history-chart-tooltip').wait_for(state='visible', timeout=5_000)
+            text = page.locator('#history-chart-tooltip').text_content()
+            self.assertIn('41.5', text)
+            self.assertIn('°C', text)
+            self.assertIn('15', text)
+            self.assertNotIn('14', text)
+        finally:
+            page.close()
+
+    def test_merged_subpixel_segments_disclose_true_count_and_duration(self):
+        span = HISTORY_PRESET_SPANS['90d']
+        end_ts = 3_000_000_000
+        start_ts = end_ts - span
+        gap_start = start_ts + 1000
+        coverage = [{'start_ts': start_ts, 'end_ts': gap_start, 'state': 'observed'}]
+        cursor = gap_start
+        for _ in range(4):
+            coverage.append({'start_ts': cursor, 'end_ts': cursor + 90, 'state': 'collection_gap'})
+            cursor += 90
+        coverage.append({'start_ts': cursor, 'end_ts': end_ts, 'state': 'observed'})
+        fixture = self._metric_fixture(
+            'cpu', [self._point(start_ts, 10.0), self._point(end_ts - 60, 20.0)], start_ts, end_ts, coverage=coverage,
+        )
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            with page.expect_request(lambda r: urlparse(r.url).path == '/api/telemetry/history'):
+                page.locator('#range-preset-90d').click()
+            page.locator('#strip-cpu .hist-coverage-segment').first.wait_for(timeout=5_000)
+            segments = page.locator('#strip-cpu .hist-coverage-segment')
+            self.assertEqual(segments.count(), 1)
+            title = segments.first.locator('title').text_content()
+            self.assertEqual(title, 'Collection gap — 4 intervals, 6 minutes total')
+            width = float(segments.first.get_attribute('width'))
+            self.assertGreaterEqual(width, 3)
+        finally:
+            page.close()
+
+    def test_adjacent_subpixel_different_reasons_do_not_merge(self):
+        span = HISTORY_PRESET_SPANS['90d']
+        end_ts = 3_100_000_000
+        start_ts = end_ts - span
+        mid = start_ts + 1000
+        coverage = [
+            {'start_ts': start_ts, 'end_ts': mid, 'state': 'observed'},
+            {'start_ts': mid, 'end_ts': mid + 30, 'state': 'collection_gap'},
+            {'start_ts': mid + 30, 'end_ts': mid + 60, 'state': 'expired'},
+            {'start_ts': mid + 60, 'end_ts': end_ts, 'state': 'observed'},
+        ]
+        fixture = self._metric_fixture(
+            'cpu', [self._point(start_ts, 10.0), self._point(end_ts - 60, 20.0)], start_ts, end_ts, coverage=coverage,
+        )
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            with page.expect_request(lambda r: urlparse(r.url).path == '/api/telemetry/history'):
+                page.locator('#range-preset-90d').click()
+            page.locator('#strip-cpu .hist-coverage-segment').first.wait_for(timeout=5_000)
+            segments = page.locator('#strip-cpu .hist-coverage-segment')
+            self.assertEqual(segments.count(), 2)
+            titles = [segments.nth(i).locator('title').text_content() for i in range(2)]
+            self.assertIn('Collection gap', titles)
+            self.assertIn('Expired (outside retention)', titles)
+        finally:
+            page.close()
+
+    def test_tooltip_updates_without_regenerating_chart_paths_on_pointer_moves(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        points = [self._point(start_ts + i * 300, 10.0 + i) for i in range(6)]
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts)
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#chart-cpu .hist-point-target').first.wait_for(timeout=5_000)
+            initial_d = page.locator('#chart-cpu path').get_attribute('d')
+            targets = page.locator('#chart-cpu .hist-point-target')
+            count = targets.count()
+            self.assertGreaterEqual(count, 5)
+            tooltip_texts = set()
+            for index in range(min(6, count)):
+                targets.nth(index).hover()
+                page.locator('#history-chart-tooltip').wait_for(state='visible', timeout=5_000)
+                tooltip_texts.add(page.locator('#history-chart-tooltip').text_content())
+            final_d = page.locator('#chart-cpu path').get_attribute('d')
+            self.assertEqual(initial_d, final_d)
+            self.assertGreater(len(tooltip_texts), 1)
+        finally:
+            page.close()
+
+    def test_four_chart_stack_render_is_measured_and_bounded_r01(self):
+        """R-01: a measured wall-clock render figure for the full four-chart
+        stack at the 90d preset with 2048 points/series and >=50 non-observed
+        coverage intervals, captured via window.__historyStackRenderMs. The
+        assertion is that a measurement was taken and is finite/bounded, not
+        that it clears a threshold invented here -- see 04-03-SUMMARY.md for
+        the recorded baseline (developer machine, not Pi-class; OPS-01 owns
+        the Pi-hardware verdict).
+        """
+        span = HISTORY_PRESET_SPANS['90d']
+        end_ts = 4_000_000_000
+        start_ts = end_ts - span
+        total_points = 2048
+        step = max(1, (end_ts - start_ts) // total_points)
+        points = [self._point(start_ts + i * step, float(i % 100)) for i in range(total_points)]
+        coverage = []
+        gap_count = 60
+        gap_step = max(2, (end_ts - start_ts) // (gap_count * 2))
+        cursor = start_ts
+        for _ in range(gap_count):
+            gap_end = cursor + gap_step
+            coverage.append({'start_ts': cursor, 'end_ts': gap_end, 'state': 'collection_gap'})
+            observed_end = gap_end + gap_step
+            coverage.append({'start_ts': gap_end, 'end_ts': observed_end, 'state': 'observed'})
+            cursor = observed_end
+        coverage.append({'start_ts': cursor, 'end_ts': end_ts, 'state': 'observed'})
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts, coverage=coverage)
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            with page.expect_request(lambda r: urlparse(r.url).path == '/api/telemetry/history'):
+                page.locator('#range-preset-90d').click()
+            page.wait_for_function(
+                "() => typeof window.__historyStackRenderMs === 'number' "
+                "&& Number.isFinite(window.__historyStackRenderMs)",
+                timeout=20_000,
+            )
+            render_ms = page.evaluate('window.__historyStackRenderMs')
+            self.assertIsInstance(render_ms, (int, float))
+            self.assertGreaterEqual(render_ms, 0)
+            print(
+                f"\nR-01 baseline: four-chart stack render at 90d preset, "
+                f"2048 pts/series, {gap_count} non-observed intervals: "
+                f"{render_ms:.2f}ms (developer machine, not Pi-class)"
+            )
         finally:
             page.close()
 

@@ -10,14 +10,18 @@
   const HIST_CHART_HEIGHT = 96;
   const HIST_STRIP_HEIGHT = 16;
   const HIST_MIN_SEGMENT_WIDTH = 3;
-  // CPU/RAM/disk are percentages; only CPU exists in this plan (04-01) -- the
-  // remaining three metrics (04-03) extend this map, not the rendering code.
-  const METRIC_VALUE_DOMAIN = {cpu: [0, 100]};
-  // The render loop, loading/empty/error wiring, and Copywriting Contract
-  // sentence below are all keyed by this list and by metric id -- 04-03 adds
-  // 'ram', 'disk', 'temp' here plus their markup; no rendering code changes.
-  const HISTORY_METRICS = ['cpu'];
-  const METRIC_LABELS = {cpu: 'CPU'};
+  // D-07: same order and same keys as the server's HOST_METRICS tuple
+  // (dashboard/beacon/telemetry.py:12), so selector values and DOM ids agree.
+  const HOST_METRIC_ORDER = ['cpu', 'ram', 'disk', 'temp'];
+  const HOST_METRIC_LABELS = {cpu: 'CPU', ram: 'Memory', disk: 'Disk', temp: 'Temperature'};
+  const HOST_METRIC_UNITS = {cpu: '%', ram: '%', disk: '%', temp: '°C'};
+  // D-10: two honest lines rather than four symmetrical ones. cpu/ram carry no
+  // entry and there is no fallback branch that invents one for them.
+  const THRESHOLD_LINES = {temp: [80, 85], disk: [100]};
+  const THRESHOLD_PROVENANCE = {
+    temp: 'Raspberry Pi documented default soft/hard thermal throttle point — not a Beacon-configured alert.',
+    disk: 'Filesystem-reported total capacity — the disk cannot exceed this line.',
+  };
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
@@ -291,10 +295,29 @@
     return ((ts - startTs) / span) * HIST_CHART_WIDTH;
   }
 
-  function histValueToY(value, metric) {
-    const [min, max] = METRIC_VALUE_DOMAIN[metric] || [0, 100];
+  function histValueToY(value, domain) {
+    const [min, max] = domain || [0, 100];
     const clamped = Math.min(max, Math.max(min, value));
     return HIST_CHART_HEIGHT - ((clamped - min) / (max - min || 1)) * HIST_CHART_HEIGHT;
+  }
+
+  // Percent metrics use a fixed 0-100 domain so the three percent charts are
+  // comparable at a glance (UI-SPEC "renderYAxis"). Temperature uses an
+  // observed-range domain padded to include any drawn threshold line, so an
+  // idle Pi's chart still shows how far it is from throttling rather than
+  // rescaling the lines off screen.
+  function metricValueDomain(metric, points) {
+    if (metric !== 'temp') return [0, 100];
+    const thresholds = THRESHOLD_LINES.temp || [];
+    const observed = (Array.isArray(points) ? points : [])
+      .map((point) => point.avg_value)
+      .filter((value) => typeof value === 'number' && Number.isFinite(value));
+    const values = observed.length ? [...observed, ...thresholds] : thresholds;
+    const min = Math.min(0, ...values);
+    const max = Math.max(...values);
+    const span = max - min || 1;
+    const pad = span * 0.1;
+    return [min - pad, max + pad];
   }
 
   // D-06/Pitfall 2: gate line-drawing exclusively on state === 'observed'; every
@@ -365,17 +388,207 @@
       .filter(Boolean);
   }
 
+  // Merges only *adjacent* segments carrying the same reason whose rendered
+  // width would fall below the 3px minimum -- two adjacent segments with
+  // different reasons are never merged, even if both are sub-pixel, so each
+  // keeps its own minimum-width slot and the five-state partition survives on
+  // screen at the 90d preset.
+  function mergeStripSegments(segments, pixelsPerSecond) {
+    const input = Array.isArray(segments) ? segments : [];
+    const merged = [];
+    input.forEach((segment) => {
+      const rawWidth = (segment.end_ts - segment.start_ts) * pixelsPerSecond;
+      const last = merged[merged.length - 1];
+      const lastRawWidth = last ? (last.end_ts - last.start_ts) * pixelsPerSecond : null;
+      const canMerge = last
+        && last.label === segment.label
+        && last.end_ts === segment.start_ts
+        && (lastRawWidth < HIST_MIN_SEGMENT_WIDTH || rawWidth < HIST_MIN_SEGMENT_WIDTH);
+      if (canMerge) {
+        last.end_ts = segment.end_ts;
+        last.count += 1;
+      } else {
+        merged.push({start_ts: segment.start_ts, end_ts: segment.end_ts, pattern: segment.pattern, label: segment.label, count: 1});
+      }
+    });
+    return merged;
+  }
+
+  function formatMergedDuration(totalSeconds) {
+    if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return '0 minutes';
+    if (totalSeconds < 60) return `${Math.round(totalSeconds)} second${Math.round(totalSeconds) === 1 ? '' : 's'}`;
+    const minutes = Math.round(totalSeconds / 60);
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+
+  // A merged segment discloses the true count and total duration it stands
+  // for, so compression can neither overstate nor hide how much is actually
+  // missing. A single unmerged segment keeps its plain reason label instead
+  // (see renderCoverageStrip).
+  function segmentTooltipText(segment) {
+    return `${segment.label} — ${segment.count} intervals, ${formatMergedDuration(segment.end_ts - segment.start_ts)} total`;
+  }
+
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return null;
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let index = 0;
+    while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
+    return `${value.toFixed(1)} ${units[index]}`;
+  }
+
+  function currentDiskTotalBytes() {
+    const snapshot = state.snapshot;
+    const disk = snapshot && snapshot.host && snapshot.host.metrics && snapshot.host.metrics.disk;
+    return disk ? finiteMeasurement(disk.total_bytes) : null;
+  }
+
+  // D-10: threshold lines are dashed --muted in both themes (never --accent),
+  // because a fixed documented constant is not a live alert. Each line carries
+  // a <title> child with the provenance string, reachable on inspection
+  // without a pointer.
+  function renderThresholdLines(metric, scale, diskTotalBytes) {
+    const svg = $(`chart-${metric}`);
+    if (!svg) return;
+    svg.querySelectorAll('.hist-threshold, .hist-threshold-label').forEach((node) => node.remove());
+    const values = THRESHOLD_LINES[metric];
+    if (!values) return;
+    const provenance = THRESHOLD_PROVENANCE[metric];
+    const unit = HOST_METRIC_UNITS[metric] || '';
+    const bytesLabel = metric === 'disk' ? formatBytes(diskTotalBytes) : null;
+    values.forEach((value) => {
+      const y = scale.yFor(value);
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', '0');
+      line.setAttribute('x2', String(HIST_CHART_WIDTH));
+      line.setAttribute('y1', String(y));
+      line.setAttribute('y2', String(y));
+      line.setAttribute('class', 'hist-threshold');
+      const title = document.createElementNS(SVG_NS, 'title');
+      title.textContent = provenance;
+      line.append(title);
+      svg.append(line);
+      const label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('x', '4');
+      label.setAttribute('y', String(Math.max(10, y - 2)));
+      label.setAttribute('class', 'hist-threshold-label');
+      label.textContent = bytesLabel ? `${value}${unit} (${bytesLabel})` : `${value}${unit}`;
+      svg.append(label);
+    });
+  }
+
+  // Each chart draws its own Y axis, ticked in that metric's unit -- percent
+  // metrics tick 0/50/100; temperature ticks the observed-range-plus-threshold
+  // domain's own min/mid/max so idle and near-throttle readings both stay
+  // legible.
+  function renderYAxis(metric, points) {
+    const svg = $(`chart-${metric}`);
+    if (!svg) return;
+    svg.querySelectorAll('.hist-y-axis-tick').forEach((node) => node.remove());
+    const domain = metricValueDomain(metric, points);
+    const unit = HOST_METRIC_UNITS[metric] || '';
+    const tickValues = metric === 'temp'
+      ? [domain[0], (domain[0] + domain[1]) / 2, domain[1]]
+      : [0, 50, 100];
+    tickValues.forEach((value) => {
+      const text = document.createElementNS(SVG_NS, 'text');
+      text.setAttribute('x', '4');
+      text.setAttribute('y', String(Math.min(HIST_CHART_HEIGHT - 2, Math.max(10, histValueToY(value, domain)))));
+      text.setAttribute('class', 'hist-y-axis-tick');
+      text.textContent = `${Math.round(value)}${unit}`;
+      svg.append(text);
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Point tooltips (HIS-01, Phase 4 04-03). Pointer-driven updates are
+  // coalesced through requestAnimationFrame -- chart <path> `d` attributes are
+  // never regenerated in response to a pointer event (Research Pitfall 3).
+  // ------------------------------------------------------------------
+
+  let pendingTooltipFrame = null;
+
+  function renderPointTooltip(metric, point) {
+    const tooltip = $('history-chart-tooltip');
+    if (!tooltip || !point) return;
+    const unit = HOST_METRIC_UNITS[metric] || '';
+    const label = HOST_METRIC_LABELS[metric] || metric;
+    const value = typeof point.avg_value === 'number' ? point.avg_value : null;
+    if (value === null) return;
+    const timestamp = formatLocalTimestamp(point.ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    tooltip.textContent = `${label}: ${value}${unit} at ${timestamp}`;
+  }
+
+  function hidePointTooltip() {
+    const tooltip = $('history-chart-tooltip');
+    if (!tooltip) return;
+    tooltip.hidden = true;
+    tooltip.textContent = '';
+  }
+
+  function showPointTooltipAt(clientX, clientY) {
+    const tooltip = $('history-chart-tooltip');
+    if (!tooltip) return;
+    tooltip.hidden = false;
+    tooltip.style.left = `${clientX + 12}px`;
+    tooltip.style.top = `${clientY + 12}px`;
+  }
+
+  function schedulePointTooltipUpdate(metric, point, clientX, clientY) {
+    if (pendingTooltipFrame !== null) cancelAnimationFrame(pendingTooltipFrame);
+    pendingTooltipFrame = requestAnimationFrame(() => {
+      pendingTooltipFrame = null;
+      renderPointTooltip(metric, point);
+      showPointTooltipAt(clientX, clientY);
+    });
+  }
+
+  // One small hit-target circle per plotted point, reachable by pointer and by
+  // keyboard focus alike -- never by regenerating the chart <path> itself.
+  function renderPointTargets(metric, points, scale) {
+    const svg = $(`chart-${metric}`);
+    if (!svg) return;
+    svg.querySelectorAll('.hist-point-target').forEach((node) => node.remove());
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      if (point.avg_value === null || point.avg_value === undefined) return;
+      const target = document.createElementNS(SVG_NS, 'circle');
+      target.setAttribute('cx', String(scale.xFor(point.ts)));
+      target.setAttribute('cy', String(scale.yFor(point.avg_value)));
+      target.setAttribute('r', '6');
+      target.setAttribute('class', 'hist-point-target');
+      target.setAttribute('tabindex', '0');
+      target.setAttribute('role', 'img');
+      const unit = HOST_METRIC_UNITS[metric] || '';
+      const label = HOST_METRIC_LABELS[metric] || metric;
+      target.setAttribute('aria-label', `${label} ${point.avg_value}${unit} at ${formatLocalTimestamp(point.ts)}`);
+      target.addEventListener('pointerover', (event) => schedulePointTooltipUpdate(metric, point, event.clientX, event.clientY));
+      target.addEventListener('pointerout', hidePointTooltip);
+      target.addEventListener('focus', () => {
+        const rect = target.getBoundingClientRect();
+        schedulePointTooltipUpdate(metric, point, rect.left, rect.top);
+      });
+      target.addEventListener('blur', hidePointTooltip);
+      svg.append(target);
+    });
+  }
+
   function renderHistoryChart(metric, result) {
     const svg = $(`chart-${metric}`);
     if (!svg) return;
     const path = svg.querySelector('.hist-series');
     if (!path) return;
     const requested = result.requested || resolveRangeBounds();
+    const points = Array.isArray(result.points) ? result.points : [];
+    const domain = metricValueDomain(metric, points);
     const scale = {
       xFor: (ts) => histTimeToX(ts, requested.start_ts, requested.end_ts),
-      yFor: (value) => histValueToY(value, metric),
+      yFor: (value) => histValueToY(value, domain),
     };
-    path.setAttribute('d', buildSeriesPath(result.points, result.coverage, scale));
+    path.setAttribute('d', buildSeriesPath(points, result.coverage, scale));
+    renderThresholdLines(metric, scale, metric === 'disk' ? currentDiskTotalBytes() : null);
+    renderYAxis(metric, points);
+    renderPointTargets(metric, points, scale);
   }
 
   // UI-SPEC Coverage Strip Mechanics: every rendered segment is at least 3px
@@ -386,7 +599,10 @@
     if (!svg) return;
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     const range = requestedRange || resolveRangeBounds();
-    coverageStripSegments(coverage).forEach((segment) => {
+    const span = Math.max(1, range.end_ts - range.start_ts);
+    const pixelsPerSecond = HIST_CHART_WIDTH / span;
+    const rawSegments = coverageStripSegments(coverage);
+    mergeStripSegments(rawSegments, pixelsPerSecond).forEach((segment) => {
       const x1 = histTimeToX(segment.start_ts, range.start_ts, range.end_ts);
       const x2 = histTimeToX(segment.end_ts, range.start_ts, range.end_ts);
       const width = Math.max(HIST_MIN_SEGMENT_WIDTH, x2 - x1);
@@ -397,7 +613,7 @@
       rect.setAttribute('height', String(HIST_STRIP_HEIGHT));
       rect.setAttribute('class', `hist-coverage-segment hist-pattern-${segment.pattern}`);
       const title = document.createElementNS(SVG_NS, 'title');
-      title.textContent = segment.label;
+      title.textContent = segment.count > 1 ? segmentTooltipText(segment) : segment.label;
       rect.append(title);
       svg.append(rect);
     });
@@ -454,42 +670,63 @@
     const chartSvg = $(`chart-${metric}`);
     const path = chartSvg ? chartSvg.querySelector('.hist-series') : null;
     if (path) path.setAttribute('d', '');
+    if (chartSvg) {
+      chartSvg.querySelectorAll('.hist-threshold, .hist-threshold-label, .hist-y-axis-tick, .hist-point-target')
+        .forEach((node) => node.remove());
+    }
     const stripSvg = $(`strip-${metric}`);
     if (stripSvg) while (stripSvg.firstChild) stripSvg.removeChild(stripSvg.firstChild);
   }
 
-  // One metric's fetch-and-render, isolated from every other metric's outcome
-  // (Research Pattern 1): a rejected fetch here renders only this metric's own
-  // error copy and never blanks the loading/empty/chart state of its siblings.
-  // Never throws -- every branch resolves so Promise.allSettled in the caller
-  // is a defensive composition boundary, not a required error path.
-  async function renderMetricHistory(metric, bounds, requestId) {
-    beginMetricLoadingState(metric);
+  // Four parallel host-metric fetches, one per HOST_METRIC_ORDER entry,
+  // composed with Promise.allSettled so one metric's rejection can never take
+  // the other three down (Research Pattern 1).
+  async function fetchHostHistory(startTs, endTs) {
+    const settled = await Promise.allSettled(
+      HOST_METRIC_ORDER.map((metric) => fetchHostMetricHistory(metric, startTs, endTs)),
+    );
+    const results = {};
+    HOST_METRIC_ORDER.forEach((metric, index) => { results[metric] = settled[index]; });
+    return results;
+  }
+
+  // Renders one metric's outcome, isolated from every other metric's outcome
+  // (Research Pattern 1): a rejected fetch renders only this metric's own
+  // error copy and never blanks the loading/empty/chart state of its
+  // siblings. Every branch leaves the chart *frame* in the stack -- a metric
+  // is never removed from the DOM, so stack height and metric order stay
+  // identical for every range.
+  function applyMetricResult(metric, outcome) {
     const loading = historyStateElement(metric, 'loading');
     const empty = historyStateElement(metric, 'empty');
     const error = historyStateElement(metric, 'error');
-    try {
-      const result = await fetchHostMetricHistory(metric, bounds.start_ts, bounds.end_ts);
-      if (requestId !== state.historyRequestGeneration) return null;
-      if (loading) loading.hidden = true;
+    if (loading) loading.hidden = true;
+    if (outcome && outcome.status === 'fulfilled') {
+      const result = outcome.value;
       const points = Array.isArray(result.points) ? result.points : [];
       const hasObservedValue = points.some((point) => point.avg_value !== null && point.avg_value !== undefined);
       if (empty) empty.hidden = hasObservedValue;
+      if (error) error.hidden = true;
       renderHistoryChart(metric, result);
-      const requested = result.requested || bounds;
+      const requested = result.requested || resolveRangeBounds();
       renderCoverageStrip(metric, result.coverage, requested);
       return {metric, result};
-    } catch (fetchError) {
-      if (requestId !== state.historyRequestGeneration) return null;
-      if (loading) loading.hidden = true;
-      if (error) {
-        const reason = serverSuppliedReason(fetchError);
-        const label = METRIC_LABELS[metric] || metric;
-        error.textContent = `This chart could not load. ${label} data is unavailable — other charts and the coverage evidence below are unaffected.${reason ? ` Server reported: ${reason}` : ''}`;
-        error.hidden = false;
-      }
-      return null;
     }
+    if (empty) empty.hidden = true;
+    if (error) {
+      const reason = outcome ? serverSuppliedReason(outcome.reason) : null;
+      const label = HOST_METRIC_LABELS[metric] || metric;
+      error.textContent = `This chart could not load. ${label} data is unavailable — other charts and the coverage evidence below are unaffected.${reason ? ` Server reported: ${reason}` : ''}`;
+      error.hidden = false;
+    }
+    return null;
+  }
+
+  // Walks HOST_METRIC_ORDER and renders each metric independently -- the
+  // fixed CPU, memory, disk, temperature order regardless of how many metrics
+  // have retained data.
+  function renderHostStack(results) {
+    return HOST_METRIC_ORDER.map((metric) => applyMetricResult(metric, results[metric])).filter(Boolean);
   }
 
   async function renderHistorySection() {
@@ -499,13 +736,16 @@
     // still-current History render. Same staleness-guard idiom, own generation.
     const requestId = ++state.historyRequestGeneration;
     const bounds = resolveRangeBounds();
-    const settled = await Promise.allSettled(
-      HISTORY_METRICS.map((metric) => renderMetricHistory(metric, bounds, requestId)),
-    );
+    HOST_METRIC_ORDER.forEach((metric) => beginMetricLoadingState(metric));
+    // R-01: a real, measured render figure for the four-chart stack, captured
+    // in the browser during the automated test run rather than deferred to
+    // Phase 6 -- see 04-03-SUMMARY.md for the recorded baseline.
+    const renderStart = performance.now();
+    const results = await fetchHostHistory(bounds.start_ts, bounds.end_ts);
     if (requestId !== state.historyRequestGeneration) return;
-    const firstSucceeded = settled
-      .filter((entry) => entry.status === 'fulfilled' && entry.value)
-      .map((entry) => entry.value)[0];
+    const succeeded = renderHostStack(results);
+    window.__historyStackRenderMs = performance.now() - renderStart;
+    const firstSucceeded = succeeded[0];
     if (firstSucceeded) {
       const requested = firstSucceeded.result.requested || bounds;
       updateRangeResolutionNote(firstSucceeded.result.effective_resolution_seconds);
@@ -1243,6 +1483,12 @@
   HISTORY_PRESET_ORDER.forEach((preset) => {
     const button = $(`range-preset-${preset}`);
     if (button) button.addEventListener('click', () => selectRangePreset(preset));
+  });
+  // 04-03: each chart's unit label is set once from HOST_METRIC_UNITS, the
+  // single source of truth the renderers below also read.
+  HOST_METRIC_ORDER.forEach((metric) => {
+    const unit = $(`unit-${metric}`);
+    if (unit) unit.textContent = HOST_METRIC_UNITS[metric] || '';
   });
   const historyNavButton = document.querySelector('[data-section="history"]');
   if (historyNavButton) historyNavButton.addEventListener('click', renderHistorySection);
