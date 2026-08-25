@@ -26,6 +26,7 @@ try:
     from .beacon import diagnosis as beacon_diagnosis
     from .beacon import maintenance as beacon_maintenance
     from .beacon import telemetry as beacon_telemetry
+    from .beacon import incidents as beacon_incidents
     from .beacon import web as beacon_web
     from .beacon import monitoring as beacon_monitoring
     from .beacon import previews as beacon_previews
@@ -40,6 +41,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import diagnosis as beacon_diagnosis
     from beacon import maintenance as beacon_maintenance
     from beacon import telemetry as beacon_telemetry
+    from beacon import incidents as beacon_incidents
     from beacon import web as beacon_web
     from beacon import monitoring as beacon_monitoring
     from beacon import previews as beacon_previews
@@ -2580,6 +2582,112 @@ def api_telemetry_history():
         'coverage': coverage,
         'aggregation_pending': list(pending),
     })
+
+
+def _incident_filters():
+    """Validate the optional /api/events/history filters before opening SQLite.
+
+    Mirrors `_history_selector`'s discipline exactly: each optional
+    parameter is read with `request.args.getlist(name)`, a repeated
+    parameter is rejected, and a value outside its allowlist raises
+    `ValueError` naming the offending parameter -- reject, never coerce.
+    """
+    filters = {}
+
+    ports = request.args.getlist('port')
+    if ports:
+        if len(ports) != 1:
+            raise ValueError('port must be supplied exactly once')
+        value = ports[0]
+        if not value.isascii() or not value.isdecimal():
+            raise ValueError('port must be a decimal integer')
+        port = int(value)
+        if not 1 <= port <= 65535:
+            raise ValueError('port must be between 1 and 65535')
+        filters['port'] = port
+
+    event_types = request.args.getlist('event_type')
+    if event_types:
+        if len(event_types) != 1:
+            raise ValueError('event_type must be supplied exactly once')
+        value = event_types[0]
+        if value not in beacon_incidents.EVENT_TYPES:
+            raise ValueError('event_type must be one of the recognised event types')
+        filters['event_type'] = value
+
+    criticalities = request.args.getlist('criticality')
+    if criticalities:
+        if len(criticalities) != 1:
+            raise ValueError('criticality must be supplied exactly once')
+        value = criticalities[0]
+        if value not in beacon_incidents.CRITICALITY_VALUES:
+            raise ValueError('criticality must be "critical" or "standard"')
+        filters['criticality'] = value
+
+    maintenances = request.args.getlist('maintenance')
+    if maintenances:
+        if len(maintenances) != 1:
+            raise ValueError('maintenance must be supplied exactly once')
+        value = maintenances[0]
+        if value not in beacon_incidents.MAINTENANCE_MODES:
+            raise ValueError('maintenance must be "include", "exclude", or "only"')
+        filters['maintenance'] = value
+    else:
+        filters['maintenance'] = beacon_incidents.DEFAULT_MAINTENANCE_MODE
+
+    return filters
+
+
+@app.route('/api/events/history')
+def api_events_history():
+    """Serve grouped, filtered incident history under a validated range.
+
+    Follows the two-phase validate-before-DB pattern `api_telemetry_history`
+    established: every filter and the requested range are validated before
+    SQLite is opened, `HistoricalRange` is the single source of bounds
+    validation on this route (see the plan's `<assumption_delta_decision>`),
+    and the route takes `_db_lock` like every other DB-touching route --
+    AR-03-01's exception for `api_advanced_current` does not extend here.
+    """
+    try:
+        filters = _incident_filters()
+        requested = beacon_telemetry.HistoricalRange(
+            _parse_history_timestamp('start_ts'),
+            _parse_history_timestamp('end_ts'),
+        )
+        now = int(time.time())
+        if requested.end_ts > now:
+            raise ValueError('end_ts must not be in the future')
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    try:
+        with _db_lock, database_access(DB_PATH) as conn:
+            rows, truncated = beacon_incidents.read_events_in_range(
+                conn,
+                start_ts=requested.start_ts,
+                end_ts=requested.end_ts,
+                port=filters.get('port'),
+                event_type=filters.get('event_type'),
+                criticality=filters.get('criticality'),
+                maintenance=filters.get('maintenance', beacon_incidents.DEFAULT_MAINTENANCE_MODE),
+                limit=beacon_incidents.INCIDENT_ROW_BUDGET,
+            )
+            ports = sorted({row['port'] for row in rows})
+            anchors = beacon_incidents.read_open_episode_anchors(
+                conn, start_ts=requested.start_ts, ports=ports,
+            )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    payload = beacon_incidents.compose_incidents_response(
+        rows, anchors,
+        start_ts=requested.start_ts, end_ts=requested.end_ts,
+        filters=filters, truncated=truncated,
+    )
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route("/api/services")
