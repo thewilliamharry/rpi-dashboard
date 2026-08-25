@@ -548,6 +548,135 @@
     setInvestigationRange({start_ts: startTs, end_ts: endTs, origin: 'manual'});
   }
 
+  // ------------------------------------------------------------------
+  // Drag-to-select (Phase 4 04-05 Task 3, D-03): dragging across any host
+  // chart narrows the range through the exact same setInvestigationRange
+  // entry point the fields and presets use -- never a second, competing
+  // range-state mechanism. Pointer-driven updates are coalesced through
+  // requestAnimationFrame and touch only the overlay rectangle's geometry;
+  // chart <path> `d` attributes are never regenerated during a drag
+  // (Research Pitfall 3, R-01's single largest Pi-performance hazard).
+  // ------------------------------------------------------------------
+
+  const HIST_DRAG_MIN_PIXELS = 1;
+  let dragState = null;
+  let pendingDragFrame = null;
+
+  function dragOverlayEl() {
+    return $('history-drag-overlay');
+  }
+
+  function stackContainerEl() {
+    return $('history-content');
+  }
+
+  // The domain a drag maps pixels into: the bounds the chart stack is
+  // actually rendered against (set by renderHistorySection from the
+  // server's own `requested` echo, falling back to the locally-resolved
+  // bounds before any fetch has completed), never the browser's own guess.
+  function chartTimeDomain() {
+    return state.historyBounds || resolveRangeBounds();
+  }
+
+  function clientXToTs(clientX, chartRect) {
+    const domain = chartTimeDomain();
+    const clamped = Math.min(chartRect.right, Math.max(chartRect.left, clientX));
+    const fraction = (clamped - chartRect.left) / Math.max(1, chartRect.width);
+    return domain.start_ts + fraction * (domain.end_ts - domain.start_ts);
+  }
+
+  function updateDragOverlayGeometry() {
+    const overlay = dragOverlayEl();
+    if (!overlay || !dragState) return;
+    const {chartRect, containerRect, startClientX, currentClientX} = dragState;
+    const left = Math.max(chartRect.left, Math.min(startClientX, currentClientX));
+    const right = Math.min(chartRect.right, Math.max(startClientX, currentClientX));
+    overlay.style.left = `${left}px`;
+    overlay.style.width = `${Math.max(0, right - left)}px`;
+    overlay.style.top = `${containerRect.top}px`;
+    overlay.style.height = `${containerRect.height}px`;
+  }
+
+  function dragEscapeListener(event) {
+    if (event.key === 'Escape') cancelDragSelect();
+  }
+
+  function endDragListeners() {
+    window.removeEventListener('pointermove', updateDragSelect);
+    window.removeEventListener('pointerup', commitDragSelect);
+    window.removeEventListener('pointercancel', cancelDragSelect);
+    window.removeEventListener('keydown', dragEscapeListener);
+  }
+
+  // Clears the overlay on pointer-cancel, on Escape, and on a drag that ends
+  // where it began (see commitDragSelect's own degenerate-drag check, which
+  // calls this same cleanup rather than duplicating it).
+  function cancelDragSelect() {
+    if (pendingDragFrame !== null) { cancelAnimationFrame(pendingDragFrame); pendingDragFrame = null; }
+    const overlay = dragOverlayEl();
+    if (overlay) { overlay.hidden = true; overlay.style.width = '0px'; }
+    dragState = null;
+    endDragListeners();
+  }
+
+  // R-03: dragging to select a range has no keyboard equivalent in this
+  // phase -- the canonical #range-start/#range-end fields remain the fully
+  // keyboard-operable path to any range (DIA-05). This is known Phase 5 / UX-06
+  // debt, recorded here at creation rather than discovered later.
+  function beginDragSelect(event) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const chartSvg = event.currentTarget;
+    const container = stackContainerEl();
+    if (!chartSvg || !container) return;
+    dragState = {
+      chartRect: chartSvg.getBoundingClientRect(),
+      containerRect: container.getBoundingClientRect(),
+      startClientX: event.clientX,
+      currentClientX: event.clientX,
+    };
+    const overlay = dragOverlayEl();
+    if (overlay) overlay.hidden = false;
+    updateDragOverlayGeometry();
+    window.addEventListener('pointermove', updateDragSelect);
+    window.addEventListener('pointerup', commitDragSelect);
+    window.addEventListener('pointercancel', cancelDragSelect);
+    window.addEventListener('keydown', dragEscapeListener);
+  }
+
+  // Coalesces every pointermove through requestAnimationFrame -- updates
+  // only the overlay rectangle's geometry, never a chart <path>.
+  function updateDragSelect(event) {
+    if (!dragState) return;
+    dragState.currentClientX = event.clientX;
+    if (pendingDragFrame !== null) return;
+    pendingDragFrame = requestAnimationFrame(() => {
+      pendingDragFrame = null;
+      updateDragOverlayGeometry();
+    });
+  }
+
+  // Converts the two x positions to timestamps, ordering them so a
+  // right-to-left drag produces the same range as a left-to-right one, and
+  // routes through the same setInvestigationRange entry point the fields
+  // and presets use. A degenerate drag (equal timestamps, or narrower than
+  // one rendered pixel) is cancelled rather than applied -- the server
+  // would reject a zero-width range, and the gesture was almost certainly a
+  // click, not a selection.
+  function commitDragSelect(event) {
+    if (!dragState) return;
+    const {chartRect, startClientX} = dragState;
+    const endClientX = event.clientX;
+    const widthPixels = Math.abs(endClientX - startClientX);
+    cancelDragSelect();
+    if (widthPixels < HIST_DRAG_MIN_PIXELS) return;
+    const tsA = clientXToTs(startClientX, chartRect);
+    const tsB = clientXToTs(endClientX, chartRect);
+    const start_ts = Math.round(Math.min(tsA, tsB));
+    const end_ts = Math.round(Math.max(tsA, tsB));
+    if (end_ts <= start_ts) return;
+    setInvestigationRange({start_ts, end_ts, origin: 'drag', label: currentRangeLabel()});
+  }
+
   async function fetchHostMetricHistory(metric, startTs, endTs) {
     const url = `/api/telemetry/history?kind=host&metric=${encodeURIComponent(metric)}&start_ts=${startTs}&end_ts=${endTs}`;
     const response = await fetch(url, {cache: 'no-store'});
@@ -1998,6 +2127,11 @@
   HOST_METRIC_ORDER.forEach((metric) => {
     const unit = $(`unit-${metric}`);
     if (unit) unit.textContent = HOST_METRIC_UNITS[metric] || '';
+  });
+  // 04-05 Task 3: dragging across any host chart narrows the range (D-03).
+  HOST_METRIC_ORDER.forEach((metric) => {
+    const svg = $(`chart-${metric}`);
+    if (svg) svg.addEventListener('pointerdown', beginDragSelect);
   });
   const historyNavButton = document.querySelector('[data-section="history"]');
   if (historyNavButton) historyNavButton.addEventListener('click', renderHistorySection);

@@ -1771,6 +1771,203 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         for forbidden in ('pushState', 'replaceState', 'location.search'):
             self.assertNotIn(forbidden, js)
 
+    # ------------------------------------------------------------------
+    # 04-05 Task 3: drag-to-select across any host chart, landing on exactly
+    # the same range state the fields describe (D-03), without regenerating
+    # a single chart <path> during the gesture (R-01/Research Pitfall 3).
+    # ------------------------------------------------------------------
+
+    def _drag_ready_page(self):
+        """A page whose requested range is fixed and known to the test (not
+        a live Date.now()-derived preset), so drag fractions can be computed
+        against a domain the test itself controls."""
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 86_400
+        fixture = self._empty_history_fixture(start_ts, end_ts)
+        fixture['points'] = [self._point(start_ts, 10.0), self._point(end_ts - 60, 20.0)]
+        fixture['coverage'] = [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}]
+        counters = {'history': 0}
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                counters['history'] += 1
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+        page.wait_for_function(
+            "() => !!document.querySelector('#chart-cpu path').getAttribute('d')",
+            timeout=5_000,
+        )
+        return page, start_ts, end_ts, counters
+
+    def test_drag_across_chart_applies_fraction_of_rendered_span(self):
+        page, start_ts, end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.25
+            x2 = box['x'] + box['width'] * 0.75
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            page.mouse.move((x1 + x2) / 2, y)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ) as request_info:
+                page.mouse.move(x2, y)
+                page.mouse.up()
+            query = parse_qs(urlparse(request_info.value.url).query)
+            span = end_ts - start_ts
+            expected_start = start_ts + span * 0.25
+            expected_end = start_ts + span * 0.75
+            self.assertAlmostEqual(int(query['start_ts'][0]), expected_start, delta=3_600)
+            self.assertAlmostEqual(int(query['end_ts'][0]), expected_end, delta=3_600)
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+        finally:
+            page.close()
+
+    def test_right_to_left_drag_produces_identical_range_to_left_to_right(self):
+        page, start_ts, end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.75
+            x2 = box['x'] + box['width'] * 0.25
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ) as request_info:
+                page.mouse.move(x2, y)
+                page.mouse.up()
+            query = parse_qs(urlparse(request_info.value.url).query)
+            span = end_ts - start_ts
+            expected_start = start_ts + span * 0.25
+            expected_end = start_ts + span * 0.75
+            self.assertAlmostEqual(int(query['start_ts'][0]), expected_start, delta=3_600)
+            self.assertAlmostEqual(int(query['end_ts'][0]), expected_end, delta=3_600)
+        finally:
+            page.close()
+
+    def test_click_without_movement_applies_no_range_and_leaves_back_absent(self):
+        page, _start_ts, _end_ts, counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x = box['x'] + box['width'] / 2
+            y = box['y'] + box['height'] / 2
+            before = counters['history']
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.up()
+            page.wait_for_timeout(200)
+            self.assertEqual(counters['history'], before)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+        finally:
+            page.close()
+
+    def test_escape_during_drag_cancels_no_range_change_and_overlay_hidden(self):
+        page, _start_ts, _end_ts, counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.25
+            x2 = box['x'] + box['width'] * 0.75
+            y = box['y'] + box['height'] / 2
+            before = counters['history']
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            page.mouse.move(x2, y)
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            page.keyboard.press('Escape')
+            page.locator('#history-drag-overlay').wait_for(state='hidden', timeout=5_000)
+            page.mouse.up()
+            page.wait_for_timeout(200)
+            self.assertEqual(counters['history'], before)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+        finally:
+            page.close()
+
+    def test_five_pointer_moves_leave_chart_paths_unchanged_while_overlay_moves(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            initial_d = {
+                metric: page.locator(f'#chart-{metric} path').get_attribute('d')
+                for metric in ('cpu', 'ram', 'disk', 'temp')
+            }
+            box = page.locator('#chart-cpu').bounding_box()
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(box['x'] + box['width'] * 0.1, y)
+            page.mouse.down()
+            widths = []
+            for fraction in (0.2, 0.35, 0.5, 0.65, 0.8):
+                page.mouse.move(box['x'] + box['width'] * fraction, y)
+                page.wait_for_timeout(30)
+                widths.append(page.locator('#history-drag-overlay').bounding_box()['width'])
+            for metric, d in initial_d.items():
+                self.assertEqual(page.locator(f'#chart-{metric} path').get_attribute('d'), d)
+            self.assertGreater(len(set(round(w) for w in widths)), 1)
+            page.mouse.up()
+        finally:
+            page.close()
+
+    def test_drag_overlay_border_resolves_accent_and_fill_is_not_solid(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.3
+            x2 = box['x'] + box['width'] * 0.6
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            page.mouse.move(x2, y)
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            accent = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
+            expected_rgb = page.evaluate(
+                "(hex) => { const p = document.createElement('div'); p.style.color = hex; "
+                "document.body.appendChild(p); const rgb = getComputedStyle(p).color; p.remove(); return rgb; }",
+                accent,
+            )
+            border_color = page.evaluate(
+                "getComputedStyle(document.getElementById('history-drag-overlay')).borderTopColor",
+            )
+            background = page.evaluate(
+                "getComputedStyle(document.getElementById('history-drag-overlay')).backgroundColor",
+            )
+            # color-mix() can serialize as either rgba(...) or the CSS Color 4
+            # color(srgb r g b / a) form depending on engine version -- read
+            # the real alpha channel back via a 1x1 canvas rather than
+            # pattern-matching a specific serialization string.
+            alpha = page.evaluate(
+                "(bg) => { const c = document.createElement('canvas'); c.width = 1; c.height = 1; "
+                "const ctx = c.getContext('2d'); ctx.fillStyle = bg; ctx.fillRect(0, 0, 1, 1); "
+                "return ctx.getImageData(0, 0, 1, 1).data[3]; }",
+                background,
+            )
+            page.mouse.up()
+            self.assertEqual(border_color, expected_rgb)
+            self.assertGreater(alpha, 0)
+            self.assertLess(alpha, 255)
+            self.assertNotEqual(background, expected_rgb)
+        finally:
+            page.close()
+
+    def test_drag_entry_point_documents_missing_keyboard_equivalent_as_phase5_debt(self):
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        self.assertIn('Phase 5 / UX-06', js)
+
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):
     """04-04 Task 3: a zone that observes DST annotates its two transitions.
