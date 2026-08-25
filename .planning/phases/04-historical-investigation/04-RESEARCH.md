@@ -441,22 +441,27 @@ MAINTENANCE_AVAILABILITY = 'maintenance'
 
 **If this table is empty:** N/A — three assumptions logged above, all low-risk and independently verifiable during planning/execution.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+*All three were settled during planning (2026-08-25); each resolution below cites the plan that carries it in executable form. No open question remains for this phase.*
 
 1. **Should the new incidents API return raw filtered events, pre-grouped episodes, or both?**
    - What we know: D-12 requires grouped rows with transitions available "on expand," and grouping must be a view over durable rows, computed server-side per the established classification split.
    - What's unclear: Whether HIS-04's "filter incidents and transitions" implies the raw ungrouped transition list must also be independently filterable (e.g., filtering to just `alert_sent`/`alert_failed` events, which don't participate in down/recovered grouping at all).
    - Recommendation: Have `/api/events/history` return both the grouped `episodes[]` (for the Incidents list) and the flat filtered `events[]` (for "transitions" and for the expand-to-see-underlying-transitions view), since the underlying SQL read is the same and both projections come from one query result set.
+   - **RESOLVED — both.** `04-02-PLAN.md` Task 1 `compose_incidents_response` returns `episodes[]` *and* `events[]` from one query result set; the flat list carries the non-grouping event types (`alert_sent`/`alert_failed`/`monitoring_gap`) that never participate in down-to-recovered grouping, and `04-07-PLAN.md` Task 2 renders `episode.transitions` behind the `Show transitions` disclosure.
 
 2. **Exact padding amount for a pushed incident window (D-15)?**
    - What we know: The window is "the incident span plus padding," explicitly left to Claude's Discretion.
    - What's unclear: A specific fixed amount (e.g., 10% of span, or a fixed 15-minute pad) is not decided.
    - Recommendation: Planning should pick a simple, explainable rule (e.g., 15% of the episode's own duration on each side, with a floor of a few minutes so very short incidents remain legible) and document it as a locked decision at plan time, since it affects test fixtures.
+   - **RESOLVED — 15% per side, 300-second floor.** `04-05-PLAN.md` Task 2 declares `INCIDENT_PAD_FRACTION = 0.15` and `INCIDENT_PAD_FLOOR_SECONDS = 300`; `04-07-PLAN.md` Task 3 `incidentFocusWindow` applies them, caps an open episode's window at the current range's own `end_ts`, and clamps the padded window to the retention bound. Both plans carry the exact fixture values as acceptance criteria (5400s per side for a 10-hour episode, 300s per side for a 60-second episode).
 
 3. **Does `/api/events/history` need a response point/row cap analogous to `point_budget`?**
    - What we know: `/api/telemetry/history` enforces `policy.point_budget` (2048) and raises if exceeded (`dashboard/app.py:2555-2557`); `api_events` today caps at `limit` (max 200, `dashboard/app.py:2685`).
    - What's unclear: A 90-day range with a busy service could produce far more than 200 individual events; HIS-04 needs both a filtered list and a "does this need pagination/truncation-disclosure" answer analogous to the coverage `aggregation_pending` pattern.
    - Recommendation: Cap and disclose truncation explicitly (following the existing `gaps.truncated`/`streams.truncated` pattern in `dashboard/advanced.js:398-424`) rather than silently dropping or unboundedly returning rows.
+   - **RESOLVED — yes, capped and disclosed.** `04-02-PLAN.md` declares `INCIDENT_ROW_BUDGET = 2048` (mirroring the telemetry `point_budget` discipline), selects `LIMIT budget + 1` to detect truncation without a second COUNT, and returns an explicit `truncated` flag plus `matched_count`. `04-02-PLAN.md` Task 3 additionally proves truncation never fabricates an episode, and `04-07-PLAN.md` Task 1 surfaces the flag as a visible disclosure so a trimmed list can never read as complete.
 
 ## Environment Availability
 
@@ -534,7 +539,7 @@ Skipped — this phase introduces no new external tool, service, or runtime depe
 - `dashboard/app.js` (lines 120-190) — existing sparkline precedent
 - `.planning/codebase/STACK.md` — confirms no frontend build step/package manager
 - `.planning/phases/04-historical-investigation/04-CONTEXT.md` — all D-01..D-18 decisions and discretion areas
-- `.planning/phases/03.1-planned-maintenance-recognition/03.1-VERIFICATION.md` — confirms Phase 03.1 fully verified (9/9 must-haves, all gap-closure items resolved), resolving R-02
+- `.planning/phases/03.1-planned-maintenance-recognition/03.1-VERIFICATION.md` — 9/9 must-haves met with `gaps: []` and every gap-closure round resolved; frontmatter `status: human_needed` remains open on one unrelated item (WR-06). The durable event shape this phase consumes (`suppressed_reason`, `maintenance_grace_until`, `down_since_ts`, migration 9) is settled, which is the substance R-02 asked to confirm — the phase is not, however, sealed
 
 ### Secondary (MEDIUM confidence — WebSearch, cross-referenced against well-known technique)
 - [LTTB downsampling algorithm reference](https://github.com/seanvelasco/lttb) — O(n) largest-triangle-three-buckets technique, cited only as a fallback if client-side decimation is ever needed beyond the server's existing 2048-point budget
