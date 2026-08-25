@@ -348,13 +348,33 @@ Plans:
 **Plans**: 8 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 04-01-PLAN.md — Tracer: end-to-end honest CPU history — History section, shared preset ladder, gap-breaking series, coverage strip, Pi-local timestamps (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 04-02-PLAN.md — `GET /api/events/history`: range-and-filter incident reads with server-side down-to-recovered grouping, open episodes, and the overrun grace/fault split (wave 2)
 - [ ] 04-03-PLAN.md — Memory, disk and temperature complete the stacked shared-axis host charts, with threshold lines only where a hardware or filesystem fact exists (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 04-04-PLAN.md — HIS-06 comparison row: latest with its own timestamp, min/max/average, a least-squares trend with three confidence tiers, and DST-labelled axis ticks (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 04-05-PLAN.md — Validated custom local-time ranges, one shared navigation stack with Back, and drag-to-select that redraws no series (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 04-06-PLAN.md — Service history: carried read-only service selection, four-state band, latency chart, failure-class chips, time-weighted availability (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 04-07-PLAN.md — Incidents section: four narrowing filters, grouped episode rows with open/overrun/expected/flapping states, and incident focus that moves every view together (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [ ] 04-08-PLAN.md — Correlation without causation: neutral clustering incident markers, one cross-chart hover cursor, and an enforced no-causal-language gate (wave 7)
 
 **UI hint**: yes
