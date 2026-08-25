@@ -77,8 +77,8 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 .hist-preset[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 #range-resolution-note { margin: 0; font-size: 12px; font-family: var(--font-mono); color: var(--muted); flex-basis: 100%; }
 #range-error { margin: 0; color: var(--accent2); flex-basis: 100%; }
-.hist-chart { margin: 0 0 16px; border: 1px solid var(--border); background: var(--bg3); padding: 8px; position: relative; }
-.hist-chart h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.hist-chart { margin: 0; border: 1px solid var(--border); background: var(--bg3); padding: 8px; position: relative; }
+.hist-chart h3 { margin: 0; font-size: 14px; font-weight: 600; }
 .hist-plot { display: block; width: 100%; height: 96px; }
 .hist-series { fill: none; stroke: var(--accent); stroke-width: 2; }
 .hist-coverage-strip { display: block; width: 100%; height: 16px; margin-top: 4px; }
@@ -93,3 +93,20 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 .hist-empty, .hist-error { margin-top: 8px; padding: 8px; overflow-wrap: anywhere; }
 .hist-error { border: 1px solid var(--accent2); color: var(--accent2); }
 .hist-skeleton { min-height: 96px; background: linear-gradient(90deg, var(--bg3), var(--border2), var(--bg3)); border: 1px solid var(--border); }
+
+/* Phase 4 (04-03) -- remaining three host charts join the stack: units, Y
+   axis, threshold lines, point tooltip, and the narrow-viewport axis scroll. */
+.hist-stack { display: flex; flex-direction: column; gap: 16px; }
+.hist-chart-header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.hist-unit { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.hist-y-axis-tick { font-family: var(--font-mono); font-size: 12px; fill: var(--muted); }
+/* D-10: dashed --muted in both themes, never --accent/--accent2 -- a fixed
+   documented constant must never read as a live Beacon alert. */
+.hist-threshold { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
+.hist-threshold-label { font-family: var(--font-mono); font-size: 12px; fill: var(--muted); }
+.hist-point-target { fill: transparent; stroke: none; cursor: pointer; }
+.hist-point-target:focus-visible { fill: rgba(0, 212, 255, 0.15); outline: none; }
+.hist-tooltip { position: fixed; pointer-events: none; z-index: 20; color: var(--text); background: var(--bg2); border: 1px solid var(--border); padding: 4px 8px; font-family: var(--font-mono); font-size: 12px; max-width: 260px; overflow-wrap: anywhere; }
+.hist-tooltip[hidden] { display: none; }
+.hist-axis-scroll { overflow-x: auto; }
+@media (max-width: 959px) { .hist-axis-scroll svg { min-width: 640px; } }
