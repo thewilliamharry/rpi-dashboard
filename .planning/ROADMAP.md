@@ -336,7 +336,8 @@ Plans:
 
 **Goal**: The operator can investigate a selected time range, service, or incident through correlated history that is detailed, bounded, and candid about what Beacon did and did not observe.
 **Depends on**: Phase 03.1
-**Requirements**: DIA-04, DIA-05, DIA-06, DIA-07, DIA-08 (range/filter-preference remainder only — the settings/refresh half shipped in Phase 3; see 04-CONTEXT.md D-04 and R-04), HIS-01, HIS-02, HIS-03, HIS-04, HIS-05, HIS-06
+**Requirements**: DIA-04, DIA-05, DIA-06, DIA-07, DIA-08, HIS-01, HIS-02, HIS-03, HIS-04, HIS-05, HIS-06
+**Requirements note**: DIA-08 covers the range/filter-preference remainder only — the settings/refresh half shipped in Phase 3. See 04-CONTEXT.md D-04 and R-04.
 **Success Criteria** (what must be TRUE):
 
   1. Operator can choose shared ranges from one hour through 90 days or a validated custom range within retained history.
