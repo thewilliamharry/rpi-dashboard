@@ -619,20 +619,230 @@
     });
   }
 
+  // ------------------------------------------------------------------
+  // Trend (HIS-06, D-08, D-09, Phase 4 04-04): a least-squares slope over
+  // observed points only -- withheld below TREND_MIN_POINTS, qualified
+  // below TREND_CONFIDENT_POINTS, flat-banded to "steady", and never
+  // extrapolated into a projection. Composed over the same points array
+  // renderHistoryChart already fetched -- no second request is issued.
+  // ------------------------------------------------------------------
+
+  const TREND_MIN_POINTS = 3;
+  const TREND_CONFIDENT_POINTS = 10;
+  const TREND_HOURLY_MAX_SPAN_SECONDS = 86400;
+  const TREND_ARROWS = {up: '↑', down: '↓'};
+
+  // Keeps only points whose avg_value is a finite measurement -- finiteMeasurement's
+  // type discipline means a boolean, array, object or blank string is an absence,
+  // never a zero -- sorted ascending by ts. The server composes one bucket per ts,
+  // so two points sharing a ts cannot occur; sorting only guards against caller
+  // order, which is what makes the slope invariant to input order.
+  function usableTrendPoints(points) {
+    return (Array.isArray(points) ? points : [])
+      .map((point) => ({ts: point.ts, value: finiteMeasurement(point.avg_value)}))
+      .filter((point) => point.value !== null && Number.isFinite(point.ts))
+      .sort((left, right) => left.ts - right.ts);
+  }
+
+  // Closed-form least-squares gradient of value against ts, in value-units per
+  // second. Fewer than two usable points returns null -- there is no line to fit.
+  function leastSquaresSlope(points) {
+    const usable = usableTrendPoints(points);
+    if (usable.length < 2) return null;
+    const n = usable.length;
+    const meanX = usable.reduce((sum, point) => sum + point.ts, 0) / n;
+    const meanY = usable.reduce((sum, point) => sum + point.value, 0) / n;
+    let numerator = 0;
+    let denominator = 0;
+    usable.forEach((point) => {
+      const dx = point.ts - meanX;
+      numerator += dx * (point.value - meanY);
+      denominator += dx * dx;
+    });
+    return denominator === 0 ? 0 : numerator / denominator;
+  }
+
+  // Turns the raw per-second slope into the exact contracted copy. Nothing
+  // returned here may express a future arrival at some value or a countdown
+  // to one -- the slope describes only the window that was observed. The
+  // internal predicted-change-over-window quantity used below to decide the
+  // flat band is a comparison only and is never rendered.
+  function trendDisplay(metric, points, spanSeconds) {
+    const usable = usableTrendPoints(points);
+    const label = (HOST_METRIC_LABELS[metric] || metric).toLowerCase();
+    if (usable.length < TREND_MIN_POINTS) return 'Not enough data for a trend';
+    const perSecond = leastSquaresSlope(points);
+    const hourly = spanSeconds <= TREND_HOURLY_MAX_SPAN_SECONDS;
+    const secondsPerUnit = hourly ? 3600 : 86400;
+    const timeUnit = hourly ? 'hour' : 'day';
+    const magnitude = (perSecond || 0) * secondsPerUnit;
+    const formattedMagnitude = Math.abs(magnitude).toFixed(1);
+    if (Number(formattedMagnitude) === 0) return `${label} steady`;
+    const sign = magnitude >= 0 ? '+' : '-';
+    const arrow = magnitude >= 0 ? TREND_ARROWS.up : TREND_ARROWS.down;
+    const unit = HOST_METRIC_UNITS[metric] || '';
+    const base = `${label} ${sign}${formattedMagnitude}${unit}/${timeUnit} ${arrow}`;
+    return usable.length < TREND_CONFIDENT_POINTS ? `${base} (low confidence — ${usable.length} points)` : base;
+  }
+
+  // Test-only hook, same pattern as window.__historyStackRenderMs: these two
+  // functions are pure and otherwise private to this IIFE, so Playwright's
+  // page.evaluate needs a reachable handle to drive them directly.
+  window.__historyTrendTestHooks = {leastSquaresSlope, trendDisplay};
+
+  // ------------------------------------------------------------------
+  // Comparison row (HIS-06, D-08, D-09, Phase 4 04-04): latest, minimum,
+  // maximum, average, and trend, all describing the same selected-range
+  // window as each other -- reduced from the same points array the chart
+  // already fetched, no second request.
+  // ------------------------------------------------------------------
+
+  // Reduces the fetched points to the five range-comparison values. minimum
+  // and maximum are the extremes of the points' own min_value/max_value;
+  // average is the sample_count-weighted mean of avg_value, matching how
+  // the server itself composes an average across mixed-resolution buckets
+  // (_compose_host_bucket) -- an unweighted mean of bucket averages would
+  // silently over-weight sparse buckets. latest is the latest_value of the
+  // latest point (by ts) that has one -- the latest *observed* point inside
+  // the range, never "now" (D-09).
+  function rangeAggregate(points) {
+    const list = (Array.isArray(points) ? points : []).slice().sort((left, right) => left.ts - right.ts);
+    const minimums = list.map((point) => finiteMeasurement(point.min_value)).filter((value) => value !== null);
+    const maximums = list.map((point) => finiteMeasurement(point.max_value)).filter((value) => value !== null);
+    const weighted = list
+      .map((point) => ({value: finiteMeasurement(point.avg_value), weight: finiteMeasurement(point.sample_count)}))
+      .filter((point) => point.value !== null && point.weight !== null && point.weight > 0);
+    const totalWeight = weighted.reduce((sum, point) => sum + point.weight, 0);
+    const latestCandidates = list.filter((point) => finiteMeasurement(point.latest_value) !== null && Number.isFinite(point.ts));
+    const latest = latestCandidates.length ? latestCandidates[latestCandidates.length - 1] : null;
+    return {
+      minimum: minimums.length ? Math.min(...minimums) : null,
+      maximum: maximums.length ? Math.max(...maximums) : null,
+      average: totalWeight > 0 ? weighted.reduce((sum, point) => sum + point.value * point.weight, 0) / totalWeight : null,
+      latestValue: latest ? finiteMeasurement(latest.latest_value) : null,
+      latestTs: latest ? latest.ts : null,
+    };
+  }
+
+  // The single rounding site for the comparison row: a fixed one-decimal
+  // formatter, so no displayed rounded value is ever read back and fed into
+  // a further computation. null/undefined/non-finite is the absence string
+  // "Unknown" -- never a fabricated 0.
+  function formatComparisonValue(value, unit) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return 'Unknown';
+    return `${value.toFixed(1)}${unit || ''}`;
+  }
+
+  // Writes Latest, Minimum, Maximum, Average, and Trend into comparison-{metric}.
+  // Latest always renders its own exact local timestamp beside it (D-09) --
+  // the range bounds are the disambiguator that stops a past-ending range from
+  // reading as a current reading. A range with no usable point renders Unknown
+  // for all four values and the withheld trend string; none of them is ever 0.
+  function renderComparisonRow(metric, points, spanSeconds) {
+    const container = $(`comparison-${metric}`);
+    if (!container) return;
+    while (container.firstChild) container.removeChild(container.firstChild);
+    const unit = HOST_METRIC_UNITS[metric] || '';
+    const aggregate = rangeAggregate(points);
+    const latestText = aggregate.latestValue === null
+      ? 'Latest: Unknown'
+      : `Latest: ${formatComparisonValue(aggregate.latestValue, unit)} (as of ${formatLocalTimestamp(aggregate.latestTs, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})})`;
+    const rows = [
+      {text: latestText, extraClass: null},
+      {text: `Minimum: ${formatComparisonValue(aggregate.minimum, unit)}`, extraClass: null},
+      {text: `Maximum: ${formatComparisonValue(aggregate.maximum, unit)}`, extraClass: null},
+      {text: `Average: ${formatComparisonValue(aggregate.average, unit)}`, extraClass: null},
+      {text: trendDisplay(metric, points, spanSeconds), extraClass: 'hist-trend'},
+    ];
+    rows.forEach((row) => {
+      const span = document.createElement('span');
+      span.className = row.extraClass ? `hist-comparison-value ${row.extraClass}` : 'hist-comparison-value';
+      span.textContent = row.text;
+      container.append(span);
+    });
+  }
+
+  // D-05/Research Pitfall 6: a "naive" local wall-clock minute index built
+  // from Intl.DateTimeFormat's own year/month/day/hour/minute parts for the
+  // configured zone -- never manual UTC-offset arithmetic. Treating those
+  // components as if they were UTC (via Date.UTC) gives a number that is
+  // directly comparable across two ticks, correctly handling a date
+  // rollover, so its difference from the fixed epoch interval that produced
+  // the two ticks is exactly zero except across a genuine DST transition.
+  function localWallClockMinutes(ts) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: state.timezone || 'UTC', hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(new Date(ts * 1000));
+    const get = (type) => Number(parts.find((part) => part.type === type).value);
+    return Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute')) / 60000;
+  }
+
+  // A DST transition always moves the local wall clock by exactly one hour
+  // relative to the fixed epoch interval that produced it, regardless of the
+  // surrounding tick spacing -- so a signed 60-minute mismatch between the
+  // local-label delta and the epoch delta is sufficient to detect and
+  // classify it, with no hand-rolled transition table and no hard-coded
+  // date. When state.timezone is UTC (including the fail-closed case), local
+  // minutes always advance exactly as fast as epoch minutes, so this can
+  // never fire. Returns one entry per tick, null unless that tick is part of
+  // a detected transition.
+  function dstAnnotations(tickTimestamps) {
+    const ticks = Array.isArray(tickTimestamps) ? tickTimestamps : [];
+    const annotations = ticks.map(() => null);
+    for (let index = 1; index < ticks.length; index += 1) {
+      const epochDiffMinutes = (ticks[index] - ticks[index - 1]) / 60;
+      const localDiffMinutes = localWallClockMinutes(ticks[index]) - localWallClockMinutes(ticks[index - 1]);
+      const delta = localDiffMinutes - epochDiffMinutes;
+      if (delta === -60) {
+        // Fall-back: the local clock repeated an hour, so both adjacent
+        // ticks read the same wall-clock label despite differing epoch
+        // values. Both are annotated.
+        const label = formatLocalTimestamp(ticks[index - 1], {hour: '2-digit', minute: '2-digit'});
+        const title = `The local time ${label} occurs twice here (DST fall-back) -- both ticks read the same clock time.`;
+        annotations[index - 1] = {title};
+        annotations[index] = {title};
+      } else if (delta === 60) {
+        // Spring-forward: an hour of local wall-clock time never occurred.
+        // Only the tick after the skip is annotated.
+        const label = formatLocalTimestamp(ticks[index - 1], {hour: '2-digit', minute: '2-digit'});
+        annotations[index] = {title: `The hour after ${label} is absent here (DST spring-forward).`};
+      }
+    }
+    return annotations;
+  }
+
   function renderSharedTimeAxis(startTs, endTs) {
     const svg = $('history-time-axis');
     if (!svg) return;
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return;
     const tickCount = 6;
+    const ticks = [];
     for (let index = 0; index <= tickCount; index += 1) {
-      const ts = startTs + ((endTs - startTs) * index) / tickCount;
+      ticks.push(startTs + ((endTs - startTs) * index) / tickCount);
+    }
+    const annotations = dstAnnotations(ticks);
+    ticks.forEach((ts, index) => {
       const text = document.createElementNS(SVG_NS, 'text');
       text.setAttribute('x', String(histTimeToX(ts, startTs, endTs)));
       text.setAttribute('y', '16');
-      text.textContent = formatLocalTimestamp(ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+      const annotation = annotations[index];
+      if (annotation) {
+        // Never re-spaced to hide the discontinuity: the tick keeps its
+        // computed x position, but its label is replaced by the explicit
+        // warning instead of a compressed hour or a duplicate-looking
+        // timestamp -- text and glyph, never colour alone.
+        text.setAttribute('class', 'hist-dst-tick');
+        text.textContent = '⚠ DST transition';
+        const title = document.createElementNS(SVG_NS, 'title');
+        title.textContent = annotation.title;
+        text.append(title);
+      } else {
+        text.textContent = formatLocalTimestamp(ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+      }
       svg.append(text);
-    }
+    });
   }
 
   // D-02: the server, not the client, owns resolution selection -- this only
@@ -676,6 +886,8 @@
     }
     const stripSvg = $(`strip-${metric}`);
     if (stripSvg) while (stripSvg.firstChild) stripSvg.removeChild(stripSvg.firstChild);
+    const comparison = $(`comparison-${metric}`);
+    if (comparison) while (comparison.firstChild) comparison.removeChild(comparison.firstChild);
   }
 
   // Four parallel host-metric fetches, one per HOST_METRIC_ORDER entry,
@@ -710,6 +922,7 @@
       renderHistoryChart(metric, result);
       const requested = result.requested || resolveRangeBounds();
       renderCoverageStrip(metric, result.coverage, requested);
+      renderComparisonRow(metric, points, requested.end_ts - requested.start_ts);
       return {metric, result};
     }
     if (empty) empty.hidden = true;

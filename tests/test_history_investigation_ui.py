@@ -1,6 +1,8 @@
+import calendar
 import re
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
@@ -1025,6 +1027,475 @@ class HistoryInvestigationUiTests(unittest.TestCase):
                 f"2048 pts/series, {gap_count} non-observed intervals: "
                 f"{render_ms:.2f}ms (developer machine, not Pi-class)"
             )
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-04 Task 1: least-squares trend with three honest confidence tiers
+    # (D-08, D-09, HIS-06). window.__historyTrendTestHooks is the same
+    # test-only-global pattern as window.__historyStackRenderMs -- the two
+    # functions under test are otherwise private to the advanced.js IIFE.
+    # ------------------------------------------------------------------
+
+    def _trend_page(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=self._empty_history_fixture(1_700_000_000, 1_700_003_600))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        return page
+
+    @staticmethod
+    def _trend_point(ts, avg_value):
+        return {'ts': ts, 'avg_value': avg_value}
+
+    def test_least_squares_slope_over_exact_gradient_returns_that_gradient(self):
+        page = self._trend_page()
+        try:
+            gradient = 0.002  # value units per second
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + gradient * i * 3600) for i in range(5)]
+            slope = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', points,
+            )
+            self.assertAlmostEqual(slope, gradient, places=6)
+        finally:
+            page.close()
+
+    def test_least_squares_slope_over_flat_series_returns_zero(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 42.0) for i in range(5)]
+            slope = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', points,
+            )
+            self.assertEqual(slope, 0)
+        finally:
+            page.close()
+
+    def test_least_squares_slope_skips_null_avg_value_points(self):
+        page = self._trend_page()
+        try:
+            gradient = 0.001
+            base_points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + gradient * i * 3600) for i in range(6)]
+            with_nulls = base_points[:2] + [self._trend_point(1_700_000_000 + 2 * 3600, None)] + base_points[2:]
+            slope_with_nulls = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', with_nulls,
+            )
+            slope_without_nulls = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', base_points,
+            )
+            self.assertAlmostEqual(slope_with_nulls, slope_without_nulls, places=9)
+        finally:
+            page.close()
+
+    def test_trend_display_withheld_below_three_usable_points_regardless_of_slope(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000, 10.0), self._trend_point(1_700_003_600, 90.0)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            self.assertEqual(result, 'Not enough data for a trend')
+        finally:
+            page.close()
+
+    def test_trend_display_low_confidence_at_three_and_nine_points(self):
+        page = self._trend_page()
+        try:
+            for count in (3, 9):
+                with self.subTest(count=count):
+                    points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(count)]
+                    result = page.evaluate(
+                        "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+                    )
+                    self.assertTrue(result.endswith(f'(low confidence — {count} points)'))
+        finally:
+            page.close()
+
+    def test_trend_display_no_qualifier_at_ten_points(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(10)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            self.assertNotIn('low confidence', result)
+        finally:
+            page.close()
+
+    def test_trend_display_steady_band_has_no_sign_or_arrow(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 42.0) for i in range(10)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            self.assertIn('steady', result)
+            self.assertNotIn('+', result)
+            self.assertNotIn('-', result)
+            self.assertNotIn('↑', result)
+            self.assertNotIn('↓', result)
+        finally:
+            page.close()
+
+    def test_trend_display_uses_hourly_unit_at_24h_and_daily_unit_just_beyond(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(10)]
+            hourly = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            daily = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86401)", points,
+            )
+            self.assertIn('/hour', hourly)
+            self.assertIn('/day', daily)
+        finally:
+            page.close()
+
+    def test_trend_display_never_contains_a_projection(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(10)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            for forbidden in ('will reach', 'projected', 'forecast', 'days remaining', 'until full'):
+                self.assertNotIn(forbidden, result.lower())
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-04 Task 2: the comparison row -- latest, minimum, maximum, average
+    # and trend, all describing the same selected-range window (D-08, D-09).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bucket_point(ts, min_value, max_value, avg_value, latest_value, sample_count=1):
+        return {
+            'ts': ts, 'min_value': min_value, 'max_value': max_value, 'avg_value': avg_value,
+            'latest_value': latest_value, 'sample_count': sample_count, 'observed_seconds': 60,
+            'gap_seconds': 0, 'unknown_seconds': 0,
+        }
+
+    def _comparison_page(self, cpu_fixture, start_ts, end_ts):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query['metric'][0]
+                route.fulfill(
+                    status=200,
+                    json=cpu_fixture if metric == 'cpu' else self._empty_history_fixture(start_ts, end_ts),
+                )
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.wait_for_function(
+            "() => (document.querySelector('#comparison-cpu').textContent || '').includes('Latest')",
+            timeout=5_000,
+        )
+        return page
+
+    def test_comparison_row_ids_present_for_all_four_metrics(self):
+        page = self._trend_page()
+        try:
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            for metric in ('cpu', 'ram', 'disk', 'temp'):
+                self.assertEqual(page.locator(f'#comparison-{metric}').count(), 1)
+        finally:
+            page.close()
+
+    def test_comparison_row_reports_known_minimum_maximum_and_weighted_average(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        points = [
+            self._bucket_point(start_ts, 10.0, 20.0, 15.0, 15.0, sample_count=2),
+            self._bucket_point(start_ts + 1800, 5.0, 30.0, 25.0, 25.0, sample_count=6),
+        ]
+        # weighted average = (15*2 + 25*6) / 8 = 22.5
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts)
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Minimum: 5.0%', text)
+            self.assertIn('Maximum: 30.0%', text)
+            self.assertIn('Average: 22.5%', text)
+            self.assertIn('Latest: 25.0%', text)
+        finally:
+            page.close()
+
+    def test_comparison_row_latest_never_reads_as_current_for_past_ending_range(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        points = [self._bucket_point(start_ts, 10.0, 10.0, 10.0, 10.0)]
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts)
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Latest: 10.0% (as of', text)
+        finally:
+            page.close()
+
+    def test_comparison_row_empty_range_renders_unknown_not_zero(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        fixture = self._metric_fixture(
+            'cpu', [], start_ts, end_ts,
+            coverage=[{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'}],
+        )
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Latest: Unknown', text)
+            self.assertIn('Minimum: Unknown', text)
+            self.assertIn('Maximum: Unknown', text)
+            self.assertIn('Average: Unknown', text)
+            self.assertIn('Not enough data for a trend', text)
+            self.assertNotIn('0%', text)
+        finally:
+            page.close()
+
+    def test_comparison_row_equal_min_max_still_renders_all_values_with_steady_trend(self):
+        start_ts = 1_700_000_000
+        points = [self._bucket_point(start_ts + i * 600, 50.0, 50.0, 50.0, 50.0) for i in range(10)]
+        end_ts = start_ts + 600 * 10
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts)
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Minimum: 50.0%', text)
+            self.assertIn('Maximum: 50.0%', text)
+            self.assertIn('Average: 50.0%', text)
+            self.assertIn('Latest: 50.0%', text)
+            self.assertIn('steady', text)
+        finally:
+            page.close()
+
+
+class HistoryDstAnnotationLondonTests(unittest.TestCase):
+    """04-04 Task 3: a zone that observes DST annotates its two transitions.
+
+    A separate class (own app/server instance, own TZ) rather than reusing
+    HistoryInvestigationUiTests -- that class's app is loaded once for
+    Australia/Sydney via a module-level importlib.reload() in load_app(),
+    and reloading dashboard.app again mid-class would rewrite the shared
+    module namespace every already-bound route handler on that class's
+    still-running server reads its SETTINGS from.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.appmod, cls.db_path = load_app({'TZ': 'Europe/London'})
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=cls.playwright.chromium.executable_path,
+        )
+        cls.base_url = f'http://127.0.0.1:{cls.server.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
+
+    @staticmethod
+    def _last_sunday(year, month):
+        last_day = calendar.monthrange(year, month)[1]
+        date = datetime(year, month, last_day, tzinfo=timezone.utc)
+        offset = (date.weekday() - 6) % 7  # weekday(): Monday=0 .. Sunday=6
+        return date - timedelta(days=offset)
+
+    @classmethod
+    def _spring_forward_epoch(cls, year=2024):
+        # UK/EU rule: clocks spring forward at 01:00 UTC on the last Sunday
+        # of March. Computed from the calendar, not a hard-coded date.
+        return int(cls._last_sunday(year, 3).replace(hour=1, minute=0, second=0).timestamp())
+
+    @classmethod
+    def _fall_back_epoch(cls, year=2024):
+        # UK/EU rule: clocks fall back at 01:00 UTC on the last Sunday of
+        # October.
+        return int(cls._last_sunday(year, 10).replace(hour=1, minute=0, second=0).timestamp())
+
+    @staticmethod
+    def _dst_fixture(metric, start_ts, end_ts):
+        return {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'host', 'metric': metric},
+            'effective_resolution_seconds': 3600,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [3600],
+            'points': [],
+            'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'}],
+            'aggregation_pending': [],
+        }
+
+    @staticmethod
+    def _config_fixture(tz):
+        return {
+            'timezone': tz, 'alerting_enabled': False,
+            'uptime_buckets': [], 'trigger_rate_limit': 4, 'trigger_rate_window_seconds': 60,
+        }
+
+    def _load_history_with_range(self, start_ts, end_ts, tz='Europe/London'):
+        snapshot = HistoryInvestigationUiTests._snapshot()
+        config_fixture = self._config_fixture(tz)
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', ['cpu'])[0]
+                route.fulfill(status=200, json=self._dst_fixture(metric, start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-time-axis text').first.wait_for(timeout=5_000)
+        return page
+
+    def test_spring_forward_annotates_exactly_one_tick_naming_absent_hour(self):
+        transition = self._spring_forward_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            annotated = page.locator('#history-time-axis .hist-dst-tick')
+            self.assertEqual(annotated.count(), 1)
+            # text_content() concatenates the <title> child's text too --
+            # startswith isolates the tick's own visible label.
+            self.assertTrue(annotated.first.text_content().startswith('⚠ DST transition'))
+            self.assertIn('absent', annotated.first.locator('title').text_content().lower())
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
+        finally:
+            page.close()
+
+    def test_fall_back_annotates_the_two_identical_local_label_ticks(self):
+        transition = self._fall_back_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            annotated = page.locator('#history-time-axis .hist-dst-tick')
+            self.assertEqual(annotated.count(), 2)
+            for index in range(2):
+                self.assertTrue(annotated.nth(index).text_content().startswith('⚠ DST transition'))
+                self.assertIn('twice', annotated.nth(index).locator('title').text_content().lower())
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
+        finally:
+            page.close()
+
+
+class HistoryDstAnnotationUtcTests(unittest.TestCase):
+    """04-04 Task 3: UTC never observes DST, so no annotation can ever fire
+    -- same two ranges as HistoryDstAnnotationLondonTests, different zone.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.appmod, cls.db_path = load_app({'TZ': 'UTC'})
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=cls.playwright.chromium.executable_path,
+        )
+        cls.base_url = f'http://127.0.0.1:{cls.server.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
+
+    def _load_history_with_range(self, start_ts, end_ts):
+        snapshot = HistoryInvestigationUiTests._snapshot()
+        config_fixture = HistoryDstAnnotationLondonTests._config_fixture('UTC')
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', ['cpu'])[0]
+                route.fulfill(
+                    status=200,
+                    json=HistoryDstAnnotationLondonTests._dst_fixture(metric, start_ts, end_ts),
+                )
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-time-axis text').first.wait_for(timeout=5_000)
+        return page
+
+    def test_spring_forward_range_under_utc_has_no_annotation(self):
+        transition = HistoryDstAnnotationLondonTests._spring_forward_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            self.assertEqual(page.locator('#history-time-axis .hist-dst-tick').count(), 0)
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
+        finally:
+            page.close()
+
+    def test_fall_back_range_under_utc_has_no_annotation(self):
+        transition = HistoryDstAnnotationLondonTests._fall_back_epoch()
+        page = self._load_history_with_range(transition - 3 * 3600, transition + 3 * 3600)
+        try:
+            self.assertEqual(page.locator('#history-time-axis .hist-dst-tick').count(), 0)
+            self.assertEqual(page.locator('#history-time-axis text').count(), 7)
         finally:
             page.close()
 
