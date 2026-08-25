@@ -3099,6 +3099,193 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_open_episode_renders_ongoing_badge_no_end_timestamp_and_sorts_first(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        closed_episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+        open_episode = self._episode(8081, 1_700_000_200, None)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            # Pre-ordered exactly as the server documents: open first.
+            return self._events_history_fixture(start_ts, end_ts, episodes=[open_episode, closed_episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            rows = page.locator('.incident-row')
+            rows.first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(rows.count(), 2)
+            first_row_text = rows.nth(0).inner_text()
+            self.assertIn('▶ Ongoing — not yet recovered', first_row_text)
+            self.assertNotIn('End:', first_row_text)
+            self.assertIn('Duration: Ongoing', first_row_text)
+            second_row_text = rows.nth(1).inner_text()
+            self.assertIn('End:', second_row_text)
+        finally:
+            page.close()
+
+    def test_overrun_episode_renders_two_duration_segments_and_two_timestamp_lines(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        # A 1000-second span split 300/700 at grace expiry.
+        episode = self._episode(
+            8080, 1_700_000_000, 1_700_001_000,
+            maintenance_grace_until=1_700_000_300, overrun=True,
+            grace_seconds=300, fault_seconds=700,
+        )
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            row_text = page.locator('.incident-row').first.inner_text()
+            self.assertIn('Down since', row_text)
+            self.assertIn('Raised at', row_text)
+            lines = [line for line in row_text.split('\n') if line.startswith('Down since') or line.startswith('Raised at')]
+            self.assertEqual(len(lines), 2)
+            grace_el = page.locator('.incident-duration-grace')
+            fault_el = page.locator('.incident-duration-fault')
+            self.assertEqual(grace_el.count(), 1)
+            self.assertEqual(fault_el.count(), 1)
+            grace_width = float(grace_el.evaluate('(el) => el.style.width').rstrip('%'))
+            fault_width = float(fault_el.evaluate('(el) => el.style.width').rstrip('%'))
+            self.assertAlmostEqual(grace_width, 30.0, delta=0.5)
+            self.assertAlmostEqual(fault_width, 70.0, delta=0.5)
+        finally:
+            page.close()
+
+    def test_open_overrun_renders_ongoing_and_no_fault_segment(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(
+            8080, 1_700_000_000, None,
+            maintenance_grace_until=1_700_000_300,
+        )
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            row_text = page.locator('.incident-row').first.inner_text()
+            self.assertIn('Ongoing', row_text)
+            self.assertEqual(page.locator('.incident-duration-fault').count(), 0)
+        finally:
+            page.close()
+
+    def test_expected_chip_renders_for_suppressed_row_by_default(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060, suppressed_reason='confirmed_maintenance')
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            chip = page.locator('.incident-chip-expected')
+            self.assertEqual(chip.count(), 1)
+            self.assertEqual(chip.first.inner_text(), 'Expected')
+        finally:
+            page.close()
+
+    def test_flapping_group_renders_one_banner_above_three_separate_rows(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episodes = [
+            self._episode(8080, 1_700_000_000, 1_700_000_060, flapping_group_id=1),
+            self._episode(8080, 1_700_000_300, 1_700_000_360, flapping_group_id=1),
+            self._episode(8080, 1_700_000_600, 1_700_000_660, flapping_group_id=1),
+        ]
+        flapping_groups = [{'id': 1, 'port': 8080, 'count': 3, 'span_seconds': 600}]
+
+        def events_payload_fn(start_ts, end_ts, query):
+            fixture = self._events_history_fixture(start_ts, end_ts, episodes=episodes)
+            fixture['flapping_groups'] = flapping_groups
+            return fixture
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('.incident-row').count(), 3)
+            banners = page.locator('.incident-flapping-banner')
+            self.assertEqual(banners.count(), 1)
+            self.assertIn('Flapping', banners.first.inner_text())
+            self.assertIn('3 episodes', banners.first.inner_text())
+        finally:
+            page.close()
+
+    def test_transitions_toggle_flips_aria_expanded_and_reveals_fixture_rows(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(
+            8080, 1_700_000_000, 1_700_000_060,
+            transitions=[
+                {'event_type': 'state_change', 'ts': 1_700_000_000, 'online': 0},
+                {'event_type': 'state_change', 'ts': 1_700_000_060, 'online': 1},
+            ],
+        )
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            toggle = page.locator('.incident-transitions-toggle').first
+            toggle.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(toggle.text_content(), 'Show transitions')
+            self.assertEqual(toggle.get_attribute('aria-expanded'), 'false')
+            toggle.click()
+            self.assertEqual(toggle.text_content(), 'Hide transitions')
+            self.assertEqual(toggle.get_attribute('aria-expanded'), 'true')
+            transitions = page.locator('.incident-transitions').first
+            self.assertTrue(transitions.is_visible())
+            self.assertEqual(transitions.locator('p').count(), 2)
+            toggle.click()
+            self.assertEqual(toggle.text_content(), 'Show transitions')
+            self.assertFalse(transitions.is_visible())
+        finally:
+            page.close()
+
+    def test_long_service_name_wraps_within_row(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        long_name = 'A' * 120
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060, service_name=long_name)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page(viewport={'width': 400, 'height': 800})
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            service_el = page.locator('.incident-service').first
+            self.assertIn(long_name, service_el.inner_text())
+            box = service_el.bounding_box()
+            self.assertLessEqual(box['width'], 400 + 1)
+            # overflow-wrap: anywhere -- the text is fully present, not
+            # truncated with an ellipsis or clipped.
+            self.assertEqual(service_el.evaluate('(el) => getComputedStyle(el).textOverflow'), 'clip')
+        finally:
+            page.close()
+
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):
     """04-04 Task 3: a zone that observes DST annotates its two transitions.
