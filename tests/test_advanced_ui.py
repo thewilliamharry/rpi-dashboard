@@ -450,7 +450,9 @@ class AdvancedUiTests(unittest.TestCase):
                 [link.text_content() for link in page.locator('#section-navigation button').all()],
                 # 04-01/D-01: History is inserted between Services and Pipeline,
                 # ahead of the two sections that remain strictly current-state.
-                ['Overview', 'Host', 'Services', 'History', 'Pipeline', 'Settings'],
+                # 04-07 adds Incidents immediately after History, per the same
+                # UI-SPEC nav ordering.
+                ['Overview', 'Host', 'Services', 'History', 'Incidents', 'Pipeline', 'Settings'],
             )
             self.assertIn('No active exceptions', page.locator('#overview-section').text_content())
             self.assertIn(
@@ -598,9 +600,14 @@ class AdvancedUiTests(unittest.TestCase):
             # 04-01/D-04: historyRange is the new validated key this phase adds
             # to the same versioned preference object. 04-06/D-16 adds
             # selectedService alongside it, the carried service selection.
+            # 04-07 adds historyFilters, the Incidents filter object -- the
+            # filtering half of the same D-04 remainder.
             self.assertEqual(
                 set(stored),
-                {'refreshSeconds', 'paused', 'density', 'range', 'filters', 'historyRange', 'selectedService'},
+                {
+                    'refreshSeconds', 'paused', 'density', 'range', 'filters',
+                    'historyRange', 'selectedService', 'historyFilters',
+                },
             )
             self.assertNotIn('snapshot', stored)
         finally:

@@ -34,10 +34,30 @@
       <button type="button" data-section="host" aria-controls="host-section" aria-selected="false">Host</button>
       <button type="button" data-section="services" aria-controls="services-section" aria-selected="false">Services</button>
       <button type="button" data-section="history" aria-controls="history-section" aria-selected="false">History</button>
+      <button type="button" data-section="incidents" aria-controls="incidents-section" aria-selected="false">Incidents</button>
       <button type="button" data-section="pipeline" aria-controls="pipeline-section" aria-selected="false">Pipeline</button>
       <button type="button" data-section="settings" aria-controls="settings-section" aria-selected="false">Settings</button>
     </nav>
     <div class="advanced-detail">
+      <div id="investigation-header" hidden>
+        <div id="investigation-range" class="hist-range" aria-label="Historical investigation range">
+          <div id="range-back-row" class="hist-back-row"></div>
+          <button type="button" id="range-preset-1h" class="hist-preset" aria-pressed="false">1h</button>
+          <button type="button" id="range-preset-6h" class="hist-preset" aria-pressed="false">6h</button>
+          <button type="button" id="range-preset-24h" class="hist-preset" aria-pressed="true">24h</button>
+          <button type="button" id="range-preset-7d" class="hist-preset" aria-pressed="false">7d</button>
+          <button type="button" id="range-preset-30d" class="hist-preset" aria-pressed="false">30d</button>
+          <button type="button" id="range-preset-90d" class="hist-preset" aria-pressed="false">90d</button>
+          <div id="hist-range-fields" class="hist-range-fields">
+            <label>Start <input type="text" id="range-start" placeholder="YYYY-MM-DD HH:MM" inputmode="numeric" autocomplete="off"></label>
+            <label>End <input type="text" id="range-end" placeholder="YYYY-MM-DD HH:MM" inputmode="numeric" autocomplete="off"></label>
+            <button type="button" id="apply-custom-range">Apply custom range</button>
+          </div>
+          <p id="range-custom-label" class="hist-range-custom-label" hidden></p>
+          <p id="range-resolution-note" aria-live="polite"></p>
+          <p id="range-error" class="hist-range-error" role="alert" hidden></p>
+        </div>
+      </div>
       <section id="overview-section" aria-labelledby="overview-heading">
         <h2 id="overview-heading" tabindex="-1">Overview</h2>
         <div id="overview-content" class="advanced-loading" aria-label="Loading overview evidence"><p>Loading current diagnosis…</p><div class="skeleton-row"></div><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
@@ -81,23 +101,6 @@
           <label>Investigate service <select id="history-service-picker"><option value="">Select a service</option></select></label>
           <span id="investigating-service" class="investigating-service" hidden></span>
           <button type="button" id="clear-selected-service" class="hist-clear-service" hidden>Clear</button>
-        </div>
-        <div id="investigation-range" class="hist-range" aria-label="Historical investigation range">
-          <div id="range-back-row" class="hist-back-row"></div>
-          <button type="button" id="range-preset-1h" class="hist-preset" aria-pressed="false">1h</button>
-          <button type="button" id="range-preset-6h" class="hist-preset" aria-pressed="false">6h</button>
-          <button type="button" id="range-preset-24h" class="hist-preset" aria-pressed="true">24h</button>
-          <button type="button" id="range-preset-7d" class="hist-preset" aria-pressed="false">7d</button>
-          <button type="button" id="range-preset-30d" class="hist-preset" aria-pressed="false">30d</button>
-          <button type="button" id="range-preset-90d" class="hist-preset" aria-pressed="false">90d</button>
-          <div id="hist-range-fields" class="hist-range-fields">
-            <label>Start <input type="text" id="range-start" placeholder="YYYY-MM-DD HH:MM" inputmode="numeric" autocomplete="off"></label>
-            <label>End <input type="text" id="range-end" placeholder="YYYY-MM-DD HH:MM" inputmode="numeric" autocomplete="off"></label>
-            <button type="button" id="apply-custom-range">Apply custom range</button>
-          </div>
-          <p id="range-custom-label" class="hist-range-custom-label" hidden></p>
-          <p id="range-resolution-note" aria-live="polite"></p>
-          <p id="range-error" class="hist-range-error" role="alert" hidden></p>
         </div>
         <div id="history-content" class="hist-stack">
           <div id="history-drag-overlay" class="hist-drag-select" hidden></div>
@@ -165,6 +168,32 @@
           </div>
         </div>
         <div id="history-chart-tooltip" class="hist-tooltip" role="tooltip" hidden></div>
+      </section>
+      <section id="incidents-section" aria-labelledby="incidents-heading" hidden>
+        <h2 id="incidents-heading" tabindex="-1">Incidents</h2>
+        <form id="incident-filters" class="service-filters incident-filters" aria-label="Filter incident history">
+          <label>Service <select id="incident-service-filter"><option value="">All services</option></select></label>
+          <label>Criticality <select id="incident-criticality-filter"><option value="">All criticality</option><option value="critical">Critical</option><option value="standard">Standard</option></select></label>
+          <label>Event type <select id="incident-event-type-filter">
+            <option value="">All event types</option>
+            <option value="event_type:state_change">State change</option>
+            <option value="event_type:monitoring_gap">Monitoring gap</option>
+            <option value="event_type:alert_sent">Alert sent</option>
+            <option value="event_type:alert_failed">Alert failed</option>
+            <option value="event_type:preview_capture">Preview capture</option>
+            <option value="event_type:preview_complete">Preview complete</option>
+            <option value="event_type:maintenance_overrun">Maintenance overrun</option>
+            <option value="maintenance:exclude">Exclude expected maintenance</option>
+            <option value="maintenance:only">Expected maintenance only</option>
+          </select></label>
+          <button type="button" id="clear-incident-filters">Clear all filters</button>
+        </form>
+        <p id="matching-incident-count" aria-live="polite">0 of 0 incidents</p>
+        <div id="incidents-loading" class="advanced-loading" hidden aria-label="Loading incidents"><div class="skeleton-row"></div><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
+        <div id="incidents-error" class="hist-error" role="alert" hidden></div>
+        <p id="incidents-truncated" class="hist-range-custom-label" hidden></p>
+        <div id="incidents-empty" class="incidents-empty" hidden><p>No incidents match this range and these filters.</p><p>Clear filters to see every recorded incident in this range.</p></div>
+        <div id="incidents-list" class="incidents-list" aria-label="Incidents"></div>
       </section>
       <section id="pipeline-section" aria-labelledby="pipeline-heading" hidden><h2 id="pipeline-heading" tabindex="-1">Pipeline</h2><p>Loading current diagnosis…</p></section>
       <section id="settings-section" aria-labelledby="settings-heading" hidden><h2 id="settings-heading" tabindex="-1">Settings</h2><p>Loading current diagnosis…</p></section>
