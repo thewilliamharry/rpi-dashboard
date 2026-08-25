@@ -78,16 +78,24 @@
       <section id="history-section" aria-labelledby="history-heading" hidden>
         <h2 id="history-heading" tabindex="-1">History</h2>
         <div id="investigation-range" class="hist-range" aria-label="Historical investigation range">
+          <div id="range-back-row" class="hist-back-row"></div>
           <button type="button" id="range-preset-1h" class="hist-preset" aria-pressed="false">1h</button>
           <button type="button" id="range-preset-6h" class="hist-preset" aria-pressed="false">6h</button>
           <button type="button" id="range-preset-24h" class="hist-preset" aria-pressed="true">24h</button>
           <button type="button" id="range-preset-7d" class="hist-preset" aria-pressed="false">7d</button>
           <button type="button" id="range-preset-30d" class="hist-preset" aria-pressed="false">30d</button>
           <button type="button" id="range-preset-90d" class="hist-preset" aria-pressed="false">90d</button>
+          <div id="hist-range-fields" class="hist-range-fields">
+            <label>Start <input type="text" id="range-start" placeholder="YYYY-MM-DD HH:MM" inputmode="numeric" autocomplete="off"></label>
+            <label>End <input type="text" id="range-end" placeholder="YYYY-MM-DD HH:MM" inputmode="numeric" autocomplete="off"></label>
+            <button type="button" id="apply-custom-range">Apply custom range</button>
+          </div>
+          <p id="range-custom-label" class="hist-range-custom-label" hidden></p>
           <p id="range-resolution-note" aria-live="polite"></p>
-          <p id="range-error" role="alert" hidden></p>
+          <p id="range-error" class="hist-range-error" role="alert" hidden></p>
         </div>
         <div id="history-content" class="hist-stack">
+          <div id="history-drag-overlay" class="hist-drag-select" hidden></div>
           <figure class="hist-chart">
             <div class="hist-chart-header"><h3>CPU</h3><span id="unit-cpu" class="hist-unit"></span></div>
             <svg id="chart-cpu" class="hist-plot" viewBox="0 0 1000 96" preserveAspectRatio="none" role="img" aria-label="CPU history chart"><path class="hist-series"></path></svg>

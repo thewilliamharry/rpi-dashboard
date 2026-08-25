@@ -1,4 +1,5 @@
 import calendar
+import pathlib
 import re
 import threading
 import unittest
@@ -9,6 +10,8 @@ from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
 
 from tests.helpers import cleanup_db, load_app
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # D-02's exact preset ladder in seconds -- the span every request must equal.
 HISTORY_PRESET_SPANS = {
@@ -1299,6 +1302,671 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             self.assertIn('steady', text)
         finally:
             page.close()
+
+    # ------------------------------------------------------------------
+    # 04-05 Task 1: canonical local-time custom range entry, validated
+    # against exactly the server's own bounds before anything is fetched
+    # (D-03). start_ts/end_ts fixtures below are 2024 dates -- far enough in
+    # the past that they can never accidentally collide with "in the future"
+    # regardless of when this suite runs, and far enough from any DST
+    # transition boundary that Sydney's offset is unambiguous.
+    # ------------------------------------------------------------------
+
+    def _history_page_with_request_counter(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        counters = {'history': 0}
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                counters['history'] += 1
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+        return page, counters
+
+    def test_apply_custom_range_control_exact_text_and_ids_present(self):
+        page, _counters = self._history_page_with_request_counter()
+        try:
+            self.assertEqual(page.locator('#range-start').count(), 1)
+            self.assertEqual(page.locator('#range-end').count(), 1)
+            self.assertEqual(page.locator('#apply-custom-range').count(), 1)
+            self.assertEqual(page.locator('#apply-custom-range').text_content(), 'Apply custom range')
+        finally:
+            page.close()
+
+    def test_blank_start_field_renders_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'Enter both a start and an end time.')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_whitespace_only_field_renders_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('   ')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'Enter both a start and an end time.')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_equal_start_and_end_renders_server_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 10:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'start_ts must be before end_ts')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_reversed_start_and_end_rejected_values_not_swapped(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-15 14:00')
+            page.locator('#range-end').fill('2024-01-15 10:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'start_ts must be before end_ts')
+            self.assertEqual(counters['history'], before)
+            # The operator's own entered text is never swapped back at them.
+            self.assertEqual(page.locator('#range-start').input_value(), '2024-01-15 14:00')
+            self.assertEqual(page.locator('#range-end').input_value(), '2024-01-15 10:00')
+            # And the governing range itself is unchanged -- still the 24h default.
+            self.assertEqual(page.locator('#range-preset-24h').get_attribute('aria-pressed'), 'true')
+        finally:
+            page.close()
+
+    def test_span_over_90_days_renders_server_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-01 00:00')
+            page.locator('#range-end').fill('2024-04-15 00:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'requested span exceeds 90 days')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_future_end_renders_server_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2098-12-01 00:00')
+            page.locator('#range-end').fill('2099-01-01 00:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'end_ts must not be in the future')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_valid_custom_range_issues_request_with_parsed_bounds_in_configured_timezone(self):
+        page, _counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ) as request_info:
+                page.locator('#apply-custom-range').click()
+            query = parse_qs(urlparse(request_info.value.url).query)
+            # 2024-01-15 10:00/14:00 Australia/Sydney (AEDT, UTC+11 in January).
+            self.assertEqual(int(query['start_ts'][0]), 1_705_273_200)
+            self.assertEqual(int(query['end_ts'][0]), 1_705_287_600)
+            self.assertTrue(page.locator('#range-error').is_hidden())
+            # Applying a valid custom range clears any preset's selected state.
+            for preset in HISTORY_PRESET_SPANS:
+                self.assertEqual(page.locator(f'#range-preset-{preset}').get_attribute('aria-pressed'), 'false')
+        finally:
+            page.close()
+
+    def test_fields_populated_after_preset_click_custom_apply_and_reload_with_stored_custom(self):
+        page, _counters = self._history_page_with_request_counter()
+        try:
+            # (a) After a preset click, the fields state that preset's own span.
+            page.locator('#range-preset-6h').click()
+            page.wait_for_function(
+                "() => /^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$/.test(document.getElementById('range-start').value)",
+                timeout=5_000,
+            )
+            start_text = page.locator('#range-start').input_value()
+            end_text = page.locator('#range-end').input_value()
+            hooks = 'window.__historyRangeTestHooks'
+            start_parsed = page.evaluate(f"{hooks}.parseLocalRangeInput({start_text!r})")
+            end_parsed = page.evaluate(f"{hooks}.parseLocalRangeInput({end_text!r})")
+            self.assertEqual(end_parsed - start_parsed, HISTORY_PRESET_SPANS['6h'])
+
+            # (b) After a custom apply, the fields show exactly what was applied.
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='hidden', timeout=5_000)
+            self.assertEqual(page.locator('#range-start').input_value(), '2024-01-15 10:00')
+            self.assertEqual(page.locator('#range-end').input_value(), '2024-01-15 14:00')
+        finally:
+            page.close()
+
+    def test_fields_populated_after_reload_with_stored_custom_range(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.add_init_script(
+            "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+            "{refreshSeconds: 15, historyRange: {custom: {start_ts: 1705273200, end_ts: 1705287600}}}));",
+        )
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function(
+                "() => document.getElementById('range-start').value === '2024-01-15 10:00'",
+                timeout=5_000,
+            )
+            self.assertEqual(page.locator('#range-start').input_value(), '2024-01-15 10:00')
+            self.assertEqual(page.locator('#range-end').input_value(), '2024-01-15 14:00')
+            for preset in HISTORY_PRESET_SPANS:
+                self.assertEqual(page.locator(f'#range-preset-{preset}').get_attribute('aria-pressed'), 'false')
+        finally:
+            page.close()
+
+    def test_hostile_stored_custom_range_yields_24h_default(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        hostile_customs = {
+            'strings': "{start_ts: 'a', end_ts: 'b'}",
+            'nulls': '{start_ts: null, end_ts: null}',
+            'inverted_pair': '{start_ts: 2000, end_ts: 1000}',
+        }
+        for label, custom_expression in hostile_customs.items():
+            with self.subTest(custom=label):
+                page = self.browser.new_page()
+                page.add_init_script(
+                    "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+                    f"{{refreshSeconds: 15, historyRange: {{custom: {custom_expression}}}}}));",
+                )
+
+                def route_api(route):
+                    path = urlparse(route.request.url).path
+                    if path == '/api/config':
+                        route.fulfill(status=200, json=config_fixture)
+                        return
+                    if path == '/api/telemetry/history':
+                        query = parse_qs(urlparse(route.request.url).query)
+                        start_ts = int(query['start_ts'][0])
+                        end_ts = int(query['end_ts'][0])
+                        route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                        return
+                    if path == '/api/advanced/current':
+                        route.fulfill(status=200, json=snapshot)
+                        return
+                    route.fallback()
+
+                page.route('**/api/**', route_api)
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    with page.expect_request(
+                        lambda request: urlparse(request.url).path == '/api/telemetry/history',
+                    ) as request_info:
+                        page.locator('[data-section="history"]').click()
+                    query = parse_qs(urlparse(request_info.value.url).query)
+                    start_ts = int(query['start_ts'][0])
+                    end_ts = int(query['end_ts'][0])
+                    self.assertEqual(end_ts - start_ts, HISTORY_PRESET_SPANS['24h'])
+                    self.assertEqual(page.locator('#range-preset-24h').get_attribute('aria-pressed'), 'true')
+                finally:
+                    page.close()
+
+    def test_apply_button_disabled_while_in_flight_fields_stay_visible(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.add_init_script(self.HISTORY_FETCH_HOLD_HARNESS)
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.wait_for_function('window.__heldHistoryReleases.length === 4', timeout=5_000)
+            page.evaluate('window.__releaseAllHeldHistoryFetches()')
+            page.locator('#apply-custom-range').wait_for(state='attached', timeout=5_000)
+            page.wait_for_function(
+                "() => document.getElementById('apply-custom-range').disabled === false",
+                timeout=5_000,
+            )
+
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            page.evaluate('window.__heldHistoryReleases = []')
+            page.locator('#apply-custom-range').click()
+            page.wait_for_function('window.__heldHistoryReleases.length === 4', timeout=5_000)
+            self.assertTrue(page.locator('#apply-custom-range').is_disabled())
+            self.assertTrue(page.locator('#range-start').is_visible())
+            self.assertTrue(page.locator('#range-end').is_visible())
+            page.evaluate('window.__releaseAllHeldHistoryFetches()')
+            page.wait_for_function(
+                "() => document.getElementById('apply-custom-range').disabled === false",
+                timeout=5_000,
+            )
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-05 Task 2: one navigation stack for every narrowing gesture (D-15).
+    # The stack's own contract (push/pop/no-op/limit/Back rendering) is
+    # independent of which gesture triggers a push, so it is exercised here
+    # directly through window.__historyRangeTestHooks.setInvestigationRange
+    # -- the exact same entry point Task 3's drag-to-select and plan 04-07's
+    # incident focus both call.
+    # ------------------------------------------------------------------
+
+    def test_range_back_absent_when_stack_empty_present_after_one_push(self):
+        page, _counters = self._history_page_with_request_counter()
+        try:
+            self.assertEqual(page.locator('#range-back').count(), 0)
+            page.evaluate(
+                "window.__historyRangeTestHooks.setInvestigationRange("
+                "{start_ts: 1700000000, end_ts: 1700003600, origin: 'drag', label: 'test range'})",
+            )
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            self.assertEqual(page.locator('#range-back').count(), 1)
+        finally:
+            page.close()
+
+    def test_three_pushes_and_three_backs_restore_original_range_exactly(self):
+        page, _counters = self._history_page_with_request_counter()
+        hooks = 'window.__historyRangeTestHooks'
+        try:
+            original_start = page.locator('#range-start').input_value()
+            original_end = page.locator('#range-end').input_value()
+            # Minute-aligned (a multiple of 60): #range-start/#range-end format
+            # at minute precision (YYYY-MM-DD HH:MM), so a sub-minute epoch
+            # value cannot round-trip through the fields losslessly -- that is
+            # a field-precision property, not a stack-restoration defect, and
+            # is sidestepped here by choosing values with zero seconds.
+            pushes = [
+                (1_699_999_980, 1_700_003_580),
+                (1_700_100_000, 1_700_103_600),
+                (1_700_199_960, 1_700_203_560),
+            ]
+            for start_ts, end_ts in pushes:
+                page.evaluate(
+                    f"{hooks}.setInvestigationRange({{start_ts: {start_ts}, end_ts: {end_ts}, "
+                    "origin: 'drag', label: 'pushed'})",
+                )
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), 3)
+            # LIFO: popping restores, in order, the range each push LEFT --
+            # the second push's own bounds, then the first push's own
+            # bounds, then the original range the first push left.
+            expected_after_pop = [pushes[1], pushes[0], None]
+            for expected in expected_after_pop:
+                page.locator('#range-back').click()
+                if expected is None:
+                    self.assertEqual(page.locator('#range-start').input_value(), original_start)
+                    self.assertEqual(page.locator('#range-end').input_value(), original_end)
+                else:
+                    start_text = page.locator('#range-start').input_value()
+                    end_text = page.locator('#range-end').input_value()
+                    start_parsed = page.evaluate(f"{hooks}.parseLocalRangeInput({start_text!r})")
+                    end_parsed = page.evaluate(f"{hooks}.parseLocalRangeInput({end_text!r})")
+                    self.assertEqual(start_parsed, expected[0])
+                    self.assertEqual(end_parsed, expected[1])
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), 0)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+        finally:
+            page.close()
+
+    def test_push_of_identical_range_creates_no_entry(self):
+        page, _counters = self._history_page_with_request_counter()
+        hooks = 'window.__historyRangeTestHooks'
+        try:
+            current = page.evaluate(f'{hooks}.resolveRangeBounds()')
+            page.evaluate(
+                f"{hooks}.setInvestigationRange({{start_ts: {current['start_ts']}, "
+                f"end_ts: {current['end_ts']}, origin: 'drag', label: 'same'}})",
+            )
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), 0)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+        finally:
+            page.close()
+
+    def test_preset_after_pushes_clears_stack_and_adopts_preset(self):
+        page, _counters = self._history_page_with_request_counter()
+        hooks = 'window.__historyRangeTestHooks'
+        try:
+            for i in range(2):
+                page.evaluate(
+                    f"{hooks}.setInvestigationRange({{start_ts: {1_700_000_000 + i}, "
+                    f"end_ts: {1_700_003_600 + i}, origin: 'drag', label: 'pushed'}})",
+                )
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), 2)
+            page.locator('#range-preset-6h').click()
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), 0)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+            self.assertEqual(page.locator('#range-preset-6h').get_attribute('aria-pressed'), 'true')
+        finally:
+            page.close()
+
+    def test_custom_apply_after_pushes_clears_stack(self):
+        page, _counters = self._history_page_with_request_counter()
+        hooks = 'window.__historyRangeTestHooks'
+        try:
+            for i in range(2):
+                page.evaluate(
+                    f"{hooks}.setInvestigationRange({{start_ts: {1_700_000_000 + i}, "
+                    f"end_ts: {1_700_003_600 + i}, origin: 'drag', label: 'pushed'}})",
+                )
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), 2)
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='hidden', timeout=5_000)
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), 0)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+        finally:
+            page.close()
+
+    def test_range_back_text_and_title_match_back_to_label(self):
+        page, _counters = self._history_page_with_request_counter()
+        hooks = 'window.__historyRangeTestHooks'
+        try:
+            page.evaluate(
+                f"{hooks}.setInvestigationRange({{start_ts: 1700000000, end_ts: 1700003600, "
+                "origin: 'drag', label: 'a distinctive label'})",
+            )
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            self.assertEqual(page.locator('#range-back').text_content(), 'Back to a distinctive label')
+            self.assertEqual(page.locator('#range-back').get_attribute('title'), 'Back to a distinctive label')
+        finally:
+            page.close()
+
+    def test_stack_never_exceeds_range_stack_limit(self):
+        page, _counters = self._history_page_with_request_counter()
+        hooks = 'window.__historyRangeTestHooks'
+        try:
+            limit = page.evaluate(f'{hooks}.RANGE_STACK_LIMIT')
+            for i in range(limit + 10):
+                page.evaluate(
+                    f"{hooks}.setInvestigationRange({{start_ts: {1_700_000_000 + i}, "
+                    f"end_ts: {1_700_003_600 + i}, origin: 'drag', label: 'pushed ' + {i}}})",
+                )
+            self.assertEqual(page.evaluate(f'{hooks}.rangeStack().length'), limit)
+        finally:
+            page.close()
+
+    def test_incident_pad_constants_declared_with_documented_values(self):
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        self.assertRegex(js, r'INCIDENT_PAD_FRACTION\s*=\s*0\.15')
+        self.assertRegex(js, r'INCIDENT_PAD_FLOOR_SECONDS\s*=\s*300')
+
+    def test_range_stack_never_reaches_the_url_or_browser_history_api(self):
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        for forbidden in ('pushState', 'replaceState', 'location.search'):
+            self.assertNotIn(forbidden, js)
+
+    # ------------------------------------------------------------------
+    # 04-05 Task 3: drag-to-select across any host chart, landing on exactly
+    # the same range state the fields describe (D-03), without regenerating
+    # a single chart <path> during the gesture (R-01/Research Pitfall 3).
+    # ------------------------------------------------------------------
+
+    def _drag_ready_page(self):
+        """A page whose requested range is fixed and known to the test (not
+        a live Date.now()-derived preset), so drag fractions can be computed
+        against a domain the test itself controls."""
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 86_400
+        fixture = self._empty_history_fixture(start_ts, end_ts)
+        fixture['points'] = [self._point(start_ts, 10.0), self._point(end_ts - 60, 20.0)]
+        fixture['coverage'] = [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}]
+        counters = {'history': 0}
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                counters['history'] += 1
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+        page.wait_for_function(
+            "() => !!document.querySelector('#chart-cpu path').getAttribute('d')",
+            timeout=5_000,
+        )
+        return page, start_ts, end_ts, counters
+
+    def test_drag_across_chart_applies_fraction_of_rendered_span(self):
+        page, start_ts, end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.25
+            x2 = box['x'] + box['width'] * 0.75
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            page.mouse.move((x1 + x2) / 2, y)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ) as request_info:
+                page.mouse.move(x2, y)
+                page.mouse.up()
+            query = parse_qs(urlparse(request_info.value.url).query)
+            span = end_ts - start_ts
+            expected_start = start_ts + span * 0.25
+            expected_end = start_ts + span * 0.75
+            self.assertAlmostEqual(int(query['start_ts'][0]), expected_start, delta=3_600)
+            self.assertAlmostEqual(int(query['end_ts'][0]), expected_end, delta=3_600)
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+        finally:
+            page.close()
+
+    def test_right_to_left_drag_produces_identical_range_to_left_to_right(self):
+        page, start_ts, end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.75
+            x2 = box['x'] + box['width'] * 0.25
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ) as request_info:
+                page.mouse.move(x2, y)
+                page.mouse.up()
+            query = parse_qs(urlparse(request_info.value.url).query)
+            span = end_ts - start_ts
+            expected_start = start_ts + span * 0.25
+            expected_end = start_ts + span * 0.75
+            self.assertAlmostEqual(int(query['start_ts'][0]), expected_start, delta=3_600)
+            self.assertAlmostEqual(int(query['end_ts'][0]), expected_end, delta=3_600)
+        finally:
+            page.close()
+
+    def test_click_without_movement_applies_no_range_and_leaves_back_absent(self):
+        page, _start_ts, _end_ts, counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x = box['x'] + box['width'] / 2
+            y = box['y'] + box['height'] / 2
+            before = counters['history']
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.up()
+            page.wait_for_timeout(200)
+            self.assertEqual(counters['history'], before)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+        finally:
+            page.close()
+
+    def test_escape_during_drag_cancels_no_range_change_and_overlay_hidden(self):
+        page, _start_ts, _end_ts, counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.25
+            x2 = box['x'] + box['width'] * 0.75
+            y = box['y'] + box['height'] / 2
+            before = counters['history']
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            page.mouse.move(x2, y)
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            page.keyboard.press('Escape')
+            page.locator('#history-drag-overlay').wait_for(state='hidden', timeout=5_000)
+            page.mouse.up()
+            page.wait_for_timeout(200)
+            self.assertEqual(counters['history'], before)
+            self.assertEqual(page.locator('#range-back').count(), 0)
+        finally:
+            page.close()
+
+    def test_five_pointer_moves_leave_chart_paths_unchanged_while_overlay_moves(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            initial_d = {
+                metric: page.locator(f'#chart-{metric} path').get_attribute('d')
+                for metric in ('cpu', 'ram', 'disk', 'temp')
+            }
+            box = page.locator('#chart-cpu').bounding_box()
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(box['x'] + box['width'] * 0.1, y)
+            page.mouse.down()
+            widths = []
+            for fraction in (0.2, 0.35, 0.5, 0.65, 0.8):
+                page.mouse.move(box['x'] + box['width'] * fraction, y)
+                page.wait_for_timeout(30)
+                widths.append(page.locator('#history-drag-overlay').bounding_box()['width'])
+            for metric, d in initial_d.items():
+                self.assertEqual(page.locator(f'#chart-{metric} path').get_attribute('d'), d)
+            self.assertGreater(len(set(round(w) for w in widths)), 1)
+            page.mouse.up()
+        finally:
+            page.close()
+
+    def test_drag_overlay_border_resolves_accent_and_fill_is_not_solid(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.3
+            x2 = box['x'] + box['width'] * 0.6
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            page.mouse.move(x2, y)
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            accent = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
+            expected_rgb = page.evaluate(
+                "(hex) => { const p = document.createElement('div'); p.style.color = hex; "
+                "document.body.appendChild(p); const rgb = getComputedStyle(p).color; p.remove(); return rgb; }",
+                accent,
+            )
+            border_color = page.evaluate(
+                "getComputedStyle(document.getElementById('history-drag-overlay')).borderTopColor",
+            )
+            background = page.evaluate(
+                "getComputedStyle(document.getElementById('history-drag-overlay')).backgroundColor",
+            )
+            # color-mix() can serialize as either rgba(...) or the CSS Color 4
+            # color(srgb r g b / a) form depending on engine version -- read
+            # the real alpha channel back via a 1x1 canvas rather than
+            # pattern-matching a specific serialization string.
+            alpha = page.evaluate(
+                "(bg) => { const c = document.createElement('canvas'); c.width = 1; c.height = 1; "
+                "const ctx = c.getContext('2d'); ctx.fillStyle = bg; ctx.fillRect(0, 0, 1, 1); "
+                "return ctx.getImageData(0, 0, 1, 1).data[3]; }",
+                background,
+            )
+            page.mouse.up()
+            self.assertEqual(border_color, expected_rgb)
+            self.assertGreater(alpha, 0)
+            self.assertLess(alpha, 255)
+            self.assertNotEqual(background, expected_rgb)
+        finally:
+            page.close()
+
+    def test_drag_entry_point_documents_missing_keyboard_equivalent_as_phase5_debt(self):
+        js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
+        self.assertIn('Phase 5 / UX-06', js)
 
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):

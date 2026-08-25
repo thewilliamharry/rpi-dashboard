@@ -76,7 +76,7 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 .hist-preset { min-height: 44px; min-width: 44px; color: var(--text); background: var(--bg3); border: 1px solid var(--border); padding: 0 12px; font: inherit; cursor: pointer; }
 .hist-preset[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 #range-resolution-note { margin: 0; font-size: 12px; font-family: var(--font-mono); color: var(--muted); flex-basis: 100%; }
-#range-error { margin: 0; color: var(--accent2); flex-basis: 100%; }
+.hist-range-error { margin: 0; color: var(--accent2); flex-basis: 100%; overflow-wrap: anywhere; }
 .hist-chart { margin: 0; border: 1px solid var(--border); background: var(--bg3); padding: 8px; position: relative; }
 .hist-chart h3 { margin: 0; font-size: 14px; font-weight: 600; }
 .hist-plot { display: block; width: 100%; height: 96px; }
@@ -124,3 +124,32 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
    reusing --accent (reserved for interactive range/investigation controls,
    03-UI-SPEC.md) or the calm --muted register the coverage strip owns. */
 .hist-dst-tick { fill: var(--accent2); font-weight: 600; cursor: help; }
+
+/* Phase 4 (04-05) -- canonical local-time custom range entry: the fields that
+   always state the currently governing range, from every source (D-03). */
+.hist-range-fields { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.hist-range-fields label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+.hist-range-fields input { min-height: 44px; color: var(--text); background: var(--bg3); border: 1px solid var(--border); padding: 0 10px; font: inherit; font-family: var(--font-mono); }
+/* Exactly one thing indicates the governing range at a time (UI-SPEC "Shared
+   range control"): when a custom range is active, no preset carries
+   aria-pressed, and the fields carry this focus/active styling instead. */
+.hist-range-fields.hist-range-active input { border-color: var(--accent); }
+#apply-custom-range { min-height: 44px; min-width: 44px; color: var(--accent); background: transparent; border: 1px solid var(--accent); padding: 0 12px; font: inherit; cursor: pointer; }
+#apply-custom-range:disabled { opacity: 0.5; cursor: not-allowed; }
+.hist-range-custom-label { margin: 0; flex-basis: 100%; overflow-wrap: anywhere; font-size: 12px; font-family: var(--font-mono); color: var(--muted); }
+
+/* Phase 4 (04-05) -- Back control (D-15): accent-colored, present only while
+   the navigation stack is non-empty (rendered/removed in JS, never merely
+   hidden), on its own row above the presets so a pushed drag/incident focus
+   is never confused with the operator's own preset choice. */
+.hist-back-row { flex-basis: 100%; }
+.hist-back { min-height: 44px; max-width: 100%; color: var(--accent); background: transparent; border: 1px solid var(--accent); padding: 0 12px; font: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Phase 4 (04-05) -- drag-to-select overlay (D-03): one absolutely-positioned
+   element reused across every chart, never one per chart. Fixed positioning
+   matches the existing .hist-tooltip precedent above, so it tracks the
+   viewport regardless of any ancestor's own positioning context. A
+   low-opacity accent tint with an accent border -- never a solid fill,
+   per the UI-SPEC accent reservation. */
+.hist-drag-select { position: fixed; z-index: 15; pointer-events: none; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.hist-drag-select[hidden] { display: none; }

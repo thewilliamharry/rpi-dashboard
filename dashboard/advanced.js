@@ -22,11 +22,26 @@
     temp: 'Raspberry Pi documented default soft/hard thermal throttle point — not a Beacon-configured alert.',
     disk: 'Filesystem-reported total capacity — the disk cannot exceed this line.',
   };
+  // D-15: the shared navigation-stack bound -- drop the oldest entry beyond
+  // this rather than growing without bound. In-memory/browser-local only
+  // (never persisted, never the URL, per D-18).
+  const RANGE_STACK_LIMIT = 20;
+  // D-15's resolved incident-window padding rule (plan 04-07 applies this
+  // when it pushes an incident window onto the stack this plan builds):
+  // 15% of the episode's own duration on each side, floored at 5 minutes per
+  // side, so a one-minute blip stays legible and a long outage is not padded
+  // into an unreasonably wide window.
+  const INCIDENT_PAD_FRACTION = 0.15;
+  const INCIDENT_PAD_FLOOR_SECONDS = 300;
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
     expandedPorts: new Set(), connectionUnavailable: false, requestGeneration: 0,
     timezone: 'UTC', historyRequestGeneration: 0,
+    // D-15/D-18: purely browser-local, in-memory investigation state -- never
+    // persisted (loadPreferences/savePreferences never touch this) and never
+    // the URL. rangeStack holds {descriptor, origin, label} entries.
+    rangeStack: [], historyBounds: null,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -40,8 +55,25 @@
   // is a known key of HISTORY_PRESETS is accepted; anything else -- an array, a
   // nested object, an unknown string -- resolves to the documented 24h default
   // without ever building a request from the untrusted value.
+  //
+  // T-04-04: a stored `custom` member is accepted only when both start_ts/end_ts
+  // are integers that themselves pass validateCustomRange's own bounds -- a
+  // hostile shape (strings, nulls, an inverted pair, an over-90-day span, a
+  // future end) resolves to the 24h default, exactly like an unrecognised
+  // preset, and no request is ever built from the untrusted stored value.
   function validHistoryRange(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {preset: '24h'};
+    if (Object.prototype.hasOwnProperty.call(value, 'custom')) {
+      const custom = value.custom;
+      if (
+        custom && typeof custom === 'object' && !Array.isArray(custom)
+        && Number.isInteger(custom.start_ts) && Number.isInteger(custom.end_ts)
+        && validateCustomRange(custom.start_ts, custom.end_ts).valid
+      ) {
+        return {custom: {start_ts: custom.start_ts, end_ts: custom.end_ts}};
+      }
+      return {preset: '24h'};
+    }
     const preset = value.preset;
     if (typeof preset !== 'string' || !Object.prototype.hasOwnProperty.call(HISTORY_PRESETS, preset)) {
       return {preset: '24h'};
@@ -266,17 +298,383 @@
     } catch (_) {
       state.timezone = 'UTC';
     }
+    // D-05: every field formatted from state.timezone must reflect the Pi's
+    // configured zone once it becomes known, even if it rendered against the
+    // 'UTC' default before this fetch settled.
+    renderRangeFields();
   }
 
-  // D-18 scope note: the two integers this returns are the only values ever
-  // interpolated into a history request URL -- never a raw stored preference.
-  function resolveRangeBounds() {
+  function boundsForPreset(preset) {
     const end_ts = Math.floor(Date.now() / 1000);
-    const preset = state.preferences.historyRange.preset;
     const span = Object.prototype.hasOwnProperty.call(HISTORY_PRESETS, preset)
       ? HISTORY_PRESETS[preset]
       : HISTORY_PRESETS['24h'];
     return {start_ts: end_ts - span, end_ts};
+  }
+
+  // D-18 scope note: the two integers this returns are the only values ever
+  // interpolated into a history request URL -- never a raw stored preference.
+  // A `custom` descriptor's own two integers are returned as-is (already
+  // validated on the way into state.preferences.historyRange by either
+  // validHistoryRange on load or validateCustomRange on apply); a `preset`
+  // descriptor is always recomputed from Date.now() so a live preset stays
+  // live across every render.
+  function resolveRangeBounds() {
+    const descriptor = state.preferences.historyRange;
+    if (descriptor && descriptor.custom) {
+      return {start_ts: descriptor.custom.start_ts, end_ts: descriptor.custom.end_ts};
+    }
+    return boundsForPreset(descriptor && descriptor.preset);
+  }
+
+  // ------------------------------------------------------------------
+  // Custom local-time range entry (Phase 4 04-05, D-03): explicit start/end
+  // fields are the canonical, statable entry -- interpreted in the Pi's
+  // configured timezone (state.timezone), never the browser's.
+  // ------------------------------------------------------------------
+
+  const CUSTOM_RANGE_TEXT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$/;
+
+  // Interprets `text` as wall-clock time in the Pi's configured timezone by
+  // building a candidate instant and correcting it against localWallClockMinutes'
+  // own reading of that instant -- reusing the exact naive-local-minutes
+  // technique the DST-tick detector below already establishes, rather than
+  // manual UTC-offset arithmetic or a hard-coded transition table. Converges
+  // in at most a couple of iterations since a timezone offset only ever
+  // changes in fixed-size (typically one-hour) steps. Returns null for
+  // anything that does not parse as YYYY-MM-DD HH:MM (or a T separator).
+  function parseLocalRangeInput(text) {
+    if (typeof text !== 'string') return null;
+    const match = text.trim().match(CUSTOM_RANGE_TEXT_PATTERN);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return null;
+    const targetMinutes = Date.UTC(year, month - 1, day, hour, minute) / 60000;
+    let candidate = targetMinutes * 60;
+    for (let iteration = 0; iteration < 3; iteration += 1) {
+      const renderedMinutes = localWallClockMinutes(candidate);
+      const deltaMinutes = targetMinutes - renderedMinutes;
+      if (deltaMinutes === 0) break;
+      candidate += deltaMinutes * 60;
+    }
+    return Number.isFinite(candidate) ? Math.round(candidate) : null;
+  }
+
+  // The exact inverse of parseLocalRangeInput's expected shape, for writing
+  // the fields back after every range change from any source.
+  function formatLocalRangeInput(ts) {
+    if (!Number.isFinite(ts)) return '';
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: state.timezone || 'UTC', hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(new Date(ts * 1000));
+    const get = (type) => parts.find((part) => part.type === type).value;
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+  }
+
+  // Applies exactly the bounds the server applies (dashboard/beacon/telemetry.py
+  // HistoricalRange, dashboard/app.py api_telemetry_history's future-end check),
+  // reading every rejection string from that server behaviour rather than
+  // inventing a paraphrase -- a change on either side shows up as a failing
+  // test, never as two different wordings.
+  function validateCustomRange(startTs, endTs) {
+    if (startTs === null || endTs === null || !Number.isFinite(startTs) || !Number.isFinite(endTs)) {
+      return {valid: false, message: 'Enter both a start and an end time.'};
+    }
+    if (startTs >= endTs) {
+      return {valid: false, message: 'start_ts must be before end_ts'};
+    }
+    if (endTs - startTs > HISTORY_PRESETS['90d']) {
+      return {valid: false, message: 'requested span exceeds 90 days'};
+    }
+    if (endTs > Math.floor(Date.now() / 1000)) {
+      return {valid: false, message: 'end_ts must not be in the future'};
+    }
+    return {valid: true, message: null};
+  }
+
+  // Names the range currently governing the charts, in words -- a preset id
+  // such as '24h', or the custom range's own start/end. Used both by the
+  // Back label (naming the range a pop restores) and as the fallback push
+  // label when a caller does not supply one of its own.
+  function currentRangeLabel() {
+    const descriptor = state.preferences.historyRange;
+    if (descriptor && descriptor.custom) {
+      return `${formatLocalRangeInput(descriptor.custom.start_ts)} – ${formatLocalRangeInput(descriptor.custom.end_ts)}`;
+    }
+    return (descriptor && descriptor.preset) || '24h';
+  }
+
+  // D-15: the shared in-memory navigation stack every narrowing gesture
+  // (drag, incident focus -- plan 04-07) pushes onto, bounded by
+  // RANGE_STACK_LIMIT (oldest entry dropped beyond that, never grown
+  // unbounded). Never persisted, never the URL (D-18).
+  function pushRange(entry) {
+    state.rangeStack.push(entry);
+    while (state.rangeStack.length > RANGE_STACK_LIMIT) state.rangeStack.shift();
+  }
+
+  // Restores exactly one entry -- N pushes followed by N pops restore the
+  // original range exactly. A no-op (empty stack) is silently ignored.
+  function popRange() {
+    const entry = state.rangeStack.pop();
+    if (!entry) return;
+    state.preferences.historyRange = entry.descriptor;
+    applyRangeAndRender();
+  }
+
+  function clearRangeStack() {
+    state.rangeStack = [];
+  }
+
+  // Writes the currently governing range into the two fields (D-03: the
+  // fields are the authoritative, statable representation of the current
+  // range at all times) and shows/hides the custom-range label. When a
+  // custom range is active, exactly one thing indicates it -- the fields'
+  // own active styling -- and no preset carries aria-pressed (already true
+  // by construction: syncHistoryPresetButtons compares against .preset,
+  // which is undefined on a custom descriptor).
+  function renderRangeFields() {
+    const bounds = resolveRangeBounds();
+    const startField = $('range-start');
+    const endField = $('range-end');
+    if (startField) startField.value = formatLocalRangeInput(bounds.start_ts);
+    if (endField) endField.value = formatLocalRangeInput(bounds.end_ts);
+    const descriptor = state.preferences.historyRange;
+    const isCustom = Boolean(descriptor && descriptor.custom);
+    const fieldsContainer = $('hist-range-fields');
+    if (fieldsContainer) fieldsContainer.classList.toggle('hist-range-active', isCustom);
+    const label = $('range-custom-label');
+    if (label) {
+      if (isCustom) {
+        label.textContent = `Custom range: ${currentRangeLabel()}`;
+        label.hidden = false;
+      } else {
+        label.textContent = '';
+        label.hidden = true;
+      }
+    }
+  }
+
+  // D-15: absent from the DOM entirely with an empty stack -- not merely
+  // hidden -- so popping is unreachable rather than present-and-disabled.
+  // The button is created/removed here rather than toggled via `hidden`.
+  function renderBackControl() {
+    const container = $('range-back-row');
+    if (!container) return;
+    const entry = state.rangeStack[state.rangeStack.length - 1];
+    let button = $('range-back');
+    if (!entry) {
+      if (button) button.remove();
+      return;
+    }
+    const text = `Back to ${entry.label}`;
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.id = 'range-back';
+      button.className = 'hist-back';
+      button.addEventListener('click', () => popRange());
+      container.append(button);
+    }
+    button.textContent = text;
+    button.title = text;
+  }
+
+  // The single tail every range-change entry point (setInvestigationRange,
+  // popRange) shares: persist, then re-render every surface that must state
+  // the current range, per every source (D-03).
+  function applyRangeAndRender() {
+    savePreferences();
+    syncHistoryPresetButtons();
+    renderRangeFields();
+    renderBackControl();
+    renderHistorySection();
+  }
+
+  // D-15: the single entry point every range change -- preset, custom apply,
+  // drag, incident focus (plan 04-07), and popRange's own restore -- flows
+  // through, and the only place that owns the stack.
+  //   next.origin === 'manual' (a preset button or Apply custom range) calls
+  //     clearRangeStack() first -- a manual range change is a fresh
+  //     investigation, not a continuation of the drill-down chain.
+  //   next.origin === 'drag' | 'incident' pushes the range being left before
+  //     adopting the new one, UNLESS the resulting bounds are exactly equal
+  //     to the current bounds -- that push is a no-op: nothing is recorded,
+  //     and Back does not appear for it, because there is nothing to return
+  //     to.
+  //   next.presetId, when present, records the adopted range as a live
+  //     preset descriptor (recomputed from Date.now() on every future
+  //     render) rather than a fixed custom range -- this is what keeps that
+  //     preset's own aria-pressed state correct after the range changes.
+  function setInvestigationRange(next) {
+    const {start_ts, end_ts, origin, label, presetId} = next;
+    if (origin === 'manual') {
+      clearRangeStack();
+    } else {
+      const before = resolveRangeBounds();
+      const isNoOp = before.start_ts === start_ts && before.end_ts === end_ts;
+      if (!isNoOp) {
+        pushRange({descriptor: {...state.preferences.historyRange}, origin, label: label || currentRangeLabel()});
+      }
+    }
+    state.preferences.historyRange = presetId ? {preset: presetId} : {custom: {start_ts, end_ts}};
+    applyRangeAndRender();
+  }
+
+  // Applying a valid custom range routes through setInvestigationRange, the
+  // single entry point every range change flows through -- never builds a
+  // request from anything but the two parsed, validated integers. A blank,
+  // whitespace-only, unparseable, reversed, equal, over-90-day, or
+  // future-ending input surfaces its message in #range-error and issues no
+  // request; the previously rendered charts are left intact because
+  // renderHistorySection is never invoked on this path.
+  function applyCustomRange() {
+    const startField = $('range-start');
+    const endField = $('range-end');
+    const startTs = parseLocalRangeInput(startField ? startField.value : '');
+    const endTs = parseLocalRangeInput(endField ? endField.value : '');
+    const result = validateCustomRange(startTs, endTs);
+    const errorEl = $('range-error');
+    if (!result.valid) {
+      if (errorEl) { errorEl.textContent = result.message; errorEl.hidden = false; }
+      return;
+    }
+    if (errorEl) { errorEl.hidden = true; errorEl.textContent = ''; }
+    setInvestigationRange({start_ts: startTs, end_ts: endTs, origin: 'manual'});
+  }
+
+  // ------------------------------------------------------------------
+  // Drag-to-select (Phase 4 04-05 Task 3, D-03): dragging across any host
+  // chart narrows the range through the exact same setInvestigationRange
+  // entry point the fields and presets use -- never a second, competing
+  // range-state mechanism. Pointer-driven updates are coalesced through
+  // requestAnimationFrame and touch only the overlay rectangle's geometry;
+  // chart <path> `d` attributes are never regenerated during a drag
+  // (Research Pitfall 3, R-01's single largest Pi-performance hazard).
+  // ------------------------------------------------------------------
+
+  const HIST_DRAG_MIN_PIXELS = 1;
+  let dragState = null;
+  let pendingDragFrame = null;
+
+  function dragOverlayEl() {
+    return $('history-drag-overlay');
+  }
+
+  function stackContainerEl() {
+    return $('history-content');
+  }
+
+  // The domain a drag maps pixels into: the bounds the chart stack is
+  // actually rendered against (set by renderHistorySection from the
+  // server's own `requested` echo, falling back to the locally-resolved
+  // bounds before any fetch has completed), never the browser's own guess.
+  function chartTimeDomain() {
+    return state.historyBounds || resolveRangeBounds();
+  }
+
+  function clientXToTs(clientX, chartRect) {
+    const domain = chartTimeDomain();
+    const clamped = Math.min(chartRect.right, Math.max(chartRect.left, clientX));
+    const fraction = (clamped - chartRect.left) / Math.max(1, chartRect.width);
+    return domain.start_ts + fraction * (domain.end_ts - domain.start_ts);
+  }
+
+  function updateDragOverlayGeometry() {
+    const overlay = dragOverlayEl();
+    if (!overlay || !dragState) return;
+    const {chartRect, containerRect, startClientX, currentClientX} = dragState;
+    const left = Math.max(chartRect.left, Math.min(startClientX, currentClientX));
+    const right = Math.min(chartRect.right, Math.max(startClientX, currentClientX));
+    overlay.style.left = `${left}px`;
+    overlay.style.width = `${Math.max(0, right - left)}px`;
+    overlay.style.top = `${containerRect.top}px`;
+    overlay.style.height = `${containerRect.height}px`;
+  }
+
+  function dragEscapeListener(event) {
+    if (event.key === 'Escape') cancelDragSelect();
+  }
+
+  function endDragListeners() {
+    window.removeEventListener('pointermove', updateDragSelect);
+    window.removeEventListener('pointerup', commitDragSelect);
+    window.removeEventListener('pointercancel', cancelDragSelect);
+    window.removeEventListener('keydown', dragEscapeListener);
+  }
+
+  // Clears the overlay on pointer-cancel, on Escape, and on a drag that ends
+  // where it began (see commitDragSelect's own degenerate-drag check, which
+  // calls this same cleanup rather than duplicating it).
+  function cancelDragSelect() {
+    if (pendingDragFrame !== null) { cancelAnimationFrame(pendingDragFrame); pendingDragFrame = null; }
+    const overlay = dragOverlayEl();
+    if (overlay) { overlay.hidden = true; overlay.style.width = '0px'; }
+    dragState = null;
+    endDragListeners();
+  }
+
+  // R-03: dragging to select a range has no keyboard equivalent in this
+  // phase -- the canonical #range-start/#range-end fields remain the fully
+  // keyboard-operable path to any range (DIA-05). This is known Phase 5 / UX-06
+  // debt, recorded here at creation rather than discovered later.
+  function beginDragSelect(event) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const chartSvg = event.currentTarget;
+    const container = stackContainerEl();
+    if (!chartSvg || !container) return;
+    dragState = {
+      chartRect: chartSvg.getBoundingClientRect(),
+      containerRect: container.getBoundingClientRect(),
+      startClientX: event.clientX,
+      currentClientX: event.clientX,
+    };
+    const overlay = dragOverlayEl();
+    if (overlay) overlay.hidden = false;
+    updateDragOverlayGeometry();
+    window.addEventListener('pointermove', updateDragSelect);
+    window.addEventListener('pointerup', commitDragSelect);
+    window.addEventListener('pointercancel', cancelDragSelect);
+    window.addEventListener('keydown', dragEscapeListener);
+  }
+
+  // Coalesces every pointermove through requestAnimationFrame -- updates
+  // only the overlay rectangle's geometry, never a chart <path>.
+  function updateDragSelect(event) {
+    if (!dragState) return;
+    dragState.currentClientX = event.clientX;
+    if (pendingDragFrame !== null) return;
+    pendingDragFrame = requestAnimationFrame(() => {
+      pendingDragFrame = null;
+      updateDragOverlayGeometry();
+    });
+  }
+
+  // Converts the two x positions to timestamps, ordering them so a
+  // right-to-left drag produces the same range as a left-to-right one, and
+  // routes through the same setInvestigationRange entry point the fields
+  // and presets use. A degenerate drag (equal timestamps, or narrower than
+  // one rendered pixel) is cancelled rather than applied -- the server
+  // would reject a zero-width range, and the gesture was almost certainly a
+  // click, not a selection.
+  function commitDragSelect(event) {
+    if (!dragState) return;
+    const {chartRect, startClientX} = dragState;
+    const endClientX = event.clientX;
+    const widthPixels = Math.abs(endClientX - startClientX);
+    cancelDragSelect();
+    if (widthPixels < HIST_DRAG_MIN_PIXELS) return;
+    const tsA = clientXToTs(startClientX, chartRect);
+    const tsB = clientXToTs(endClientX, chartRect);
+    const start_ts = Math.round(Math.min(tsA, tsB));
+    const end_ts = Math.round(Math.max(tsA, tsB));
+    if (end_ts <= start_ts) return;
+    setInvestigationRange({start_ts, end_ts, origin: 'drag', label: currentRangeLabel()});
   }
 
   async function fetchHostMetricHistory(metric, startTs, endTs) {
@@ -949,6 +1347,14 @@
     // still-current History render. Same staleness-guard idiom, own generation.
     const requestId = ++state.historyRequestGeneration;
     const bounds = resolveRangeBounds();
+    // D-03: the fields state the governing range from every source, including
+    // the moment the section is entered or a request begins -- not only once
+    // a fetch completes.
+    syncHistoryPresetButtons();
+    renderRangeFields();
+    renderBackControl();
+    const applyButton = $('apply-custom-range');
+    if (applyButton) applyButton.disabled = true;
     HOST_METRIC_ORDER.forEach((metric) => beginMetricLoadingState(metric));
     // R-01: a real, measured render figure for the four-chart stack, captured
     // in the browser during the automated test run rather than deferred to
@@ -961,25 +1367,28 @@
     const firstSucceeded = succeeded[0];
     if (firstSucceeded) {
       const requested = firstSucceeded.result.requested || bounds;
+      state.historyBounds = requested;
       updateRangeResolutionNote(firstSucceeded.result.effective_resolution_seconds);
       renderSharedTimeAxis(requested.start_ts, requested.end_ts);
     } else {
       // Every metric failed (or returned nothing to anchor the axis on): the
       // shared axis still renders from the requested bounds so it never
       // disappears alongside a per-metric fetch failure.
+      state.historyBounds = bounds;
       updateRangeResolutionNote(null);
       renderSharedTimeAxis(bounds.start_ts, bounds.end_ts);
     }
+    if (applyButton) applyButton.disabled = false;
   }
 
-  // D-04: validated before assignment, persisted, then re-rendered -- never a
-  // request built from anything but the two integers resolveRangeBounds emits.
+  // D-04: validated before assignment, routed through setInvestigationRange
+  // (origin 'manual' -- a preset click is a fresh investigation, D-15) --
+  // never a request built from anything but the two integers boundsForPreset
+  // computes.
   function selectRangePreset(preset) {
     if (!Object.prototype.hasOwnProperty.call(HISTORY_PRESETS, preset)) return;
-    state.preferences.historyRange = {preset};
-    savePreferences();
-    syncHistoryPresetButtons();
-    renderHistorySection();
+    const bounds = boundsForPreset(preset);
+    setInvestigationRange({start_ts: bounds.start_ts, end_ts: bounds.end_ts, origin: 'manual', presetId: preset});
   }
 
   function renderSafety(snapshot) {
@@ -1697,11 +2106,32 @@
     const button = $(`range-preset-${preset}`);
     if (button) button.addEventListener('click', () => selectRangePreset(preset));
   });
+  // 04-05: the canonical custom-range entry point (D-03) and its render on
+  // boot -- fields must state the governing range before the operator ever
+  // visits History, and a stored custom range must render correctly on reload.
+  renderRangeFields();
+  renderBackControl();
+  const applyCustomRangeButton = $('apply-custom-range');
+  if (applyCustomRangeButton) applyCustomRangeButton.addEventListener('click', applyCustomRange);
+  // Test-only hooks, same pattern as window.__historyTrendTestHooks: these
+  // functions are pure/stateful but otherwise private to this IIFE, so
+  // Playwright's page.evaluate needs a reachable handle to drive the
+  // navigation-stack and custom-range machinery directly.
+  window.__historyRangeTestHooks = {
+    parseLocalRangeInput, formatLocalRangeInput, validateCustomRange,
+    setInvestigationRange, pushRange, popRange, clearRangeStack,
+    resolveRangeBounds, rangeStack: () => state.rangeStack, RANGE_STACK_LIMIT,
+  };
   // 04-03: each chart's unit label is set once from HOST_METRIC_UNITS, the
   // single source of truth the renderers below also read.
   HOST_METRIC_ORDER.forEach((metric) => {
     const unit = $(`unit-${metric}`);
     if (unit) unit.textContent = HOST_METRIC_UNITS[metric] || '';
+  });
+  // 04-05 Task 3: dragging across any host chart narrows the range (D-03).
+  HOST_METRIC_ORDER.forEach((metric) => {
+    const svg = $(`chart-${metric}`);
+    if (svg) svg.addEventListener('pointerdown', beginDragSelect);
   });
   const historyNavButton = document.querySelector('[data-section="history"]');
   if (historyNavButton) historyNavButton.addEventListener('click', renderHistorySection);
