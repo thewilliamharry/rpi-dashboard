@@ -45,8 +45,8 @@
 ### Historical Investigation
 
 - [x] **HIS-01**: The operator can inspect CPU, memory, disk, and temperature history with units, contextual thresholds, tooltips, and visible gaps.
-- [ ] **HIS-02**: The operator can inspect time-weighted service availability over the selected range.
-- [ ] **HIS-03**: The operator can inspect a service state timeline, latency history, failure classes, and unknown intervals.
+- [x] **HIS-02**: The operator can inspect time-weighted service availability over the selected range.
+- [x] **HIS-03**: The operator can inspect a service state timeline, latency history, failure classes, and unknown intervals.
 - [ ] **HIS-04**: The operator can filter incidents and transitions by service, criticality, event type, and time range.
 - [ ] **HIS-05**: Selecting an incident focuses the relevant service and time window.
 - [x] **HIS-06**: The operator can compare the latest value with selected-range minimum, maximum, average, and simple trend information.
@@ -134,8 +134,8 @@ Every v1 requirement maps to exactly one roadmap phase.
 | DIA-07 | Phase 4 | Pending |
 | DIA-08 | Phase 3 + Phase 4 | Complete |
 | HIS-01 | Phase 4 | Complete |
-| HIS-02 | Phase 4 | Pending |
-| HIS-03 | Phase 4 | Pending |
+| HIS-02 | Phase 4 | Complete |
+| HIS-03 | Phase 4 | Complete |
 | HIS-04 | Phase 4 | Pending |
 | HIS-05 | Phase 4 | Pending |
 | HIS-06 | Phase 4 | Complete |
