@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03.1
-current_phase_name: planned-maintenance-recognition
+current_phase: 04
+current_phase_name: historical-investigation
 status: executing
 stopped_at: Phase 4 UI-SPEC approved
-last_updated: "2026-08-25T19:13:06.452Z"
-last_activity: 2026-08-24
-last_activity_desc: Phase 03.1 execution resumed (wave continue)
+last_updated: "2026-08-25T19:17:29.516Z"
+last_activity: 2026-08-25
+last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 5
   completed_phases: 4
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 03.1 — planned-maintenance-recognition
+**Current focus:** Phase 04 — historical-investigation
 
 ## Current Position
 
-Phase: 03.1 (planned-maintenance-recognition) — EXECUTING
-Plan: 1 of 15
-Status: Ready to execute
-Last activity: 2026-08-24 — Phase 03.1 execution resumed (wave continue)
+Phase: 04 (historical-investigation) — EXECUTING
+Plan: 1 of 8
+Status: Executing Phase 04
+Last activity: 2026-08-25 — Phase 04 execution started
 
 Progress: [██████████] 100%
 
