@@ -1028,6 +1028,155 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # ------------------------------------------------------------------
+    # 04-04 Task 1: least-squares trend with three honest confidence tiers
+    # (D-08, D-09, HIS-06). window.__historyTrendTestHooks is the same
+    # test-only-global pattern as window.__historyStackRenderMs -- the two
+    # functions under test are otherwise private to the advanced.js IIFE.
+    # ------------------------------------------------------------------
+
+    def _trend_page(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=self._empty_history_fixture(1_700_000_000, 1_700_003_600))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        return page
+
+    @staticmethod
+    def _trend_point(ts, avg_value):
+        return {'ts': ts, 'avg_value': avg_value}
+
+    def test_least_squares_slope_over_exact_gradient_returns_that_gradient(self):
+        page = self._trend_page()
+        try:
+            gradient = 0.002  # value units per second
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + gradient * i * 3600) for i in range(5)]
+            slope = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', points,
+            )
+            self.assertAlmostEqual(slope, gradient, places=6)
+        finally:
+            page.close()
+
+    def test_least_squares_slope_over_flat_series_returns_zero(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 42.0) for i in range(5)]
+            slope = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', points,
+            )
+            self.assertEqual(slope, 0)
+        finally:
+            page.close()
+
+    def test_least_squares_slope_skips_null_avg_value_points(self):
+        page = self._trend_page()
+        try:
+            gradient = 0.001
+            base_points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + gradient * i * 3600) for i in range(6)]
+            with_nulls = base_points[:2] + [self._trend_point(1_700_000_000 + 2 * 3600, None)] + base_points[2:]
+            slope_with_nulls = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', with_nulls,
+            )
+            slope_without_nulls = page.evaluate(
+                '(points) => window.__historyTrendTestHooks.leastSquaresSlope(points)', base_points,
+            )
+            self.assertAlmostEqual(slope_with_nulls, slope_without_nulls, places=9)
+        finally:
+            page.close()
+
+    def test_trend_display_withheld_below_three_usable_points_regardless_of_slope(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000, 10.0), self._trend_point(1_700_003_600, 90.0)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            self.assertEqual(result, 'Not enough data for a trend')
+        finally:
+            page.close()
+
+    def test_trend_display_low_confidence_at_three_and_nine_points(self):
+        page = self._trend_page()
+        try:
+            for count in (3, 9):
+                with self.subTest(count=count):
+                    points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(count)]
+                    result = page.evaluate(
+                        "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+                    )
+                    self.assertTrue(result.endswith(f'(low confidence — {count} points)'))
+        finally:
+            page.close()
+
+    def test_trend_display_no_qualifier_at_ten_points(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(10)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            self.assertNotIn('low confidence', result)
+        finally:
+            page.close()
+
+    def test_trend_display_steady_band_has_no_sign_or_arrow(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 42.0) for i in range(10)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            self.assertIn('steady', result)
+            self.assertNotIn('+', result)
+            self.assertNotIn('-', result)
+            self.assertNotIn('↑', result)
+            self.assertNotIn('↓', result)
+        finally:
+            page.close()
+
+    def test_trend_display_uses_hourly_unit_at_24h_and_daily_unit_just_beyond(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(10)]
+            hourly = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            daily = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86401)", points,
+            )
+            self.assertIn('/hour', hourly)
+            self.assertIn('/day', daily)
+        finally:
+            page.close()
+
+    def test_trend_display_never_contains_a_projection(self):
+        page = self._trend_page()
+        try:
+            points = [self._trend_point(1_700_000_000 + i * 3600, 10.0 + i) for i in range(10)]
+            result = page.evaluate(
+                "(points) => window.__historyTrendTestHooks.trendDisplay('disk', points, 86400)", points,
+            )
+            for forbidden in ('will reach', 'projected', 'forecast', 'days remaining', 'until full'):
+                self.assertNotIn(forbidden, result.lower())
+        finally:
+            page.close()
+
 
 if __name__ == '__main__':
     unittest.main()
