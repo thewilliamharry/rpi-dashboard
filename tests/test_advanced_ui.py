@@ -414,8 +414,16 @@ class AdvancedUiTests(unittest.TestCase):
         self.assertIn("cache: 'no-store'", js)
         self.assertIn('.textContent', js)
         self.assertIn('.replaceChildren(', js)
-        for forbidden in ('POST', 'PUT', 'PATCH', 'DELETE', 'thumbnail', 'history', 'http://', 'https://', 'run_discovery'):
-            self.assertNotIn(forbidden, js)
+        # 04-01/D-18: the document route itself stays GET-only and parameterless,
+        # but /api/telemetry/history is an explicitly authorized parameterised GET
+        # read (D-18's scope note) -- 'history' is therefore no longer forbidden
+        # here; every other mutation/exfiltration signal is still checked. The
+        # SVG XML namespace URI (required by createElementNS for the History
+        # chart/coverage-strip/axis elements) is not a fetched or navigated-to
+        # URL, so it is excluded from the http(s):// outbound-URL check below.
+        js_without_svg_namespace = js.replace("'http://www.w3.org/2000/svg'", '')
+        for forbidden in ('POST', 'PUT', 'PATCH', 'DELETE', 'thumbnail', 'http://', 'https://', 'run_discovery'):
+            self.assertNotIn(forbidden, js_without_svg_namespace)
 
     def test_workspace_sections_overview_and_host_states(self):
         payload = self._snapshot()
@@ -440,7 +448,9 @@ class AdvancedUiTests(unittest.TestCase):
             page.locator('#overview-section').wait_for(timeout=5_000)
             self.assertEqual(
                 [link.text_content() for link in page.locator('#section-navigation button').all()],
-                ['Overview', 'Host', 'Services', 'Pipeline', 'Settings'],
+                # 04-01/D-01: History is inserted between Services and Pipeline,
+                # ahead of the two sections that remain strictly current-state.
+                ['Overview', 'Host', 'Services', 'History', 'Pipeline', 'Settings'],
             )
             self.assertIn('No active exceptions', page.locator('#overview-section').text_content())
             self.assertIn(
@@ -585,7 +595,9 @@ class AdvancedUiTests(unittest.TestCase):
             page.wait_for_timeout(100)
             self.assertEqual(fixture['calls'], initial_calls + 1)
             stored = page.evaluate("JSON.parse(localStorage.getItem('beacon-advanced-preferences-v1'))")
-            self.assertEqual(set(stored), {'refreshSeconds', 'paused', 'density', 'range', 'filters'})
+            # 04-01/D-04: historyRange is the new validated key this phase adds
+            # to the same versioned preference object.
+            self.assertEqual(set(stored), {'refreshSeconds', 'paused', 'density', 'range', 'filters', 'historyRange'})
             self.assertNotIn('snapshot', stored)
         finally:
             page.close()
@@ -1701,7 +1713,10 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertEqual(page.locator('#advanced-last-success').text_content(), newer_success)
             self.assertIn('No active exceptions', page.locator('#overview-section').text_content())
             self.assertFalse(page.locator('#worker-warning').is_visible())
-            self.assertEqual(page.evaluate('window.__fetchCount'), 2)
+            # 04-01: fetchRuntimeConfig() adds one GET /api/config call at boot,
+            # deliberately dispatched after refreshCurrentDiagnosis()'s own fetch
+            # so /api/advanced/current stays this harness's index-0 held call.
+            self.assertEqual(page.evaluate('window.__fetchCount'), 3)
         finally:
             page.close()
 

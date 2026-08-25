@@ -33,6 +33,7 @@
       <button type="button" data-section="overview" aria-controls="overview-section" aria-selected="true">Overview</button>
       <button type="button" data-section="host" aria-controls="host-section" aria-selected="false">Host</button>
       <button type="button" data-section="services" aria-controls="services-section" aria-selected="false">Services</button>
+      <button type="button" data-section="history" aria-controls="history-section" aria-selected="false">History</button>
       <button type="button" data-section="pipeline" aria-controls="pipeline-section" aria-selected="false">Pipeline</button>
       <button type="button" data-section="settings" aria-controls="settings-section" aria-selected="false">Settings</button>
     </nav>
@@ -74,9 +75,49 @@
         </div>
         <div id="services-empty" class="services-empty" hidden><p>No services match these filters</p><p>Clear filters to view every monitored service, or wait for the next discovery result.</p></div>
       </section>
+      <section id="history-section" aria-labelledby="history-heading" hidden>
+        <h2 id="history-heading" tabindex="-1">History</h2>
+        <div id="investigation-range" class="hist-range" aria-label="Historical investigation range">
+          <button type="button" id="range-preset-1h" class="hist-preset" aria-pressed="false">1h</button>
+          <button type="button" id="range-preset-6h" class="hist-preset" aria-pressed="false">6h</button>
+          <button type="button" id="range-preset-24h" class="hist-preset" aria-pressed="true">24h</button>
+          <button type="button" id="range-preset-7d" class="hist-preset" aria-pressed="false">7d</button>
+          <button type="button" id="range-preset-30d" class="hist-preset" aria-pressed="false">30d</button>
+          <button type="button" id="range-preset-90d" class="hist-preset" aria-pressed="false">90d</button>
+          <p id="range-resolution-note" aria-live="polite"></p>
+          <p id="range-error" role="alert" hidden></p>
+        </div>
+        <div id="history-content">
+          <figure class="hist-chart">
+            <h3>CPU</h3>
+            <svg id="chart-cpu" class="hist-plot" viewBox="0 0 1000 96" preserveAspectRatio="none" role="img" aria-label="CPU history chart"><path class="hist-series"></path></svg>
+            <svg id="strip-cpu" class="hist-coverage-strip" viewBox="0 0 1000 16" preserveAspectRatio="none" role="img" aria-label="CPU coverage evidence"></svg>
+            <div id="history-cpu-loading" class="hist-skeleton" hidden aria-label="Loading historical investigation"><p>Loading historical investigation…</p></div>
+            <div id="history-cpu-empty" class="hist-empty" hidden><p>No CPU data in this range.</p><p>Beacon has no observations, gaps, or expiry evidence for this window.</p></div>
+            <div id="history-cpu-error" class="hist-error" role="alert" hidden></div>
+          </figure>
+          <svg id="history-time-axis" class="hist-axis" viewBox="0 0 1000 24" preserveAspectRatio="none" role="img" aria-label="Shared history time axis"></svg>
+        </div>
+      </section>
       <section id="pipeline-section" aria-labelledby="pipeline-heading" hidden><h2 id="pipeline-heading" tabindex="-1">Pipeline</h2><p>Loading current diagnosis…</p></section>
       <section id="settings-section" aria-labelledby="settings-heading" hidden><h2 id="settings-heading" tabindex="-1">Settings</h2><p>Loading current diagnosis…</p></section>
     </div>
   </main>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <pattern id="hist-pattern-dots" width="4" height="4" patternUnits="userSpaceOnUse">
+        <circle cx="2" cy="2" r="1" fill="var(--muted)"></circle>
+      </pattern>
+      <pattern id="hist-pattern-diagonal-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="6" stroke="var(--muted)" stroke-width="3"></line>
+      </pattern>
+      <pattern id="hist-pattern-dashed" width="6" height="6" patternUnits="userSpaceOnUse">
+        <rect width="3" height="6" fill="var(--muted)" opacity="0.5"></rect>
+      </pattern>
+      <pattern id="hist-pattern-diagonal-thin" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="5" stroke="var(--muted)" stroke-width="1"></line>
+      </pattern>
+    </defs>
+  </svg>
 </body>
 </html>

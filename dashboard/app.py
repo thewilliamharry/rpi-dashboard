@@ -2444,6 +2444,7 @@ def api_config():
         "uptime_buckets": UPTIME_BUCKETS,
         "trigger_rate_limit": TRIGGER_SCAN_RATE_LIMIT,
         "trigger_rate_window_seconds": TRIGGER_SCAN_WINDOW_SECONDS,
+        "timezone": SETTINGS.timezone,
     })
 
 

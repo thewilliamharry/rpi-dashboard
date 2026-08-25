@@ -228,8 +228,12 @@ class ApiAndAuthTests(unittest.TestCase):
             self.assertIn(content_type, response.content_type)
 
         config = self.client.get('/api/config').get_json()
+        # 04-01/D-05: timezone is the new additive field exposing SETTINGS.timezone
+        # to the browser so History can render every timestamp in the Pi's own
+        # configured local time instead of the browser's.
         self.assertEqual(set(config), {
             'alerting_enabled', 'uptime_buckets', 'trigger_rate_limit', 'trigger_rate_window_seconds',
+            'timezone',
         })
         stats = self.client.get('/api/stats')
         self.assertEqual(stats.status_code, 200)
