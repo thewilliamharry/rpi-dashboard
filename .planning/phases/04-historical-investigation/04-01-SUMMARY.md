@@ -201,6 +201,10 @@ None - no external service configuration required.
 - DIA-08's documentation conflict is closed; DIA-04 and HIS-01 remain correctly `Pending` in REQUIREMENTS.md (this plan is a thin tracer slice — the full preset/threshold/tooltip/four-metric surface is not yet complete) and are left for the phase verifier to promote once later plans in this phase land.
 - No blockers for 04-02 through 04-07.
 
+## Self-Check: PASSED
+
+All created/modified files found on disk; all four commit hashes (8c092bc, 96bd3ca, c2b2f3b, 8a951c7) found in git log.
+
 ---
 *Phase: 04-historical-investigation*
 *Completed: 2026-08-26*
