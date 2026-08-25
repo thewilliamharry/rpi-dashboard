@@ -49,7 +49,7 @@
 - [ ] **HIS-03**: The operator can inspect a service state timeline, latency history, failure classes, and unknown intervals.
 - [ ] **HIS-04**: The operator can filter incidents and transitions by service, criticality, event type, and time range.
 - [ ] **HIS-05**: Selecting an incident focuses the relevant service and time window.
-- [ ] **HIS-06**: The operator can compare the latest value with selected-range minimum, maximum, average, and simple trend information.
+- [x] **HIS-06**: The operator can compare the latest value with selected-range minimum, maximum, average, and simple trend information.
 
 ### Experience and Themes
 
@@ -138,7 +138,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | HIS-03 | Phase 4 | Pending |
 | HIS-04 | Phase 4 | Pending |
 | HIS-05 | Phase 4 | Pending |
-| HIS-06 | Phase 4 | Pending |
+| HIS-06 | Phase 4 | Complete |
 | UX-01 | Phase 5 | Pending |
 | UX-02 | Phase 3 | Complete |
 | UX-03 | Phase 5 | Pending |
