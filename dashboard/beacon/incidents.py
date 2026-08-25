@@ -69,18 +69,19 @@ def _validate_int(value, name):
     return value
 
 
-def read_events_in_range(
-    conn, *, start_ts, end_ts, port=None, event_type=None, criticality=None,
+def build_events_query(
+    *, start_ts, end_ts, port=None, event_type=None, criticality=None,
     maintenance=DEFAULT_MAINTENANCE_MODE, limit=INCIDENT_ROW_BUDGET,
 ):
-    """Read events in `[start_ts, end_ts)` after allowlisting every filter value.
+    """Validate every filter and return `(statement, params)` for the range read.
 
-    Every filter is validated by name before any SQL is built; an
-    out-of-allowlist value raises `ValueError` naming the offending
-    parameter -- reject, never coerce. Every value reaches SQLite as a bound
-    `?` parameter; none is ever concatenated or interpolated into the
-    statement text. Returns `(rows, truncated)`, where `truncated` is True
-    only when more than `limit` rows matched.
+    Split out from `read_events_in_range` so a caller (a test proving
+    Research Assumption A3's index-backed query plan, or a future EXPLAIN
+    diagnostic) can inspect the exact statement text without a second,
+    possibly-diverging, hand-written copy of it. Every filter value reaches
+    SQLite as a bound `?` parameter; none is ever concatenated or
+    interpolated into the statement text -- an out-of-allowlist value raises
+    `ValueError` naming the offending parameter.
     """
     _validate_int(start_ts, 'start_ts')
     _validate_int(end_ts, 'end_ts')
@@ -123,7 +124,27 @@ def read_events_in_range(
         'ORDER BY e.ts ASC, e.id ASC LIMIT ?'
     )
     params.append(limit + 1)
-    rows = conn.execute(statement, tuple(params)).fetchall()
+    return statement, tuple(params)
+
+
+def read_events_in_range(
+    conn, *, start_ts, end_ts, port=None, event_type=None, criticality=None,
+    maintenance=DEFAULT_MAINTENANCE_MODE, limit=INCIDENT_ROW_BUDGET,
+):
+    """Read events in `[start_ts, end_ts)` after allowlisting every filter value.
+
+    Every filter is validated by name before any SQL is built; an
+    out-of-allowlist value raises `ValueError` naming the offending
+    parameter -- reject, never coerce. Every value reaches SQLite as a bound
+    `?` parameter; none is ever concatenated or interpolated into the
+    statement text. Returns `(rows, truncated)`, where `truncated` is True
+    only when more than `limit` rows matched.
+    """
+    statement, params = build_events_query(
+        start_ts=start_ts, end_ts=end_ts, port=port, event_type=event_type,
+        criticality=criticality, maintenance=maintenance, limit=limit,
+    )
+    rows = conn.execute(statement, params).fetchall()
     truncated = len(rows) > limit
     if truncated:
         rows = rows[:limit]

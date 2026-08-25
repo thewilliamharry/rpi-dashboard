@@ -322,5 +322,166 @@ class EventsHistoryRouteTests(unittest.TestCase):
         self.assertIn('start_ts', response.get_json()['error'])
 
 
+class BoundsParityRowBudgetAndQueryPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.client = self.appmod.app.test_client()
+        self.now = int(time.time())
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_event(self, ts, *, port=80, event_type='state_change', online=None,
+                       error_class=None, suppressed_reason=None,
+                       maintenance_grace_until=None, down_since_ts=None):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO events(ts, port, event_type, online, previous_online, "
+                    "latency_ms, error_class, alert_status, details, suppressed_reason, "
+                    "maintenance_grace_until, down_since_ts) "
+                    "VALUES (?,?,?,?,NULL,NULL,?,NULL,NULL,?,?,?)",
+                    (ts, port, event_type, online, error_class, suppressed_reason,
+                     maintenance_grace_until, down_since_ts),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _telemetry_error(self, start_ts, end_ts):
+        response = self.client.get('/api/telemetry/history', query_string={
+            'kind': 'host', 'metric': 'cpu', 'start_ts': str(start_ts), 'end_ts': str(end_ts),
+        })
+        self.assertEqual(response.status_code, 400)
+        return response.get_json()['error']
+
+    def _incidents_error(self, start_ts, end_ts):
+        response = self.client.get('/api/events/history', query_string={
+            'start_ts': str(start_ts), 'end_ts': str(end_ts),
+        })
+        self.assertEqual(response.status_code, 400)
+        return response.get_json()['error']
+
+    def test_inverted_span_error_matches_telemetry_route(self):
+        start_ts = self.now
+        end_ts = self.now - 100
+        self.assertEqual(
+            self._incidents_error(start_ts, end_ts),
+            self._telemetry_error(start_ts, end_ts),
+        )
+
+    def test_over_90_day_span_error_matches_telemetry_route(self):
+        start_ts = self.now - 91 * 86400
+        end_ts = self.now
+        self.assertEqual(
+            self._incidents_error(start_ts, end_ts),
+            self._telemetry_error(start_ts, end_ts),
+        )
+
+    def test_row_budget_truncation_disclosed(self):
+        budget = beacon_incidents.INCIDENT_ROW_BUDGET
+        start_ts = self.now - budget - 10
+        for i in range(budget + 5):
+            self._insert_event(start_ts + i, port=9000 + (i % 50), event_type='monitoring_gap')
+        response = self.client.get('/api/events/history', query_string={
+            'start_ts': str(start_ts), 'end_ts': str(self.now),
+        })
+        payload = response.get_json()
+        self.assertEqual(len(payload['events']), budget)
+        self.assertTrue(payload['truncated'])
+        self.assertEqual(payload['matched_count'], budget)
+
+    def test_under_budget_not_truncated(self):
+        start_ts = self.now - 100
+        self._insert_event(start_ts, port=9100, event_type='monitoring_gap')
+        response = self.client.get('/api/events/history', query_string={
+            'start_ts': str(start_ts), 'end_ts': str(self.now),
+        })
+        payload = response.get_json()
+        self.assertFalse(payload['truncated'])
+
+    def test_orphan_recovery_with_no_anchor_emits_no_episode(self):
+        start_ts = self.now - 500
+        end_ts = self.now
+        # Only a recovery row exists anywhere for this port -- its opening
+        # down row was never observed at all, so no anchor can locate it.
+        self._insert_event(self.now - 100, port=9200, online=1)
+        response = self.client.get('/api/events/history', query_string={
+            'start_ts': str(start_ts), 'end_ts': str(end_ts),
+        })
+        payload = response.get_json()
+        self.assertEqual([e for e in payload['episodes'] if e['port'] == 9200], [])
+        self.assertTrue(any(e['port'] == 9200 for e in payload['events']))
+
+    def test_durable_prior_down_row_is_picked_up_as_anchor(self):
+        start_ts = self.now - 500
+        end_ts = self.now
+        true_down_ts = self.now - 1000  # strictly before start_ts
+        self._insert_event(true_down_ts, port=9201, online=0)
+        self._insert_event(self.now - 100, port=9201, online=1)
+        response = self.client.get('/api/events/history', query_string={
+            'start_ts': str(start_ts), 'end_ts': str(end_ts),
+        })
+        payload = response.get_json()
+        episodes = [e for e in payload['episodes'] if e['port'] == 9201]
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0]['down_ts'], true_down_ts)
+        self.assertFalse(episodes[0]['open'])
+
+    def test_route_half_open_boundary(self):
+        start_ts = self.now - 500
+        end_ts = self.now
+        self._insert_event(start_ts, port=9202, event_type='monitoring_gap')
+        self._insert_event(end_ts, port=9202, event_type='monitoring_gap')
+        response = self.client.get('/api/events/history', query_string={
+            'start_ts': str(start_ts), 'end_ts': str(end_ts),
+        })
+        ts_values = [e['ts'] for e in response.get_json()['events']]
+        self.assertIn(start_ts, ts_values)
+        self.assertNotIn(end_ts, ts_values)
+
+    def test_equal_down_ts_tiebreaks_descending_opening_id_and_is_stable(self):
+        start_ts = self.now - 1000
+        end_ts = self.now
+        down_ts = self.now - 500
+        self._insert_event(down_ts, port=9301, online=0)
+        self._insert_event(down_ts + 10, port=9301, online=1)
+        self._insert_event(down_ts, port=9302, online=0)
+        self._insert_event(down_ts + 10, port=9302, online=1)
+
+        orderings = []
+        for _ in range(10):
+            response = self.client.get('/api/events/history', query_string={
+                'start_ts': str(start_ts), 'end_ts': str(end_ts),
+            })
+            payload = response.get_json()
+            orderings.append([e['port'] for e in payload['episodes']])
+        self.assertTrue(all(ordering == orderings[0] for ordering in orderings))
+        # Both episodes share down_ts; the later-inserted port (higher
+        # opening event id) sorts first under the descending-id tiebreak.
+        self.assertEqual(orderings[0], [9302, 9301])
+
+    def test_query_plans_use_index_not_full_table_scan(self):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                stmt, params = beacon_incidents.build_events_query(
+                    start_ts=self.now - 90 * 86400, end_ts=self.now,
+                )
+                plan = [dict(row) for row in conn.execute('EXPLAIN QUERY PLAN ' + stmt, params)]
+                self.assertTrue(any('idx_events_ts' in row['detail'] for row in plan))
+                self.assertFalse(any('SCAN e' in row['detail'] for row in plan))
+
+                stmt2, params2 = beacon_incidents.build_events_query(
+                    start_ts=self.now - 90 * 86400, end_ts=self.now, port=80,
+                )
+                plan2 = [dict(row) for row in conn.execute('EXPLAIN QUERY PLAN ' + stmt2, params2)]
+                self.assertTrue(any('idx_events_port_ts' in row['detail'] for row in plan2))
+                self.assertFalse(any('SCAN e' in row['detail'] for row in plan2))
+            finally:
+                conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()
