@@ -447,18 +447,29 @@ own pattern **and** text label — never color alone, and never a status color:
 
 ## UI Considerations
 
-Applicable state considerations resolved: 44 covered, 0 backstop, 0 unresolved.
+Applicable state considerations: **36 applicable, 36 resolved (explicit), 0 backstop, 0 unresolved.**
+
+Derived from the post-verification UI-consideration probe over five surfaces. Element kinds were
+confirmed by the operator rather than taken from the prose classifier alone — E2/E3 were additionally
+classified `media` + `interactive-control`, E4 `form` + `static-content`, and E5 `static-content`,
+which raised four considerations the heuristic alone would have missed.
+
+Empty-state and error-state COPY lives in `## Copywriting Contract`; the rows below cover shape-rooted
+STATE coverage and reference that copy rather than restating it.
 
 | Category | Element(s) | Status | Resolution / Reason |
 |----------|------------|--------|---------------------|
-| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | Range control (presets, custom fields, `Apply`, `Back`) | ✅ covered | Documented empty/invalid-range validation reuses server-side `HistoricalRange` rejection copy; loading disables `Apply` without hiding fields; `Back` renders only when the stack is non-empty; long custom-range labels wrap within the header row rather than overlapping controls. |
-| empty, loading, error, populated, partial, overflow, long-text | Host chart stack (4 charts + coverage strips) | ✅ covered | Per-metric partial fetch failure is isolated (Research Pattern 1) and shown per chart; loading uses skeleton plot/strip placeholders; gap-drawing and merged sub-pixel strip segments are documented in the Chart Contract; long threshold-line labels wrap in their tooltip, never on the axis itself. |
-| empty, loading, error, populated, partial, overflow, long-text | Service state band + latency chart | ✅ covered | Band/latency share the host stack's loading/error/partial handling; failure-class chip list wraps to a second line at narrow widths rather than truncating; an unselected service renders an explicit `Select a service to view its history` placeholder instead of an empty band. |
-| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | Incidents list and filters | ✅ covered | Documented empty/error copy above; `N of M` count and `Clear all filters` cover zero-one-many; open, overrun, and flapping rows are explicitly defined states (never inferred); long service names/error-class text wrap within the row, matching the existing `.evidence-row` `overflow-wrap: anywhere` rule. |
-| populated, overflow, long-text | Investigation context (carried service, navigation stack, correlation markers/cursor) | ✅ covered | Dense-marker clustering degrades to a count glyph rather than saturating the axis; the "Investigating: {service}" indicator and `Back` label truncate with a full-string tooltip rather than pushing the header layout; the forbidden-word list is a static, testable constraint (DIA-07). |
+| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | E1 — Range control (presets, custom fields, `Apply`, `Back`) | ✅ resolved (explicit) | Documented empty/invalid-range validation reuses server-side `HistoricalRange` rejection copy; loading disables `Apply` without hiding fields; `Back` renders only when the stack is non-empty; long custom-range labels wrap within the header row rather than overlapping controls. |
+| empty, loading, error, populated, partial, overflow, long-text | E2 — Host chart stack (4 charts + coverage strips) | ✅ resolved (explicit) | Per-metric partial fetch failure is isolated (Research Pattern 1) and shown per chart; loading uses skeleton plot/strip placeholders; gap-drawing and merged sub-pixel strip segments are documented in the Chart Contract; long threshold-line labels wrap in their tooltip, never on the axis itself. |
+| **zero-one-many** | E2 — Host chart stack | ✅ resolved (explicit) | All four charts always render in the fixed CPU → memory → disk → temperature order regardless of how many metrics have retained data. A metric with no data in the selected range renders its chart frame with the documented empty copy; it is never omitted. Stack height and metric order are therefore stable across every range, and an absent sensor is visibly distinguishable from a rendering failure. |
+| empty, loading, error, populated, partial, overflow, long-text | E3 — Service state band + latency chart | ✅ resolved (explicit) | Band/latency share the host stack's loading/error/partial handling; failure-class chip list wraps to a second line at narrow widths rather than truncating; an unselected service renders an explicit `Select a service to view its history` placeholder instead of an empty band. |
+| **zero-one-many** | E3 — Service state band + latency chart | ✅ resolved (explicit) | A single uninterrupted state spans the full band width with one duration label. Zero observations render the `unknown` fill across the entire band rather than a blank strip, so "we did not observe" is never shown as "nothing happened". Failure-class chip counts use explicit singular/plural copy (`1 failure class` / `{N} failure classes`). |
+| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | E4 — Incidents list and filters | ✅ resolved (explicit) | Documented empty/error copy above; `N of M` count and `Clear all filters` cover zero-one-many; open, overrun, and flapping rows are explicitly defined states (never inferred); long service names/error-class text wrap within the row, matching the existing `.evidence-row` `overflow-wrap: anywhere` rule. |
+| overflow, long-text | E5 — Investigation context (carried service, navigation stack, correlation markers/cursor) | ✅ resolved (explicit) | Dense-marker clustering degrades to a count glyph rather than saturating the axis; the `Investigating: {service}` indicator and `Back` label truncate with a full-string tooltip rather than pushing the header layout; the forbidden-word list is a static, testable constraint (DIA-07). |
+| **loading** | E5 — Investigation context | ✅ resolved (explicit) | The `Investigating: {service}` indicator and `Back` control render immediately from client-side navigation state and stay visible throughout — they require no fetch. Correlation markers and the shared hover time cursor are suppressed until their underlying charts finish loading, so a marker is never plotted against a skeleton axis. |
+| **error** | E5 — Investigation context | ✅ resolved (explicit) | The indicator and `Back` control remain usable so the operator can navigate back out of a failed investigation. Correlation markers are omitted and the chart area carries an explicit `Correlation markers unavailable for this range` note — a silently marker-free chart is forbidden, because it reads as "nothing correlated" rather than "Beacon could not check". |
 
 ---
-
 ## Registry Safety
 
 | Registry | Blocks Used | Safety Gate |
@@ -469,11 +480,11 @@ Applicable state considerations resolved: 44 covered, 0 backstop, 0 unresolved.
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 1 Copywriting: PASS
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** pending
+**Approval:** approved 2026-08-25
