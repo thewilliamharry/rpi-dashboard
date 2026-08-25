@@ -1300,6 +1300,321 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # ------------------------------------------------------------------
+    # 04-05 Task 1: canonical local-time custom range entry, validated
+    # against exactly the server's own bounds before anything is fetched
+    # (D-03). start_ts/end_ts fixtures below are 2024 dates -- far enough in
+    # the past that they can never accidentally collide with "in the future"
+    # regardless of when this suite runs, and far enough from any DST
+    # transition boundary that Sydney's offset is unambiguous.
+    # ------------------------------------------------------------------
+
+    def _history_page_with_request_counter(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        counters = {'history': 0}
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                counters['history'] += 1
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+        return page, counters
+
+    def test_apply_custom_range_control_exact_text_and_ids_present(self):
+        page, _counters = self._history_page_with_request_counter()
+        try:
+            self.assertEqual(page.locator('#range-start').count(), 1)
+            self.assertEqual(page.locator('#range-end').count(), 1)
+            self.assertEqual(page.locator('#apply-custom-range').count(), 1)
+            self.assertEqual(page.locator('#apply-custom-range').text_content(), 'Apply custom range')
+        finally:
+            page.close()
+
+    def test_blank_start_field_renders_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'Enter both a start and an end time.')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_whitespace_only_field_renders_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('   ')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'Enter both a start and an end time.')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_equal_start_and_end_renders_server_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 10:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'start_ts must be before end_ts')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_reversed_start_and_end_rejected_values_not_swapped(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-15 14:00')
+            page.locator('#range-end').fill('2024-01-15 10:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'start_ts must be before end_ts')
+            self.assertEqual(counters['history'], before)
+            # The operator's own entered text is never swapped back at them.
+            self.assertEqual(page.locator('#range-start').input_value(), '2024-01-15 14:00')
+            self.assertEqual(page.locator('#range-end').input_value(), '2024-01-15 10:00')
+            # And the governing range itself is unchanged -- still the 24h default.
+            self.assertEqual(page.locator('#range-preset-24h').get_attribute('aria-pressed'), 'true')
+        finally:
+            page.close()
+
+    def test_span_over_90_days_renders_server_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-01 00:00')
+            page.locator('#range-end').fill('2024-04-15 00:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'requested span exceeds 90 days')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_future_end_renders_server_message_and_issues_zero_requests(self):
+        page, counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2098-12-01 00:00')
+            page.locator('#range-end').fill('2099-01-01 00:00')
+            before = counters['history']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#range-error').text_content(), 'end_ts must not be in the future')
+            self.assertEqual(counters['history'], before)
+        finally:
+            page.close()
+
+    def test_valid_custom_range_issues_request_with_parsed_bounds_in_configured_timezone(self):
+        page, _counters = self._history_page_with_request_counter()
+        try:
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ) as request_info:
+                page.locator('#apply-custom-range').click()
+            query = parse_qs(urlparse(request_info.value.url).query)
+            # 2024-01-15 10:00/14:00 Australia/Sydney (AEDT, UTC+11 in January).
+            self.assertEqual(int(query['start_ts'][0]), 1_705_273_200)
+            self.assertEqual(int(query['end_ts'][0]), 1_705_287_600)
+            self.assertTrue(page.locator('#range-error').is_hidden())
+            # Applying a valid custom range clears any preset's selected state.
+            for preset in HISTORY_PRESET_SPANS:
+                self.assertEqual(page.locator(f'#range-preset-{preset}').get_attribute('aria-pressed'), 'false')
+        finally:
+            page.close()
+
+    def test_fields_populated_after_preset_click_custom_apply_and_reload_with_stored_custom(self):
+        page, _counters = self._history_page_with_request_counter()
+        try:
+            # (a) After a preset click, the fields state that preset's own span.
+            page.locator('#range-preset-6h').click()
+            page.wait_for_function(
+                "() => /^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$/.test(document.getElementById('range-start').value)",
+                timeout=5_000,
+            )
+            start_text = page.locator('#range-start').input_value()
+            end_text = page.locator('#range-end').input_value()
+            hooks = 'window.__historyRangeTestHooks'
+            start_parsed = page.evaluate(f"{hooks}.parseLocalRangeInput({start_text!r})")
+            end_parsed = page.evaluate(f"{hooks}.parseLocalRangeInput({end_text!r})")
+            self.assertEqual(end_parsed - start_parsed, HISTORY_PRESET_SPANS['6h'])
+
+            # (b) After a custom apply, the fields show exactly what was applied.
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='hidden', timeout=5_000)
+            self.assertEqual(page.locator('#range-start').input_value(), '2024-01-15 10:00')
+            self.assertEqual(page.locator('#range-end').input_value(), '2024-01-15 14:00')
+        finally:
+            page.close()
+
+    def test_fields_populated_after_reload_with_stored_custom_range(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.add_init_script(
+            "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+            "{refreshSeconds: 15, historyRange: {custom: {start_ts: 1705273200, end_ts: 1705287600}}}));",
+        )
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function(
+                "() => document.getElementById('range-start').value === '2024-01-15 10:00'",
+                timeout=5_000,
+            )
+            self.assertEqual(page.locator('#range-start').input_value(), '2024-01-15 10:00')
+            self.assertEqual(page.locator('#range-end').input_value(), '2024-01-15 14:00')
+            for preset in HISTORY_PRESET_SPANS:
+                self.assertEqual(page.locator(f'#range-preset-{preset}').get_attribute('aria-pressed'), 'false')
+        finally:
+            page.close()
+
+    def test_hostile_stored_custom_range_yields_24h_default(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        hostile_customs = {
+            'strings': "{start_ts: 'a', end_ts: 'b'}",
+            'nulls': '{start_ts: null, end_ts: null}',
+            'inverted_pair': '{start_ts: 2000, end_ts: 1000}',
+        }
+        for label, custom_expression in hostile_customs.items():
+            with self.subTest(custom=label):
+                page = self.browser.new_page()
+                page.add_init_script(
+                    "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+                    f"{{refreshSeconds: 15, historyRange: {{custom: {custom_expression}}}}}));",
+                )
+
+                def route_api(route):
+                    path = urlparse(route.request.url).path
+                    if path == '/api/config':
+                        route.fulfill(status=200, json=config_fixture)
+                        return
+                    if path == '/api/telemetry/history':
+                        query = parse_qs(urlparse(route.request.url).query)
+                        start_ts = int(query['start_ts'][0])
+                        end_ts = int(query['end_ts'][0])
+                        route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                        return
+                    if path == '/api/advanced/current':
+                        route.fulfill(status=200, json=snapshot)
+                        return
+                    route.fallback()
+
+                page.route('**/api/**', route_api)
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    with page.expect_request(
+                        lambda request: urlparse(request.url).path == '/api/telemetry/history',
+                    ) as request_info:
+                        page.locator('[data-section="history"]').click()
+                    query = parse_qs(urlparse(request_info.value.url).query)
+                    start_ts = int(query['start_ts'][0])
+                    end_ts = int(query['end_ts'][0])
+                    self.assertEqual(end_ts - start_ts, HISTORY_PRESET_SPANS['24h'])
+                    self.assertEqual(page.locator('#range-preset-24h').get_attribute('aria-pressed'), 'true')
+                finally:
+                    page.close()
+
+    def test_apply_button_disabled_while_in_flight_fields_stay_visible(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.add_init_script(self.HISTORY_FETCH_HOLD_HARNESS)
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.wait_for_function('window.__heldHistoryReleases.length === 4', timeout=5_000)
+            page.evaluate('window.__releaseAllHeldHistoryFetches()')
+            page.locator('#apply-custom-range').wait_for(state='attached', timeout=5_000)
+            page.wait_for_function(
+                "() => document.getElementById('apply-custom-range').disabled === false",
+                timeout=5_000,
+            )
+
+            page.locator('#range-start').fill('2024-01-15 10:00')
+            page.locator('#range-end').fill('2024-01-15 14:00')
+            page.evaluate('window.__heldHistoryReleases = []')
+            page.locator('#apply-custom-range').click()
+            page.wait_for_function('window.__heldHistoryReleases.length === 4', timeout=5_000)
+            self.assertTrue(page.locator('#apply-custom-range').is_disabled())
+            self.assertTrue(page.locator('#range-start').is_visible())
+            self.assertTrue(page.locator('#range-end').is_visible())
+            page.evaluate('window.__releaseAllHeldHistoryFetches()')
+            page.wait_for_function(
+                "() => document.getElementById('apply-custom-range').disabled === false",
+                timeout=5_000,
+            )
+        finally:
+            page.close()
+
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):
     """04-04 Task 3: a zone that observes DST annotates its two transitions.
