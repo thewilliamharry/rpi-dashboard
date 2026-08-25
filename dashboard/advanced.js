@@ -13,6 +13,11 @@
   // CPU/RAM/disk are percentages; only CPU exists in this plan (04-01) -- the
   // remaining three metrics (04-03) extend this map, not the rendering code.
   const METRIC_VALUE_DOMAIN = {cpu: [0, 100]};
+  // The render loop, loading/empty/error wiring, and Copywriting Contract
+  // sentence below are all keyed by this list and by metric id -- 04-03 adds
+  // 'ram', 'disk', 'temp' here plus their markup; no rendering code changes.
+  const HISTORY_METRICS = ['cpu'];
+  const METRIC_LABELS = {cpu: 'CPU'};
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
@@ -432,6 +437,61 @@
     });
   }
 
+  function historyStateElement(metric, suffix) {
+    return $(`history-${metric}-${suffix}`);
+  }
+
+  // Never renders a zeroed chart, an empty-looking plot frame, or a bare axis
+  // while loading: the previous series/strip content is cleared up front, and
+  // the loading skeleton is the only thing visible until the fetch settles.
+  function beginMetricLoadingState(metric) {
+    const loading = historyStateElement(metric, 'loading');
+    const empty = historyStateElement(metric, 'empty');
+    const error = historyStateElement(metric, 'error');
+    if (loading) loading.hidden = false;
+    if (empty) empty.hidden = true;
+    if (error) error.hidden = true;
+    const chartSvg = $(`chart-${metric}`);
+    const path = chartSvg ? chartSvg.querySelector('.hist-series') : null;
+    if (path) path.setAttribute('d', '');
+    const stripSvg = $(`strip-${metric}`);
+    if (stripSvg) while (stripSvg.firstChild) stripSvg.removeChild(stripSvg.firstChild);
+  }
+
+  // One metric's fetch-and-render, isolated from every other metric's outcome
+  // (Research Pattern 1): a rejected fetch here renders only this metric's own
+  // error copy and never blanks the loading/empty/chart state of its siblings.
+  // Never throws -- every branch resolves so Promise.allSettled in the caller
+  // is a defensive composition boundary, not a required error path.
+  async function renderMetricHistory(metric, bounds, requestId) {
+    beginMetricLoadingState(metric);
+    const loading = historyStateElement(metric, 'loading');
+    const empty = historyStateElement(metric, 'empty');
+    const error = historyStateElement(metric, 'error');
+    try {
+      const result = await fetchHostMetricHistory(metric, bounds.start_ts, bounds.end_ts);
+      if (requestId !== state.historyRequestGeneration) return null;
+      if (loading) loading.hidden = true;
+      const points = Array.isArray(result.points) ? result.points : [];
+      const hasObservedValue = points.some((point) => point.avg_value !== null && point.avg_value !== undefined);
+      if (empty) empty.hidden = hasObservedValue;
+      renderHistoryChart(metric, result);
+      const requested = result.requested || bounds;
+      renderCoverageStrip(metric, result.coverage, requested);
+      return {metric, result};
+    } catch (fetchError) {
+      if (requestId !== state.historyRequestGeneration) return null;
+      if (loading) loading.hidden = true;
+      if (error) {
+        const reason = serverSuppliedReason(fetchError);
+        const label = METRIC_LABELS[metric] || metric;
+        error.textContent = `This chart could not load. ${label} data is unavailable — other charts and the coverage evidence below are unaffected.${reason ? ` Server reported: ${reason}` : ''}`;
+        error.hidden = false;
+      }
+      return null;
+    }
+  }
+
   async function renderHistorySection() {
     // A dedicated counter, not state.requestGeneration: that counter belongs to
     // refreshCurrentDiagnosis's own periodic poll (every refreshSeconds), and
@@ -439,32 +499,23 @@
     // still-current History render. Same staleness-guard idiom, own generation.
     const requestId = ++state.historyRequestGeneration;
     const bounds = resolveRangeBounds();
-    const loading = $('history-cpu-loading');
-    const empty = $('history-cpu-empty');
-    const error = $('history-cpu-error');
-    if (loading) loading.hidden = false;
-    if (empty) empty.hidden = true;
-    if (error) error.hidden = true;
-    try {
-      const result = await fetchHostMetricHistory('cpu', bounds.start_ts, bounds.end_ts);
-      if (requestId !== state.historyRequestGeneration) return;
-      if (loading) loading.hidden = true;
-      updateRangeResolutionNote(result.effective_resolution_seconds);
-      const points = Array.isArray(result.points) ? result.points : [];
-      const hasObservedValue = points.some((point) => point.avg_value !== null && point.avg_value !== undefined);
-      if (empty) empty.hidden = hasObservedValue;
-      renderHistoryChart('cpu', result);
-      const requested = result.requested || bounds;
-      renderCoverageStrip('cpu', result.coverage, requested);
+    const settled = await Promise.allSettled(
+      HISTORY_METRICS.map((metric) => renderMetricHistory(metric, bounds, requestId)),
+    );
+    if (requestId !== state.historyRequestGeneration) return;
+    const firstSucceeded = settled
+      .filter((entry) => entry.status === 'fulfilled' && entry.value)
+      .map((entry) => entry.value)[0];
+    if (firstSucceeded) {
+      const requested = firstSucceeded.result.requested || bounds;
+      updateRangeResolutionNote(firstSucceeded.result.effective_resolution_seconds);
       renderSharedTimeAxis(requested.start_ts, requested.end_ts);
-    } catch (fetchError) {
-      if (requestId !== state.historyRequestGeneration) return;
-      if (loading) loading.hidden = true;
-      if (error) {
-        const reason = serverSuppliedReason(fetchError);
-        error.textContent = `This chart could not load. CPU data is unavailable — other charts and the coverage evidence below are unaffected.${reason ? ` Server reported: ${reason}` : ''}`;
-        error.hidden = false;
-      }
+    } else {
+      // Every metric failed (or returned nothing to anchor the axis on): the
+      // shared axis still renders from the requested bounds so it never
+      // disappears alongside a per-metric fetch failure.
+      updateRangeResolutionNote(null);
+      renderSharedTimeAxis(bounds.start_ts, bounds.end_ts);
     }
   }
 

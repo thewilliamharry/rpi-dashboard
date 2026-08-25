@@ -347,6 +347,150 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_empty_response_renders_empty_copy_and_still_renders_coverage_strip(self):
+        start_ts = 1_700_000_000
+        end_ts = 1_700_086_400
+        fixture = {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'host', 'metric': 'cpu'},
+            'effective_resolution_seconds': 3600,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [3600],
+            'points': [],
+            'coverage': [
+                {'start_ts': start_ts, 'end_ts': start_ts + 40_000, 'state': 'not_yet_monitored'},
+                {'start_ts': start_ts + 40_000, 'end_ts': end_ts, 'state': 'unknown'},
+            ],
+            'aggregation_pending': [],
+        }
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-cpu-empty').wait_for(state='visible', timeout=5_000)
+            self.assertIn('No CPU data in this range.', page.locator('#history-cpu-empty').text_content())
+            segments = page.locator('#strip-cpu .hist-coverage-segment')
+            segments.first.wait_for(timeout=5_000)
+            self.assertEqual(segments.count(), 2)
+        finally:
+            page.close()
+
+    def test_error_response_renders_server_reason_and_keeps_shared_axis(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=503, json={'error': 'telemetry unavailable'})
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-cpu-error').wait_for(state='visible', timeout=5_000)
+            error_text = page.locator('#history-cpu-error').text_content()
+            self.assertIn('This chart could not load.', error_text)
+            self.assertIn('telemetry unavailable', error_text)
+            # The shared axis element stays in the DOM even though every
+            # metric's fetch failed -- a per-metric failure never disappears
+            # the shared correlation surface around it.
+            self.assertEqual(page.locator('#history-time-axis').count(), 1)
+        finally:
+            page.close()
+
+    # Same fetch-holding idiom as AdvancedUiTests.REVERSE_ORDER_HARNESS: the
+    # network response can complete immediately (fulfilled by the Python route
+    # handler), while the *JS Promise* the page code awaits is deliberately
+    # held back until the test explicitly releases it. This avoids blocking
+    # the Playwright driver's single-threaded sync-API connection, which a
+    # Python-side time.sleep() inside a route handler would otherwise starve.
+    HISTORY_FETCH_HOLD_HARNESS = """
+        window.__heldHistoryRelease = null;
+        const realFetch = window.fetch.bind(window);
+        window.fetch = (...args) => {
+          const url = String(args[0] || '');
+          if (!url.includes('/api/telemetry/history')) return realFetch(...args);
+          const pending = realFetch(...args);
+          return new Promise((resolve, reject) => {
+            window.__heldHistoryRelease = () => pending.then(resolve, reject);
+          });
+        };
+    """
+
+    def test_pending_request_shows_skeleton_and_draws_no_chart_path(self):
+        start_ts = 1_700_000_000
+        end_ts = 1_700_086_400
+        fixture = {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'host', 'metric': 'cpu'},
+            'effective_resolution_seconds': 3600,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [3600],
+            'points': [self._point(start_ts, 10.0)],
+            'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}],
+            'aggregation_pending': [],
+        }
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.add_init_script(self.HISTORY_FETCH_HOLD_HARNESS)
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-cpu-loading').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function('window.__heldHistoryRelease !== null', timeout=5_000)
+            path_d = page.locator('#chart-cpu path').get_attribute('d')
+            self.assertFalse(path_d)
+            # Now release the held fetch and confirm the loading skeleton
+            # clears and the chart draws.
+            page.evaluate('window.__heldHistoryRelease()')
+            page.locator('#history-cpu-loading').wait_for(state='hidden', timeout=5_000)
+            self.assertTrue(page.locator('#chart-cpu path').get_attribute('d'))
+        finally:
+            page.close()
+
 
 if __name__ == '__main__':
     unittest.main()
