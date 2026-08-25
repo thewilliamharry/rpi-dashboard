@@ -58,7 +58,6 @@ same 4px rhythm):
 | Host/latency chart plot height | 96px | Each of the four stacked host-metric charts and the service latency chart |
 | State band height | 32px | The horizontal online/offline/unknown/maintenance band (D-11) |
 | Coverage strip height | 16px | Each per-chart coverage strip (D-06) |
-| Coverage-strip minimum segment width | 3px | See Chart Contract — Coverage Strip Mechanics |
 
 **Exceptions:**
 - Every interactive control this phase adds (preset range buttons, `Apply custom range`, drag
@@ -68,6 +67,12 @@ same 4px rhythm):
 - The coverage strip and hover-cursor readout are visual/informational only and are exempt from
   the 44px rule; their keyboard-operable equivalents are explicit Phase 5 debt (R-03) — see Layout
   and Responsive Contract note below.
+- **Coverage-strip minimum segment width is 3px (not a multiple of 4).** This is a deliberate
+  departure from the 4px rhythm: at the 90d preset, sub-pixel-duration coverage intervals would
+  otherwise be merged away entirely or rounded up to the next 4px token (8px), which would either
+  hide a distinct state reason or overstate how much time it actually covers. 3px is the minimum
+  width at which all five state reasons remain independently visible as distinct segments at
+  maximum zoom-out. See Chart Contract — Coverage Strip Mechanics.
 
 ---
 
@@ -96,6 +101,12 @@ percentage) uses the 28px size, matching Phase 3's page-title/count precedent.
 Use the existing CSS variables (verified at `dashboard/style.css:5-21,24-37`). No new token is
 created; two existing tokens gain new, explicit semantic roles for this phase, following the exact
 pattern 03.1 used for `--accent3`.
+
+**Color distribution:** 60% dominant (`--bg`), 30% secondary (`--bg2`/`--bg3`), 10% accent
+(`--accent`, reserved for the interactive range/investigation controls listed below). Status
+colors (online/offline/maintenance/unknown), threshold lines, incident markers, and coverage-strip
+patterns are semantic overlays on top of that 60/30/10 split, not a competing distribution — they
+occupy small, specific areas of the secondary (30%) surface, never the dominant background.
 
 | Role | Value | Usage |
 |------|-------|-------|
@@ -161,6 +172,11 @@ incident-row text — those carry their own vocabulary above.
 - The active preset (or `Custom`) is always visibly indicated (selected/accent state on the
   button, or the fields carrying focus styling) — the operator must never be uncertain which range
   is currently governing the charts below.
+
+### Focal points
+
+- **Primary visual anchor on the `History` screen:** the four-chart stack (and, when a service is selected, the state band/latency pairing beneath it). The range control above it is a persistent but secondary utility strip — legible and reachable, never competing with the charts for attention.
+- **Primary visual anchor on the `Incidents` screen:** the incident list. Filters sit above it as a secondary utility strip, matching the Services section's established filter-then-content weighting from Phase 3.
 
 ### Chart stack (`History` section, D-07)
 
