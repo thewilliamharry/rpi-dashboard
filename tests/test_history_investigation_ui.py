@@ -1,11 +1,17 @@
+import re
 import threading
 import unittest
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
 
 from tests.helpers import cleanup_db, load_app
+
+# D-02's exact preset ladder in seconds -- the span every request must equal.
+HISTORY_PRESET_SPANS = {
+    '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000, '90d': 7776000,
+}
 
 
 class HistoryInvestigationUiTests(unittest.TestCase):
@@ -106,6 +112,179 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             ],
             'aggregation_pending': [],
         }
+
+    @staticmethod
+    def _empty_history_fixture(start_ts, end_ts, resolution_seconds=3600):
+        """A minimal, well-formed /api/telemetry/history response for a given
+        requested span -- used where the test only cares about the requested
+        bounds and the preset-toggle/persistence behavior, not chart content.
+        """
+        return {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'host', 'metric': 'cpu'},
+            'effective_resolution_seconds': resolution_seconds,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [resolution_seconds],
+            'points': [],
+            'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'}],
+            'aggregation_pending': [],
+        }
+
+    def test_all_six_presets_request_the_documented_span_and_toggle_aria_pressed(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+
+            for preset, span in HISTORY_PRESET_SPANS.items():
+                with self.subTest(preset=preset):
+                    with page.expect_request(
+                        lambda request: urlparse(request.url).path == '/api/telemetry/history',
+                    ) as request_info:
+                        page.locator(f'#range-preset-{preset}').click()
+                    query = parse_qs(urlparse(request_info.value.url).query)
+                    start_ts = int(query['start_ts'][0])
+                    end_ts = int(query['end_ts'][0])
+                    self.assertEqual(end_ts - start_ts, span)
+                    for candidate in HISTORY_PRESET_SPANS:
+                        expected = 'true' if candidate == preset else 'false'
+                        self.assertEqual(
+                            page.locator(f'#range-preset-{candidate}').get_attribute('aria-pressed'),
+                            expected,
+                        )
+        finally:
+            page.close()
+
+    def test_7d_preset_renders_one_coordinate_per_point_with_no_duplicate_ts(self):
+        # A fixture whose points straddle the raw/5-minute tier seam --
+        # two adjacent source_resolutions_seconds values -- proving the
+        # renderer draws exactly one coordinate per returned point and never
+        # duplicates a bucket at the seam.
+        span = HISTORY_PRESET_SPANS['7d']
+        end_ts = 2_000_000_000
+        start_ts = end_ts - span
+        points = [
+            self._point(start_ts, 10.0),
+            self._point(start_ts + 60, 20.0),
+            self._point(start_ts + 120, 15.0),
+            self._point(start_ts + 500_000, 55.0),
+            self._point(start_ts + 500_300, 60.0),
+            self._point(start_ts + 604_700, 90.0),
+        ]
+        fixture = {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'host', 'metric': 'cpu'},
+            'effective_resolution_seconds': 300,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [60, 300],
+            'points': points,
+            'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}],
+            'aggregation_pending': [],
+        }
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('#range-preset-7d').click()
+            page.wait_for_function(
+                "() => { const d = document.querySelector('#chart-cpu path').getAttribute('d') || ''; "
+                "return d.length > 0; }",
+                timeout=5_000,
+            )
+            d_attribute = page.locator('#chart-cpu path').get_attribute('d') or ''
+            coordinates = re.findall(r'[ML]([-\d.]+),([-\d.]+)', d_attribute)
+            self.assertEqual(len(coordinates), len(points))
+            x_values = [x for x, _y in coordinates]
+            self.assertEqual(len(x_values), len(set(x_values)))
+        finally:
+            page.close()
+
+    def test_hostile_stored_history_range_falls_back_to_24h_default(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        hostile_seeds = {
+            'array': "JSON.stringify({refreshSeconds: 15, historyRange: ['24h']})",
+            'unknown_preset': "JSON.stringify({refreshSeconds: 15, historyRange: {preset: '../../etc'}})",
+            'non_object_json': "JSON.stringify('not-an-object')",
+        }
+        for label, seed_expression in hostile_seeds.items():
+            with self.subTest(seed=label):
+                page = self.browser.new_page()
+                page.add_init_script(
+                    f"localStorage.setItem('beacon-advanced-preferences-v1', {seed_expression});",
+                )
+
+                def route_api(route):
+                    path = urlparse(route.request.url).path
+                    if path == '/api/config':
+                        route.fulfill(status=200, json=config_fixture)
+                        return
+                    if path == '/api/telemetry/history':
+                        query = parse_qs(urlparse(route.request.url).query)
+                        start_ts = int(query['start_ts'][0])
+                        end_ts = int(query['end_ts'][0])
+                        route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                        return
+                    if path == '/api/advanced/current':
+                        route.fulfill(status=200, json=snapshot)
+                        return
+                    route.fallback()
+
+                page.route('**/api/**', route_api)
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    # Loading without error: the section becomes reachable and
+                    # the default preset renders as pressed with no thrown error.
+                    with page.expect_request(
+                        lambda request: urlparse(request.url).path == '/api/telemetry/history',
+                    ) as request_info:
+                        page.locator('[data-section="history"]').click()
+                    query = parse_qs(urlparse(request_info.value.url).query)
+                    start_ts = int(query['start_ts'][0])
+                    end_ts = int(query['end_ts'][0])
+                    self.assertEqual(end_ts - start_ts, HISTORY_PRESET_SPANS['24h'])
+                    self.assertEqual(page.locator('#range-preset-24h').get_attribute('aria-pressed'), 'true')
+                finally:
+                    page.close()
 
     def test_history_section_breaks_gaps_labels_coverage_and_renders_local_time_axis(self):
         history_fixture = self._history_fixture()
