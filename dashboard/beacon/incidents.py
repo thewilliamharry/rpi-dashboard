@@ -218,7 +218,7 @@ def group_episodes(rows):
                 'failure_class': row['error_class'],
                 'suppressed_reason': row['suppressed_reason'],
                 'maintenance_grace_until': row['maintenance_grace_until'],
-                'transitions': [row],
+                'transitions': [dict(row)],
             }
         elif online == 1 and open_episode is not None:
             open_episode['recovered_ts'] = int(row['ts'])
@@ -226,7 +226,7 @@ def group_episodes(rows):
             open_episode['duration_seconds'] = (
                 open_episode['recovered_ts'] - open_episode['down_ts']
             )
-            open_episode['transitions'].append(row)
+            open_episode['transitions'].append(dict(row))
             episodes.append(_finalize_episode(open_episode))
             open_episode = None
         # online == 1 with nothing open: no episode emitted, row stays flat.

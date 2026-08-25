@@ -205,5 +205,122 @@ class ReadEventsInRangeTests(unittest.TestCase):
         self.assertIsNone(re.search(r'f"SELECT|f\'SELECT', source))
 
 
+class EventsHistoryRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.client = self.appmod.app.test_client()
+        self.now = int(time.time())
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_event(self, ts, *, port=80, event_type='state_change', online=None,
+                       error_class=None, suppressed_reason=None,
+                       maintenance_grace_until=None, down_since_ts=None):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO events(ts, port, event_type, online, previous_online, "
+                    "latency_ms, error_class, alert_status, details, suppressed_reason, "
+                    "maintenance_grace_until, down_since_ts) "
+                    "VALUES (?,?,?,?,NULL,NULL,?,NULL,NULL,?,?,?)",
+                    (ts, port, event_type, online, error_class, suppressed_reason,
+                     maintenance_grace_until, down_since_ts),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _get(self, **params):
+        query = {'start_ts': str(self.now - 1000), 'end_ts': str(self.now)}
+        query.update({key: str(value) for key, value in params.items()})
+        return self.client.get('/api/events/history', query_string=query)
+
+    def test_response_shape(self):
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        for key in ('requested', 'filters', 'episodes', 'events', 'flapping_groups',
+                    'row_budget', 'truncated', 'matched_count'):
+            self.assertIn(key, payload)
+
+    def test_db_lock_used(self):
+        import inspect
+        source = inspect.getsource(self.appmod.api_events_history)
+        self.assertIn('with _db_lock, database_access(DB_PATH) as conn:', source)
+
+    def test_closed_episode(self):
+        self._insert_event(self.now - 500, port=81, online=0)
+        self._insert_event(self.now - 400, port=81, online=1)
+        payload = self._get().get_json()
+        episodes = [e for e in payload['episodes'] if e['port'] == 81]
+        self.assertEqual(len(episodes), 1)
+        self.assertFalse(episodes[0]['open'])
+        self.assertEqual(episodes[0]['duration_seconds'], 100)
+
+    def test_open_episode(self):
+        self._insert_event(self.now - 500, port=82, online=0)
+        payload = self._get().get_json()
+        episodes = [e for e in payload['episodes'] if e['port'] == 82]
+        self.assertEqual(len(episodes), 1)
+        self.assertTrue(episodes[0]['open'])
+        self.assertIsNone(episodes[0]['recovered_ts'])
+        self.assertIsNone(episodes[0]['duration_seconds'])
+
+    def test_overrun_episode_splits_grace_and_fault(self):
+        down_since = self.now - 800
+        raised_ts = self.now - 700
+        grace_until = self.now - 650
+        recovered_ts = self.now - 600
+        self._insert_event(
+            raised_ts, port=83, online=0, down_since_ts=down_since,
+            maintenance_grace_until=grace_until,
+        )
+        self._insert_event(recovered_ts, port=83, online=1)
+        payload = self._get().get_json()
+        episodes = [e for e in payload['episodes'] if e['port'] == 83]
+        self.assertEqual(len(episodes), 1)
+        episode = episodes[0]
+        self.assertEqual(episode['grace_seconds'] + episode['fault_seconds'], recovered_ts - down_since)
+
+    def test_maintenance_suppressed_row_present_by_default_and_excludable(self):
+        self._insert_event(self.now - 500, port=84, online=0, suppressed_reason='maintenance')
+        self._insert_event(self.now - 400, port=84, online=1)
+        default_payload = self._get().get_json()
+        self.assertTrue(any(e['ts'] == self.now - 500 for e in default_payload['events']))
+        excluded_payload = self._get(maintenance='exclude').get_json()
+        self.assertFalse(any(e['ts'] == self.now - 500 for e in excluded_payload['events']))
+
+    def test_invalid_event_type_returns_400_naming_parameter(self):
+        response = self._get(event_type='nonsense')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('event_type', response.get_json()['error'])
+
+    def test_invalid_criticality_returns_400_naming_parameter(self):
+        response = self._get(criticality='nonsense')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('criticality', response.get_json()['error'])
+
+    def test_invalid_port_zero_returns_400(self):
+        response = self._get(port='0')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('port', response.get_json()['error'])
+
+    def test_invalid_port_too_large_returns_400(self):
+        response = self._get(port='70000')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('port', response.get_json()['error'])
+
+    def test_repeated_start_ts_returns_400(self):
+        response = self.client.get('/api/events/history', query_string=[
+            ('start_ts', str(self.now - 1000)),
+            ('start_ts', str(self.now - 500)),
+            ('end_ts', str(self.now)),
+        ])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('start_ts', response.get_json()['error'])
+
+
 if __name__ == '__main__':
     unittest.main()
