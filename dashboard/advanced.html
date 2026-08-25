@@ -77,6 +77,11 @@
       </section>
       <section id="history-section" aria-labelledby="history-heading" hidden>
         <h2 id="history-heading" tabindex="-1">History</h2>
+        <div id="investigating-service-row" class="hist-investigating-row">
+          <label>Investigate service <select id="history-service-picker"><option value="">Select a service</option></select></label>
+          <span id="investigating-service" class="investigating-service" hidden></span>
+          <button type="button" id="clear-selected-service" class="hist-clear-service" hidden>Clear</button>
+        </div>
         <div id="investigation-range" class="hist-range" aria-label="Historical investigation range">
           <div id="range-back-row" class="hist-back-row"></div>
           <button type="button" id="range-preset-1h" class="hist-preset" aria-pressed="false">1h</button>
@@ -135,6 +140,11 @@
           <div id="history-axis-scroll" class="hist-axis-scroll" role="region" aria-label="Shared history time axis" tabindex="0">
             <svg id="history-time-axis" class="hist-axis" viewBox="0 0 1000 24" preserveAspectRatio="none" role="img" aria-label="Shared history time axis"></svg>
           </div>
+        </div>
+        <div id="service-history-group" class="hist-service-group" aria-label="Selected service history">
+          <div id="service-history-loading" class="hist-skeleton" hidden aria-label="Loading service history"><p>Loading service history…</p></div>
+          <div id="service-history-empty" class="hist-empty">Select a service to view its history</div>
+          <div id="service-history-error" class="hist-error" role="alert" hidden></div>
         </div>
         <div id="history-chart-tooltip" class="hist-tooltip" role="tooltip" hidden></div>
       </section>

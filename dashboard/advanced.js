@@ -1,6 +1,6 @@
 (() => {
   const PREFS_KEY = 'beacon-advanced-preferences-v1';
-  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}, historyRange: {preset: '24h'}};
+  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}, historyRange: {preset: '24h'}, selectedService: null};
   const REFRESH_CHOICES = new Set([5, 15, 30, 60]);
   // D-02 preset ladder, mapped onto the Phase 2 retention-tier boundaries.
   const HISTORY_PRESETS = {'1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000, '90d': 7776000};
@@ -42,6 +42,11 @@
     // persisted (loadPreferences/savePreferences never touch this) and never
     // the URL. rangeStack holds {descriptor, origin, label} entries.
     rangeStack: [], historyBounds: null,
+    // D-16 (Phase 4 04-06): a dedicated staleness-guard generation for the
+    // selected-service history fetch, independent of historyRequestGeneration
+    // (the host stack's own guard) -- a service selection change must not
+    // discard an in-flight host-metric render, and vice versa.
+    serviceHistoryRequestGeneration: 0,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -81,6 +86,19 @@
     return {preset};
   }
 
+  // D-16/T-04-04: a service selection carried between the Phase 3 Services
+  // table and the History section. Only `null` or an integer port in
+  // 1..65535 is accepted -- a numeric-looking string ("8080"), a negative or
+  // out-of-range number, an object, or an array all resolve to no selection.
+  // The server independently re-validates the port before it ever reaches
+  // SQLite (`_history_selector`), so a hostile stored value cannot reach a
+  // query as anything but this same bounded integer.
+  function validSelectedService(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) return null;
+    return value;
+  }
+
   function loadPreferences() {
     let stored = {};
     try {
@@ -95,6 +113,7 @@
       range: stored.range === '24h' ? stored.range : DEFAULT_PREFERENCES.range,
       filters: validFilters(stored.filters),
       historyRange: validHistoryRange(stored.historyRange),
+      selectedService: validSelectedService(stored.selectedService),
     };
     state.filters = state.preferences.filters;
     return state.preferences;
@@ -109,6 +128,7 @@
       range: prefs.range,
       filters: validFilters(state.filters),
       historyRange: validHistoryRange(prefs.historyRange),
+      selectedService: validSelectedService(prefs.selectedService),
     }));
   }
 
@@ -325,6 +345,195 @@
       return {start_ts: descriptor.custom.start_ts, end_ts: descriptor.custom.end_ts};
     }
     return boundsForPreset(descriptor && descriptor.preset);
+  }
+
+  // ------------------------------------------------------------------
+  // Selected-service history (Phase 4 04-06, D-16, T-04-13): one carried,
+  // read-only service selection published by the Phase 3 Services table and
+  // the History service picker alike, consumed only by this section's own
+  // service-history group. Neither affordance alters the row's existing
+  // data, sort, filter behaviour, or expand toggle, and neither ever adds a
+  // parameter to /api/advanced/current -- that request stays parameterless
+  // and byte-identical before and after a selection (T-04-13's own gate is
+  // the existing Phase 3 suites re-run at the plan's <verify> boundary).
+  // ------------------------------------------------------------------
+
+  function selectedServiceRecord() {
+    const port = state.preferences.selectedService;
+    if (port === null) return null;
+    const services = Array.isArray(state.snapshot && state.snapshot.services) ? state.snapshot.services : [];
+    return services.find((service) => Number(service.port) === port) || null;
+  }
+
+  function selectedServiceName() {
+    const port = state.preferences.selectedService;
+    if (port === null) return null;
+    const record = selectedServiceRecord();
+    return (record && (record.name || record.title)) || `Port ${port}`;
+  }
+
+  // Renders immediately from client-side state alone -- no fetch is
+  // involved, so this (and the clear action) stay visible and operable
+  // while a service-history request is pending and after it fails, letting
+  // the operator navigate out of a failed investigation (UI-SPEC E5).
+  function renderInvestigatingIndicator() {
+    const indicator = $('investigating-service');
+    const clearButton = $('clear-selected-service');
+    const port = state.preferences.selectedService;
+    if (indicator) {
+      if (port === null) {
+        indicator.hidden = true;
+        indicator.textContent = '';
+        indicator.removeAttribute('title');
+      } else {
+        const name = selectedServiceName();
+        indicator.hidden = false;
+        indicator.textContent = `Investigating: ${name}`;
+        indicator.title = name;
+      }
+    }
+    if (clearButton) clearButton.hidden = port === null;
+  }
+
+  // Populated from the same current snapshot's service list the Services
+  // table itself reads -- never a second, independently-fetched list.
+  function renderHistoryServicePicker() {
+    const picker = $('history-service-picker');
+    if (!picker) return;
+    const services = Array.isArray(state.snapshot && state.snapshot.services) ? state.snapshot.services : [];
+    const unique = new Map();
+    services.forEach((service) => {
+      const port = Number(service.port);
+      if (Number.isFinite(port) && !unique.has(port)) unique.set(port, service);
+    });
+    const sorted = [...unique.values()].sort((left, right) => (
+      String(left.name || left.title || '').localeCompare(String(right.name || right.title || ''))
+      || Number(left.port) - Number(right.port)
+    ));
+    const currentValue = state.preferences.selectedService === null ? '' : String(state.preferences.selectedService);
+    picker.replaceChildren(Object.assign(document.createElement('option'), {value: '', textContent: 'Select a service'}));
+    sorted.forEach((service) => {
+      const option = document.createElement('option');
+      option.value = String(Number(service.port));
+      option.textContent = `${service.name || service.title || `Port ${service.port}`} :${service.port}`;
+      picker.append(option);
+    });
+    picker.value = currentValue;
+  }
+
+  // The single entry point both affordances (a Services-table row control
+  // and the History picker) call -- a `null` port clears the selection.
+  // Re-renders every surface that must state the current selection from
+  // every source, then triggers a service-history render only when the
+  // History section is the one currently active (Task 1 action text) --
+  // selecting a service from the Services table must not itself issue a
+  // request while History is not even visible.
+  function setSelectedService(port) {
+    state.preferences.selectedService = validSelectedService(port);
+    savePreferences();
+    renderInvestigatingIndicator();
+    renderHistoryServicePicker();
+    renderServices();
+    if (state.activeSection === 'history') renderServiceHistorySection();
+  }
+
+  // Unsets the subject without touching the range -- clearing who is being
+  // investigated is not clearing the window being investigated.
+  function clearSelectedService() {
+    setSelectedService(null);
+  }
+
+  async function fetchServiceTelemetryHistory(port, startTs, endTs) {
+    const url = `/api/telemetry/history?kind=service&port=${encodeURIComponent(port)}&start_ts=${startTs}&end_ts=${endTs}`;
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json()).error || message; } catch (_) { /* bounded status evidence */ }
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  async function fetchServiceEventsHistory(port, startTs, endTs) {
+    const url = `/api/events/history?start_ts=${startTs}&end_ts=${endTs}&port=${encodeURIComponent(port)}`;
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json()).error || message; } catch (_) { /* bounded status evidence */ }
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  // Task 2 (D-11): the service's own telemetry history and the
+  // maintenance-suppressed spans that reclassify part of its band both
+  // fetched in parallel via Promise.allSettled -- one failing stream
+  // renders its own error while the other renders normally, and a failure
+  // here never disturbs the host stack above (Research Pattern 1).
+  async function fetchServiceHistory(port, startTs, endTs) {
+    const [telemetry, events] = await Promise.allSettled([
+      fetchServiceTelemetryHistory(port, startTs, endTs),
+      fetchServiceEventsHistory(port, startTs, endTs),
+    ]);
+    return {telemetry, events};
+  }
+
+  function serviceHistoryElement(suffix) {
+    return $(`service-history-${suffix}`);
+  }
+
+  function beginServiceHistoryLoadingState() {
+    const loading = serviceHistoryElement('loading');
+    const empty = serviceHistoryElement('empty');
+    const error = serviceHistoryElement('error');
+    if (loading) loading.hidden = false;
+    if (empty) empty.hidden = true;
+    if (error) error.hidden = true;
+  }
+
+  function renderServiceHistoryPlaceholder() {
+    const loading = serviceHistoryElement('loading');
+    const empty = serviceHistoryElement('empty');
+    const error = serviceHistoryElement('error');
+    if (loading) loading.hidden = true;
+    if (error) error.hidden = true;
+    if (empty) { empty.hidden = false; empty.textContent = 'Select a service to view its history'; }
+  }
+
+  // The service-history render entry point: a dedicated staleness-guard
+  // generation (never state.historyRequestGeneration, which belongs to the
+  // host stack's own render cycle) so a rapid service-selection change or
+  // range change can never let a stale response overwrite a newer one.
+  // With no service selected this issues no request at all -- the
+  // documented placeholder renders instead (UI-SPEC E3 "zero-one-many").
+  async function renderServiceHistorySection() {
+    const port = state.preferences.selectedService;
+    const requestId = ++state.serviceHistoryRequestGeneration;
+    if (port === null) {
+      renderServiceHistoryPlaceholder();
+      return;
+    }
+    const bounds = state.historyBounds || resolveRangeBounds();
+    beginServiceHistoryLoadingState();
+    const {telemetry, events} = await fetchServiceHistory(port, bounds.start_ts, bounds.end_ts);
+    if (requestId !== state.serviceHistoryRequestGeneration) return;
+    const loading = serviceHistoryElement('loading');
+    if (loading) loading.hidden = true;
+    const errorEl = serviceHistoryElement('error');
+    const telemetryOutcome = telemetry.status === 'fulfilled' ? telemetry.value : null;
+    const eventsOutcome = events.status === 'fulfilled' ? events.value : null;
+    if (!telemetryOutcome && !eventsOutcome) {
+      if (errorEl) {
+        const reason = serverSuppliedReason(telemetry.reason) || serverSuppliedReason(events.reason);
+        errorEl.textContent = `This service history could not load.${reason ? ` Server reported: ${reason}` : ''}`;
+        errorEl.hidden = false;
+      }
+      return;
+    }
+    if (errorEl) errorEl.hidden = true;
+    // Task 2/3 extend this branch to render the state band, latency chart,
+    // availability figure, and failure-class chips from telemetryOutcome
+    // (points) and eventsOutcome (episodes).
   }
 
   // ------------------------------------------------------------------
@@ -1353,6 +1562,10 @@
     syncHistoryPresetButtons();
     renderRangeFields();
     renderBackControl();
+    // D-16: the indicator/picker state from every source (client-side, no
+    // fetch involved) every time History is entered or the range changes.
+    renderInvestigatingIndicator();
+    renderHistoryServicePicker();
     const applyButton = $('apply-custom-range');
     if (applyButton) applyButton.disabled = true;
     HOST_METRIC_ORDER.forEach((metric) => beginMetricLoadingState(metric));
@@ -1379,6 +1592,10 @@
       renderSharedTimeAxis(bounds.start_ts, bounds.end_ts);
     }
     if (applyButton) applyButton.disabled = false;
+    // D-11: the selected service's own history is an independent fetch,
+    // never awaited here -- a slow or failed service-history request must
+    // never delay or blank the host stack above it (Research Pattern 1).
+    renderServiceHistorySection();
   }
 
   // D-04: validated before assignment, routed through setInvestigationRange
@@ -1934,7 +2151,30 @@
       details.textContent = expanded ? 'Hide details' : 'Show details';
       details.setAttribute('aria-expanded', String(expanded)); details.setAttribute('aria-controls', detailId);
       details.addEventListener('click', () => toggleServiceDetails(port));
-      identity.append(name, portLabel, details);
+      // D-16 (Phase 4 04-06): a selection control that publishes this
+      // service's port for the History section's own views to read --
+      // never a value this row's own rendering, sort, filter, or expand
+      // behaviour consumes. Toggling it off (already-selected) clears the
+      // selection rather than leaving it unreachable from this row.
+      // `position: absolute` (advanced.css) takes it entirely out of the
+      // identity grid's row/column sizing -- name/portLabel/details keep
+      // their exact original grid placement. Two in-flow placements (a
+      // stacked third row, and an inline flex sibling of name) were each
+      // found to distort .service-details-toggle's own spanned-row height
+      // at the narrow (<=959px) breakpoint, intercepting the next row's
+      // clicks (Rule 1 fix) -- only removing it from grid flow proved
+      // stable. A single-glyph label keeps its own footprint tiny.
+      const investigating = state.preferences.selectedService === port;
+      const investigate = document.createElement('button');
+      investigate.type = 'button'; investigate.id = `service-investigate-${port}`;
+      investigate.className = 'service-investigate-toggle';
+      investigate.textContent = investigating ? '★' : '☆';
+      investigate.setAttribute('aria-pressed', String(investigating));
+      const investigateLabel = `${investigating ? 'Stop investigating' : 'Investigate'} ${displayValue(service.name)}`;
+      investigate.setAttribute('aria-label', investigateLabel);
+      investigate.title = investigateLabel;
+      investigate.addEventListener('click', () => setSelectedService(investigating ? null : port));
+      identity.append(name, portLabel, details, investigate);
       const status = document.createElement('td');
       const availability = serviceAvailability(service);
       status.textContent = `● ${availability}`;
@@ -1991,6 +2231,11 @@
     renderServices();
     renderPipeline(snapshot.pipeline || {});
     renderSettings(snapshot.settings || {});
+    // D-16: the picker and indicator both read the same current snapshot's
+    // service list -- refreshed on every successful poll so a renamed or
+    // newly-discovered service is reflected without a page reload.
+    renderHistoryServicePicker();
+    renderInvestigatingIndicator();
   }
 
   function updateRefreshEvidence() {
@@ -2135,6 +2380,21 @@
   });
   const historyNavButton = document.querySelector('[data-section="history"]');
   if (historyNavButton) historyNavButton.addEventListener('click', renderHistorySection);
+  // D-16 (Phase 4 04-06): the History picker and the Clear action both call
+  // the same setSelectedService/clearSelectedService entry points the
+  // Services table row control uses -- one carried selection, published and
+  // consumed from either side.
+  renderInvestigatingIndicator();
+  renderHistoryServicePicker();
+  const historyServicePicker = $('history-service-picker');
+  if (historyServicePicker) {
+    historyServicePicker.addEventListener('change', () => {
+      const value = historyServicePicker.value;
+      setSelectedService(value === '' ? null : Number(value));
+    });
+  }
+  const clearSelectedServiceButton = $('clear-selected-service');
+  if (clearSelectedServiceButton) clearSelectedServiceButton.addEventListener('click', clearSelectedService);
   // refreshCurrentDiagnosis() must be invoked before fetchRuntimeConfig(): both
   // dispatch their fetch() call synchronously (before their first await), so
   // this order keeps /api/advanced/current the first network call the page

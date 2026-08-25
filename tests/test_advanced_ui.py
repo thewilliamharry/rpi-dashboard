@@ -596,8 +596,12 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertEqual(fixture['calls'], initial_calls + 1)
             stored = page.evaluate("JSON.parse(localStorage.getItem('beacon-advanced-preferences-v1'))")
             # 04-01/D-04: historyRange is the new validated key this phase adds
-            # to the same versioned preference object.
-            self.assertEqual(set(stored), {'refreshSeconds', 'paused', 'density', 'range', 'filters', 'historyRange'})
+            # to the same versioned preference object. 04-06/D-16 adds
+            # selectedService alongside it, the carried service selection.
+            self.assertEqual(
+                set(stored),
+                {'refreshSeconds', 'paused', 'density', 'range', 'filters', 'historyRange', 'selectedService'},
+            )
             self.assertNotIn('snapshot', stored)
         finally:
             page.close()

@@ -45,10 +45,37 @@
 #services-table thead th[aria-sort="descending"] button::after { content: ' ↓'; }
 .service-row { min-height: 44px; }
 .service-row > * { height: 44px; }
-.service-identity { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; min-width: 210px; }
-.service-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.service-identity { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; min-width: 210px; position: relative; }
+.service-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 18px; }
 .service-port { grid-column: 1; color: var(--muted); }
 .service-details-toggle { grid-column: 2; grid-row: 1 / span 2; }
+/* D-16 (Phase 4 04-06): the investigate toggle is `position: absolute`, so
+   it takes NO part in the identity grid's row/column sizing -- name, port
+   and details keep their exact original grid placement and measured
+   heights untouched. Two in-flow approaches (a stacked third row, and an
+   inline flex sibling of name) were both found to distort
+   .service-details-toggle's own spanned-row height at the narrow
+   (<=959px) breakpoint, intercepting the next row's clicks (Rule 1 fix);
+   only removing this control from grid flow entirely proved stable.
+   An explicit fixed `width`/`height` is required too: a grid's
+   absolutely-positioned child with no explicit grid-column/grid-row
+   defaults its containing block to the WHOLE grid area (both columns), and
+   an auto-width block box fills that entire containing block regardless of
+   `justify-self` -- discovered only once it silently covered
+   .service-details-toggle in column 2 and intercepted its hover/click
+   (Rule 1 fix). `.service-name`'s reserved left padding keeps the toggle
+   from covering the name's leading characters. The `#services-table`
+   prefix raises this rule's specificity above the existing
+   `#services-table th button { width: 100%; ...}`/`min-height: 44px`
+   rules above (line 38/43), which otherwise silently win over a bare
+   class selector on any button inside a `<th>` in this table and were
+   the actual, non-obvious source of the stretch (Rule 1 fix). */
+#services-table .service-investigate-toggle {
+  position: absolute; top: 0; left: 0;
+  width: 18px; height: 18px; min-width: 18px; min-height: 18px; line-height: 1; padding: 0; font-size: 12px;
+  color: var(--muted); background: transparent; border: none; cursor: pointer;
+}
+#services-table .service-investigate-toggle[aria-pressed="true"] { color: var(--accent); }
 .service-detail-row td { padding: 12px; background: var(--bg2); }
 .service-detail-evidence { display: grid; gap: 8px; }
 /* D-06/03.1-UI-SPEC.md "Color": the maintenance status value reuses the existing
@@ -153,3 +180,14 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
    per the UI-SPEC accent reservation. */
 .hist-drag-select { position: fixed; z-index: 15; pointer-events: none; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .hist-drag-select[hidden] { display: none; }
+
+/* Phase 4 (04-06) -- History header: carried service selection (D-16). The
+   Services-table row control itself (.service-primary/.service-investigate-toggle)
+   is declared above, alongside the identity-cell rules it shares a
+   positioning context with. */
+.hist-investigating-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 16px; }
+.hist-investigating-row label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.hist-investigating-row select { min-height: 44px; color: var(--text); background: var(--bg3); border: 1px solid var(--border); padding: 0 10px; font: inherit; }
+.investigating-service { font-weight: 600; overflow-wrap: anywhere; max-width: 320px; }
+.hist-clear-service { min-height: 44px; min-width: 44px; color: var(--accent); background: transparent; border: 1px solid var(--accent); padding: 0 12px; font: inherit; cursor: pointer; }
+.hist-service-group { margin-top: 16px; }
