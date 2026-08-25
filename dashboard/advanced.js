@@ -1,6 +1,6 @@
 (() => {
   const PREFS_KEY = 'beacon-advanced-preferences-v1';
-  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}, historyRange: {preset: '24h'}};
+  const DEFAULT_PREFERENCES = {refreshSeconds: 15, paused: false, density: null, range: '24h', filters: {}, historyRange: {preset: '24h'}, selectedService: null};
   const REFRESH_CHOICES = new Set([5, 15, 30, 60]);
   // D-02 preset ladder, mapped onto the Phase 2 retention-tier boundaries.
   const HISTORY_PRESETS = {'1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000, '90d': 7776000};
@@ -10,6 +10,12 @@
   const HIST_CHART_HEIGHT = 96;
   const HIST_STRIP_HEIGHT = 16;
   const HIST_MIN_SEGMENT_WIDTH = 3;
+  // D-11 (Phase 4 04-06): the state band's own four-state wire vocabulary --
+  // the exact literals dashboard/beacon/diagnosis.py already uses for
+  // current service availability. No fifth state, no new color.
+  const SERVICE_BAND_STATES = ['online', 'offline', 'unknown', 'maintenance'];
+  const MIN_BAND_SEGMENT_PX = 3;
+  const HIST_BAND_HEIGHT = 32;
   // D-07: same order and same keys as the server's HOST_METRICS tuple
   // (dashboard/beacon/telemetry.py:12), so selector values and DOM ids agree.
   const HOST_METRIC_ORDER = ['cpu', 'ram', 'disk', 'temp'];
@@ -42,6 +48,11 @@
     // persisted (loadPreferences/savePreferences never touch this) and never
     // the URL. rangeStack holds {descriptor, origin, label} entries.
     rangeStack: [], historyBounds: null,
+    // D-16 (Phase 4 04-06): a dedicated staleness-guard generation for the
+    // selected-service history fetch, independent of historyRequestGeneration
+    // (the host stack's own guard) -- a service selection change must not
+    // discard an in-flight host-metric render, and vice versa.
+    serviceHistoryRequestGeneration: 0,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -81,6 +92,19 @@
     return {preset};
   }
 
+  // D-16/T-04-04: a service selection carried between the Phase 3 Services
+  // table and the History section. Only `null` or an integer port in
+  // 1..65535 is accepted -- a numeric-looking string ("8080"), a negative or
+  // out-of-range number, an object, or an array all resolve to no selection.
+  // The server independently re-validates the port before it ever reaches
+  // SQLite (`_history_selector`), so a hostile stored value cannot reach a
+  // query as anything but this same bounded integer.
+  function validSelectedService(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) return null;
+    return value;
+  }
+
   function loadPreferences() {
     let stored = {};
     try {
@@ -95,6 +119,7 @@
       range: stored.range === '24h' ? stored.range : DEFAULT_PREFERENCES.range,
       filters: validFilters(stored.filters),
       historyRange: validHistoryRange(stored.historyRange),
+      selectedService: validSelectedService(stored.selectedService),
     };
     state.filters = state.preferences.filters;
     return state.preferences;
@@ -109,6 +134,7 @@
       range: prefs.range,
       filters: validFilters(state.filters),
       historyRange: validHistoryRange(prefs.historyRange),
+      selectedService: validSelectedService(prefs.selectedService),
     }));
   }
 
@@ -325,6 +351,595 @@
       return {start_ts: descriptor.custom.start_ts, end_ts: descriptor.custom.end_ts};
     }
     return boundsForPreset(descriptor && descriptor.preset);
+  }
+
+  // ------------------------------------------------------------------
+  // Selected-service history (Phase 4 04-06, D-16, T-04-13): one carried,
+  // read-only service selection published by the Phase 3 Services table and
+  // the History service picker alike, consumed only by this section's own
+  // service-history group. Neither affordance alters the row's existing
+  // data, sort, filter behaviour, or expand toggle, and neither ever adds a
+  // parameter to /api/advanced/current -- that request stays parameterless
+  // and byte-identical before and after a selection (T-04-13's own gate is
+  // the existing Phase 3 suites re-run at the plan's <verify> boundary).
+  // ------------------------------------------------------------------
+
+  function selectedServiceRecord() {
+    const port = state.preferences.selectedService;
+    if (port === null) return null;
+    const services = Array.isArray(state.snapshot && state.snapshot.services) ? state.snapshot.services : [];
+    return services.find((service) => Number(service.port) === port) || null;
+  }
+
+  function selectedServiceName() {
+    const port = state.preferences.selectedService;
+    if (port === null) return null;
+    const record = selectedServiceRecord();
+    return (record && (record.name || record.title)) || `Port ${port}`;
+  }
+
+  // Renders immediately from client-side state alone -- no fetch is
+  // involved, so this (and the clear action) stay visible and operable
+  // while a service-history request is pending and after it fails, letting
+  // the operator navigate out of a failed investigation (UI-SPEC E5).
+  function renderInvestigatingIndicator() {
+    const indicator = $('investigating-service');
+    const clearButton = $('clear-selected-service');
+    const port = state.preferences.selectedService;
+    if (indicator) {
+      if (port === null) {
+        indicator.hidden = true;
+        indicator.textContent = '';
+        indicator.removeAttribute('title');
+      } else {
+        const name = selectedServiceName();
+        indicator.hidden = false;
+        indicator.textContent = `Investigating: ${name}`;
+        indicator.title = name;
+      }
+    }
+    if (clearButton) clearButton.hidden = port === null;
+  }
+
+  // Populated from the same current snapshot's service list the Services
+  // table itself reads -- never a second, independently-fetched list.
+  function renderHistoryServicePicker() {
+    const picker = $('history-service-picker');
+    if (!picker) return;
+    const services = Array.isArray(state.snapshot && state.snapshot.services) ? state.snapshot.services : [];
+    const unique = new Map();
+    services.forEach((service) => {
+      const port = Number(service.port);
+      if (Number.isFinite(port) && !unique.has(port)) unique.set(port, service);
+    });
+    const sorted = [...unique.values()].sort((left, right) => (
+      String(left.name || left.title || '').localeCompare(String(right.name || right.title || ''))
+      || Number(left.port) - Number(right.port)
+    ));
+    const currentValue = state.preferences.selectedService === null ? '' : String(state.preferences.selectedService);
+    picker.replaceChildren(Object.assign(document.createElement('option'), {value: '', textContent: 'Select a service'}));
+    sorted.forEach((service) => {
+      const option = document.createElement('option');
+      option.value = String(Number(service.port));
+      option.textContent = `${service.name || service.title || `Port ${service.port}`} :${service.port}`;
+      picker.append(option);
+    });
+    picker.value = currentValue;
+  }
+
+  // The single entry point both affordances (a Services-table row control
+  // and the History picker) call -- a `null` port clears the selection.
+  // Re-renders every surface that must state the current selection from
+  // every source, then triggers a service-history render only when the
+  // History section is the one currently active (Task 1 action text) --
+  // selecting a service from the Services table must not itself issue a
+  // request while History is not even visible.
+  function setSelectedService(port) {
+    state.preferences.selectedService = validSelectedService(port);
+    savePreferences();
+    renderInvestigatingIndicator();
+    renderHistoryServicePicker();
+    renderServices();
+    if (state.activeSection === 'history') renderServiceHistorySection();
+  }
+
+  // Unsets the subject without touching the range -- clearing who is being
+  // investigated is not clearing the window being investigated.
+  function clearSelectedService() {
+    setSelectedService(null);
+  }
+
+  async function fetchServiceTelemetryHistory(port, startTs, endTs) {
+    const url = `/api/telemetry/history?kind=service&port=${encodeURIComponent(port)}&start_ts=${startTs}&end_ts=${endTs}`;
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json()).error || message; } catch (_) { /* bounded status evidence */ }
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  async function fetchServiceEventsHistory(port, startTs, endTs) {
+    const url = `/api/events/history?start_ts=${startTs}&end_ts=${endTs}&port=${encodeURIComponent(port)}`;
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json()).error || message; } catch (_) { /* bounded status evidence */ }
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  // Task 2 (D-11): the service's own telemetry history and the
+  // maintenance-suppressed spans that reclassify part of its band both
+  // fetched in parallel via Promise.allSettled -- one failing stream
+  // renders its own error while the other renders normally, and a failure
+  // here never disturbs the host stack above (Research Pattern 1).
+  async function fetchServiceHistory(port, startTs, endTs) {
+    const [telemetry, events] = await Promise.allSettled([
+      fetchServiceTelemetryHistory(port, startTs, endTs),
+      fetchServiceEventsHistory(port, startTs, endTs),
+    ]);
+    return {telemetry, events};
+  }
+
+  function serviceHistoryElement(suffix) {
+    return $(`service-history-${suffix}`);
+  }
+
+  function beginServiceHistoryLoadingState() {
+    const loading = serviceHistoryElement('loading');
+    const empty = serviceHistoryElement('empty');
+    const error = serviceHistoryElement('error');
+    const content = serviceHistoryElement('content');
+    if (loading) loading.hidden = false;
+    if (empty) empty.hidden = true;
+    if (error) error.hidden = true;
+    // Never a zeroed band or chart while loading (UI-SPEC E3 "loading") --
+    // any previously-rendered content is hidden until the new fetch settles.
+    if (content) content.hidden = true;
+  }
+
+  function renderServiceHistoryPlaceholder() {
+    const loading = serviceHistoryElement('loading');
+    const empty = serviceHistoryElement('empty');
+    const error = serviceHistoryElement('error');
+    const content = serviceHistoryElement('content');
+    if (loading) loading.hidden = true;
+    if (error) error.hidden = true;
+    if (content) content.hidden = true;
+    if (empty) { empty.hidden = false; empty.textContent = 'Select a service to view its history'; }
+  }
+
+  // ------------------------------------------------------------------
+  // The state band (Phase 4 04-06 Task 2, D-11): a 32px horizontal bar
+  // spanning the shared time axis, directly above its own latency chart.
+  // ------------------------------------------------------------------
+
+  // Turns each episode the events fetch returned into the exact span this
+  // band must reclassify from `offline` to `maintenance`: a fully
+  // maintenance-suppressed episode's whole down-to-recovered span, or (for
+  // an overrun episode) only the grace-covered portion before the fault
+  // split takes over -- never the post-grace fault portion, which is
+  // genuine unplanned downtime per plan 04-02's own split.
+  function maintenanceSuppressedSpans(episodes, fallbackEndTs) {
+    const spans = [];
+    (Array.isArray(episodes) ? episodes : []).forEach((episode) => {
+      if (!episode || typeof episode !== 'object') return;
+      const downTs = finiteMeasurement(episode.down_ts);
+      if (downTs === null) return;
+      if (episode.overrun) {
+        const graceSeconds = finiteMeasurement(episode.grace_seconds);
+        if (graceSeconds !== null && graceSeconds > 0) {
+          spans.push({start_ts: downTs, end_ts: downTs + graceSeconds});
+        }
+        return;
+      }
+      if (episode.suppressed_reason) {
+        const recoveredTs = finiteMeasurement(episode.recovered_ts);
+        const endTs = recoveredTs === null ? fallbackEndTs : recoveredTs;
+        if (Number.isFinite(endTs) && endTs > downTs) spans.push({start_ts: downTs, end_ts: endTs});
+      }
+    });
+    return spans;
+  }
+
+  function intervalOverlapsAnySpan(startTs, endTs, spans) {
+    return spans.some((span) => startTs < span.end_ts && endTs > span.start_ts);
+  }
+
+  // Splits each bucket into sub-segments whose widths are proportional to
+  // its real online/offline/unknown+gap seconds -- unknown and gap seconds
+  // are folded into one `unknown` sub-segment because the band's own
+  // four-state vocabulary carries no fifth "gap" state; both mean "we did
+  // not observe a definite online/offline state" to an operator reading
+  // the band. A bucket with zero online and zero offline seconds renders
+  // as `unknown` across its full width rather than being split at all. An
+  // `offline` sub-segment overlapping a maintenance-suppressed span
+  // becomes `maintenance` instead. A bucket whose split produces both an
+  // `online` and an `offline` sub-segment (the "mixed bucket" case) is
+  // marked `mixedWith` so the render step can disclose the exact counts
+  // and the below-resolution ordering caveat -- and so mergeBandSegments
+  // never silently folds that disclosure into a neighbour's duration.
+  function deriveBandSegments(points, episodes, resolutionSeconds, rangeEndTs) {
+    const maintenanceSpans = maintenanceSuppressedSpans(episodes, rangeEndTs);
+    const segments = [];
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      const bucketStart = point.ts;
+      if (!Number.isFinite(bucketStart)) return;
+      const span = Number.isFinite(resolutionSeconds) && resolutionSeconds > 0 ? resolutionSeconds : 1;
+      const bucketEnd = bucketStart + span;
+      const online = Math.max(0, finiteMeasurement(point.online_seconds) || 0);
+      const offline = Math.max(0, finiteMeasurement(point.offline_seconds) || 0);
+      const unknown = Math.max(0, finiteMeasurement(point.unknown_seconds) || 0)
+        + Math.max(0, finiteMeasurement(point.gap_seconds) || 0);
+      if (online === 0 && offline === 0) {
+        segments.push({start_ts: bucketStart, end_ts: bucketEnd, state: 'unknown'});
+        return;
+      }
+      const parts = [];
+      if (online > 0) parts.push({seconds: online, state: 'online'});
+      if (offline > 0) parts.push({seconds: offline, state: 'offline'});
+      if (unknown > 0) parts.push({seconds: unknown, state: 'unknown'});
+      const totalSeconds = online + offline + unknown;
+      const mixed = online > 0 && offline > 0 ? {onlineSeconds: online, offlineSeconds: offline} : null;
+      let cursor = bucketStart;
+      parts.forEach((part, index) => {
+        const isLast = index === parts.length - 1;
+        const fraction = totalSeconds > 0 ? part.seconds / totalSeconds : 0;
+        const segStart = cursor;
+        const segEnd = isLast ? bucketEnd : segStart + fraction * (bucketEnd - bucketStart);
+        let state = part.state;
+        if (state === 'offline' && intervalOverlapsAnySpan(segStart, segEnd, maintenanceSpans)) {
+          state = 'maintenance';
+        }
+        segments.push({start_ts: segStart, end_ts: segEnd, state, mixedWith: mixed});
+        cursor = segEnd;
+      });
+    });
+    return segments;
+  }
+
+  // Merges only adjacent segments carrying the same state into one segment
+  // with one duration label -- adjacent segments of different states are
+  // never merged, even when either would render below MIN_BAND_SEGMENT_PX,
+  // so a genuine state transition can never be compressed out of
+  // existence. A segment carrying a `mixedWith` disclosure never merges
+  // (in either direction) -- its exact per-bucket counts would otherwise
+  // be silently absorbed into a neighbour's plain duration.
+  function mergeBandSegments(segments) {
+    const merged = [];
+    (Array.isArray(segments) ? segments : []).forEach((segment) => {
+      const last = merged[merged.length - 1];
+      const canMerge = last && !last.mixedWith && !segment.mixedWith
+        && last.state === segment.state && last.end_ts === segment.start_ts;
+      if (canMerge) {
+        last.end_ts = segment.end_ts;
+      } else {
+        merged.push({...segment});
+      }
+    });
+    return merged;
+  }
+
+  // The exact disclosure text a segment's <title> and aria-label share --
+  // reachable on hover (native SVG title) and via the shared, rAF-coalesced
+  // tooltip on keyboard focus, matching the host chart's own point-tooltip
+  // idiom (renderPointTooltip/schedulePointTooltipUpdate).
+  function bandSegmentTooltipText(segment) {
+    const duration = formatMergedDuration(segment.end_ts - segment.start_ts);
+    const startLabel = formatLocalTimestamp(segment.start_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    const endLabel = formatLocalTimestamp(segment.end_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    let text = `${segment.state} — ${startLabel} to ${endLabel} (${duration})`;
+    if (segment.mixedWith) {
+      text += ` — online ${segment.mixedWith.onlineSeconds}s, offline ${segment.mixedWith.offlineSeconds}s observed in this bucket; the ordering within the bucket is below the displayed resolution.`;
+    }
+    return text;
+  }
+
+  let pendingBandTooltipFrame = null;
+
+  // The same shared #history-chart-tooltip element and rAF coalescing the
+  // host chart's point tooltips already use -- reused here with plain text
+  // rather than a (metric, point) pair, since a band segment's disclosure
+  // is a state/duration sentence, not a single measured value.
+  function scheduleBandTooltipUpdate(text, clientX, clientY) {
+    if (pendingBandTooltipFrame !== null) cancelAnimationFrame(pendingBandTooltipFrame);
+    pendingBandTooltipFrame = requestAnimationFrame(() => {
+      pendingBandTooltipFrame = null;
+      const tooltip = $('history-chart-tooltip');
+      if (tooltip) tooltip.textContent = text;
+      showPointTooltipAt(clientX, clientY);
+    });
+  }
+
+  function renderServiceStateBand(segments, requestedRange) {
+    const svg = $('service-state-band');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    (Array.isArray(segments) ? segments : []).forEach((segment) => {
+      const x1 = histTimeToX(segment.start_ts, requestedRange.start_ts, requestedRange.end_ts);
+      const x2 = histTimeToX(segment.end_ts, requestedRange.start_ts, requestedRange.end_ts);
+      const width = Math.max(MIN_BAND_SEGMENT_PX, x2 - x1);
+      const rect = document.createElementNS(SVG_NS, 'rect');
+      rect.setAttribute('x', String(x1));
+      rect.setAttribute('y', '0');
+      rect.setAttribute('width', String(width));
+      rect.setAttribute('height', String(HIST_BAND_HEIGHT));
+      rect.setAttribute('class', `hist-band-segment hist-band-${segment.state}`);
+      rect.setAttribute('tabindex', '0');
+      rect.setAttribute('role', 'img');
+      const text = bandSegmentTooltipText(segment);
+      rect.setAttribute('aria-label', text);
+      const title = document.createElementNS(SVG_NS, 'title');
+      title.textContent = text;
+      rect.append(title);
+      rect.addEventListener('pointerover', (event) => scheduleBandTooltipUpdate(text, event.clientX, event.clientY));
+      rect.addEventListener('pointerout', hidePointTooltip);
+      rect.addEventListener('focus', () => {
+        const box = rect.getBoundingClientRect();
+        scheduleBandTooltipUpdate(text, box.left, box.top);
+      });
+      rect.addEventListener('blur', hidePointTooltip);
+      svg.append(rect);
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // The latency chart (Phase 4 04-06 Task 2): reuses buildSeriesPath and
+  // the coverage-strip machinery verbatim -- the same gap-breaking rule,
+  // the same five-reason vocabulary, its own strip element. No state
+  // shading is ever applied to #service-latency-chart -- that visual
+  // channel belongs exclusively to the coverage strip (D-11).
+  // ------------------------------------------------------------------
+
+  // Latency has no host-metric-style fixed domain (0-100) or documented
+  // threshold -- an observed-range-plus-10%-pad domain, floored at 0,
+  // mirrors metricValueDomain's own temperature branch.
+  function latencyValueDomain(points) {
+    const observed = (Array.isArray(points) ? points : [])
+      .map((point) => finiteMeasurement(point.latency_avg))
+      .filter((value) => value !== null);
+    if (!observed.length) return [0, 1];
+    const min = Math.min(0, ...observed);
+    const max = Math.max(...observed);
+    const span = max - min || 1;
+    const pad = span * 0.1;
+    return [min - pad, max + pad];
+  }
+
+  function renderLatencyChart(points, coverage, requestedRange) {
+    const svg = $('service-latency-chart');
+    if (!svg) return;
+    const path = svg.querySelector('.hist-series');
+    const seriesPoints = (Array.isArray(points) ? points : [])
+      .map((point) => ({ts: point.ts, avg_value: finiteMeasurement(point.latency_avg)}));
+    const domain = latencyValueDomain(points);
+    const scale = {
+      xFor: (ts) => histTimeToX(ts, requestedRange.start_ts, requestedRange.end_ts),
+      yFor: (value) => histValueToY(value, domain),
+    };
+    if (path) path.setAttribute('d', buildSeriesPath(seriesPoints, coverage, scale));
+    // renderCoverageStrip keys its target element off `strip-${metric}` --
+    // passing 'service-latency' targets #strip-service-latency without any
+    // new lookup logic.
+    renderCoverageStrip('service-latency', coverage, requestedRange);
+  }
+
+  // ------------------------------------------------------------------
+  // Time-weighted availability and failure classes (Phase 4 04-06 Task 3).
+  // ------------------------------------------------------------------
+
+  // Sums online_seconds/offline_seconds across every bucket and returns the
+  // ratio plus the unknown/gap totals reported separately -- a pure sum, so
+  // it is invariant to the order `points` is processed in. Unknown and gap
+  // seconds are excluded from BOTH the numerator and the denominator:
+  // folding either in would turn "we did not observe" into either a
+  // fabricated outage or a fabricated uptime. `availability` is `null`
+  // when online+offline is zero -- a range with no observed service
+  // seconds asserts nothing about that window (03.1 D-09).
+  function timeWeightedAvailability(points) {
+    let online = 0;
+    let offline = 0;
+    let unknown = 0;
+    let gap = 0;
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      online += Math.max(0, finiteMeasurement(point.online_seconds) || 0);
+      offline += Math.max(0, finiteMeasurement(point.offline_seconds) || 0);
+      unknown += Math.max(0, finiteMeasurement(point.unknown_seconds) || 0);
+      gap += Math.max(0, finiteMeasurement(point.gap_seconds) || 0);
+    });
+    const observedSeconds = online + offline;
+    return {
+      availability: observedSeconds > 0 ? online / observedSeconds : null,
+      observedSeconds, unknownSeconds: unknown, gapSeconds: gap,
+    };
+  }
+
+  // The seconds of this range's downtime that fall inside a
+  // maintenance-suppressed or overrun-grace span -- reuses Task 2's own
+  // maintenanceSuppressedSpans so the band's reclassification and this
+  // attribution figure can never quietly disagree about which seconds are
+  // maintenance-covered. Clipped to the requested range, since a span may
+  // extend past either edge (an open suppressed episode, or one that began
+  // before the range).
+  function maintenanceAttributedSeconds(episodes, requestedRange) {
+    const spans = maintenanceSuppressedSpans(episodes, requestedRange.end_ts);
+    let total = 0;
+    spans.forEach((span) => {
+      const start = Math.max(span.start_ts, requestedRange.start_ts);
+      const end = Math.min(span.end_ts, requestedRange.end_ts);
+      if (end > start) total += end - start;
+    });
+    return total;
+  }
+
+  // The detail region's own exact-count formatter: unlike formatSpan (the
+  // largest-sensible-unit formatter the state-duration/maintenance-window
+  // cells use), the observed/unknown/gap/attributed second counts here are
+  // disclosed at exact second precision -- rounding 500 unknown seconds to
+  // "8 minutes" would be a genuine loss of the evidence this detail exists
+  // to disclose.
+  function exactSecondsLabel(value) {
+    const measurement = finiteMeasurement(value);
+    return measurement === null ? 'Unknown' : `${measurement} second${measurement === 1 ? '' : 's'}`;
+  }
+
+  // Writes the 28px headline percentage (or `Unknown`, never `0%`/`100%`)
+  // beside the range bounds, and the observed/unknown/gap/maintenance-
+  // attributed seconds into the expandable detail. Per 03.1 D-09 the
+  // headline is never adjusted for maintenance -- attribution appears only
+  // here, in the detail, and no excluding-maintenance figure is ever
+  // rendered at the headline's own weight.
+  function renderAvailability(result, requestedRange, episodes) {
+    const headline = $('service-availability');
+    const rangeLabel = `${formatLocalTimestamp(requestedRange.start_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})} – ${formatLocalTimestamp(requestedRange.end_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})}`;
+    if (headline) {
+      const value = result && result.availability !== null
+        ? `${(result.availability * 100).toFixed(1)}%`
+        : 'Unknown';
+      headline.textContent = `Availability: ${value} (${rangeLabel})`;
+    }
+    const detailBody = $('service-availability-detail-body');
+    if (detailBody) {
+      while (detailBody.firstChild) detailBody.removeChild(detailBody.firstChild);
+      const attributedSeconds = maintenanceAttributedSeconds(episodes, requestedRange);
+      [
+        `Observed: ${exactSecondsLabel(result ? result.observedSeconds : null)}`,
+        `Unknown: ${exactSecondsLabel(result ? result.unknownSeconds : null)}`,
+        `Collection gap: ${exactSecondsLabel(result ? result.gapSeconds : null)}`,
+        `Maintenance-attributed downtime: ${exactSecondsLabel(attributedSeconds)}`,
+      ].forEach((text) => {
+        const row = document.createElement('p');
+        row.textContent = text;
+        detailBody.append(row);
+      });
+    }
+  }
+
+  // Sums each bucket's failure_class_counts map across the range, reusing
+  // the server's own failure-class vocabulary verbatim (http_{code},
+  // invalid_target, invalid_url, not_responding, timeout,
+  // connection_error, request_error, probe_error) -- no display name is
+  // ever invented for a class the server did not emit.
+  function aggregateFailureClasses(points) {
+    const counts = {};
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      const perBucket = point.failure_class_counts;
+      if (!perBucket || typeof perBucket !== 'object' || Array.isArray(perBucket)) return;
+      Object.entries(perBucket).forEach(([failureClass, count]) => {
+        const value = finiteMeasurement(count);
+        if (value === null) return;
+        counts[failureClass] = (counts[failureClass] || 0) + value;
+      });
+    });
+    return counts;
+  }
+
+  // One `{class}: {count}` chip per class, sorted by descending count then
+  // ascending class name so equal counts never reorder between identical
+  // requests -- preceded by an explicit `countLabel` count (`0 failure
+  // classes` rather than an omitted list) so the list's own completeness is
+  // never in question.
+  function renderFailureClassChips(counts) {
+    const container = $('failure-class-chips');
+    if (!container) return;
+    while (container.firstChild) container.removeChild(container.firstChild);
+    const entries = Object.entries(counts || {}).sort((left, right) => (
+      right[1] - left[1] || left[0].localeCompare(right[0])
+    ));
+    const summary = document.createElement('p');
+    summary.className = 'hist-failure-chip-count';
+    // Not countLabel (that generic pluralizer only ever appends a bare
+    // "s", which would render "classs") -- "class" pluralizes irregularly
+    // ("classes"), so this list owns its own exact copy rule instead.
+    summary.textContent = entries.length === 1 ? '1 failure class' : `${entries.length} failure classes`;
+    container.append(summary);
+    const list = document.createElement('div');
+    list.className = 'hist-failure-chip-list';
+    entries.forEach(([failureClass, count]) => {
+      const chip = document.createElement('span');
+      chip.className = 'hist-failure-chip';
+      chip.textContent = `${failureClass}: ${count}`;
+      list.append(chip);
+    });
+    container.append(list);
+  }
+
+  // The service-history render entry point: a dedicated staleness-guard
+  // generation (never state.historyRequestGeneration, which belongs to the
+  // host stack's own render cycle) so a rapid service-selection change or
+  // range change can never let a stale response overwrite a newer one.
+  // With no service selected this issues no request at all -- the
+  // documented placeholder renders instead (UI-SPEC E3 "zero-one-many").
+  async function renderServiceHistorySection() {
+    const port = state.preferences.selectedService;
+    const requestId = ++state.serviceHistoryRequestGeneration;
+    if (port === null) {
+      renderServiceHistoryPlaceholder();
+      return;
+    }
+    const bounds = state.historyBounds || resolveRangeBounds();
+    beginServiceHistoryLoadingState();
+    const {telemetry, events} = await fetchServiceHistory(port, bounds.start_ts, bounds.end_ts);
+    if (requestId !== state.serviceHistoryRequestGeneration) return;
+    const loading = serviceHistoryElement('loading');
+    if (loading) loading.hidden = true;
+    const errorEl = serviceHistoryElement('error');
+    const telemetryOutcome = telemetry.status === 'fulfilled' ? telemetry.value : null;
+    const eventsOutcome = events.status === 'fulfilled' ? events.value : null;
+    if (!telemetryOutcome && !eventsOutcome) {
+      if (errorEl) {
+        const reason = serverSuppliedReason(telemetry.reason) || serverSuppliedReason(events.reason);
+        errorEl.textContent = `This service history could not load.${reason ? ` Server reported: ${reason}` : ''}`;
+        errorEl.hidden = false;
+      }
+      return;
+    }
+    // The band and the latency chart are both composed from telemetry's own
+    // points -- there is no independent "latency present, band absent (or
+    // the reverse)" split at this fetch boundary, since both read the same
+    // response. The events fetch is the one genuinely independent leg: on
+    // its own failure, the band still renders from telemetry alone (every
+    // offline second stays `offline` rather than being silently
+    // reclassified `maintenance`) and the latency chart is unaffected, so
+    // one stream's failure never blanks the whole service view.
+    const content = serviceHistoryElement('content');
+    if (!telemetryOutcome) {
+      if (content) content.hidden = true;
+      if (errorEl) {
+        const reason = serverSuppliedReason(telemetry.reason);
+        errorEl.textContent = `This service history could not load.${reason ? ` Server reported: ${reason}` : ''}`;
+        errorEl.hidden = false;
+      }
+      return;
+    }
+    const points = Array.isArray(telemetryOutcome.points) ? telemetryOutcome.points : [];
+    const coverage = telemetryOutcome.coverage;
+    const requestedRange = telemetryOutcome.requested || bounds;
+    const episodes = eventsOutcome && Array.isArray(eventsOutcome.episodes) ? eventsOutcome.episodes : [];
+    if (content) content.hidden = false;
+    if (errorEl) {
+      if (eventsOutcome) {
+        errorEl.hidden = true;
+      } else {
+        // Partial result (UI-SPEC E3): the band and chart still render
+        // fully from telemetry alone -- this note discloses only the
+        // missing maintenance-reclassification evidence, it never hides
+        // the content that did load.
+        const reason = serverSuppliedReason(events.reason);
+        errorEl.textContent = `Maintenance-suppressed spans could not load for this range; offline time below may include maintenance that has not been reclassified.${reason ? ` Server reported: ${reason}` : ''}`;
+        errorEl.hidden = false;
+      }
+    }
+    const segments = mergeBandSegments(
+      deriveBandSegments(points, episodes, telemetryOutcome.effective_resolution_seconds, requestedRange.end_ts),
+    );
+    renderServiceStateBand(segments, requestedRange);
+    renderLatencyChart(points, coverage, requestedRange);
+    renderAvailability(timeWeightedAvailability(points), requestedRange, episodes);
+    renderFailureClassChips(aggregateFailureClasses(points));
   }
 
   // ------------------------------------------------------------------
@@ -1353,6 +1968,10 @@
     syncHistoryPresetButtons();
     renderRangeFields();
     renderBackControl();
+    // D-16: the indicator/picker state from every source (client-side, no
+    // fetch involved) every time History is entered or the range changes.
+    renderInvestigatingIndicator();
+    renderHistoryServicePicker();
     const applyButton = $('apply-custom-range');
     if (applyButton) applyButton.disabled = true;
     HOST_METRIC_ORDER.forEach((metric) => beginMetricLoadingState(metric));
@@ -1379,6 +1998,10 @@
       renderSharedTimeAxis(bounds.start_ts, bounds.end_ts);
     }
     if (applyButton) applyButton.disabled = false;
+    // D-11: the selected service's own history is an independent fetch,
+    // never awaited here -- a slow or failed service-history request must
+    // never delay or blank the host stack above it (Research Pattern 1).
+    renderServiceHistorySection();
   }
 
   // D-04: validated before assignment, routed through setInvestigationRange
@@ -1934,7 +2557,30 @@
       details.textContent = expanded ? 'Hide details' : 'Show details';
       details.setAttribute('aria-expanded', String(expanded)); details.setAttribute('aria-controls', detailId);
       details.addEventListener('click', () => toggleServiceDetails(port));
-      identity.append(name, portLabel, details);
+      // D-16 (Phase 4 04-06): a selection control that publishes this
+      // service's port for the History section's own views to read --
+      // never a value this row's own rendering, sort, filter, or expand
+      // behaviour consumes. Toggling it off (already-selected) clears the
+      // selection rather than leaving it unreachable from this row.
+      // `position: absolute` (advanced.css) takes it entirely out of the
+      // identity grid's row/column sizing -- name/portLabel/details keep
+      // their exact original grid placement. Two in-flow placements (a
+      // stacked third row, and an inline flex sibling of name) were each
+      // found to distort .service-details-toggle's own spanned-row height
+      // at the narrow (<=959px) breakpoint, intercepting the next row's
+      // clicks (Rule 1 fix) -- only removing it from grid flow proved
+      // stable. A single-glyph label keeps its own footprint tiny.
+      const investigating = state.preferences.selectedService === port;
+      const investigate = document.createElement('button');
+      investigate.type = 'button'; investigate.id = `service-investigate-${port}`;
+      investigate.className = 'service-investigate-toggle';
+      investigate.textContent = investigating ? '★' : '☆';
+      investigate.setAttribute('aria-pressed', String(investigating));
+      const investigateLabel = `${investigating ? 'Stop investigating' : 'Investigate'} ${displayValue(service.name)}`;
+      investigate.setAttribute('aria-label', investigateLabel);
+      investigate.title = investigateLabel;
+      investigate.addEventListener('click', () => setSelectedService(investigating ? null : port));
+      identity.append(name, portLabel, details, investigate);
       const status = document.createElement('td');
       const availability = serviceAvailability(service);
       status.textContent = `● ${availability}`;
@@ -1991,6 +2637,11 @@
     renderServices();
     renderPipeline(snapshot.pipeline || {});
     renderSettings(snapshot.settings || {});
+    // D-16: the picker and indicator both read the same current snapshot's
+    // service list -- refreshed on every successful poll so a renamed or
+    // newly-discovered service is reflected without a page reload.
+    renderHistoryServicePicker();
+    renderInvestigatingIndicator();
   }
 
   function updateRefreshEvidence() {
@@ -2135,6 +2786,21 @@
   });
   const historyNavButton = document.querySelector('[data-section="history"]');
   if (historyNavButton) historyNavButton.addEventListener('click', renderHistorySection);
+  // D-16 (Phase 4 04-06): the History picker and the Clear action both call
+  // the same setSelectedService/clearSelectedService entry points the
+  // Services table row control uses -- one carried selection, published and
+  // consumed from either side.
+  renderInvestigatingIndicator();
+  renderHistoryServicePicker();
+  const historyServicePicker = $('history-service-picker');
+  if (historyServicePicker) {
+    historyServicePicker.addEventListener('change', () => {
+      const value = historyServicePicker.value;
+      setSelectedService(value === '' ? null : Number(value));
+    });
+  }
+  const clearSelectedServiceButton = $('clear-selected-service');
+  if (clearSelectedServiceButton) clearSelectedServiceButton.addEventListener('click', clearSelectedService);
   // refreshCurrentDiagnosis() must be invoked before fetchRuntimeConfig(): both
   // dispatch their fetch() call synchronously (before their first await), so
   // this order keeps /api/advanced/current the first network call the page

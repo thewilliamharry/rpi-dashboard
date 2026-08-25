@@ -90,6 +90,87 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             'gap_seconds': 0, 'unknown_seconds': 0,
         }
 
+    @staticmethod
+    def _service(port, name='Test Service', **overrides):
+        """A minimal well-formed services[] entry (04-06): the fields
+        renderServices/serviceAvailability/serviceFreshness/serviceDuration
+        each read, with the rest defaulted so a test only names what it
+        actually varies.
+        """
+        service = {
+            'port': port, 'name': name, 'availability': 'online', 'latency_ms': 12.0,
+            'critical': False, 'tags': [], 'pinned_order': port,
+            'state_duration_seconds': 120,
+            'freshness': {'state': 'fresh', 'age_seconds': 5},
+            'expected_cadence_seconds': 300, 'last_probe_ts': 1_700_000_000,
+        }
+        service.update(overrides)
+        return service
+
+    @staticmethod
+    def _service_history_fixture(start_ts, end_ts, points=None):
+        return {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'selector': {'kind': 'service', 'port': 8080},
+            'effective_resolution_seconds': 60,
+            'point_budget': 2048,
+            'source_resolutions_seconds': [60],
+            'points': points if points is not None else [],
+            'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'}],
+            'aggregation_pending': [],
+        }
+
+    @staticmethod
+    def _events_history_fixture(start_ts, end_ts, episodes=None, events=None):
+        return {
+            'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+            'filters': {'maintenance': 'include'},
+            'episodes': episodes if episodes is not None else [],
+            'events': events if events is not None else [],
+            'flapping_groups': [],
+            'row_budget': 2048,
+            'truncated': False,
+            'matched_count': 0,
+        }
+
+    @staticmethod
+    def _service_point(
+        ts, *, online_seconds=0, offline_seconds=0, unknown_seconds=0, gap_seconds=0,
+        latency_min=None, latency_max=None, latency_avg=None, check_count=0,
+        failure_class_counts=None,
+    ):
+        """One `_compose_service_bucket`-shaped point (04-06 Task 2/3)."""
+        return {
+            'ts': ts, 'online_seconds': online_seconds, 'offline_seconds': offline_seconds,
+            'unknown_seconds': unknown_seconds, 'gap_seconds': gap_seconds,
+            'latency_min': latency_min, 'latency_max': latency_max, 'latency_avg': latency_avg,
+            'check_count': check_count, 'failure_class_counts': failure_class_counts or {},
+        }
+
+    @staticmethod
+    def _episode(
+        port, down_ts, recovered_ts=None, *, suppressed_reason=None,
+        maintenance_grace_until=None, overrun=False, grace_seconds=0, fault_seconds=None,
+        **overrides,
+    ):
+        """One `group_episodes`/`split_overrun_span`-shaped episode (04-06 Task 2)."""
+        open_episode = recovered_ts is None
+        duration = None if open_episode else recovered_ts - down_ts
+        default_fault = None
+        if duration is not None:
+            default_fault = fault_seconds if fault_seconds is not None else max(0, duration - grace_seconds)
+        episode = {
+            'port': port, 'service_name': 'Test Service', 'critical': False,
+            'down_ts': down_ts, 'raised_ts': down_ts, 'recovered_ts': recovered_ts,
+            'open': open_episode, 'duration_seconds': duration,
+            'failure_class': None, 'suppressed_reason': suppressed_reason,
+            'maintenance_grace_until': maintenance_grace_until,
+            'transitions': [], 'overrun': overrun, 'grace_seconds': grace_seconds,
+            'fault_seconds': default_fault, 'flapping_group_id': None,
+        }
+        episode.update(overrides)
+        return episode
+
     @classmethod
     def _history_fixture(cls):
         """One observed span, a storage_pressure gap, an expired span, then a
@@ -559,9 +640,13 @@ class HistoryInvestigationUiTests(unittest.TestCase):
                     "return d.length > 0; }" % metric,
                     timeout=5_000,
                 )
-            chart_ids = page.eval_on_selector_all('.hist-plot', 'nodes => nodes.map(n => n.id)')
+            # Scoped to #history-content (04-06 adds a fifth .hist-plot/.hist-coverage-strip
+            # pair -- #service-latency-chart/#strip-service-latency -- reusing these same
+            # classes verbatim for the selected-service view, which lives in its own
+            # #service-history-group sibling rather than this host stack).
+            chart_ids = page.eval_on_selector_all('#history-content .hist-plot', 'nodes => nodes.map(n => n.id)')
             self.assertEqual(chart_ids, ['chart-cpu', 'chart-ram', 'chart-disk', 'chart-temp'])
-            strip_ids = page.eval_on_selector_all('.hist-coverage-strip', 'nodes => nodes.map(n => n.id)')
+            strip_ids = page.eval_on_selector_all('#history-content .hist-coverage-strip', 'nodes => nodes.map(n => n.id)')
             self.assertEqual(strip_ids, ['strip-cpu', 'strip-ram', 'strip-disk', 'strip-temp'])
             self.assertEqual(page.locator('#history-time-axis').count(), 1)
             self.assertEqual(page.locator('#unit-cpu').text_content(), '%')
@@ -1967,6 +2052,720 @@ class HistoryInvestigationUiTests(unittest.TestCase):
     def test_drag_entry_point_documents_missing_keyboard_equivalent_as_phase5_debt(self):
         js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
         self.assertIn('Phase 5 / UX-06', js)
+
+    # ------------------------------------------------------------------
+    # 04-06 Task 1: one carried, read-only service selection (D-16).
+    # ------------------------------------------------------------------
+
+    SERVICE_HISTORY_HOLD_HARNESS = """
+        window.__heldServiceReleases = [];
+        const realFetch = window.fetch.bind(window);
+        window.fetch = (...args) => {
+          const url = String(args[0] || '');
+          const isServiceTelemetry = url.includes('/api/telemetry/history') && url.includes('kind=service');
+          const isServiceEvents = url.includes('/api/events/history');
+          if (!isServiceTelemetry && !isServiceEvents) return realFetch(...args);
+          const pending = realFetch(...args);
+          return new Promise((resolve, reject) => {
+            window.__heldServiceReleases.push(() => pending.then(resolve, reject));
+          });
+        };
+        window.__releaseAllHeldServiceFetches = () => {
+          const releases = window.__heldServiceReleases;
+          window.__heldServiceReleases = [];
+          releases.forEach((release) => release());
+        };
+    """
+
+    def _service_selection_route(
+        self, snapshot, config_fixture, *,
+        service_status=200, events_status=200,
+        service_payload_fn=None, events_payload_fn=None,
+        recorded_current=None, recorded_service_kinds=None,
+    ):
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                if query.get('kind', [''])[0] == 'service':
+                    if recorded_service_kinds is not None:
+                        recorded_service_kinds.append(route.request.url)
+                    if service_status != 200:
+                        route.fulfill(status=service_status, json={'error': 'service history unavailable'})
+                        return
+                    payload = (
+                        service_payload_fn(start_ts, end_ts) if service_payload_fn
+                        else self._service_history_fixture(start_ts, end_ts)
+                    )
+                    route.fulfill(status=200, json=payload)
+                    return
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/events/history':
+                if events_status != 200:
+                    route.fulfill(status=events_status, json={'error': 'events unavailable'})
+                    return
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                payload = (
+                    events_payload_fn(start_ts, end_ts) if events_payload_fn
+                    else self._events_history_fixture(start_ts, end_ts)
+                )
+                route.fulfill(status=200, json=payload)
+                return
+            if path == '/api/advanced/current':
+                if recorded_current is not None:
+                    recorded_current.append((route.request.url, route.request.method))
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+        return route_api
+
+    def test_selecting_service_in_table_sets_indicator_and_carries_to_history_picker(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        page = self.browser.new_page()
+        page.route('**/api/**', self._service_selection_route(snapshot, config_fixture))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="services"]').click()
+            page.locator('#service-investigate-8080').wait_for(state='visible', timeout=5_000)
+            page.locator('#service-investigate-8080').click()
+            page.wait_for_function(
+                "() => document.getElementById('investigating-service').textContent === 'Investigating: Test Service'",
+                timeout=5_000,
+            )
+            self.assertIsNone(page.locator('#investigating-service').get_attribute('hidden'))
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#history-service-picker').input_value(), '8080')
+        finally:
+            page.close()
+
+    def test_selecting_service_in_history_picker_shows_selected_in_services_table(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        page = self.browser.new_page()
+        page.route('**/api/**', self._service_selection_route(snapshot, config_fixture))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('[data-section="services"]').click()
+            page.locator('#service-investigate-8080').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#service-investigate-8080').get_attribute('aria-pressed'), 'true')
+            self.assertIn('Stop investigating', page.locator('#service-investigate-8080').get_attribute('aria-label'))
+        finally:
+            page.close()
+
+    def test_advanced_current_request_byte_identical_before_and_after_selection(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        recorded = []
+        page = self.browser.new_page()
+        page.route('**/api/**', self._service_selection_route(snapshot, config_fixture, recorded_current=recorded))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="services"]').click()
+            page.locator('#service-investigate-8080').wait_for(state='visible', timeout=5_000)
+            recorded.clear()
+            with page.expect_request(lambda r: urlparse(r.url).path == '/api/advanced/current'):
+                page.locator('#advanced-refresh').click()
+            before = recorded[-1]
+            page.locator('#service-investigate-8080').click()
+            page.wait_for_function(
+                "() => document.getElementById('investigating-service').textContent === 'Investigating: Test Service'",
+                timeout=5_000,
+            )
+            with page.expect_request(lambda r: urlparse(r.url).path == '/api/advanced/current'):
+                page.locator('#advanced-refresh').click()
+            after = recorded[-1]
+            self.assertEqual(before, after)
+            self.assertNotIn('?', before[0])
+        finally:
+            page.close()
+
+    def test_clear_selected_service_leaves_range_fields_unchanged(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        page = self.browser.new_page()
+        page.route('**/api/**', self._service_selection_route(snapshot, config_fixture))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function(
+                "() => /^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$/.test(document.getElementById('range-start').value)",
+                timeout=5_000,
+            )
+            start_before = page.locator('#range-start').input_value()
+            end_before = page.locator('#range-end').input_value()
+            page.locator('#history-service-picker').select_option('8080')
+            page.wait_for_function(
+                "() => document.getElementById('clear-selected-service').hidden === false",
+                timeout=5_000,
+            )
+            page.locator('#clear-selected-service').click()
+            page.wait_for_function(
+                "() => document.getElementById('investigating-service').hidden === true",
+                timeout=5_000,
+            )
+            self.assertEqual(page.locator('#range-start').input_value(), start_before)
+            self.assertEqual(page.locator('#range-end').input_value(), end_before)
+        finally:
+            page.close()
+
+    def test_hostile_stored_selected_service_values_resolve_to_no_selection(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        hostile_values = {
+            'string_port': "'8080'",
+            'negative': '-1',
+            'out_of_range': '70000',
+            'object': '{}',
+            'array': '[]',
+        }
+        for label, value_expression in hostile_values.items():
+            with self.subTest(selectedService=label):
+                page = self.browser.new_page()
+                page.add_init_script(
+                    "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+                    f"{{refreshSeconds: 15, selectedService: {value_expression}}}));",
+                )
+                recorded_kinds = []
+                page.route(
+                    '**/api/**',
+                    self._service_selection_route(
+                        snapshot, config_fixture, recorded_service_kinds=recorded_kinds,
+                    ),
+                )
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.locator('[data-section="history"]').click()
+                    page.locator('#service-history-empty').wait_for(state='visible', timeout=5_000)
+                    self.assertEqual(
+                        page.locator('#service-history-empty').text_content(),
+                        'Select a service to view its history',
+                    )
+                    self.assertIsNotNone(page.locator('#investigating-service').get_attribute('hidden'))
+                    self.assertEqual(recorded_kinds, [])
+                finally:
+                    page.close()
+
+    def test_no_selection_renders_placeholder_and_issues_no_service_request(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        recorded_kinds = []
+        page = self.browser.new_page()
+        page.route(
+            '**/api/**',
+            self._service_selection_route(snapshot, config_fixture, recorded_service_kinds=recorded_kinds),
+        )
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#service-history-empty').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(
+                page.locator('#service-history-empty').text_content(),
+                'Select a service to view its history',
+            )
+            # Give any (incorrect) service request a chance to have fired.
+            page.locator('#chart-cpu path').wait_for(state='attached', timeout=5_000)
+            self.assertEqual(recorded_kinds, [])
+        finally:
+            page.close()
+
+    def test_indicator_and_clear_present_and_operable_while_service_request_pending(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        page = self.browser.new_page()
+        page.add_init_script(self.SERVICE_HISTORY_HOLD_HARNESS)
+        page.route('**/api/**', self._service_selection_route(snapshot, config_fixture))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.wait_for_function('window.__heldServiceReleases.length === 2', timeout=5_000)
+            self.assertEqual(
+                page.locator('#investigating-service').text_content(), 'Investigating: Test Service',
+            )
+            self.assertIsNone(page.locator('#investigating-service').get_attribute('hidden'))
+            self.assertFalse(page.locator('#clear-selected-service').is_disabled())
+            page.locator('#clear-selected-service').click()
+            page.wait_for_function(
+                "() => document.getElementById('investigating-service').hidden === true",
+                timeout=5_000,
+            )
+            page.evaluate('window.__releaseAllHeldServiceFetches()')
+        finally:
+            page.close()
+
+    def test_indicator_and_clear_present_and_operable_after_service_request_fails(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        page = self.browser.new_page()
+        page.route(
+            '**/api/**',
+            self._service_selection_route(
+                snapshot, config_fixture, service_status=503, events_status=503,
+            ),
+        )
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('#service-history-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(
+                page.locator('#investigating-service').text_content(), 'Investigating: Test Service',
+            )
+            self.assertIsNone(page.locator('#investigating-service').get_attribute('hidden'))
+            page.locator('#clear-selected-service').click()
+            page.wait_for_function(
+                "() => document.getElementById('investigating-service').hidden === true",
+                timeout=5_000,
+            )
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-06 Task 2: the state band and its latency chart (D-11).
+    # ------------------------------------------------------------------
+
+    def _select_service_page(self, snapshot, config_fixture, **route_kwargs):
+        page = self.browser.new_page()
+        page.route('**/api/**', self._service_selection_route(snapshot, config_fixture, **route_kwargs))
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+        page.locator('#history-service-picker').select_option('8080')
+        return page
+
+    def test_one_uninterrupted_online_range_renders_one_full_width_segment(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            # A single bucket whose own resolution equals the full
+            # requested span -- three consecutive same-resolution buckets
+            # would each render at a fraction of the 1000px chart width and
+            # not, on their own, prove the *merged* segment spans the full
+            # band; merging three same-state buckets is covered by its own
+            # dedicated test below.
+            span = end_ts - start_ts
+            fixture = self._service_history_fixture(
+                start_ts, end_ts, points=[self._service_point(start_ts, online_seconds=span)],
+            )
+            fixture['effective_resolution_seconds'] = span
+            return fixture
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 1)
+            self.assertEqual(segments.first.get_attribute('class'), 'hist-band-segment hist-band-online')
+            width = float(segments.first.get_attribute('width'))
+            self.assertGreater(width, 990)
+        finally:
+            page.close()
+
+    def test_zero_online_and_zero_offline_bucket_renders_unknown_not_blank(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=60),
+                self._service_point(start_ts + 60, unknown_seconds=60),
+                self._service_point(start_ts + 120, online_seconds=60),
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 3)
+            self.assertIn('hist-band-unknown', segments.nth(1).get_attribute('class'))
+        finally:
+            page.close()
+
+    def test_three_consecutive_same_state_buckets_merge_into_one_segment(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts + offset, offline_seconds=60)
+                for offset in (0, 60, 120)
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 1)
+            self.assertIn('hist-band-offline', segments.first.get_attribute('class'))
+        finally:
+            page.close()
+
+    def test_alternating_subpixel_states_never_merge(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=60),
+                self._service_point(start_ts + 60, offline_seconds=60),
+                self._service_point(start_ts + 120, online_seconds=60),
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self.browser.new_page()
+        page.route(
+            '**/api/**',
+            self._service_selection_route(snapshot, config_fixture, service_payload_fn=service_payload_fn),
+        )
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            # A 90-day requested span with three 60-second buckets clustered
+            # at its start renders each bucket at a sub-pixel fraction of
+            # the 1000px chart width, exercising the never-merge-different-
+            # states rule under exactly the condition it exists for.
+            page.locator('#range-preset-90d').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 3)
+            classes = [segments.nth(index).get_attribute('class') for index in range(3)]
+            self.assertIn('hist-band-online', classes[0])
+            self.assertIn('hist-band-offline', classes[1])
+            self.assertIn('hist-band-online', classes[2])
+        finally:
+            page.close()
+
+    def test_offline_overlapping_maintenance_suppressed_episode_renders_maintenance(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, offline_seconds=60)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        def events_payload_fn(start_ts, end_ts):
+            episode = self._episode(
+                8080, start_ts, start_ts + 60, suppressed_reason='maintenance_window',
+            )
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self._select_service_page(
+            snapshot, config_fixture,
+            service_payload_fn=service_payload_fn, events_payload_fn=events_payload_fn,
+        )
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 1)
+            self.assertIn('hist-band-maintenance', segments.first.get_attribute('class'))
+        finally:
+            page.close()
+
+    def test_mixed_bucket_segment_title_discloses_exact_counts_and_ordering_caveat(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=40, offline_seconds=20)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 2)
+            title_texts = [segments.nth(index).locator('title').text_content() for index in range(2)]
+            combined = ' '.join(title_texts)
+            self.assertIn('online 40s, offline 20s', combined)
+            self.assertIn('ordering within the bucket is below the displayed resolution', combined)
+        finally:
+            page.close()
+
+    def test_latency_chart_breaks_at_non_observed_coverage_and_strip_renders_two_segments(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=60, latency_avg=10.0),
+                self._service_point(start_ts + 10_000, online_seconds=60, latency_avg=20.0),
+                self._service_point(start_ts + 70_000, online_seconds=60, latency_avg=70.0),
+                self._service_point(start_ts + 75_000, online_seconds=60, latency_avg=75.0),
+            ]
+            coverage = [
+                {'start_ts': start_ts, 'end_ts': start_ts + 20_000, 'state': 'observed'},
+                {'start_ts': start_ts + 20_000, 'end_ts': start_ts + 40_000, 'state': 'collection_gap'},
+                {'start_ts': start_ts + 40_000, 'end_ts': start_ts + 60_000, 'state': 'expired'},
+                {'start_ts': start_ts + 60_000, 'end_ts': start_ts + 80_000, 'state': 'observed'},
+            ]
+            fixture = self._service_history_fixture(start_ts, end_ts, points=points)
+            fixture['coverage'] = coverage
+            return fixture
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            path_d = page.locator('#service-latency-chart path').get_attribute('d')
+            self.assertEqual(path_d.count('M'), 2)
+            self.assertEqual(page.locator('#strip-service-latency rect').count(), 2)
+        finally:
+            page.close()
+
+    def test_latency_plot_background_matches_plain_plot_background_in_both_themes(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=60, latency_avg=10.0)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page = self.browser.new_page()
+                if theme == 'light':
+                    page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                page.route(
+                    '**/api/**',
+                    self._service_selection_route(snapshot, config_fixture, service_payload_fn=service_payload_fn),
+                )
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.locator('[data-section="history"]').click()
+                    page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+                    page.locator('#history-service-picker').select_option('8080')
+                    page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+                    latency_bg = page.locator('#service-latency-chart').evaluate(
+                        '(node) => getComputedStyle(node).backgroundColor',
+                    )
+                    plain_bg = page.locator('#chart-cpu').evaluate(
+                        '(node) => getComputedStyle(node).backgroundColor',
+                    )
+                    self.assertEqual(latency_bg, plain_bg)
+                    band_bg = page.locator('#service-state-band').evaluate(
+                        '(node) => getComputedStyle(node).backgroundColor',
+                    )
+                    self.assertNotEqual(band_bg, 'rgb(0, 255, 136)')
+                finally:
+                    page.close()
+
+    # ------------------------------------------------------------------
+    # 04-06 Task 3: time-weighted availability and failure classes (D-09).
+    # ------------------------------------------------------------------
+
+    def test_900_online_100_offline_renders_90_percent(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=900, offline_seconds=100)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertIn('90.0%', page.locator('#service-availability').text_content())
+        finally:
+            page.close()
+
+    def test_adding_unknown_seconds_leaves_availability_unchanged_and_discloses_in_detail(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=900, offline_seconds=100, unknown_seconds=500),
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertIn('90.0%', page.locator('#service-availability').text_content())
+            detail_text = page.locator('#service-availability-detail-body').text_content()
+            self.assertIn('500 seconds', detail_text)
+        finally:
+            page.close()
+
+    def test_zero_online_and_zero_offline_renders_unknown_never_0_or_100_percent(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, unknown_seconds=600)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            text = page.locator('#service-availability').text_content()
+            self.assertIn('Unknown', text)
+            self.assertNotIn('0%', text)
+            self.assertNotIn('100%', text)
+        finally:
+            page.close()
+
+    def test_reversed_bucket_order_produces_identical_availability(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        results = {}
+        for label, order in (('forward', (0, 1)), ('reversed', (1, 0))):
+            def service_payload_fn(start_ts, end_ts, order=order):
+                raw = [
+                    self._service_point(start_ts, online_seconds=300, offline_seconds=100),
+                    self._service_point(start_ts + 60, online_seconds=600, offline_seconds=0),
+                ]
+                return self._service_history_fixture(start_ts, end_ts, points=[raw[order[0]], raw[order[1]]])
+
+            page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+            try:
+                page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+                results[label] = page.locator('#service-availability').text_content()
+            finally:
+                page.close()
+        self.assertEqual(results['forward'], results['reversed'])
+
+    def test_maintenance_suppressed_downtime_still_counts_in_headline(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=900, offline_seconds=100)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        def events_payload_fn(start_ts, end_ts):
+            episode = self._episode(
+                8080, start_ts, start_ts + 100, suppressed_reason='maintenance_window',
+            )
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self._select_service_page(
+            snapshot, config_fixture,
+            service_payload_fn=service_payload_fn, events_payload_fn=events_payload_fn,
+        )
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertIn('90.0%', page.locator('#service-availability').text_content())
+            detail_text = page.locator('#service-availability-detail-body').text_content()
+            self.assertIn('100 seconds', detail_text)
+        finally:
+            page.close()
+
+    def test_two_equal_count_failure_classes_render_in_ascending_name_order(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(
+                start_ts, offline_seconds=100,
+                failure_class_counts={'timeout': 2, 'connection_error': 2, 'not_responding': 5},
+            )]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            chips = page.locator('.hist-failure-chip')
+            self.assertEqual(chips.count(), 3)
+            texts = [chips.nth(index).text_content() for index in range(3)]
+            self.assertEqual(texts, ['not_responding: 5', 'connection_error: 2', 'timeout: 2'])
+        finally:
+            page.close()
+
+    def test_no_failures_renders_zero_failure_classes(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=60)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('.hist-failure-chip-count').text_content(), '0 failure classes')
+            self.assertEqual(page.locator('.hist-failure-chip').count(), 0)
+        finally:
+            page.close()
+
+    def test_failure_class_chip_list_wraps_at_narrow_viewport(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(
+                start_ts, offline_seconds=100,
+                failure_class_counts={
+                    'timeout': 3, 'connection_error': 2, 'not_responding': 4,
+                    'request_error': 1, 'probe_error': 1, 'invalid_target': 1,
+                },
+            )]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self.browser.new_page(viewport={'width': 400, 'height': 800})
+        page.route(
+            '**/api/**',
+            self._service_selection_route(snapshot, config_fixture, service_payload_fn=service_payload_fn),
+        )
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            chips = page.locator('.hist-failure-chip')
+            self.assertEqual(chips.count(), 6)
+            tops = sorted({round(chips.nth(index).bounding_box()['y']) for index in range(6)})
+            self.assertGreater(len(tops), 1)
+            for index in range(6):
+                box = chips.nth(index).bounding_box()
+                self.assertLessEqual(box['x'] + box['width'], 400 + 1)
+        finally:
+            page.close()
 
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):

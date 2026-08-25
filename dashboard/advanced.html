@@ -77,6 +77,11 @@
       </section>
       <section id="history-section" aria-labelledby="history-heading" hidden>
         <h2 id="history-heading" tabindex="-1">History</h2>
+        <div id="investigating-service-row" class="hist-investigating-row">
+          <label>Investigate service <select id="history-service-picker"><option value="">Select a service</option></select></label>
+          <span id="investigating-service" class="investigating-service" hidden></span>
+          <button type="button" id="clear-selected-service" class="hist-clear-service" hidden>Clear</button>
+        </div>
         <div id="investigation-range" class="hist-range" aria-label="Historical investigation range">
           <div id="range-back-row" class="hist-back-row"></div>
           <button type="button" id="range-preset-1h" class="hist-preset" aria-pressed="false">1h</button>
@@ -134,6 +139,29 @@
           </figure>
           <div id="history-axis-scroll" class="hist-axis-scroll" role="region" aria-label="Shared history time axis" tabindex="0">
             <svg id="history-time-axis" class="hist-axis" viewBox="0 0 1000 24" preserveAspectRatio="none" role="img" aria-label="Shared history time axis"></svg>
+          </div>
+        </div>
+        <div id="service-history-group" class="hist-service-group" aria-label="Selected service history">
+          <div id="service-history-loading" class="hist-skeleton" hidden aria-label="Loading service history"><p>Loading service history…</p></div>
+          <div id="service-history-empty" class="hist-empty">Select a service to view its history</div>
+          <div id="service-history-error" class="hist-error" role="alert" hidden></div>
+          <div id="service-history-content" class="hist-service-content" hidden>
+            <figure class="hist-chart hist-band-figure">
+              <div class="hist-band-header">
+                <p id="service-availability" class="hist-availability-headline"></p>
+                <details id="service-availability-detail" class="hist-availability-detail">
+                  <summary>Availability detail</summary>
+                  <div id="service-availability-detail-body"></div>
+                </details>
+              </div>
+              <svg id="service-state-band" class="hist-state-band" viewBox="0 0 1000 32" preserveAspectRatio="none" role="img" aria-label="Selected service state band"></svg>
+              <div id="failure-class-chips" class="hist-failure-chips" aria-label="Failure classes for this range"></div>
+            </figure>
+            <figure class="hist-chart">
+              <div class="hist-chart-header"><h3>Latency</h3><span id="unit-service-latency" class="hist-unit">ms</span></div>
+              <svg id="service-latency-chart" class="hist-plot" viewBox="0 0 1000 96" preserveAspectRatio="none" role="img" aria-label="Selected service latency chart"><path class="hist-series"></path></svg>
+              <svg id="strip-service-latency" class="hist-coverage-strip" viewBox="0 0 1000 16" preserveAspectRatio="none" role="img" aria-label="Selected service latency coverage evidence"></svg>
+            </figure>
           </div>
         </div>
         <div id="history-chart-tooltip" class="hist-tooltip" role="tooltip" hidden></div>
