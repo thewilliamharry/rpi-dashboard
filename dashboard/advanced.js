@@ -727,6 +727,146 @@
     renderCoverageStrip('service-latency', coverage, requestedRange);
   }
 
+  // ------------------------------------------------------------------
+  // Time-weighted availability and failure classes (Phase 4 04-06 Task 3).
+  // ------------------------------------------------------------------
+
+  // Sums online_seconds/offline_seconds across every bucket and returns the
+  // ratio plus the unknown/gap totals reported separately -- a pure sum, so
+  // it is invariant to the order `points` is processed in. Unknown and gap
+  // seconds are excluded from BOTH the numerator and the denominator:
+  // folding either in would turn "we did not observe" into either a
+  // fabricated outage or a fabricated uptime. `availability` is `null`
+  // when online+offline is zero -- a range with no observed service
+  // seconds asserts nothing about that window (03.1 D-09).
+  function timeWeightedAvailability(points) {
+    let online = 0;
+    let offline = 0;
+    let unknown = 0;
+    let gap = 0;
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      online += Math.max(0, finiteMeasurement(point.online_seconds) || 0);
+      offline += Math.max(0, finiteMeasurement(point.offline_seconds) || 0);
+      unknown += Math.max(0, finiteMeasurement(point.unknown_seconds) || 0);
+      gap += Math.max(0, finiteMeasurement(point.gap_seconds) || 0);
+    });
+    const observedSeconds = online + offline;
+    return {
+      availability: observedSeconds > 0 ? online / observedSeconds : null,
+      observedSeconds, unknownSeconds: unknown, gapSeconds: gap,
+    };
+  }
+
+  // The seconds of this range's downtime that fall inside a
+  // maintenance-suppressed or overrun-grace span -- reuses Task 2's own
+  // maintenanceSuppressedSpans so the band's reclassification and this
+  // attribution figure can never quietly disagree about which seconds are
+  // maintenance-covered. Clipped to the requested range, since a span may
+  // extend past either edge (an open suppressed episode, or one that began
+  // before the range).
+  function maintenanceAttributedSeconds(episodes, requestedRange) {
+    const spans = maintenanceSuppressedSpans(episodes, requestedRange.end_ts);
+    let total = 0;
+    spans.forEach((span) => {
+      const start = Math.max(span.start_ts, requestedRange.start_ts);
+      const end = Math.min(span.end_ts, requestedRange.end_ts);
+      if (end > start) total += end - start;
+    });
+    return total;
+  }
+
+  // The detail region's own exact-count formatter: unlike formatSpan (the
+  // largest-sensible-unit formatter the state-duration/maintenance-window
+  // cells use), the observed/unknown/gap/attributed second counts here are
+  // disclosed at exact second precision -- rounding 500 unknown seconds to
+  // "8 minutes" would be a genuine loss of the evidence this detail exists
+  // to disclose.
+  function exactSecondsLabel(value) {
+    const measurement = finiteMeasurement(value);
+    return measurement === null ? 'Unknown' : `${measurement} second${measurement === 1 ? '' : 's'}`;
+  }
+
+  // Writes the 28px headline percentage (or `Unknown`, never `0%`/`100%`)
+  // beside the range bounds, and the observed/unknown/gap/maintenance-
+  // attributed seconds into the expandable detail. Per 03.1 D-09 the
+  // headline is never adjusted for maintenance -- attribution appears only
+  // here, in the detail, and no excluding-maintenance figure is ever
+  // rendered at the headline's own weight.
+  function renderAvailability(result, requestedRange, episodes) {
+    const headline = $('service-availability');
+    const rangeLabel = `${formatLocalTimestamp(requestedRange.start_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})} – ${formatLocalTimestamp(requestedRange.end_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})}`;
+    if (headline) {
+      const value = result && result.availability !== null
+        ? `${(result.availability * 100).toFixed(1)}%`
+        : 'Unknown';
+      headline.textContent = `Availability: ${value} (${rangeLabel})`;
+    }
+    const detailBody = $('service-availability-detail-body');
+    if (detailBody) {
+      while (detailBody.firstChild) detailBody.removeChild(detailBody.firstChild);
+      const attributedSeconds = maintenanceAttributedSeconds(episodes, requestedRange);
+      [
+        `Observed: ${exactSecondsLabel(result ? result.observedSeconds : null)}`,
+        `Unknown: ${exactSecondsLabel(result ? result.unknownSeconds : null)}`,
+        `Collection gap: ${exactSecondsLabel(result ? result.gapSeconds : null)}`,
+        `Maintenance-attributed downtime: ${exactSecondsLabel(attributedSeconds)}`,
+      ].forEach((text) => {
+        const row = document.createElement('p');
+        row.textContent = text;
+        detailBody.append(row);
+      });
+    }
+  }
+
+  // Sums each bucket's failure_class_counts map across the range, reusing
+  // the server's own failure-class vocabulary verbatim (http_{code},
+  // invalid_target, invalid_url, not_responding, timeout,
+  // connection_error, request_error, probe_error) -- no display name is
+  // ever invented for a class the server did not emit.
+  function aggregateFailureClasses(points) {
+    const counts = {};
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      const perBucket = point.failure_class_counts;
+      if (!perBucket || typeof perBucket !== 'object' || Array.isArray(perBucket)) return;
+      Object.entries(perBucket).forEach(([failureClass, count]) => {
+        const value = finiteMeasurement(count);
+        if (value === null) return;
+        counts[failureClass] = (counts[failureClass] || 0) + value;
+      });
+    });
+    return counts;
+  }
+
+  // One `{class}: {count}` chip per class, sorted by descending count then
+  // ascending class name so equal counts never reorder between identical
+  // requests -- preceded by an explicit `countLabel` count (`0 failure
+  // classes` rather than an omitted list) so the list's own completeness is
+  // never in question.
+  function renderFailureClassChips(counts) {
+    const container = $('failure-class-chips');
+    if (!container) return;
+    while (container.firstChild) container.removeChild(container.firstChild);
+    const entries = Object.entries(counts || {}).sort((left, right) => (
+      right[1] - left[1] || left[0].localeCompare(right[0])
+    ));
+    const summary = document.createElement('p');
+    summary.className = 'hist-failure-chip-count';
+    // Not countLabel (that generic pluralizer only ever appends a bare
+    // "s", which would render "classs") -- "class" pluralizes irregularly
+    // ("classes"), so this list owns its own exact copy rule instead.
+    summary.textContent = entries.length === 1 ? '1 failure class' : `${entries.length} failure classes`;
+    container.append(summary);
+    const list = document.createElement('div');
+    list.className = 'hist-failure-chip-list';
+    entries.forEach(([failureClass, count]) => {
+      const chip = document.createElement('span');
+      chip.className = 'hist-failure-chip';
+      chip.textContent = `${failureClass}: ${count}`;
+      list.append(chip);
+    });
+    container.append(list);
+  }
+
   // The service-history render entry point: a dedicated staleness-guard
   // generation (never state.historyRequestGeneration, which belongs to the
   // host stack's own render cycle) so a rapid service-selection change or
@@ -798,8 +938,8 @@
     );
     renderServiceStateBand(segments, requestedRange);
     renderLatencyChart(points, coverage, requestedRange);
-    // Task 3 extends this branch to render the availability figure and
-    // failure-class chips from the same `points`.
+    renderAvailability(timeWeightedAvailability(points), requestedRange, episodes);
+    renderFailureClassChips(aggregateFailureClasses(points));
   }
 
   // ------------------------------------------------------------------

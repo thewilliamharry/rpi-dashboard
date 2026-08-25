@@ -2585,6 +2585,188 @@ class HistoryInvestigationUiTests(unittest.TestCase):
                 finally:
                     page.close()
 
+    # ------------------------------------------------------------------
+    # 04-06 Task 3: time-weighted availability and failure classes (D-09).
+    # ------------------------------------------------------------------
+
+    def test_900_online_100_offline_renders_90_percent(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=900, offline_seconds=100)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertIn('90.0%', page.locator('#service-availability').text_content())
+        finally:
+            page.close()
+
+    def test_adding_unknown_seconds_leaves_availability_unchanged_and_discloses_in_detail(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=900, offline_seconds=100, unknown_seconds=500),
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertIn('90.0%', page.locator('#service-availability').text_content())
+            detail_text = page.locator('#service-availability-detail-body').text_content()
+            self.assertIn('500 seconds', detail_text)
+        finally:
+            page.close()
+
+    def test_zero_online_and_zero_offline_renders_unknown_never_0_or_100_percent(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, unknown_seconds=600)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            text = page.locator('#service-availability').text_content()
+            self.assertIn('Unknown', text)
+            self.assertNotIn('0%', text)
+            self.assertNotIn('100%', text)
+        finally:
+            page.close()
+
+    def test_reversed_bucket_order_produces_identical_availability(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        results = {}
+        for label, order in (('forward', (0, 1)), ('reversed', (1, 0))):
+            def service_payload_fn(start_ts, end_ts, order=order):
+                raw = [
+                    self._service_point(start_ts, online_seconds=300, offline_seconds=100),
+                    self._service_point(start_ts + 60, online_seconds=600, offline_seconds=0),
+                ]
+                return self._service_history_fixture(start_ts, end_ts, points=[raw[order[0]], raw[order[1]]])
+
+            page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+            try:
+                page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+                results[label] = page.locator('#service-availability').text_content()
+            finally:
+                page.close()
+        self.assertEqual(results['forward'], results['reversed'])
+
+    def test_maintenance_suppressed_downtime_still_counts_in_headline(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=900, offline_seconds=100)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        def events_payload_fn(start_ts, end_ts):
+            episode = self._episode(
+                8080, start_ts, start_ts + 100, suppressed_reason='maintenance_window',
+            )
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self._select_service_page(
+            snapshot, config_fixture,
+            service_payload_fn=service_payload_fn, events_payload_fn=events_payload_fn,
+        )
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertIn('90.0%', page.locator('#service-availability').text_content())
+            detail_text = page.locator('#service-availability-detail-body').text_content()
+            self.assertIn('100 seconds', detail_text)
+        finally:
+            page.close()
+
+    def test_two_equal_count_failure_classes_render_in_ascending_name_order(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(
+                start_ts, offline_seconds=100,
+                failure_class_counts={'timeout': 2, 'connection_error': 2, 'not_responding': 5},
+            )]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            chips = page.locator('.hist-failure-chip')
+            self.assertEqual(chips.count(), 3)
+            texts = [chips.nth(index).text_content() for index in range(3)]
+            self.assertEqual(texts, ['not_responding: 5', 'connection_error: 2', 'timeout: 2'])
+        finally:
+            page.close()
+
+    def test_no_failures_renders_zero_failure_classes(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=60)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('.hist-failure-chip-count').text_content(), '0 failure classes')
+            self.assertEqual(page.locator('.hist-failure-chip').count(), 0)
+        finally:
+            page.close()
+
+    def test_failure_class_chip_list_wraps_at_narrow_viewport(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(
+                start_ts, offline_seconds=100,
+                failure_class_counts={
+                    'timeout': 3, 'connection_error': 2, 'not_responding': 4,
+                    'request_error': 1, 'probe_error': 1, 'invalid_target': 1,
+                },
+            )]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self.browser.new_page(viewport={'width': 400, 'height': 800})
+        page.route(
+            '**/api/**',
+            self._service_selection_route(snapshot, config_fixture, service_payload_fn=service_payload_fn),
+        )
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            chips = page.locator('.hist-failure-chip')
+            self.assertEqual(chips.count(), 6)
+            tops = sorted({round(chips.nth(index).bounding_box()['y']) for index in range(6)})
+            self.assertGreater(len(tops), 1)
+            for index in range(6):
+                box = chips.nth(index).bounding_box()
+                self.assertLessEqual(box['x'] + box['width'], 400 + 1)
+        finally:
+            page.close()
+
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):
     """04-04 Task 3: a zone that observes DST annotates its two transitions.

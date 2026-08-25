@@ -207,3 +207,17 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 .hist-band-offline { fill: var(--red); }
 .hist-band-unknown { fill: var(--muted); }
 .hist-band-maintenance { fill: var(--accent3); }
+
+/* Phase 4 (04-06) Task 3 -- time-weighted availability and failure-class
+   chips beside the band (03.1 D-09: never adjusted for maintenance; the
+   attribution lives only in this expandable detail, never at the
+   headline's own visual weight). Typography per 04-UI-SPEC.md's 28px
+   range-summary/trend-headline row. */
+.hist-band-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.hist-availability-headline { margin: 0; font-family: var(--font-mono); font-size: 28px; font-weight: 600; }
+.hist-availability-detail summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.hist-availability-detail p { margin: 4px 0 0; font-size: 12px; font-family: var(--font-mono); color: var(--muted); }
+.hist-failure-chips { margin-top: 8px; }
+.hist-failure-chip-count { margin: 0 0 4px; font-size: 12px; color: var(--muted); }
+.hist-failure-chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.hist-failure-chip { font-family: var(--font-mono); font-size: 12px; padding: 2px 8px; border: 1px solid var(--border); background: var(--bg3); overflow-wrap: anywhere; }

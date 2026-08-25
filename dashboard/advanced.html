@@ -147,7 +147,15 @@
           <div id="service-history-error" class="hist-error" role="alert" hidden></div>
           <div id="service-history-content" class="hist-service-content" hidden>
             <figure class="hist-chart hist-band-figure">
+              <div class="hist-band-header">
+                <p id="service-availability" class="hist-availability-headline"></p>
+                <details id="service-availability-detail" class="hist-availability-detail">
+                  <summary>Availability detail</summary>
+                  <div id="service-availability-detail-body"></div>
+                </details>
+              </div>
               <svg id="service-state-band" class="hist-state-band" viewBox="0 0 1000 32" preserveAspectRatio="none" role="img" aria-label="Selected service state band"></svg>
+              <div id="failure-class-chips" class="hist-failure-chips" aria-label="Failure classes for this range"></div>
             </figure>
             <figure class="hist-chart">
               <div class="hist-chart-header"><h3>Latency</h3><span id="unit-service-latency" class="hist-unit">ms</span></div>
