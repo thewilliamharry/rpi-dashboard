@@ -10,6 +10,12 @@
   const HIST_CHART_HEIGHT = 96;
   const HIST_STRIP_HEIGHT = 16;
   const HIST_MIN_SEGMENT_WIDTH = 3;
+  // D-11 (Phase 4 04-06): the state band's own four-state wire vocabulary --
+  // the exact literals dashboard/beacon/diagnosis.py already uses for
+  // current service availability. No fifth state, no new color.
+  const SERVICE_BAND_STATES = ['online', 'offline', 'unknown', 'maintenance'];
+  const MIN_BAND_SEGMENT_PX = 3;
+  const HIST_BAND_HEIGHT = 32;
   // D-07: same order and same keys as the server's HOST_METRICS tuple
   // (dashboard/beacon/telemetry.py:12), so selector values and DOM ids agree.
   const HOST_METRIC_ORDER = ['cpu', 'ram', 'disk', 'temp'];
@@ -486,18 +492,239 @@
     const loading = serviceHistoryElement('loading');
     const empty = serviceHistoryElement('empty');
     const error = serviceHistoryElement('error');
+    const content = serviceHistoryElement('content');
     if (loading) loading.hidden = false;
     if (empty) empty.hidden = true;
     if (error) error.hidden = true;
+    // Never a zeroed band or chart while loading (UI-SPEC E3 "loading") --
+    // any previously-rendered content is hidden until the new fetch settles.
+    if (content) content.hidden = true;
   }
 
   function renderServiceHistoryPlaceholder() {
     const loading = serviceHistoryElement('loading');
     const empty = serviceHistoryElement('empty');
     const error = serviceHistoryElement('error');
+    const content = serviceHistoryElement('content');
     if (loading) loading.hidden = true;
     if (error) error.hidden = true;
+    if (content) content.hidden = true;
     if (empty) { empty.hidden = false; empty.textContent = 'Select a service to view its history'; }
+  }
+
+  // ------------------------------------------------------------------
+  // The state band (Phase 4 04-06 Task 2, D-11): a 32px horizontal bar
+  // spanning the shared time axis, directly above its own latency chart.
+  // ------------------------------------------------------------------
+
+  // Turns each episode the events fetch returned into the exact span this
+  // band must reclassify from `offline` to `maintenance`: a fully
+  // maintenance-suppressed episode's whole down-to-recovered span, or (for
+  // an overrun episode) only the grace-covered portion before the fault
+  // split takes over -- never the post-grace fault portion, which is
+  // genuine unplanned downtime per plan 04-02's own split.
+  function maintenanceSuppressedSpans(episodes, fallbackEndTs) {
+    const spans = [];
+    (Array.isArray(episodes) ? episodes : []).forEach((episode) => {
+      if (!episode || typeof episode !== 'object') return;
+      const downTs = finiteMeasurement(episode.down_ts);
+      if (downTs === null) return;
+      if (episode.overrun) {
+        const graceSeconds = finiteMeasurement(episode.grace_seconds);
+        if (graceSeconds !== null && graceSeconds > 0) {
+          spans.push({start_ts: downTs, end_ts: downTs + graceSeconds});
+        }
+        return;
+      }
+      if (episode.suppressed_reason) {
+        const recoveredTs = finiteMeasurement(episode.recovered_ts);
+        const endTs = recoveredTs === null ? fallbackEndTs : recoveredTs;
+        if (Number.isFinite(endTs) && endTs > downTs) spans.push({start_ts: downTs, end_ts: endTs});
+      }
+    });
+    return spans;
+  }
+
+  function intervalOverlapsAnySpan(startTs, endTs, spans) {
+    return spans.some((span) => startTs < span.end_ts && endTs > span.start_ts);
+  }
+
+  // Splits each bucket into sub-segments whose widths are proportional to
+  // its real online/offline/unknown+gap seconds -- unknown and gap seconds
+  // are folded into one `unknown` sub-segment because the band's own
+  // four-state vocabulary carries no fifth "gap" state; both mean "we did
+  // not observe a definite online/offline state" to an operator reading
+  // the band. A bucket with zero online and zero offline seconds renders
+  // as `unknown` across its full width rather than being split at all. An
+  // `offline` sub-segment overlapping a maintenance-suppressed span
+  // becomes `maintenance` instead. A bucket whose split produces both an
+  // `online` and an `offline` sub-segment (the "mixed bucket" case) is
+  // marked `mixedWith` so the render step can disclose the exact counts
+  // and the below-resolution ordering caveat -- and so mergeBandSegments
+  // never silently folds that disclosure into a neighbour's duration.
+  function deriveBandSegments(points, episodes, resolutionSeconds, rangeEndTs) {
+    const maintenanceSpans = maintenanceSuppressedSpans(episodes, rangeEndTs);
+    const segments = [];
+    (Array.isArray(points) ? points : []).forEach((point) => {
+      const bucketStart = point.ts;
+      if (!Number.isFinite(bucketStart)) return;
+      const span = Number.isFinite(resolutionSeconds) && resolutionSeconds > 0 ? resolutionSeconds : 1;
+      const bucketEnd = bucketStart + span;
+      const online = Math.max(0, finiteMeasurement(point.online_seconds) || 0);
+      const offline = Math.max(0, finiteMeasurement(point.offline_seconds) || 0);
+      const unknown = Math.max(0, finiteMeasurement(point.unknown_seconds) || 0)
+        + Math.max(0, finiteMeasurement(point.gap_seconds) || 0);
+      if (online === 0 && offline === 0) {
+        segments.push({start_ts: bucketStart, end_ts: bucketEnd, state: 'unknown'});
+        return;
+      }
+      const parts = [];
+      if (online > 0) parts.push({seconds: online, state: 'online'});
+      if (offline > 0) parts.push({seconds: offline, state: 'offline'});
+      if (unknown > 0) parts.push({seconds: unknown, state: 'unknown'});
+      const totalSeconds = online + offline + unknown;
+      const mixed = online > 0 && offline > 0 ? {onlineSeconds: online, offlineSeconds: offline} : null;
+      let cursor = bucketStart;
+      parts.forEach((part, index) => {
+        const isLast = index === parts.length - 1;
+        const fraction = totalSeconds > 0 ? part.seconds / totalSeconds : 0;
+        const segStart = cursor;
+        const segEnd = isLast ? bucketEnd : segStart + fraction * (bucketEnd - bucketStart);
+        let state = part.state;
+        if (state === 'offline' && intervalOverlapsAnySpan(segStart, segEnd, maintenanceSpans)) {
+          state = 'maintenance';
+        }
+        segments.push({start_ts: segStart, end_ts: segEnd, state, mixedWith: mixed});
+        cursor = segEnd;
+      });
+    });
+    return segments;
+  }
+
+  // Merges only adjacent segments carrying the same state into one segment
+  // with one duration label -- adjacent segments of different states are
+  // never merged, even when either would render below MIN_BAND_SEGMENT_PX,
+  // so a genuine state transition can never be compressed out of
+  // existence. A segment carrying a `mixedWith` disclosure never merges
+  // (in either direction) -- its exact per-bucket counts would otherwise
+  // be silently absorbed into a neighbour's plain duration.
+  function mergeBandSegments(segments) {
+    const merged = [];
+    (Array.isArray(segments) ? segments : []).forEach((segment) => {
+      const last = merged[merged.length - 1];
+      const canMerge = last && !last.mixedWith && !segment.mixedWith
+        && last.state === segment.state && last.end_ts === segment.start_ts;
+      if (canMerge) {
+        last.end_ts = segment.end_ts;
+      } else {
+        merged.push({...segment});
+      }
+    });
+    return merged;
+  }
+
+  // The exact disclosure text a segment's <title> and aria-label share --
+  // reachable on hover (native SVG title) and via the shared, rAF-coalesced
+  // tooltip on keyboard focus, matching the host chart's own point-tooltip
+  // idiom (renderPointTooltip/schedulePointTooltipUpdate).
+  function bandSegmentTooltipText(segment) {
+    const duration = formatMergedDuration(segment.end_ts - segment.start_ts);
+    const startLabel = formatLocalTimestamp(segment.start_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    const endLabel = formatLocalTimestamp(segment.end_ts, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    let text = `${segment.state} — ${startLabel} to ${endLabel} (${duration})`;
+    if (segment.mixedWith) {
+      text += ` — online ${segment.mixedWith.onlineSeconds}s, offline ${segment.mixedWith.offlineSeconds}s observed in this bucket; the ordering within the bucket is below the displayed resolution.`;
+    }
+    return text;
+  }
+
+  let pendingBandTooltipFrame = null;
+
+  // The same shared #history-chart-tooltip element and rAF coalescing the
+  // host chart's point tooltips already use -- reused here with plain text
+  // rather than a (metric, point) pair, since a band segment's disclosure
+  // is a state/duration sentence, not a single measured value.
+  function scheduleBandTooltipUpdate(text, clientX, clientY) {
+    if (pendingBandTooltipFrame !== null) cancelAnimationFrame(pendingBandTooltipFrame);
+    pendingBandTooltipFrame = requestAnimationFrame(() => {
+      pendingBandTooltipFrame = null;
+      const tooltip = $('history-chart-tooltip');
+      if (tooltip) tooltip.textContent = text;
+      showPointTooltipAt(clientX, clientY);
+    });
+  }
+
+  function renderServiceStateBand(segments, requestedRange) {
+    const svg = $('service-state-band');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    (Array.isArray(segments) ? segments : []).forEach((segment) => {
+      const x1 = histTimeToX(segment.start_ts, requestedRange.start_ts, requestedRange.end_ts);
+      const x2 = histTimeToX(segment.end_ts, requestedRange.start_ts, requestedRange.end_ts);
+      const width = Math.max(MIN_BAND_SEGMENT_PX, x2 - x1);
+      const rect = document.createElementNS(SVG_NS, 'rect');
+      rect.setAttribute('x', String(x1));
+      rect.setAttribute('y', '0');
+      rect.setAttribute('width', String(width));
+      rect.setAttribute('height', String(HIST_BAND_HEIGHT));
+      rect.setAttribute('class', `hist-band-segment hist-band-${segment.state}`);
+      rect.setAttribute('tabindex', '0');
+      rect.setAttribute('role', 'img');
+      const text = bandSegmentTooltipText(segment);
+      rect.setAttribute('aria-label', text);
+      const title = document.createElementNS(SVG_NS, 'title');
+      title.textContent = text;
+      rect.append(title);
+      rect.addEventListener('pointerover', (event) => scheduleBandTooltipUpdate(text, event.clientX, event.clientY));
+      rect.addEventListener('pointerout', hidePointTooltip);
+      rect.addEventListener('focus', () => {
+        const box = rect.getBoundingClientRect();
+        scheduleBandTooltipUpdate(text, box.left, box.top);
+      });
+      rect.addEventListener('blur', hidePointTooltip);
+      svg.append(rect);
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // The latency chart (Phase 4 04-06 Task 2): reuses buildSeriesPath and
+  // the coverage-strip machinery verbatim -- the same gap-breaking rule,
+  // the same five-reason vocabulary, its own strip element. No state
+  // shading is ever applied to #service-latency-chart -- that visual
+  // channel belongs exclusively to the coverage strip (D-11).
+  // ------------------------------------------------------------------
+
+  // Latency has no host-metric-style fixed domain (0-100) or documented
+  // threshold -- an observed-range-plus-10%-pad domain, floored at 0,
+  // mirrors metricValueDomain's own temperature branch.
+  function latencyValueDomain(points) {
+    const observed = (Array.isArray(points) ? points : [])
+      .map((point) => finiteMeasurement(point.latency_avg))
+      .filter((value) => value !== null);
+    if (!observed.length) return [0, 1];
+    const min = Math.min(0, ...observed);
+    const max = Math.max(...observed);
+    const span = max - min || 1;
+    const pad = span * 0.1;
+    return [min - pad, max + pad];
+  }
+
+  function renderLatencyChart(points, coverage, requestedRange) {
+    const svg = $('service-latency-chart');
+    if (!svg) return;
+    const path = svg.querySelector('.hist-series');
+    const seriesPoints = (Array.isArray(points) ? points : [])
+      .map((point) => ({ts: point.ts, avg_value: finiteMeasurement(point.latency_avg)}));
+    const domain = latencyValueDomain(points);
+    const scale = {
+      xFor: (ts) => histTimeToX(ts, requestedRange.start_ts, requestedRange.end_ts),
+      yFor: (value) => histValueToY(value, domain),
+    };
+    if (path) path.setAttribute('d', buildSeriesPath(seriesPoints, coverage, scale));
+    // renderCoverageStrip keys its target element off `strip-${metric}` --
+    // passing 'service-latency' targets #strip-service-latency without any
+    // new lookup logic.
+    renderCoverageStrip('service-latency', coverage, requestedRange);
   }
 
   // The service-history render entry point: a dedicated staleness-guard
@@ -530,10 +757,49 @@
       }
       return;
     }
-    if (errorEl) errorEl.hidden = true;
-    // Task 2/3 extend this branch to render the state band, latency chart,
-    // availability figure, and failure-class chips from telemetryOutcome
-    // (points) and eventsOutcome (episodes).
+    // The band and the latency chart are both composed from telemetry's own
+    // points -- there is no independent "latency present, band absent (or
+    // the reverse)" split at this fetch boundary, since both read the same
+    // response. The events fetch is the one genuinely independent leg: on
+    // its own failure, the band still renders from telemetry alone (every
+    // offline second stays `offline` rather than being silently
+    // reclassified `maintenance`) and the latency chart is unaffected, so
+    // one stream's failure never blanks the whole service view.
+    const content = serviceHistoryElement('content');
+    if (!telemetryOutcome) {
+      if (content) content.hidden = true;
+      if (errorEl) {
+        const reason = serverSuppliedReason(telemetry.reason);
+        errorEl.textContent = `This service history could not load.${reason ? ` Server reported: ${reason}` : ''}`;
+        errorEl.hidden = false;
+      }
+      return;
+    }
+    const points = Array.isArray(telemetryOutcome.points) ? telemetryOutcome.points : [];
+    const coverage = telemetryOutcome.coverage;
+    const requestedRange = telemetryOutcome.requested || bounds;
+    const episodes = eventsOutcome && Array.isArray(eventsOutcome.episodes) ? eventsOutcome.episodes : [];
+    if (content) content.hidden = false;
+    if (errorEl) {
+      if (eventsOutcome) {
+        errorEl.hidden = true;
+      } else {
+        // Partial result (UI-SPEC E3): the band and chart still render
+        // fully from telemetry alone -- this note discloses only the
+        // missing maintenance-reclassification evidence, it never hides
+        // the content that did load.
+        const reason = serverSuppliedReason(events.reason);
+        errorEl.textContent = `Maintenance-suppressed spans could not load for this range; offline time below may include maintenance that has not been reclassified.${reason ? ` Server reported: ${reason}` : ''}`;
+        errorEl.hidden = false;
+      }
+    }
+    const segments = mergeBandSegments(
+      deriveBandSegments(points, episodes, telemetryOutcome.effective_resolution_seconds, requestedRange.end_ts),
+    );
+    renderServiceStateBand(segments, requestedRange);
+    renderLatencyChart(points, coverage, requestedRange);
+    // Task 3 extends this branch to render the availability figure and
+    // failure-class chips from the same `points`.
   }
 
   // ------------------------------------------------------------------

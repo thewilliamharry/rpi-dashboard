@@ -133,6 +133,44 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             'matched_count': 0,
         }
 
+    @staticmethod
+    def _service_point(
+        ts, *, online_seconds=0, offline_seconds=0, unknown_seconds=0, gap_seconds=0,
+        latency_min=None, latency_max=None, latency_avg=None, check_count=0,
+        failure_class_counts=None,
+    ):
+        """One `_compose_service_bucket`-shaped point (04-06 Task 2/3)."""
+        return {
+            'ts': ts, 'online_seconds': online_seconds, 'offline_seconds': offline_seconds,
+            'unknown_seconds': unknown_seconds, 'gap_seconds': gap_seconds,
+            'latency_min': latency_min, 'latency_max': latency_max, 'latency_avg': latency_avg,
+            'check_count': check_count, 'failure_class_counts': failure_class_counts or {},
+        }
+
+    @staticmethod
+    def _episode(
+        port, down_ts, recovered_ts=None, *, suppressed_reason=None,
+        maintenance_grace_until=None, overrun=False, grace_seconds=0, fault_seconds=None,
+        **overrides,
+    ):
+        """One `group_episodes`/`split_overrun_span`-shaped episode (04-06 Task 2)."""
+        open_episode = recovered_ts is None
+        duration = None if open_episode else recovered_ts - down_ts
+        default_fault = None
+        if duration is not None:
+            default_fault = fault_seconds if fault_seconds is not None else max(0, duration - grace_seconds)
+        episode = {
+            'port': port, 'service_name': 'Test Service', 'critical': False,
+            'down_ts': down_ts, 'raised_ts': down_ts, 'recovered_ts': recovered_ts,
+            'open': open_episode, 'duration_seconds': duration,
+            'failure_class': None, 'suppressed_reason': suppressed_reason,
+            'maintenance_grace_until': maintenance_grace_until,
+            'transitions': [], 'overrun': overrun, 'grace_seconds': grace_seconds,
+            'fault_seconds': default_fault, 'flapping_group_id': None,
+        }
+        episode.update(overrides)
+        return episode
+
     @classmethod
     def _history_fixture(cls):
         """One observed span, a storage_pressure gap, an expired span, then a
@@ -602,9 +640,13 @@ class HistoryInvestigationUiTests(unittest.TestCase):
                     "return d.length > 0; }" % metric,
                     timeout=5_000,
                 )
-            chart_ids = page.eval_on_selector_all('.hist-plot', 'nodes => nodes.map(n => n.id)')
+            # Scoped to #history-content (04-06 adds a fifth .hist-plot/.hist-coverage-strip
+            # pair -- #service-latency-chart/#strip-service-latency -- reusing these same
+            # classes verbatim for the selected-service view, which lives in its own
+            # #service-history-group sibling rather than this host stack).
+            chart_ids = page.eval_on_selector_all('#history-content .hist-plot', 'nodes => nodes.map(n => n.id)')
             self.assertEqual(chart_ids, ['chart-cpu', 'chart-ram', 'chart-disk', 'chart-temp'])
-            strip_ids = page.eval_on_selector_all('.hist-coverage-strip', 'nodes => nodes.map(n => n.id)')
+            strip_ids = page.eval_on_selector_all('#history-content .hist-coverage-strip', 'nodes => nodes.map(n => n.id)')
             self.assertEqual(strip_ids, ['strip-cpu', 'strip-ram', 'strip-disk', 'strip-temp'])
             self.assertEqual(page.locator('#history-time-axis').count(), 1)
             self.assertEqual(page.locator('#unit-cpu').text_content(), '%')
@@ -2301,6 +2343,247 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             )
         finally:
             page.close()
+
+    # ------------------------------------------------------------------
+    # 04-06 Task 2: the state band and its latency chart (D-11).
+    # ------------------------------------------------------------------
+
+    def _select_service_page(self, snapshot, config_fixture, **route_kwargs):
+        page = self.browser.new_page()
+        page.route('**/api/**', self._service_selection_route(snapshot, config_fixture, **route_kwargs))
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+        page.locator('#history-service-picker').select_option('8080')
+        return page
+
+    def test_one_uninterrupted_online_range_renders_one_full_width_segment(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            # A single bucket whose own resolution equals the full
+            # requested span -- three consecutive same-resolution buckets
+            # would each render at a fraction of the 1000px chart width and
+            # not, on their own, prove the *merged* segment spans the full
+            # band; merging three same-state buckets is covered by its own
+            # dedicated test below.
+            span = end_ts - start_ts
+            fixture = self._service_history_fixture(
+                start_ts, end_ts, points=[self._service_point(start_ts, online_seconds=span)],
+            )
+            fixture['effective_resolution_seconds'] = span
+            return fixture
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 1)
+            self.assertEqual(segments.first.get_attribute('class'), 'hist-band-segment hist-band-online')
+            width = float(segments.first.get_attribute('width'))
+            self.assertGreater(width, 990)
+        finally:
+            page.close()
+
+    def test_zero_online_and_zero_offline_bucket_renders_unknown_not_blank(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=60),
+                self._service_point(start_ts + 60, unknown_seconds=60),
+                self._service_point(start_ts + 120, online_seconds=60),
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 3)
+            self.assertIn('hist-band-unknown', segments.nth(1).get_attribute('class'))
+        finally:
+            page.close()
+
+    def test_three_consecutive_same_state_buckets_merge_into_one_segment(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts + offset, offline_seconds=60)
+                for offset in (0, 60, 120)
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 1)
+            self.assertIn('hist-band-offline', segments.first.get_attribute('class'))
+        finally:
+            page.close()
+
+    def test_alternating_subpixel_states_never_merge(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=60),
+                self._service_point(start_ts + 60, offline_seconds=60),
+                self._service_point(start_ts + 120, online_seconds=60),
+            ]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self.browser.new_page()
+        page.route(
+            '**/api/**',
+            self._service_selection_route(snapshot, config_fixture, service_payload_fn=service_payload_fn),
+        )
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            # A 90-day requested span with three 60-second buckets clustered
+            # at its start renders each bucket at a sub-pixel fraction of
+            # the 1000px chart width, exercising the never-merge-different-
+            # states rule under exactly the condition it exists for.
+            page.locator('#range-preset-90d').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 3)
+            classes = [segments.nth(index).get_attribute('class') for index in range(3)]
+            self.assertIn('hist-band-online', classes[0])
+            self.assertIn('hist-band-offline', classes[1])
+            self.assertIn('hist-band-online', classes[2])
+        finally:
+            page.close()
+
+    def test_offline_overlapping_maintenance_suppressed_episode_renders_maintenance(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, offline_seconds=60)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        def events_payload_fn(start_ts, end_ts):
+            episode = self._episode(
+                8080, start_ts, start_ts + 60, suppressed_reason='maintenance_window',
+            )
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self._select_service_page(
+            snapshot, config_fixture,
+            service_payload_fn=service_payload_fn, events_payload_fn=events_payload_fn,
+        )
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 1)
+            self.assertIn('hist-band-maintenance', segments.first.get_attribute('class'))
+        finally:
+            page.close()
+
+    def test_mixed_bucket_segment_title_discloses_exact_counts_and_ordering_caveat(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=40, offline_seconds=20)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#service-state-band rect')
+            self.assertEqual(segments.count(), 2)
+            title_texts = [segments.nth(index).locator('title').text_content() for index in range(2)]
+            combined = ' '.join(title_texts)
+            self.assertIn('online 40s, offline 20s', combined)
+            self.assertIn('ordering within the bucket is below the displayed resolution', combined)
+        finally:
+            page.close()
+
+    def test_latency_chart_breaks_at_non_observed_coverage_and_strip_renders_two_segments(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [
+                self._service_point(start_ts, online_seconds=60, latency_avg=10.0),
+                self._service_point(start_ts + 10_000, online_seconds=60, latency_avg=20.0),
+                self._service_point(start_ts + 70_000, online_seconds=60, latency_avg=70.0),
+                self._service_point(start_ts + 75_000, online_seconds=60, latency_avg=75.0),
+            ]
+            coverage = [
+                {'start_ts': start_ts, 'end_ts': start_ts + 20_000, 'state': 'observed'},
+                {'start_ts': start_ts + 20_000, 'end_ts': start_ts + 40_000, 'state': 'collection_gap'},
+                {'start_ts': start_ts + 40_000, 'end_ts': start_ts + 60_000, 'state': 'expired'},
+                {'start_ts': start_ts + 60_000, 'end_ts': start_ts + 80_000, 'state': 'observed'},
+            ]
+            fixture = self._service_history_fixture(start_ts, end_ts, points=points)
+            fixture['coverage'] = coverage
+            return fixture
+
+        page = self._select_service_page(snapshot, config_fixture, service_payload_fn=service_payload_fn)
+        try:
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+            path_d = page.locator('#service-latency-chart path').get_attribute('d')
+            self.assertEqual(path_d.count('M'), 2)
+            self.assertEqual(page.locator('#strip-service-latency rect').count(), 2)
+        finally:
+            page.close()
+
+    def test_latency_plot_background_matches_plain_plot_background_in_both_themes(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+
+        def service_payload_fn(start_ts, end_ts):
+            points = [self._service_point(start_ts, online_seconds=60, latency_avg=10.0)]
+            return self._service_history_fixture(start_ts, end_ts, points=points)
+
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page = self.browser.new_page()
+                if theme == 'light':
+                    page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                page.route(
+                    '**/api/**',
+                    self._service_selection_route(snapshot, config_fixture, service_payload_fn=service_payload_fn),
+                )
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.locator('[data-section="history"]').click()
+                    page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+                    page.locator('#history-service-picker').select_option('8080')
+                    page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+                    latency_bg = page.locator('#service-latency-chart').evaluate(
+                        '(node) => getComputedStyle(node).backgroundColor',
+                    )
+                    plain_bg = page.locator('#chart-cpu').evaluate(
+                        '(node) => getComputedStyle(node).backgroundColor',
+                    )
+                    self.assertEqual(latency_bg, plain_bg)
+                    band_bg = page.locator('#service-state-band').evaluate(
+                        '(node) => getComputedStyle(node).backgroundColor',
+                    )
+                    self.assertNotEqual(band_bg, 'rgb(0, 255, 136)')
+                finally:
+                    page.close()
 
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):

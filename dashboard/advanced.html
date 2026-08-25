@@ -145,6 +145,16 @@
           <div id="service-history-loading" class="hist-skeleton" hidden aria-label="Loading service history"><p>Loading service history…</p></div>
           <div id="service-history-empty" class="hist-empty">Select a service to view its history</div>
           <div id="service-history-error" class="hist-error" role="alert" hidden></div>
+          <div id="service-history-content" class="hist-service-content" hidden>
+            <figure class="hist-chart hist-band-figure">
+              <svg id="service-state-band" class="hist-state-band" viewBox="0 0 1000 32" preserveAspectRatio="none" role="img" aria-label="Selected service state band"></svg>
+            </figure>
+            <figure class="hist-chart">
+              <div class="hist-chart-header"><h3>Latency</h3><span id="unit-service-latency" class="hist-unit">ms</span></div>
+              <svg id="service-latency-chart" class="hist-plot" viewBox="0 0 1000 96" preserveAspectRatio="none" role="img" aria-label="Selected service latency chart"><path class="hist-series"></path></svg>
+              <svg id="strip-service-latency" class="hist-coverage-strip" viewBox="0 0 1000 16" preserveAspectRatio="none" role="img" aria-label="Selected service latency coverage evidence"></svg>
+            </figure>
+          </div>
         </div>
         <div id="history-chart-tooltip" class="hist-tooltip" role="tooltip" hidden></div>
       </section>
