@@ -333,7 +333,7 @@
   // configured timezone (state.timezone), never the browser's.
   // ------------------------------------------------------------------
 
-  const CUSTOM_RANGE_INPUT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$/;
+  const CUSTOM_RANGE_TEXT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$/;
 
   // Interprets `text` as wall-clock time in the Pi's configured timezone by
   // building a candidate instant and correcting it against localWallClockMinutes'
@@ -345,7 +345,7 @@
   // anything that does not parse as YYYY-MM-DD HH:MM (or a T separator).
   function parseLocalRangeInput(text) {
     if (typeof text !== 'string') return null;
-    const match = text.trim().match(CUSTOM_RANGE_INPUT_PATTERN);
+    const match = text.trim().match(CUSTOM_RANGE_TEXT_PATTERN);
     if (!match) return null;
     const year = Number(match[1]);
     const month = Number(match[2]);
