@@ -690,6 +690,78 @@
   // page.evaluate needs a reachable handle to drive them directly.
   window.__historyTrendTestHooks = {leastSquaresSlope, trendDisplay};
 
+  // ------------------------------------------------------------------
+  // Comparison row (HIS-06, D-08, D-09, Phase 4 04-04): latest, minimum,
+  // maximum, average, and trend, all describing the same selected-range
+  // window as each other -- reduced from the same points array the chart
+  // already fetched, no second request.
+  // ------------------------------------------------------------------
+
+  // Reduces the fetched points to the five range-comparison values. minimum
+  // and maximum are the extremes of the points' own min_value/max_value;
+  // average is the sample_count-weighted mean of avg_value, matching how
+  // the server itself composes an average across mixed-resolution buckets
+  // (_compose_host_bucket) -- an unweighted mean of bucket averages would
+  // silently over-weight sparse buckets. latest is the latest_value of the
+  // latest point (by ts) that has one -- the latest *observed* point inside
+  // the range, never "now" (D-09).
+  function rangeAggregate(points) {
+    const list = (Array.isArray(points) ? points : []).slice().sort((left, right) => left.ts - right.ts);
+    const minimums = list.map((point) => finiteMeasurement(point.min_value)).filter((value) => value !== null);
+    const maximums = list.map((point) => finiteMeasurement(point.max_value)).filter((value) => value !== null);
+    const weighted = list
+      .map((point) => ({value: finiteMeasurement(point.avg_value), weight: finiteMeasurement(point.sample_count)}))
+      .filter((point) => point.value !== null && point.weight !== null && point.weight > 0);
+    const totalWeight = weighted.reduce((sum, point) => sum + point.weight, 0);
+    const latestCandidates = list.filter((point) => finiteMeasurement(point.latest_value) !== null && Number.isFinite(point.ts));
+    const latest = latestCandidates.length ? latestCandidates[latestCandidates.length - 1] : null;
+    return {
+      minimum: minimums.length ? Math.min(...minimums) : null,
+      maximum: maximums.length ? Math.max(...maximums) : null,
+      average: totalWeight > 0 ? weighted.reduce((sum, point) => sum + point.value * point.weight, 0) / totalWeight : null,
+      latestValue: latest ? finiteMeasurement(latest.latest_value) : null,
+      latestTs: latest ? latest.ts : null,
+    };
+  }
+
+  // The single rounding site for the comparison row: a fixed one-decimal
+  // formatter, so no displayed rounded value is ever read back and fed into
+  // a further computation. null/undefined/non-finite is the absence string
+  // "Unknown" -- never a fabricated 0.
+  function formatComparisonValue(value, unit) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return 'Unknown';
+    return `${value.toFixed(1)}${unit || ''}`;
+  }
+
+  // Writes Latest, Minimum, Maximum, Average, and Trend into comparison-{metric}.
+  // Latest always renders its own exact local timestamp beside it (D-09) --
+  // the range bounds are the disambiguator that stops a past-ending range from
+  // reading as a current reading. A range with no usable point renders Unknown
+  // for all four values and the withheld trend string; none of them is ever 0.
+  function renderComparisonRow(metric, points, spanSeconds) {
+    const container = $(`comparison-${metric}`);
+    if (!container) return;
+    while (container.firstChild) container.removeChild(container.firstChild);
+    const unit = HOST_METRIC_UNITS[metric] || '';
+    const aggregate = rangeAggregate(points);
+    const latestText = aggregate.latestValue === null
+      ? 'Latest: Unknown'
+      : `Latest: ${formatComparisonValue(aggregate.latestValue, unit)} (as of ${formatLocalTimestamp(aggregate.latestTs, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})})`;
+    const rows = [
+      {text: latestText, extraClass: null},
+      {text: `Minimum: ${formatComparisonValue(aggregate.minimum, unit)}`, extraClass: null},
+      {text: `Maximum: ${formatComparisonValue(aggregate.maximum, unit)}`, extraClass: null},
+      {text: `Average: ${formatComparisonValue(aggregate.average, unit)}`, extraClass: null},
+      {text: trendDisplay(metric, points, spanSeconds), extraClass: 'hist-trend'},
+    ];
+    rows.forEach((row) => {
+      const span = document.createElement('span');
+      span.className = row.extraClass ? `hist-comparison-value ${row.extraClass}` : 'hist-comparison-value';
+      span.textContent = row.text;
+      container.append(span);
+    });
+  }
+
   function renderSharedTimeAxis(startTs, endTs) {
     const svg = $('history-time-axis');
     if (!svg) return;
@@ -747,6 +819,8 @@
     }
     const stripSvg = $(`strip-${metric}`);
     if (stripSvg) while (stripSvg.firstChild) stripSvg.removeChild(stripSvg.firstChild);
+    const comparison = $(`comparison-${metric}`);
+    if (comparison) while (comparison.firstChild) comparison.removeChild(comparison.firstChild);
   }
 
   // Four parallel host-metric fetches, one per HOST_METRIC_ORDER entry,
@@ -781,6 +855,7 @@
       renderHistoryChart(metric, result);
       const requested = result.requested || resolveRangeBounds();
       renderCoverageStrip(metric, result.coverage, requested);
+      renderComparisonRow(metric, points, requested.end_ts - requested.start_ts);
       return {metric, result};
     }
     if (empty) empty.hidden = true;

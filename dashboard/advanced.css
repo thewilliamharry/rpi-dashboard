@@ -110,3 +110,17 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 .hist-tooltip[hidden] { display: none; }
 .hist-axis-scroll { overflow-x: auto; }
 @media (max-width: 959px) { .hist-axis-scroll svg { min-width: 640px; } }
+
+/* Phase 4 (04-04) -- per-chart comparison row: latest, minimum, maximum,
+   average and trend, all describing the same selected-range window.
+   Reuses .evidence-row's border/background visual language; the internal
+   layout is a wrapping row of five short values rather than a label:value
+   grid, since none of the five need more than one line. */
+.hist-comparison { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; padding: 8px; border: 1px solid var(--border); background: var(--bg3); font-size: 14px; overflow-wrap: anywhere; }
+.hist-comparison-value { font-family: var(--font-mono); }
+.hist-trend { font-weight: 600; }
+/* DST transition tick (D-05, Research Pitfall 6): text and glyph, never
+   colour alone -- --accent2 flags it as an axis-rendering anomaly without
+   reusing --accent (reserved for interactive range/investigation controls,
+   03-UI-SPEC.md) or the calm --muted register the coverage strip owns. */
+.hist-dst-tick { fill: var(--accent2); font-weight: 600; cursor: help; }

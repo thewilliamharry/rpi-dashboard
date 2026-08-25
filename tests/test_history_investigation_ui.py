@@ -1177,6 +1177,127 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # ------------------------------------------------------------------
+    # 04-04 Task 2: the comparison row -- latest, minimum, maximum, average
+    # and trend, all describing the same selected-range window (D-08, D-09).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bucket_point(ts, min_value, max_value, avg_value, latest_value, sample_count=1):
+        return {
+            'ts': ts, 'min_value': min_value, 'max_value': max_value, 'avg_value': avg_value,
+            'latest_value': latest_value, 'sample_count': sample_count, 'observed_seconds': 60,
+            'gap_seconds': 0, 'unknown_seconds': 0,
+        }
+
+    def _comparison_page(self, cpu_fixture, start_ts, end_ts):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query['metric'][0]
+                route.fulfill(
+                    status=200,
+                    json=cpu_fixture if metric == 'cpu' else self._empty_history_fixture(start_ts, end_ts),
+                )
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.wait_for_function(
+            "() => (document.querySelector('#comparison-cpu').textContent || '').includes('Latest')",
+            timeout=5_000,
+        )
+        return page
+
+    def test_comparison_row_ids_present_for_all_four_metrics(self):
+        page = self._trend_page()
+        try:
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            for metric in ('cpu', 'ram', 'disk', 'temp'):
+                self.assertEqual(page.locator(f'#comparison-{metric}').count(), 1)
+        finally:
+            page.close()
+
+    def test_comparison_row_reports_known_minimum_maximum_and_weighted_average(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        points = [
+            self._bucket_point(start_ts, 10.0, 20.0, 15.0, 15.0, sample_count=2),
+            self._bucket_point(start_ts + 1800, 5.0, 30.0, 25.0, 25.0, sample_count=6),
+        ]
+        # weighted average = (15*2 + 25*6) / 8 = 22.5
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts)
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Minimum: 5.0%', text)
+            self.assertIn('Maximum: 30.0%', text)
+            self.assertIn('Average: 22.5%', text)
+            self.assertIn('Latest: 25.0%', text)
+        finally:
+            page.close()
+
+    def test_comparison_row_latest_never_reads_as_current_for_past_ending_range(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        points = [self._bucket_point(start_ts, 10.0, 10.0, 10.0, 10.0)]
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts)
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Latest: 10.0% (as of', text)
+        finally:
+            page.close()
+
+    def test_comparison_row_empty_range_renders_unknown_not_zero(self):
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        fixture = self._metric_fixture(
+            'cpu', [], start_ts, end_ts,
+            coverage=[{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'not_yet_monitored'}],
+        )
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Latest: Unknown', text)
+            self.assertIn('Minimum: Unknown', text)
+            self.assertIn('Maximum: Unknown', text)
+            self.assertIn('Average: Unknown', text)
+            self.assertIn('Not enough data for a trend', text)
+            self.assertNotIn('0%', text)
+        finally:
+            page.close()
+
+    def test_comparison_row_equal_min_max_still_renders_all_values_with_steady_trend(self):
+        start_ts = 1_700_000_000
+        points = [self._bucket_point(start_ts + i * 600, 50.0, 50.0, 50.0, 50.0) for i in range(10)]
+        end_ts = start_ts + 600 * 10
+        fixture = self._metric_fixture('cpu', points, start_ts, end_ts)
+        page = self._comparison_page(fixture, start_ts, end_ts)
+        try:
+            text = page.locator('#comparison-cpu').text_content()
+            self.assertIn('Minimum: 50.0%', text)
+            self.assertIn('Maximum: 50.0%', text)
+            self.assertIn('Average: 50.0%', text)
+            self.assertIn('Latest: 50.0%', text)
+            self.assertIn('steady', text)
+        finally:
+            page.close()
+
 
 if __name__ == '__main__':
     unittest.main()
