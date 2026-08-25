@@ -346,7 +346,7 @@ Plans:
   4. Operator can filter incidents and transitions by service, criticality, event type, and time range; choosing an incident focuses the related service and time window.
   5. Selecting a service, incident, or time range updates related host, service, and event views together, presenting observed correlation without claiming an unsupported root cause.
 
-**Plans**: 5/8 plans executed
+**Plans**: 6/8 plans executed
 
 Plans:
 **Wave 1**
@@ -368,7 +368,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 04-06-PLAN.md — Service history: carried read-only service selection, four-state band, latency chart, failure-class chips, time-weighted availability (wave 5)
+- [x] 04-06-PLAN.md — Service history: carried read-only service selection, four-state band, latency chart, failure-class chips, time-weighted availability (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
@@ -421,6 +421,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
-| 4. Historical Investigation | 5/8 | In Progress|  |
+| 4. Historical Investigation | 6/8 | In Progress|  |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
