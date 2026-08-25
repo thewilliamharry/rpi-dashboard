@@ -619,6 +619,77 @@
     });
   }
 
+  // ------------------------------------------------------------------
+  // Trend (HIS-06, D-08, D-09, Phase 4 04-04): a least-squares slope over
+  // observed points only -- withheld below TREND_MIN_POINTS, qualified
+  // below TREND_CONFIDENT_POINTS, flat-banded to "steady", and never
+  // extrapolated into a projection. Composed over the same points array
+  // renderHistoryChart already fetched -- no second request is issued.
+  // ------------------------------------------------------------------
+
+  const TREND_MIN_POINTS = 3;
+  const TREND_CONFIDENT_POINTS = 10;
+  const TREND_HOURLY_MAX_SPAN_SECONDS = 86400;
+  const TREND_ARROWS = {up: '↑', down: '↓'};
+
+  // Keeps only points whose avg_value is a finite measurement -- finiteMeasurement's
+  // type discipline means a boolean, array, object or blank string is an absence,
+  // never a zero -- sorted ascending by ts. The server composes one bucket per ts,
+  // so two points sharing a ts cannot occur; sorting only guards against caller
+  // order, which is what makes the slope invariant to input order.
+  function usableTrendPoints(points) {
+    return (Array.isArray(points) ? points : [])
+      .map((point) => ({ts: point.ts, value: finiteMeasurement(point.avg_value)}))
+      .filter((point) => point.value !== null && Number.isFinite(point.ts))
+      .sort((left, right) => left.ts - right.ts);
+  }
+
+  // Closed-form least-squares gradient of value against ts, in value-units per
+  // second. Fewer than two usable points returns null -- there is no line to fit.
+  function leastSquaresSlope(points) {
+    const usable = usableTrendPoints(points);
+    if (usable.length < 2) return null;
+    const n = usable.length;
+    const meanX = usable.reduce((sum, point) => sum + point.ts, 0) / n;
+    const meanY = usable.reduce((sum, point) => sum + point.value, 0) / n;
+    let numerator = 0;
+    let denominator = 0;
+    usable.forEach((point) => {
+      const dx = point.ts - meanX;
+      numerator += dx * (point.value - meanY);
+      denominator += dx * dx;
+    });
+    return denominator === 0 ? 0 : numerator / denominator;
+  }
+
+  // Turns the raw per-second slope into the exact contracted copy. Nothing
+  // returned here may express a future arrival at some value or a countdown
+  // to one -- the slope describes only the window that was observed. The
+  // internal predicted-change-over-window quantity used below to decide the
+  // flat band is a comparison only and is never rendered.
+  function trendDisplay(metric, points, spanSeconds) {
+    const usable = usableTrendPoints(points);
+    const label = (HOST_METRIC_LABELS[metric] || metric).toLowerCase();
+    if (usable.length < TREND_MIN_POINTS) return 'Not enough data for a trend';
+    const perSecond = leastSquaresSlope(points);
+    const hourly = spanSeconds <= TREND_HOURLY_MAX_SPAN_SECONDS;
+    const secondsPerUnit = hourly ? 3600 : 86400;
+    const timeUnit = hourly ? 'hour' : 'day';
+    const magnitude = (perSecond || 0) * secondsPerUnit;
+    const formattedMagnitude = Math.abs(magnitude).toFixed(1);
+    if (Number(formattedMagnitude) === 0) return `${label} steady`;
+    const sign = magnitude >= 0 ? '+' : '-';
+    const arrow = magnitude >= 0 ? TREND_ARROWS.up : TREND_ARROWS.down;
+    const unit = HOST_METRIC_UNITS[metric] || '';
+    const base = `${label} ${sign}${formattedMagnitude}${unit}/${timeUnit} ${arrow}`;
+    return usable.length < TREND_CONFIDENT_POINTS ? `${base} (low confidence — ${usable.length} points)` : base;
+  }
+
+  // Test-only hook, same pattern as window.__historyStackRenderMs: these two
+  // functions are pure and otherwise private to this IIFE, so Playwright's
+  // page.evaluate needs a reachable handle to drive them directly.
+  window.__historyTrendTestHooks = {leastSquaresSlope, trendDisplay};
+
   function renderSharedTimeAxis(startTs, endTs) {
     const svg = $('history-time-axis');
     if (!svg) return;
