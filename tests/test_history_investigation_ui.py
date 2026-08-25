@@ -3286,6 +3286,104 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_clicking_incident_row_focuses_service_and_pushes_padded_range(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        # A 10-hour closed episode: 36000s * 0.15 = 5400s padding per side.
+        down_ts = 1_700_000_000
+        recovered_ts = down_ts + 36_000
+        episode = self._episode(8080, down_ts, recovered_ts)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history'
+                and parse_qs(urlparse(request.url).query).get('kind', [''])[0] == 'service',
+            ) as service_request_info:
+                page.locator('.incident-row .incident-service').first.click()
+            page.wait_for_function(
+                "() => document.getElementById('investigating-service').textContent === 'Investigating: Test Service'",
+                timeout=5_000,
+            )
+            service_query = parse_qs(urlparse(service_request_info.value.url).query)
+            self.assertEqual(service_query['port'][0], '8080')
+            self.assertEqual(int(service_query['start_ts'][0]), down_ts - 5_400)
+            self.assertEqual(int(service_query['end_ts'][0]), recovered_ts + 5_400)
+            self.assertIsNone(page.locator('#range-back').get_attribute('hidden'))
+        finally:
+            page.close()
+
+    def test_focus_padding_floor_applies_for_a_short_episode(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        # A 60-second episode: 0.15*60 = 9s < the 300s floor, so the floor wins.
+        down_ts = 1_700_000_000
+        recovered_ts = down_ts + 60
+        episode = self._episode(8080, down_ts, recovered_ts)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history'
+                and parse_qs(urlparse(request.url).query).get('kind', [''])[0] == 'service',
+            ) as service_request_info:
+                page.locator('.incident-row .incident-service').first.click()
+            service_query = parse_qs(urlparse(service_request_info.value.url).query)
+            self.assertEqual(int(service_query['start_ts'][0]), down_ts - 300)
+            self.assertEqual(int(service_query['end_ts'][0]), recovered_ts + 300)
+        finally:
+            page.close()
+
+    def test_open_incident_focus_caps_end_at_current_range_end(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        # A custom, fixed range so the "current range end" is a known value
+        # rather than a moving `Date.now()` -- an open episode's pushed
+        # window must never exceed it.
+        range_start = 1_700_000_000
+        range_end = 1_700_003_600
+        episode = self._episode(8080, range_start + 60, None)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.evaluate(
+                "([s, e]) => window.__historyRangeTestHooks.setInvestigationRange({start_ts: s, end_ts: e, origin: 'manual'})",
+                [range_start, range_end],
+            )
+            page.locator('[data-section="incidents"]').click()
+            page.locator('#incidents-section').wait_for(state='visible', timeout=5_000)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history'
+                and parse_qs(urlparse(request.url).query).get('kind', [''])[0] == 'service',
+            ) as service_request_info:
+                page.locator('.incident-row .incident-service').first.click()
+            service_query = parse_qs(urlparse(service_request_info.value.url).query)
+            self.assertEqual(int(service_query['end_ts'][0]), range_end)
+            self.assertLessEqual(int(service_query['end_ts'][0]), range_end)
+        finally:
+            page.close()
+
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):
     """04-04 Task 3: a zone that observes DST annotates its two transitions.
