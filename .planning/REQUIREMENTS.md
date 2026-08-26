@@ -36,7 +36,7 @@
 - [x] **DIA-01**: The operator can open a dedicated advanced analytics and monitoring page from either theme.
 - [x] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
 - [x] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
-- [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
+- [x] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
 - [x] **DIA-05**: The operator can select a validated custom range within retained history.
 - [x] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
 - [x] **DIA-07**: Correlated views present observed evidence without asserting an unsupported root cause.
@@ -128,7 +128,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | DIA-01 | Phase 3 | Complete |
 | DIA-02 | Phase 3 | Complete |
 | DIA-03 | Phase 3 | Complete |
-| DIA-04 | Phase 4 | Pending |
+| DIA-04 | Phase 4 | Complete |
 | DIA-05 | Phase 4 | Complete |
 | DIA-06 | Phase 4 | Complete |
 | DIA-07 | Phase 4 | Complete |
@@ -167,13 +167,24 @@ recovered incident's status, and leak a suppressed-maintenance anchor's evidence
 episode-scope grouping and `filter_episodes` narrowing that closed CR-01/CR-02/WR-01
 server-side) and 04-10 (the Incidents section's on-screen disclosure of the narrowing rule).
 Its evidence is the named route-level regression tests in
-`tests/test_incidents_api.py::EpisodeScopeRegressionTests`.
+`tests/test_incidents_api.py::EpisodeScopeRegressionTests`. The 2026-08-26 re-verification
+confirmed those three closures at the code and test level but found a further candour defect
+in the same view, recorded as `04-REVIEW.md` WR-01 (new): `renderIncidentsSection` rendered
+the filtered count as the total when the unfiltered baseline read failed (`"N of N
+incidents"` for a genuinely unknown total). It was closed by gap-closure plan 04-11, which
+made the count state the total is unknown rather than reuse the filtered number. Its evidence
+is the named UI regression
+`tests/test_history_investigation_ui.py::HistoryInvestigationUiTests::test_baseline_total_fetch_failure_never_claims_the_filtered_count_is_the_total`.
 
 DIA-04 was determined satisfied by `04-VERIFICATION.md` (the six-preset ladder, its
 active-state indication, and its validated persisted preference, untouched by any confirmed
-defect) and its promotion was recommended there, but it is deliberately held at Pending here
-because a gap-closure plan may not promote a requirement unconnected to any gap in its own
-closure set — promotion is left for the next independent re-verification.
+defect) and its promotion was recommended there, but it was deliberately held at Pending in
+04-10 because a gap-closure plan may not promote a requirement unconnected to any gap in its
+own closure set — promotion was left for the next independent re-verification. Gap-closure
+plan 04-10 deliberately held at Pending until an independent re-verification could decide;
+that hold is now discharged by 04-VERIFICATION.md (2026-08-26T12:15:00Z), which determined
+DIA-04 satisfied and recommended promotion on the evidence of the preset ladder, its
+active-state indication, and its validated persisted preference.
 
 **Coverage:**
 

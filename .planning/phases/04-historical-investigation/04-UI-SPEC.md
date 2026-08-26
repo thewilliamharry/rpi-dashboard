@@ -445,6 +445,7 @@ own pattern **and** text label — never color alone, and never a status color:
 | Incidents event-type narrowing note | `Incident rows are grouped from every state change in this range; the Event type filter keeps only incidents with a matching event during the incident.` |
 | Incidents maintenance narrowing note | `Expected-maintenance filtering applies to each incident's own opening event, so an incident that began during maintenance is filtered as expected maintenance.` |
 | Custom range — nonexistent local time | `That local time does not exist on this date — the clock jumps forward here (DST). Enter a time outside the absent hour.` |
+| Incidents matching-count — unfiltered total unavailable | `{N} of ? incidents (total unavailable)` |
 
 The three rows above were added by gap-closure plan 04-10. The first two disclose, on screen, the
 episode-scope narrowing semantics plan 04-09 introduced (`episode_scope.narrowed_by`) — closing the
@@ -453,6 +454,13 @@ expected-maintenance filter narrowed the already-grouped episode list. The third
 client-only message in the range control: every other `validateCustomRange` message is a verbatim
 copy of a server rejection string, but the server takes epoch integers and has no equivalent
 rejection to copy for a wall-clock time its own zone never reaches.
+
+The fourth row above was added by gap-closure plan 04-11. The `{N} of {M}` row above it (`Incidents
+matching-count`) describes only the state where both the filtered read and the unfiltered baseline
+read succeed; this row is the state where the baseline read failed and the total is genuinely
+unknown — the count says so rather than reusing the filtered number as though it were the total,
+the same disclosure policy `Correlation markers unavailable for this range` already applies to the
+marker rail's own baseline fetch.
 
 ---
 
@@ -475,7 +483,7 @@ STATE coverage and reference that copy rather than restating it.
 | **zero-one-many** | E2 — Host chart stack | ✅ resolved (explicit) | All four charts always render in the fixed CPU → memory → disk → temperature order regardless of how many metrics have retained data. A metric with no data in the selected range renders its chart frame with the documented empty copy; it is never omitted. Stack height and metric order are therefore stable across every range, and an absent sensor is visibly distinguishable from a rendering failure. |
 | empty, loading, error, populated, partial, overflow, long-text | E3 — Service state band + latency chart | ✅ resolved (explicit) | Band/latency share the host stack's loading/error/partial handling; failure-class chip list wraps to a second line at narrow widths rather than truncating; an unselected service renders an explicit `Select a service to view its history` placeholder instead of an empty band. |
 | **zero-one-many** | E3 — Service state band + latency chart | ✅ resolved (explicit) | A single uninterrupted state spans the full band width with one duration label. Zero observations render the `unknown` fill across the entire band rather than a blank strip, so "we did not observe" is never shown as "nothing happened". Failure-class chip counts use explicit singular/plural copy (`1 failure class` / `{N} failure classes`). |
-| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | E4 — Incidents list and filters | ✅ resolved (explicit) | Documented empty/error copy above; `N of M` count and `Clear all filters` cover zero-one-many; open, overrun, and flapping rows are explicitly defined states (never inferred); long service names/error-class text wrap within the row, matching the existing `.evidence-row` `overflow-wrap: anywhere` rule. |
+| empty, loading, error, populated, partial, overflow, zero-one-many, long-text | E4 — Incidents list and filters | ✅ resolved (explicit) | Documented empty/error copy above; `N of M` count and `Clear all filters` cover zero-one-many; open, overrun, and flapping rows are explicitly defined states (never inferred); long service names/error-class text wrap within the row, matching the existing `.evidence-row` `overflow-wrap: anywhere` rule. The `partial` category now covers a failed unfiltered-baseline read (04-11): the filtered list still renders and the count states the total is unknown, so a partial failure degrades one number rather than the view. |
 | overflow, long-text | E5 — Investigation context (carried service, navigation stack, correlation markers/cursor) | ✅ resolved (explicit) | Dense-marker clustering degrades to a count glyph rather than saturating the axis; the `Investigating: {service}` indicator and `Back` label truncate with a full-string tooltip rather than pushing the header layout; the forbidden-word list is a static, testable constraint (DIA-07). |
 | **loading** | E5 — Investigation context | ✅ resolved (explicit) | The `Investigating: {service}` indicator and `Back` control render immediately from client-side navigation state and stay visible throughout — they require no fetch. Correlation markers and the shared hover time cursor are suppressed until their underlying charts finish loading, so a marker is never plotted against a skeleton axis. |
 | **error** | E5 — Investigation context | ✅ resolved (explicit) | The indicator and `Back` control remain usable so the operator can navigate back out of a failed investigation. Correlation markers are omitted and the chart area carries an explicit `Correlation markers unavailable for this range` note — a silently marker-free chart is forbidden, because it reads as "nothing correlated" rather than "Beacon could not check". |
