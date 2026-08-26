@@ -346,7 +346,7 @@ Plans:
   4. Operator can filter incidents and transitions by service, criticality, event type, and time range; choosing an incident focuses the related service and time window.
   5. Selecting a service, incident, or time range updates related host, service, and event views together, presenting observed correlation without claiming an unsupported root cause.
 
-**Plans**: 8/8 plans executed + 2 gap-closure plans pending
+**Plans**: 9/10 plans executed + 2 gap-closure plans pending
 
 Plans:
 **Wave 1**
@@ -380,7 +380,7 @@ Plans:
 
 **Gap closure round 1 (after 04-VERIFICATION.md, status gaps_found, 4/6 — Observable Truth #2 (validated custom ranges, DIA-05) and #5 (honest incident filtering, HIS-04) both failed; 04-REVIEW.md CR-01/CR-02/WR-01/WR-02 independently confirmed present in the current tree; HIS-04 found recorded Complete while demonstrably broken by two of its own four filter dimensions)**
 
-- [ ] 04-09-PLAN.md — Honest incident scope: the open-episode anchor and the episode row set are resolved independently of the filtered read, expected-maintenance filtering becomes the episode’s own opening event, and ten route-level regressions pin CR-01/CR-02/WR-01 shut (wave 8)
+- [x] 04-09-PLAN.md — Honest incident scope: the open-episode anchor and the episode row set are resolved independently of the filtered read, expected-maintenance filtering becomes the episode’s own opening event, and ten route-level regressions pin CR-01/CR-02/WR-01 shut (wave 8)
 - [ ] 04-10-PLAN.md — A local time that does not exist is rejected with a message naming the clock change instead of silently accepted (WR-02), the Incidents section states the rule that narrowed its list, and the DIA-05/DIA-06/DIA-08/HIS-04 records are reconciled with the evidence (wave 9)
 
 **UI hint**: yes
@@ -426,6 +426,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
-| 4. Historical Investigation | 8/8 | In Progress|  |
+| 4. Historical Investigation | 9/10 | In Progress|  |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
