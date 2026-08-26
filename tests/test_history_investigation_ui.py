@@ -4395,5 +4395,159 @@ class HistoryDstAnnotationUtcTests(unittest.TestCase):
             page.close()
 
 
+class CustomRangeDstGapTests(unittest.TestCase):
+    """04-10 Task 1 (WR-02/DIA-05): a custom range's typed local time that the
+    configured zone never reaches -- the DST spring-forward absent hour --
+    is rejected with a message naming the clock change, and issues no
+    request. A time in the fall-back ambiguous hour is unaffected: it still
+    parses and round-trips exactly as typed.
+
+    A separate app/server instance (own TZ=Europe/London), for the same
+    reason HistoryDstAnnotationLondonTests uses one rather than reusing
+    HistoryInvestigationUiTests: reloading dashboard.app mid-class would
+    rewrite the shared module namespace every already-bound route handler
+    on that class's still-running server reads its SETTINGS from.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.appmod, cls.db_path = load_app({'TZ': 'Europe/London'})
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=cls.playwright.chromium.executable_path,
+        )
+        cls.base_url = f'http://127.0.0.1:{cls.server.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
+
+    def _page_with_counters(self):
+        """Loads /advanced on the History section with routes for every API
+        the range control and the always-fetched incident marker rail touch,
+        counting requests to /api/telemetry/history and /api/events/history
+        separately so a rejected apply can be proven to issue neither.
+        """
+        snapshot = HistoryInvestigationUiTests._snapshot()
+        config_fixture = HistoryDstAnnotationLondonTests._config_fixture('Europe/London')
+        counters = {'telemetry': 0, 'events': 0}
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                counters['telemetry'] += 1
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', ['cpu'])[0]
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(
+                    status=200,
+                    json=HistoryDstAnnotationLondonTests._dst_fixture(metric, start_ts, end_ts),
+                )
+                return
+            if path == '/api/events/history':
+                counters['events'] += 1
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(
+                    status=200,
+                    json=HistoryInvestigationUiTests._events_history_fixture(start_ts, end_ts),
+                )
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+        page.locator('[data-section="history"]').click()
+        page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+        return page, counters
+
+    def test_spring_forward_absent_local_time_is_rejected_with_a_named_message(self):
+        date = HistoryDstAnnotationLondonTests._last_sunday(2024, 3).strftime('%Y-%m-%d')
+        text = f'{date} 01:30'
+        page, _counters = self._page_with_counters()
+        try:
+            page.locator('#range-start').fill(text)
+            page.locator('#range-end').fill('2024-01-15 10:00')
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(
+                page.locator('#range-error').text_content(),
+                'That local time does not exist on this date — the clock jumps forward here '
+                '(DST). Enter a time outside the absent hour.',
+            )
+            hooks = 'window.__historyRangeTestHooks'
+            self.assertTrue(
+                page.evaluate(f"{hooks}.parseLocalRangeInput({text!r}) === {hooks}.NONEXISTENT_LOCAL_TIME"),
+            )
+        finally:
+            page.close()
+
+    def test_spring_forward_absent_local_time_issues_no_history_request(self):
+        # A same-day, chronologically-later end (unlike test 1's deliberately
+        # earlier-day end) so this test cannot pass merely because the
+        # existing ordering check also happens to reject the pair -- it
+        # isolates the DST round-trip check as the sole reason no request is
+        # issued.
+        date = HistoryDstAnnotationLondonTests._last_sunday(2024, 3).strftime('%Y-%m-%d')
+        text = f'{date} 01:30'
+        page, counters = self._page_with_counters()
+        try:
+            page.locator('#range-start').fill(text)
+            page.locator('#range-end').fill(f'{date} 10:00')
+            before_telemetry = counters['telemetry']
+            before_events = counters['events']
+            page.locator('#apply-custom-range').click()
+            page.locator('#range-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(counters['telemetry'], before_telemetry)
+            self.assertEqual(counters['events'], before_events)
+        finally:
+            page.close()
+
+    def test_fall_back_ambiguous_local_time_still_parses_and_round_trips(self):
+        date = HistoryDstAnnotationLondonTests._last_sunday(2024, 10).strftime('%Y-%m-%d')
+        text = f'{date} 01:30'
+        page, _counters = self._page_with_counters()
+        try:
+            hooks = 'window.__historyRangeTestHooks'
+            parsed = page.evaluate(f"{hooks}.parseLocalRangeInput({text!r})")
+            self.assertIsInstance(parsed, (int, float))
+            self.assertTrue(math.isfinite(parsed))
+            formatted = page.evaluate(
+                f"{hooks}.formatLocalRangeInput({hooks}.parseLocalRangeInput({text!r}))",
+            )
+            self.assertEqual(formatted, text)
+        finally:
+            page.close()
+
+    def test_ordinary_local_time_round_trips_unchanged(self):
+        text = '2024-06-15 14:05'
+        page, _counters = self._page_with_counters()
+        try:
+            hooks = 'window.__historyRangeTestHooks'
+            formatted = page.evaluate(
+                f"{hooks}.formatLocalRangeInput({hooks}.parseLocalRangeInput({text!r}))",
+            )
+            self.assertEqual(formatted, text)
+        finally:
+            page.close()
+
+
 if __name__ == '__main__':
     unittest.main()
