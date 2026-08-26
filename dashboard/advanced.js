@@ -1101,9 +1101,23 @@
     if (list) list.replaceChildren();
   }
 
+  // `total` is `number | null`. `null` means "Beacon does not have this
+  // number" -- never "zero". `0` is a real, meaningful matched count this
+  // element already renders (`0 of 1 incidents`), so an absent total must
+  // stay type-distinguishable from it rather than collapsing into it. Both
+  // branches write the text and the `data-total-known` state on every call,
+  // so a previous render's uncertainty state can never survive into a later
+  // successful one.
   function updateMatchingIncidentCount(matching, total) {
     const el = $('matching-incident-count');
-    if (el) el.textContent = `${matching} of ${total} incidents`;
+    if (!el) return;
+    if (total === null) {
+      el.textContent = `${matching} of ? incidents (total unavailable)`;
+      el.dataset.totalKnown = 'false';
+    } else {
+      el.textContent = `${matching} of ${total} incidents`;
+      el.dataset.totalKnown = 'true';
+    }
   }
 
   // Populated from the same current snapshot's service list the Services
@@ -1376,7 +1390,15 @@
   // Fetches the currently-filtered list and an unfiltered baseline for the
   // same range in parallel -- "N of M incidents" needs both numbers (M is
   // deliberately never narrowed by the operator's own filter selection),
-  // and the two are otherwise independent reads of the same range.
+  // and the two are otherwise independent reads of the same range. When only
+  // the baseline fetch fails, the total becomes unknown and is rendered as
+  // unknown rather than silently substituted with the filtered count: D-06
+  // (the chart never implies data Beacon does not have) and D-12 (the
+  // grouped episode list is a view over durable rows, never a fact of its
+  // own) both forbid a confident-looking number standing in for one Beacon
+  // does not actually have. This is the same disclosure policy the marker
+  // rail's own unfiltered baseline fetch already applies via
+  // `#correlation-unavailable` a screen away.
   async function renderIncidentsSection() {
     const requestId = ++state.incidentsRequestGeneration;
     const bounds = state.historyBounds || resolveRangeBounds();
@@ -1410,9 +1432,8 @@
     const payload = filteredOutcome.value;
     const episodes = Array.isArray(payload.episodes) ? payload.episodes : [];
     const flappingGroups = Array.isArray(payload.flapping_groups) ? payload.flapping_groups : [];
-    const total = totalOutcome.status === 'fulfilled' && Array.isArray(totalOutcome.value.episodes)
-      ? totalOutcome.value.episodes.length
-      : episodes.length;
+    const totalKnown = totalOutcome.status === 'fulfilled' && Array.isArray(totalOutcome.value.episodes);
+    const total = totalKnown ? totalOutcome.value.episodes.length : null;
     updateMatchingIncidentCount(episodes.length, total);
     renderEpisodeScopeNote(payload.episode_scope || {}, filters);
     if (truncatedEl) {
