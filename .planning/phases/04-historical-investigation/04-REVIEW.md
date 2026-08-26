@@ -1,218 +1,173 @@
 ---
 phase: 04-historical-investigation
-reviewed: 2026-08-26T00:35:24Z
+reviewed: 2026-08-26T08:44:38Z
 depth: standard
 files_reviewed: 10
 files_reviewed_list:
+  - dashboard/advanced.css
+  - dashboard/advanced.html
+  - dashboard/advanced.js
   - dashboard/app.py
   - dashboard/beacon/incidents.py
-  - dashboard/advanced.js
-  - dashboard/advanced.html
-  - dashboard/advanced.css
-  - tests/test_incidents_api.py
-  - tests/test_history_investigation_ui.py
-  - tests/test_historical_telemetry_api.py
   - tests/test_advanced_ui.py
   - tests/test_api_and_auth.py
+  - tests/test_historical_telemetry_api.py
+  - tests/test_history_investigation_ui.py
+  - tests/test_incidents_api.py
 findings:
-  critical: 2
+  critical: 0
   warning: 2
   info: 1
-  total: 5
+  total: 3
 status: issues_found
 ---
 
 # Phase 04: Code Review Report
 
-**Reviewed:** 2026-08-26T00:35:24Z
+**Reviewed:** 2026-08-26T08:44:38Z
 **Depth:** standard
 **Files Reviewed:** 10
 **Status:** issues_found
 
 ## Summary
 
-This phase adds `GET /api/events/history` (`dashboard/beacon/incidents.py`, wired in
-`dashboard/app.py`) plus a large History/Incidents UI (`dashboard/advanced.js`,
-`dashboard/advanced.html`, `dashboard/advanced.css`). The parameter validation, SQL
-parameterization, timestamp/timezone handling (including the DST-tick detector and the
-iterative local-wall-clock parser), the gap-breaking chart path builder, and the
-divide-by-zero guards in the statistics code (trend slope, range aggregate, time-weighted
-availability) are all careful and well-documented. No `innerHTML`/`insertAdjacentHTML` usage
-exists anywhere in `advanced.js` — every dynamic string reaches the DOM through `textContent`
-or attribute assignment, so there is no XSS surface from service names or event reasons.
-Event-listener lifecycle is also clean: window-level drag/cursor listeners are added and
-removed via named function references, and every re-rendered list uses `replaceChildren`
-rather than `append`, so there is no listener-accumulation leak across polling cycles.
+This is a re-review of the same file set as the prior `04-REVIEW.md`, after plans 04-09 and
+04-10 closed the four findings that review raised (CR-01, CR-02, WR-01, WR-02). Both closures
+were verified directly against the current code, not taken on faith:
 
-The one systemic problem is in `dashboard/beacon/incidents.py`'s episode-grouping/anchor
-mechanism: it structurally requires every state-transition row that opens and closes an
-episode to be present in the SQL-filtered row set, but the route derives which ports get an
-"anchor" lookup — and which rows even reach grouping — from that same filtered set. Two
-concrete, currently-untested request shapes cause the Incidents view to misreport an
-operator-visible incident's actual status (see CR-01 and CR-02). Both are reachable directly
-from the shipped UI (the port-scoped History service picker, and the Incidents "Event type"
-filter dropdown), not just via direct API calls.
+- **CR-01/CR-02/WR-01 (closed by 04-09):** `dashboard/app.py`'s `api_events_history`
+  (`app.py:2664-2702`) now reads episode-grouping material two ways: `read_episode_state_changes`
+  (`incidents.py:297-315`) always reads every `state_change` row in range for the in-scope
+  services, pinned to `event_type='state_change'` and `maintenance='include'` regardless of the
+  operator's `event_type`/`maintenance` filter selection, and `anchor_candidate_ports`
+  (`incidents.py:266-294`) computes which ports get an anchor lookup independently of what
+  matched inside the window — always `[port]` for an explicit per-service filter, otherwise the
+  union of in-range episode ports and `read_open_ports_as_of`'s durable-event-derived discovery
+  query. `filter_episodes` (`incidents.py:485-526`) then narrows the already-grouped episodes by
+  `maintenance`/`event_type` *after* grouping, checking `maintenance` against each episode's own
+  `suppressed_reason` (which `group_episodes` assigns from the opening/anchor row), which is what
+  closes WR-01 (an anchor's own suppression state is now authoritative for the `maintenance`
+  filter, not bypassed). A dedicated `EpisodeScopeRegressionTests` class
+  (`tests/test_incidents_api.py:486-755`) directly exercises the CR-01 (silently-down service,
+  both unscoped and `port`-scoped), CR-02 (non-`state_change` `event_type` filter on a
+  fully-recovered episode), and WR-01 (`maintenance=exclude`/`only` against a suppressed anchor)
+  scenarios at the route level and asserts the previously-wrong outcomes no longer occur. Closure
+  confirmed.
+- **WR-02 (closed by 04-10):** `parseLocalRangeInput` (`advanced.js:1788-1810`) now performs a
+  round-trip check after the convergence loop — `localWallClockMinutes(rounded) !== targetMinutes`
+  returns the `NONEXISTENT_LOCAL_TIME` sentinel rather than silently accepting a mismatched
+  instant — and `validateCustomRange` (`advanced.js:1829-1857`) surfaces a named rejection for it
+  ahead of every other check. `tests/test_history_investigation_ui.py:4373-4620` (the
+  `HistoryDstAnnotationLondonTests`/spring-forward classes) cover both the sentinel value and the
+  end-to-end "no request issued" behavior for an absent local hour. Closure confirmed.
+- **IN-01** (route-level filter-interaction test gap) is closed by the same `EpisodeScopeRegressionTests`
+  addition.
 
-## Critical Issues
-
-### CR-01: Ongoing outages disappear from `/api/events/history` whenever the query window (or a `port` filter) excludes every non-anchor row for that port
-
-**File:** `dashboard/app.py:2664-2679`, `dashboard/beacon/incidents.py:154-176, 312-338`
-
-**Issue:**
-`api_events_history` computes the set of ports eligible for an "open episode" anchor lookup
-purely from the rows returned by the *filtered, range-bounded* query:
-
-```python
-rows, truncated = beacon_incidents.read_events_in_range(conn, ..., port=filters.get('port'), ...)
-ports = sorted({row['port'] for row in rows})
-anchors = beacon_incidents.read_open_episode_anchors(conn, start_ts=requested.start_ts, ports=ports)
-```
-
-`compose_incidents_response` then only ever consults an anchor for a port that already has at
-least one row in `rows_by_port` (`incidents.py:332-338`). A service that went down before
-`start_ts` and has *not yet recovered*, and that produced **no other event** inside the
-requested window (no `alert_sent`, no `preview_capture`, nothing — which is the normal case
-for a long-silent outage, since `state_change` rows are only written on a state flip), has
-zero rows in the filtered result set. `ports` is therefore empty for that service, no anchor
-is fetched, and the still-open episode is completely absent from `episodes` — even though the
-module's own docstring states this is exactly the scenario `read_open_episode_anchors` exists
-to handle ("lets an outage that *began* before the selected range group correctly instead of
-appearing as a recovery with no cause").
-
-The same gap is reachable through the explicit `port` filter: the History service picker and
-the Incidents "Service" filter both call `/api/events/history?port=<N>&...`
-(`dashboard/advanced.js:550`, `incidentQueryParams` at `advanced.js:1056-1069`). If an operator
-picks a specific service to investigate a currently-ongoing, event-quiet outage over a narrow
-range, `read_events_in_range` returns zero rows for that port, `ports` is empty, and the
-Incidents list renders "No incidents match this range and these filters" for the exact service
-the operator is trying to investigate — directly contradicting the product's core value
-proposition ("what is failing" — PROJECT.md).
-
-Every existing test that exercises `read_open_episode_anchors` (`test_durable_prior_down_row_is_picked_up_as_anchor`,
-`test_orphan_recovery_with_no_anchor_emits_no_episode` in `tests/test_incidents_api.py:404-430`)
-seeds a recovery row *inside* the window, which is exactly the one case that already works.
-No test covers "anchor exists, port has zero other rows in-range."
-
-**Fix:** Compute the anchor candidate port set independently of what happened to match inside
-the window — e.g. always look up the anchor for the filter's explicit `port` when one is
-supplied, and otherwise query for every port with a currently-open `state_change` (`online = 0`
-with no later `online = 1`) as of `start_ts`, not just the ports that happen to appear in
-`rows`. A minimal fix without a broader query: when `filters.get('port')` is set, always pass
-`[filters['port']]` to `read_open_episode_anchors` regardless of whether `rows` is empty.
-
----
-
-### CR-02: The `event_type` (and `maintenance`) filter can fabricate a false "Ongoing" badge for an already-recovered incident, or silently erase a real one
-
-**File:** `dashboard/beacon/incidents.py:210-256, 312-338`, `dashboard/advanced.js:1063-1067, 125-136 (HTML)`
-
-**Issue:** `group_episodes` only participates rows whose `event_type == 'state_change'`
-(`incidents.py:224-225`) — by design, per its own docstring. But `read_events_in_range`'s
-`event_type` filter is applied at the SQL level *before* grouping, and the shipped Incidents UI
-lets an operator pick any single event type, including non-`state_change` values
-(`dashboard/advanced.html:127-135`: `Alert sent`, `Alert failed`, `Preview capture`, `Preview
-complete`, `Maintenance overrun`, plus the two `maintenance:` options that map to the
-`maintenance=exclude`/`only` parameter, which filters on `suppressed_reason` at the row level).
-
-Concretely: an operator filters Incidents to `Event type: Alert sent`. The server-side query
-now returns only `alert_sent` rows for the range. For a port whose outage already recovered
-entirely inside the range (down `state_change` + up `state_change`, both excluded by the
-filter) but that also has a prior open-episode anchor from before `start_ts`:
-- `rows_by_port` for that port contains only the `alert_sent` rows, which `group_episodes`
-  skips entirely (line 224-225).
-- The anchor (always fetched with no `event_type`/`maintenance` predicate —
-  `incidents.py:164-169`) is still prepended and is the *only* `state_change` row seen by
-  `group_episodes`, so it opens an episode that is **never closed**, because the real closing
-  `online=1` row was excluded by the filter.
-- The route reports this already-resolved incident as `open: True` with the `▶ Ongoing — not
-  yet recovered` badge (`advanced.js:1214-1219`) — a fabricated status the codebase's own
-  design mandate (D-12/Pitfall 4, repeated throughout `04-UI-SPEC.md` and the `incidents.py`
-  module docstring) explicitly forbids ("never backfilled with the query's `end_ts` or the
-  current time"; here it is backfilled with a false "still open" state instead).
-
-The inverse also happens: a port whose incident is entirely inside the range with no
-pre-existing anchor simply vanishes from `episodes` under this filter (no anchor, no
-`state_change` rows survive the filter), even though `events` (the flat list) still shows the
-underlying activity — so "N of M incidents" silently undercounts real incidents whenever a
-non-`state_change` event type or a `maintenance` mode is selected.
-
-No test in `tests/test_incidents_api.py` drives the route with an `event_type` or `maintenance`
-query-string filter and inspects the resulting `episodes`/`flapping_groups`/matching-count
-output; the only `event_type`-related test (`test_non_state_change_rows_never_participate_in_grouping`,
-line 65-72) calls the pure `group_episodes` function directly on a hand-built list that already
-contains both the `state_change` rows and the extra event — it never goes through
-`read_events_in_range`'s SQL filter, so it cannot catch this.
-
-**Fix:** Either (a) restrict the `event_type` filter (and `maintenance`'s effect on grouping)
-to the flat `events` list only, and always group `episodes` from an unfiltered-by-event-type,
-unfiltered-by-maintenance `state_change` read (then filter/annotate episodes after grouping),
-or (b) when `event_type` is supplied and is not `state_change`, only ever return the `events`
-list (return `episodes: []` explicitly, or reject episode-shaped filters server-side) rather
-than grouping a partial row set that cannot represent a real state machine. Add a route-level
-test that applies `event_type=alert_sent` to a port with a fully-recovered in-range episode and
-asserts it is **not** reported as `open`.
+No new Critical issues were found in this pass. Two new Warnings were found that the prior
+review's structural focus did not cover: a silent, misleading "N of M incidents" count when the
+unfiltered baseline fetch fails, and an ARIA role/interactivity mismatch on the single incident
+marker that is inconsistent with every other interactive control this same file defines. One Info
+item notes a related, narrower gap in test coverage.
 
 ## Warnings
 
-### WR-01: `read_open_episode_anchors` bypasses the `maintenance` filter, so a suppressed anchor can still surface under `maintenance=exclude`
+### WR-01: "N of M incidents" silently substitutes the filtered count for the total when the unfiltered baseline fetch fails
 
-**File:** `dashboard/beacon/incidents.py:154-176`
+**File:** `dashboard/advanced.js:1387-1416`
 
-**Issue:** `read_open_episode_anchors`'s query has no `suppressed_reason` predicate — it always
-returns the most recent prior down row regardless of the caller's `maintenance` filter. If that
-anchor's `suppressed_reason` is set (the down event began during a maintenance window) and the
-recovery event inside the window is not suppressed, requesting `maintenance=exclude` (the
-"hide expected maintenance" filter) still produces an episode carrying the anchor's
-`suppressed_reason` and the `Expected` chip (`advanced.js:1205-1210`), i.e. the exact evidence
-the operator asked to exclude. This is the same class of problem as CR-02 (filter predicate
-applied inconsistently between the anchor read and the range read) but scoped to a single
-field (`suppressed_reason`) rather than dropping the whole episode.
+**Issue:** `renderIncidentsSection` fetches the operator's filtered incident list and an
+unfiltered baseline for the same range in parallel via `Promise.allSettled`:
 
-**Fix:** Either apply the same `maintenance` predicate to the anchor query, or explicitly
-document/test that an anchor's suppression state is authoritative regardless of the
-`maintenance` filter (and confirm that's the intended semantics — currently untested either
-way).
+```js
+const [filteredOutcome, totalOutcome] = await Promise.allSettled([
+  fetchIncidents(bounds.start_ts, bounds.end_ts, filters),
+  fetchIncidents(bounds.start_ts, bounds.end_ts, DEFAULT_HISTORY_FILTERS),
+]);
+...
+const total = totalOutcome.status === 'fulfilled' && Array.isArray(totalOutcome.value.episodes)
+  ? totalOutcome.value.episodes.length
+  : episodes.length;
+updateMatchingIncidentCount(episodes.length, total);
+```
 
-### WR-02: `parseLocalRangeInput`'s convergence loop does not handle a nonexistent local time (spring-forward gap)
+When the filtered request succeeds but the unfiltered baseline request fails (a transient
+network error, a timeout, or a server 5xx that does not also affect the first, nearly-identical
+request), `total` silently falls back to `episodes.length` — i.e. the exact filtered count. The
+UI then renders `"N of N incidents"`, which reads as "every incident in this range matches your
+filter" even when the operator has an active `criticality`/`event_type`/`service` filter and the
+real total is unknown and possibly much larger. No error, partial-failure notice, or `?` is
+surfaced anywhere for this case; `errorEl` is only populated when `filteredOutcome` itself fails
+(`advanced.js:1399-1408`). This is the same class of problem the codebase's own design principle
+(D-12/Pitfall 4, "never fabricate, never fill a gap with a guess that reads as a fact") is meant
+to prevent, but applied here to a fetch failure rather than a query-shape gap. No test in
+`tests/test_history_investigation_ui.py` exercises the "unfiltered baseline request fails" path
+(only successful-both-requests assertions exist at `test_history_investigation_ui.py:2887,3056`).
 
-**File:** `dashboard/advanced.js:1726-1745`
+**Fix:** Track baseline-fetch failure explicitly and render a state that does not claim parity,
+e.g. `"N of ? incidents (total unavailable)"`, or retry the baseline fetch once before falling
+back. Minimal fix:
 
-**Issue:** `parseLocalRangeInput` iteratively nudges a candidate UTC instant until
-`localWallClockMinutes(candidate)` reports the wall-clock minutes the operator typed. This
-converges correctly for an unambiguous time and (per the file's own comments) for the
-"fall back" ambiguous hour, but for a wall-clock time that never occurs at all (the
-"spring forward" gap, e.g. entering `02:30` on the day a zone jumps from 02:00 to 03:00), there
-is no candidate `ts` for which `localWallClockMinutes(candidate) === targetMinutes`, so
-`deltaMinutes` never reaches `0`. The loop still exits after exactly 3 iterations and returns
-whatever `candidate` it last computed — silently accepting a value that does not actually
-render back to the text the operator entered, with no error surfaced to `validateCustomRange`
-(which only checks ordering/span/future-ness, not round-trip fidelity). Since this phase
-explicitly reasons about DST elsewhere (the `dstAnnotations` detector, `advanced.js:2564-2600`),
-this input path is the one place that edge case isn't handled.
+```js
+const totalKnown = totalOutcome.status === 'fulfilled' && Array.isArray(totalOutcome.value.episodes);
+const total = totalKnown ? totalOutcome.value.episodes.length : null;
+updateMatchingIncidentCount(episodes.length, total); // render "N of ? incidents" when total is null
+```
 
-**Fix:** After the loop, verify `localWallClockMinutes(candidate) === targetMinutes`; if not
-(nonexistent local time), return `null` (or a sentinel `validateCustomRange` can turn into "that
-local time does not exist because of a clock change — pick another") rather than silently
-accepting an inaccurate instant.
+### WR-02: Single incident marker uses `role="img"` while being fully keyboard/pointer interactive, inconsistent with every other actionable control in this file
+
+**File:** `dashboard/advanced.js:1582-1601`
+
+**Issue:** `renderMarkerSingle` builds the lone (non-clustered) incident marker on the shared time
+axis:
+
+```js
+circle.setAttribute('tabindex', '0');
+circle.setAttribute('role', 'img');
+const text = markerTitle(episode);
+circle.setAttribute('aria-label', text);
+...
+circle.addEventListener('click', () => focusIncident(episode));
+circle.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focusIncident(episode); }
+});
+```
+
+`role="img"` tells assistive technology this element is a static graphic whose content is
+described by its label — not an actionable control. Screen readers commonly do not expose an
+`img`-role element as operable (no "button" role announcement, and some AT strips it from the
+interactive-elements rotor entirely), so a screen-reader user tabbing through the time axis may
+land on a focusable-but-silent-as-to-purpose circle that in fact opens `focusIncident` on
+Enter/Space/click. Every other interactive element this same file adds in the same feature area
+uses the correct role: `renderMarkerCluster` (`advanced.js:1544-1573`) uses `role="button"`, and
+`incidentRow` (`advanced.js:1194-1312`) uses `role="button"` with an action-stating `aria-label`
+("Investigate ... incident starting ..."). The single-marker circle is the one outlier, both in
+role (`img` instead of `button`) and in label wording (a plain description instead of a
+call-to-action), despite having identical click/keydown behavior to the cluster glyph next to it.
+
+**Fix:** Use `role="button"` to match `renderMarkerCluster` and `incidentRow`, and word the label
+consistently:
+
+```js
+circle.setAttribute('role', 'button');
+circle.setAttribute('aria-label', `Investigate ${text}`);
+```
 
 ## Info
 
-### IN-01: `criticality`/`event_type`/`maintenance` interaction is untested at the route level
+### IN-01: No test exercises the incident-count baseline-fetch-failure path
 
-**File:** `tests/test_incidents_api.py`
+**File:** `tests/test_history_investigation_ui.py`
 
-**Issue:** All 37 tests either exercise the pure grouping functions with hand-built row lists,
-or exercise the route with range/port/malformed-parameter combinations. None combine a
-non-default `event_type` or `maintenance` filter with a route-level request that has both an
-anchor and an in-range recovery (the scenario CR-02 and WR-01 depend on), so this class of bug
-had no regression coverage before this review.
+**Issue:** As noted in WR-01 above, no test drives `renderIncidentsSection` with the filtered
+request succeeding and the unfiltered-baseline request failing (or vice versa), so the misleading
+`"N of N"` fallback had no regression coverage to catch it.
 
-**Fix:** Add the route-level tests suggested in CR-01/CR-02/WR-01's fix sections; they would
-have caught all three findings above.
+**Fix:** Add a Playwright-style test that stubs `/api/events/history` to succeed for the filtered
+query string and fail (network error or 500) for the unfiltered one, then asserts
+`#matching-incident-count` does not silently claim `N of N`.
 
 ---
 
-_Reviewed: 2026-08-26T00:35:24Z_
+_Reviewed: 2026-08-26T08:44:38Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
