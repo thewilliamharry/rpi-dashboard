@@ -53,6 +53,17 @@
   ];
   const INCIDENT_CRITICALITY_VALUES = ['critical', 'standard'];
   const INCIDENT_MAINTENANCE_MODES = ['exclude', 'only'];
+  // D-17 (Phase 4 04-08): markers whose rendered x positions (in the shared
+  // 1000-unit chart coordinate space HIST_CHART_WIDTH already establishes)
+  // fall within this many units of the immediately preceding marker already
+  // placed collapse into one cluster glyph -- the same adjacent-run idiom
+  // mergeStripSegments already uses for coverage segments.
+  const MARKER_MIN_SEPARATION_PX = 8;
+  // The six surfaces the shared hover cursor spans -- the four host charts,
+  // the selected service's state band, and its latency chart. Named once so
+  // both the pointer-event wiring and the cursor's own span geometry read
+  // from one list.
+  const CURSOR_TARGET_IDS = ['chart-cpu', 'chart-ram', 'chart-disk', 'chart-temp', 'service-state-band', 'service-latency-chart'];
   const state = {
     snapshot: null, lastSuccessLabel: null, activeSection: 'overview', timer: null,
     preferences: {...DEFAULT_PREFERENCES}, filters: {}, serviceSort: null,
@@ -72,6 +83,22 @@
     // other section's own generation counter -- same idiom as
     // serviceHistoryRequestGeneration above.
     incidentsRequestGeneration: 0,
+    // D-17 (Phase 4 04-08): true only while the host chart stack itself is
+    // still loading -- correlationReady() gates both the marker rail and the
+    // hover cursor on this, never on the independent service-history or
+    // Incidents-list fetches, so a marker or cursor readout is never
+    // composed against a skeleton axis.
+    historyChartsLoading: false,
+    // Per-metric {points, coverage, resolutionSeconds} snapshots, populated
+    // by applyMetricResult on every render -- the hover cursor's readout
+    // reads these rather than issuing its own request.
+    historyMetricData: {},
+    // The selected service's own merged band segments and latency
+    // {points, coverage, resolutionSeconds}, populated by
+    // renderServiceHistorySection -- null whenever no service is selected or
+    // its history did not load, so the readout reads as absence rather than
+    // a stale value from a previous selection.
+    serviceBandSegments: null, serviceLatencyData: null,
   };
   const $ = (id) => document.getElementById(id);
 
@@ -936,6 +963,10 @@
     const port = state.preferences.selectedService;
     const requestId = ++state.serviceHistoryRequestGeneration;
     if (port === null) {
+      // Task 2 (04-08): the cursor readout must read as absence, not a
+      // stale value from whichever service was selected before this clear.
+      state.serviceBandSegments = null;
+      state.serviceLatencyData = null;
       renderServiceHistoryPlaceholder();
       return;
     }
@@ -949,6 +980,8 @@
     const telemetryOutcome = telemetry.status === 'fulfilled' ? telemetry.value : null;
     const eventsOutcome = events.status === 'fulfilled' ? events.value : null;
     if (!telemetryOutcome && !eventsOutcome) {
+      state.serviceBandSegments = null;
+      state.serviceLatencyData = null;
       if (errorEl) {
         const reason = serverSuppliedReason(telemetry.reason) || serverSuppliedReason(events.reason);
         errorEl.textContent = `This service history could not load.${reason ? ` Server reported: ${reason}` : ''}`;
@@ -966,6 +999,8 @@
     // one stream's failure never blanks the whole service view.
     const content = serviceHistoryElement('content');
     if (!telemetryOutcome) {
+      state.serviceBandSegments = null;
+      state.serviceLatencyData = null;
       if (content) content.hidden = true;
       if (errorEl) {
         const reason = serverSuppliedReason(telemetry.reason);
@@ -995,6 +1030,11 @@
     const segments = mergeBandSegments(
       deriveBandSegments(points, episodes, telemetryOutcome.effective_resolution_seconds, requestedRange.end_ts),
     );
+    // Task 2 (04-08): the hover cursor's readout looks these up directly --
+    // never a second computation of the same band/latency data the chart
+    // itself just rendered.
+    state.serviceBandSegments = segments;
+    state.serviceLatencyData = {points, coverage, resolutionSeconds: telemetryOutcome.effective_resolution_seconds};
     renderServiceStateBand(segments, requestedRange);
     renderLatencyChart(points, coverage, requestedRange);
     renderAvailability(timeWeightedAvailability(points), requestedRange, episodes);
@@ -1391,6 +1431,280 @@
     const label = currentRangeLabel();
     setSelectedService(Number(episode.port));
     setInvestigationRange({...window, origin: 'incident', label});
+  }
+
+  // ------------------------------------------------------------------
+  // Incident marker rail (Phase 4 04-08 Task 1, D-17): neutral markers along
+  // the shared time axis, positioned against the exact same scale the chart
+  // stack itself uses. Fetched via fetchIncidents/`/api/events/history`
+  // verbatim (04-07) -- no new endpoint -- and always the unfiltered
+  // baseline (DEFAULT_HISTORY_FILTERS), so a marker's presence never depends
+  // on the operator's own Incidents filter choice.
+  // ------------------------------------------------------------------
+
+  function markerTitle(episode) {
+    const serviceLabel = `${displayValue(episode.service_name)} :${displayValue(episode.port)}`;
+    const startLabel = formatLocalTimestamp(episode.down_ts, INCIDENT_TIMESTAMP_OPTIONS);
+    return `${serviceLabel} — ${startLabel}`;
+  }
+
+  // Collapses markers whose rendered x positions fall within
+  // MARKER_MIN_SEPARATION_PX of the immediately preceding marker already
+  // placed into the current group -- an adjacent-run merge, the same idiom
+  // mergeStripSegments already establishes for coverage segments, so a dense
+  // incident period degrades into one counted cluster rather than a
+  // saturated rail of overlapping marks.
+  function clusterMarkers(episodes, scale) {
+    const positioned = (Array.isArray(episodes) ? episodes : [])
+      .filter((episode) => episode && Number.isFinite(episode.down_ts))
+      .map((episode) => ({episode, x: scale.xFor(episode.down_ts)}))
+      .sort((left, right) => left.x - right.x);
+    const groups = [];
+    positioned.forEach((marker) => {
+      const last = groups[groups.length - 1];
+      const lastMarker = last ? last.markers[last.markers.length - 1] : null;
+      if (last && lastMarker && marker.x - lastMarker.x < MARKER_MIN_SEPARATION_PX) {
+        last.markers.push(marker);
+      } else {
+        groups.push({markers: [marker]});
+      }
+    });
+    return groups;
+  }
+
+  function hideMarkerDisclosure() {
+    const el = $('incident-marker-disclosure');
+    if (!el) return;
+    el.hidden = true;
+    el.replaceChildren();
+  }
+
+  // A dense cluster's disclosure is a bounded, internally-scrollable list
+  // (`.hist-marker-disclosure`'s own max-height/overflow-y) -- the shared
+  // axis itself never becomes a scroll surface. Each entry activates
+  // focusIncident for its own episode, exactly like a single marker.
+  function showMarkerDisclosure(markers, clientX, clientY) {
+    const el = $('incident-marker-disclosure');
+    if (!el) return;
+    el.replaceChildren();
+    markers.forEach(({episode}) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'hist-marker-disclosure-item';
+      item.textContent = markerTitle(episode);
+      item.addEventListener('click', () => { hideMarkerDisclosure(); focusIncident(episode); });
+      el.append(item);
+    });
+    el.hidden = false;
+    el.style.left = `${clientX}px`;
+    el.style.top = `${clientY + 12}px`;
+  }
+
+  function renderMarkerCluster(group) {
+    const xs = group.markers.map((marker) => marker.x);
+    const x = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+    const count = group.markers.length;
+    const summary = `${count} incidents near ${formatLocalTimestamp(group.markers[0].episode.down_ts, INCIDENT_TIMESTAMP_OPTIONS)}`;
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'hist-marker-cluster');
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('role', 'button');
+    g.setAttribute('aria-label', summary);
+    const circle = document.createElementNS(SVG_NS, 'circle');
+    circle.setAttribute('cx', String(x));
+    circle.setAttribute('cy', '8');
+    circle.setAttribute('r', '7');
+    circle.setAttribute('class', 'hist-marker-cluster-glyph');
+    const text = document.createElementNS(SVG_NS, 'text');
+    text.setAttribute('x', String(x));
+    text.setAttribute('y', '11');
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('class', 'hist-marker-cluster-label');
+    text.textContent = `+${count}`;
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = summary;
+    g.append(circle, text, title);
+    g.addEventListener('pointerover', (event) => showMarkerDisclosure(group.markers, event.clientX, event.clientY));
+    g.addEventListener('pointerout', hideMarkerDisclosure);
+    g.addEventListener('focus', () => { const box = g.getBoundingClientRect(); showMarkerDisclosure(group.markers, box.left, box.bottom); });
+    g.addEventListener('blur', hideMarkerDisclosure);
+    return g;
+  }
+
+  // Every marker is rendered in the neutral --muted token in both themes and
+  // is never coloured, sized, weighted or ordered by severity, criticality,
+  // failure class or duration -- colouring by severity would read as an
+  // implicit importance/causal claim, which D-17 explicitly forbids. A
+  // marker activates focusIncident for its own episode, so the rail is a
+  // second, equivalent route into the same focus behaviour the incident
+  // list already offers.
+  function renderMarkerSingle(marker) {
+    const {episode, x} = marker;
+    const circle = document.createElementNS(SVG_NS, 'circle');
+    circle.setAttribute('cx', String(x));
+    circle.setAttribute('cy', '8');
+    circle.setAttribute('r', '4');
+    circle.setAttribute('class', 'hist-marker');
+    circle.setAttribute('tabindex', '0');
+    circle.setAttribute('role', 'img');
+    const text = markerTitle(episode);
+    circle.setAttribute('aria-label', text);
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = text;
+    circle.append(title);
+    circle.addEventListener('click', () => focusIncident(episode));
+    circle.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focusIncident(episode); }
+    });
+    return circle;
+  }
+
+  function renderIncidentMarkers(episodes, scale) {
+    const svg = $('incident-marker-rail');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    hideMarkerDisclosure();
+    clusterMarkers(episodes, scale).forEach((group) => {
+      svg.append(group.markers.length === 1 ? renderMarkerSingle(group.markers[0]) : renderMarkerCluster(group));
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Cross-chart hover cursor (Phase 4 04-08 Task 2, D-17): one instant, read
+  // across every stacked chart at once. Pointer-driven updates are coalesced
+  // through requestAnimationFrame -- inside the frame callback this touches
+  // only the cursor line's transform and the readout panel's text content;
+  // chart <path> d attributes, band segments, strip segments and marker
+  // positions are never regenerated on a pointer event (Research Pitfall 3).
+  // ------------------------------------------------------------------
+
+  function correlationReady() {
+    return !state.historyChartsLoading;
+  }
+
+  // The six named surfaces, filtered to only those actually rendered right
+  // now (a hidden service band/latency chart -- no service selected, or its
+  // own history still loading -- contributes no client rect) -- so the
+  // cursor's span always matches what is genuinely visible, never a stale
+  // service selection's geometry.
+  function cursorTargetRects() {
+    return CURSOR_TARGET_IDS
+      .map((id) => $(id))
+      .filter((el) => el && el.getClientRects().length > 0)
+      .map((el) => el.getBoundingClientRect());
+  }
+
+  function cursorUnionRect() {
+    const rects = cursorTargetRects();
+    if (!rects.length) return null;
+    return {
+      left: Math.min(...rects.map((rect) => rect.left)),
+      right: Math.max(...rects.map((rect) => rect.right)),
+      top: Math.min(...rects.map((rect) => rect.top)),
+      bottom: Math.max(...rects.map((rect) => rect.bottom)),
+    };
+  }
+
+  let cursorGeometry = null;
+  let pendingCursorFrame = null;
+  let pendingCursorClientX = null;
+  // R-01 (Task 2): counts only committed rAF callbacks, never raw
+  // pointermove events -- proving the coalescing genuinely coalesces
+  // (asserted <= the pointer-event count in the automated measurement run).
+  let cursorFrameCount = 0;
+
+  function hideTimeCursor() {
+    if (pendingCursorFrame !== null) { cancelAnimationFrame(pendingCursorFrame); pendingCursorFrame = null; }
+    cursorGeometry = null;
+    const cursor = $('history-time-cursor');
+    if (cursor) cursor.hidden = true;
+    const readout = $('history-cursor-readout');
+    if (readout) { readout.hidden = true; readout.textContent = ''; }
+  }
+
+  // A metric snapshot's value at the exact instant `ts`, or null (the
+  // absence string upstream) when that instant is not observed, or when no
+  // bucket actually contains it -- never a nearby bucket's value silently
+  // borrowed for a instant that was not observed.
+  function metricValueAtInstant(ts, data, valueField = 'avg_value') {
+    if (!data || !intervalFullyObserved(ts, ts + 1, data.coverage)) return null;
+    const resolution = Number.isFinite(data.resolutionSeconds) && data.resolutionSeconds > 0 ? data.resolutionSeconds : null;
+    const point = (Array.isArray(data.points) ? data.points : []).find((candidate) => (
+      Number.isFinite(candidate.ts) && ts >= candidate.ts && (resolution === null || ts < candidate.ts + resolution)
+    ));
+    return point ? finiteMeasurement(point[valueField]) : null;
+  }
+
+  function bandStateAtInstant(ts) {
+    const segments = state.serviceBandSegments;
+    if (!Array.isArray(segments)) return null;
+    const segment = segments.find((candidate) => ts >= candidate.start_ts && ts < candidate.end_ts);
+    return segment ? segment.state : null;
+  }
+
+  // Composes one panel from data already in hand -- the instant in local
+  // time, each host metric's value at the bucket that actually contains it,
+  // and the selected service's band state and latency at that instant. This
+  // describes the instant, not the nearest thing to it.
+  function readoutForInstant(ts) {
+    const timeLabel = formatLocalTimestamp(ts, INCIDENT_TIMESTAMP_OPTIONS);
+    const parts = [`At ${timeLabel}`];
+    HOST_METRIC_ORDER.forEach((metric) => {
+      const value = metricValueAtInstant(ts, state.historyMetricData[metric]);
+      const unit = HOST_METRIC_UNITS[metric] || '';
+      const label = HOST_METRIC_LABELS[metric] || metric;
+      parts.push(`${label}: ${value === null ? 'Unknown' : `${value}${unit}`}`);
+    });
+    const bandState = bandStateAtInstant(ts);
+    parts.push(`Service state: ${bandState || 'Unknown'}`);
+    const latencyValue = metricValueAtInstant(ts, state.serviceLatencyData, 'latency_avg');
+    parts.push(`Service latency: ${latencyValue === null ? 'Unknown' : `${latencyValue}ms`}`);
+    return parts.join(' — ');
+  }
+
+  // Suppressed entirely while any chart in the stack is still loading
+  // (correlationReady() false) and while a drag-select is in progress -- the
+  // drag overlay is the only pointer-driven element updating during a drag.
+  function moveTimeCursor(clientX) {
+    if (!correlationReady() || dragState) { hideTimeCursor(); return; }
+    if (!cursorGeometry) {
+      const union = cursorUnionRect();
+      if (!union) return;
+      cursorGeometry = union;
+      const cursor = $('history-time-cursor');
+      if (cursor) {
+        cursor.style.left = `${union.left}px`;
+        cursor.style.top = `${union.top}px`;
+        cursor.style.height = `${Math.max(0, union.bottom - union.top)}px`;
+        cursor.style.transform = 'translateX(0px)';
+        cursor.hidden = false;
+      }
+    }
+    pendingCursorClientX = clientX;
+    if (pendingCursorFrame !== null) return;
+    pendingCursorFrame = requestAnimationFrame(() => {
+      pendingCursorFrame = null;
+      cursorFrameCount += 1;
+      if (!cursorGeometry) return;
+      const domain = chartTimeDomain();
+      const clamped = Math.min(cursorGeometry.right, Math.max(cursorGeometry.left, pendingCursorClientX));
+      const fraction = (clamped - cursorGeometry.left) / Math.max(1, cursorGeometry.right - cursorGeometry.left);
+      const ts = Math.round(domain.start_ts + fraction * (domain.end_ts - domain.start_ts));
+      const cursor = $('history-time-cursor');
+      if (cursor) cursor.style.transform = `translateX(${clamped - cursorGeometry.left}px)`;
+      const readout = $('history-cursor-readout');
+      if (readout) { readout.textContent = readoutForInstant(ts); readout.hidden = false; }
+    });
+  }
+
+  function bindTimeCursorHandlers() {
+    CURSOR_TARGET_IDS.forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      el.addEventListener('pointermove', (event) => moveTimeCursor(event.clientX));
+      el.addEventListener('pointerleave', hideTimeCursor);
+    });
+    window.addEventListener('keydown', (event) => { if (event.key === 'Escape') hideTimeCursor(); });
   }
 
   // ------------------------------------------------------------------
@@ -2392,8 +2706,13 @@
       const requested = result.requested || resolveRangeBounds();
       renderCoverageStrip(metric, result.coverage, requested);
       renderComparisonRow(metric, points, requested.end_ts - requested.start_ts);
+      // Task 2 (04-08): the hover cursor's readout reads this snapshot
+      // rather than issuing its own request -- never a second fetch for the
+      // same data the chart itself just rendered.
+      state.historyMetricData[metric] = {points, coverage: result.coverage, resolutionSeconds: result.effective_resolution_seconds};
       return {metric, result};
     }
+    state.historyMetricData[metric] = null;
     if (empty) empty.hidden = true;
     if (error) {
       const reason = outcome ? serverSuppliedReason(outcome.reason) : null;
@@ -2431,27 +2750,64 @@
     const applyButton = $('apply-custom-range');
     if (applyButton) applyButton.disabled = true;
     HOST_METRIC_ORDER.forEach((metric) => beginMetricLoadingState(metric));
+    // Task 2/3 (04-08): the cursor and the marker rail are both suppressed
+    // for the whole loading window -- a cursor readout or a marker plotted
+    // against a skeleton axis would misrepresent evidence that has not
+    // loaded yet.
+    state.historyChartsLoading = true;
+    hideTimeCursor();
+    const markerRail = $('incident-marker-rail');
+    if (markerRail) while (markerRail.firstChild) markerRail.removeChild(markerRail.firstChild);
+    const correlationUnavailable = $('correlation-unavailable');
+    if (correlationUnavailable) correlationUnavailable.hidden = true;
     // R-01: a real, measured render figure for the four-chart stack, captured
     // in the browser during the automated test run rather than deferred to
     // Phase 6 -- see 04-03-SUMMARY.md for the recorded baseline.
     const renderStart = performance.now();
-    const results = await fetchHostHistory(bounds.start_ts, bounds.end_ts);
+    // The marker rail's own fetch reuses fetchIncidents/`/api/events/history`
+    // verbatim (04-07) -- always the unfiltered baseline, since a marker's
+    // presence must never depend on the operator's own Incidents filter
+    // choice. Run in parallel with, and isolated from, the four host
+    // fetches (Research Pattern 1): one failing independently of the other.
+    const [results, markerEpisodesOutcome] = await Promise.all([
+      fetchHostHistory(bounds.start_ts, bounds.end_ts),
+      fetchIncidents(bounds.start_ts, bounds.end_ts, DEFAULT_HISTORY_FILTERS).then(
+        (value) => ({status: 'fulfilled', value}),
+        (reason) => ({status: 'rejected', reason}),
+      ),
+    ]);
     if (requestId !== state.historyRequestGeneration) return;
     const succeeded = renderHostStack(results);
     window.__historyStackRenderMs = performance.now() - renderStart;
     const firstSucceeded = succeeded[0];
+    let requestedRange;
     if (firstSucceeded) {
-      const requested = firstSucceeded.result.requested || bounds;
-      state.historyBounds = requested;
+      requestedRange = firstSucceeded.result.requested || bounds;
+      state.historyBounds = requestedRange;
       updateRangeResolutionNote(firstSucceeded.result.effective_resolution_seconds);
-      renderSharedTimeAxis(requested.start_ts, requested.end_ts);
+      renderSharedTimeAxis(requestedRange.start_ts, requestedRange.end_ts);
     } else {
       // Every metric failed (or returned nothing to anchor the axis on): the
       // shared axis still renders from the requested bounds so it never
       // disappears alongside a per-metric fetch failure.
+      requestedRange = bounds;
       state.historyBounds = bounds;
       updateRangeResolutionNote(null);
       renderSharedTimeAxis(bounds.start_ts, bounds.end_ts);
+    }
+    state.historyChartsLoading = false;
+    const markerScale = {xFor: (ts) => histTimeToX(ts, requestedRange.start_ts, requestedRange.end_ts)};
+    if (markerEpisodesOutcome.status === 'fulfilled') {
+      const episodes = Array.isArray(markerEpisodesOutcome.value.episodes) ? markerEpisodesOutcome.value.episodes : [];
+      renderIncidentMarkers(episodes, markerScale);
+    } else {
+      // T-04-17: an empty rail must never silently mean "nothing
+      // correlated" when the truth is "Beacon could not check".
+      renderIncidentMarkers([], markerScale);
+      if (correlationUnavailable) {
+        correlationUnavailable.textContent = 'Correlation markers unavailable for this range';
+        correlationUnavailable.hidden = false;
+      }
     }
     if (applyButton) applyButton.disabled = false;
     // D-11: the selected service's own history is an independent fetch,
@@ -3316,6 +3672,16 @@
   }
   // Test-only hook, same pattern as window.__historyRangeTestHooks.
   window.__incidentTestHooks = {incidentFocusWindow, focusIncident, INCIDENT_PAD_FRACTION, INCIDENT_PAD_FLOOR_SECONDS};
+  // Phase 4 04-08: the cross-chart hover cursor listens on all six named
+  // surfaces from boot -- the service band/latency chart are static markup
+  // present from page load (only their ancestor's `hidden` toggles), so
+  // wiring here once is sufficient for every future selection change.
+  bindTimeCursorHandlers();
+  window.__historyCursorTestHooks = {
+    moveTimeCursor, hideTimeCursor, readoutForInstant, correlationReady,
+    cursorFrameCount: () => cursorFrameCount,
+    resetCursorFrameCount: () => { cursorFrameCount = 0; },
+  };
   // refreshCurrentDiagnosis() must be invoked before fetchRuntimeConfig(): both
   // dispatch their fetch() call synchronously (before their first await), so
   // this order keeps /api/advanced/current the first network call the page
