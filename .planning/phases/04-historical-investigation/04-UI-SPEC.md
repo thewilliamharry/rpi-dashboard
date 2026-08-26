@@ -442,6 +442,13 @@ own pattern **and** text label — never color alone, and never a status color:
 | DST transition tick annotation | `⚠ DST transition` |
 | Correlation copy pattern | `{Metric A} rose while {Metric B} was elevated in this window` — co-occurrence phrasing only, see Investigation Context Contract for the full forbidden-word list |
 | Destructive confirmation | Not applicable — Phase 4 exposes no destructive actions, remote control, or monitoring mutations; every route is GET-only, matching D-18's scope note |
+| Incidents event-type narrowing note | `Incident rows are grouped from every state change in this range; the Event type filter keeps only incidents with a matching event during the incident.` |
+| Incidents maintenance narrowing note | `Expected-maintenance filtering applies to each incident's own opening event, so an incident that began during maintenance is filtered as expected maintenance.` |
+
+Both rows above were added by gap-closure plan 04-10 to disclose, on screen, the episode-scope
+narrowing semantics plan 04-09 introduced (`episode_scope.narrowed_by`) — closing the gap where the
+Incidents section changed count without stating the rule by which the Event type or
+expected-maintenance filter narrowed the already-grouped episode list.
 
 ---
 

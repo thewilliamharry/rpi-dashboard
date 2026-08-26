@@ -1088,11 +1088,16 @@
     const empty = incidentsElement('empty');
     const error = incidentsElement('error');
     const truncated = incidentsElement('truncated');
+    // renderEpisodeScopeNote's own region, reset here so a stale narrowing
+    // note from a previous request never survives into this request's
+    // loading state.
+    const episodeScope = incidentsElement('episode-scope');
     const list = incidentsElement('list');
     if (loading) loading.hidden = false;
     if (empty) empty.hidden = true;
     if (error) { error.hidden = true; error.textContent = ''; }
     if (truncated) { truncated.hidden = true; truncated.textContent = ''; }
+    if (episodeScope) { episodeScope.hidden = true; episodeScope.textContent = ''; }
     if (list) list.replaceChildren();
   }
 
@@ -1335,6 +1340,39 @@
     list.replaceChildren(fragment);
   }
 
+  // 04-10 Task 2: states, on screen, the rule by which the Event type or
+  // expected-maintenance filter narrowed the already-grouped episode list
+  // that 04-09's episode_scope key discloses -- never leaving the operator
+  // to infer a narrowing rule from a changed count alone. `scope.narrowed_by`
+  // is a machine-readable list of filter names the server applied after
+  // grouping; the two sentences below are the only client-side copy chosen
+  // from it, joined by a single space when both apply, in that order.
+  function renderEpisodeScopeNote(scope, filters) {
+    const el = $('incidents-episode-scope');
+    if (!el) return;
+    const narrowedBy = Array.isArray(scope && scope.narrowed_by) ? scope.narrowed_by : [];
+    const sentences = [];
+    if (narrowedBy.includes('event_type')) {
+      sentences.push(
+        'Incident rows are grouped from every state change in this range; the Event type '
+        + 'filter keeps only incidents with a matching event during the incident.',
+      );
+    }
+    if (narrowedBy.includes('maintenance')) {
+      sentences.push(
+        "Expected-maintenance filtering applies to each incident's own opening event, so an "
+        + 'incident that began during maintenance is filtered as expected maintenance.',
+      );
+    }
+    if (sentences.length === 0) {
+      el.textContent = '';
+      el.hidden = true;
+      return;
+    }
+    el.textContent = sentences.join(' ');
+    el.hidden = false;
+  }
+
   // Fetches the currently-filtered list and an unfiltered baseline for the
   // same range in parallel -- "N of M incidents" needs both numbers (M is
   // deliberately never narrowed by the operator's own filter selection),
@@ -1357,12 +1395,14 @@
     const emptyEl = incidentsElement('empty');
     const truncatedEl = incidentsElement('truncated');
     const listEl = incidentsElement('list');
+    const episodeScopeEl = incidentsElement('episode-scope');
     if (filteredOutcome.status !== 'fulfilled') {
       if (errorEl) {
         errorEl.textContent = 'Beacon could not load incidents for this range. Try again, or narrow the range.';
         errorEl.hidden = false;
       }
       if (emptyEl) emptyEl.hidden = true;
+      if (episodeScopeEl) { episodeScopeEl.hidden = true; episodeScopeEl.textContent = ''; }
       if (listEl) listEl.replaceChildren();
       return;
     }
@@ -1374,6 +1414,7 @@
       ? totalOutcome.value.episodes.length
       : episodes.length;
     updateMatchingIncidentCount(episodes.length, total);
+    renderEpisodeScopeNote(payload.episode_scope || {}, filters);
     if (truncatedEl) {
       if (payload.truncated) {
         truncatedEl.textContent = 'This incidents list was truncated at the row budget; not every matching incident in this range and these filters is shown.';
