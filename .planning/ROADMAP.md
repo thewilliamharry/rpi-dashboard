@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Bounded Telemetry & Retention** - Establish truthful 90-day host and service history with bounded storage and query contracts. (completed 2026-08-11)
 - [x] **Phase 3: Advanced Current Diagnosis** - Let the operator open an advanced workspace for fresh host, service, settings, and pipeline-health diagnosis. (completed 2026-08-20)
 - [ ] **Phase 03.1: Planned Maintenance Recognition (INSERTED)** - Confirm or define expected recurring service restarts without hiding downtime or overruns. (reopened 2026-08-23 — closed on automated verification 2026-08-22; human UAT then found migration 9 could not apply to any existing deployment, see 03.1-UAT.md gaps G-03.1-1 and G-03.1-2)
-- [ ] **Phase 4: Historical Investigation** - Turn retained telemetry into honest range-based charts, service history, and incident investigation.
+- [x] **Phase 4: Historical Investigation** - Turn retained telemetry into honest range-based charts, service history, and incident investigation. (completed 2026-08-26)
 - [ ] **Phase 5: Theme-Parity Analytics Experience** - Make the dashboard and advanced workspace cohesive, responsive, accessible, and equivalent in both themes.
 - [ ] **Phase 6: Workload Resilience & Pi Acceptance** - Ensure discovery and previews remain bounded best-effort work and prove Beacon holds up under Pi-class load.
 
@@ -346,7 +346,7 @@ Plans:
   4. Operator can filter incidents and transitions by service, criticality, event type, and time range; choosing an incident focuses the related service and time window.
   5. Selecting a service, incident, or time range updates related host, service, and event views together, presenting observed correlation without claiming an unsupported root cause.
 
-**Plans**: 10 plans executed (04-01 – 04-10) + 1 gap-closure plan pending (04-11)
+**Plans**: 11 plans executed (04-01 – 04-11)
 
 Plans:
 **Wave 1**
@@ -385,7 +385,7 @@ Plans:
 
 **Gap closure round 2 (after 04-VERIFICATION.md re-verification, status gaps_found, 5/6 — CR-01, CR-02, WR-01 (original) and WR-02 all independently re-confirmed genuinely closed at the code and test level; one new gap found in the same view, 04-REVIEW.md WR-01 (new): `renderIncidentsSection` silently substitutes the filtered count for the unfiltered baseline total when the baseline fetch fails, rendering a misleading "N of N incidents" with no uncertainty indication and no test coverage. DIA-04 independently determined SATISFIED and recommended for promotion. `renderMarkerSingle`'s ARIA role mismatch recorded in Anti-Patterns for Phase 5 to inherit, not treated as a Phase 4 gap.)**
 
-- [ ] 04-11-PLAN.md — A failed unfiltered baseline read can no longer be rendered as a known total: the matching-count states the total is unknown instead of reusing the filtered count, pinned by the 04-REVIEW.md IN-01 regression and its recovery case, with the new copy recorded in the design contract and DIA-04 promoted on cited evidence (wave 10)
+- [x] 04-11-PLAN.md — A failed unfiltered baseline read can no longer be rendered as a known total: the matching-count states the total is unknown instead of reusing the filtered count, pinned by the 04-REVIEW.md IN-01 regression and its recovery case, with the new copy recorded in the design contract and DIA-04 promoted on cited evidence (wave 10)
 
 **UI hint**: yes
 
@@ -430,6 +430,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
-| 4. Historical Investigation | 10/10 | In Progress|  |
+| 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
