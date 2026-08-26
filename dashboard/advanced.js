@@ -1715,6 +1715,18 @@
 
   const CUSTOM_RANGE_TEXT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$/;
 
+  // 04-10 Task 1 (WR-02/DIA-05): a third, distinct outcome from
+  // parseLocalRangeInput alongside `null` and a finite instant. `null` means
+  // "this text is not a range input at all" (does not match the pattern, or
+  // fails the component bounds check); this sentinel means "this text is a
+  // well-formed local time that the configured zone never reaches" -- the
+  // wall-clock hour a DST spring-forward transition skips. The two must stay
+  // distinguishable because validateCustomRange needs to state the correct
+  // reason: falling through to the generic "not a range input" message would
+  // be false -- the operator entered a real-looking time, just one that does
+  // not exist under the configured zone.
+  const NONEXISTENT_LOCAL_TIME = 'nonexistent-local-time';
+
   // Interprets `text` as wall-clock time in the Pi's configured timezone by
   // building a candidate instant and correcting it against localWallClockMinutes'
   // own reading of that instant -- reusing the exact naive-local-minutes
@@ -1723,6 +1735,15 @@
   // in at most a couple of iterations since a timezone offset only ever
   // changes in fixed-size (typically one-hour) steps. Returns null for
   // anything that does not parse as YYYY-MM-DD HH:MM (or a T separator).
+  //
+  // The loop converges to delta === 0 for an unambiguous time, and also for
+  // a fall-back ambiguous time (both adjacent instants render the typed wall
+  // clock, so the first one the loop lands on is a legitimate match). The
+  // one input that can never converge is a wall-clock time the zone skips
+  // entirely (a spring-forward absent hour): no instant ever renders that
+  // label, so after the bounded iterations the best-effort candidate still
+  // renders a different wall-clock time than the one typed. The round-trip
+  // check below is what turns that silent mismatch into a named rejection.
   function parseLocalRangeInput(text) {
     if (typeof text !== 'string') return null;
     const match = text.trim().match(CUSTOM_RANGE_TEXT_PATTERN);
@@ -1741,7 +1762,10 @@
       if (deltaMinutes === 0) break;
       candidate += deltaMinutes * 60;
     }
-    return Number.isFinite(candidate) ? Math.round(candidate) : null;
+    if (!Number.isFinite(candidate)) return null;
+    const rounded = Math.round(candidate);
+    if (localWallClockMinutes(rounded) !== targetMinutes) return NONEXISTENT_LOCAL_TIME;
+    return rounded;
   }
 
   // The exact inverse of parseLocalRangeInput's expected shape, for writing
@@ -1762,6 +1786,20 @@
   // inventing a paraphrase -- a change on either side shows up as a failing
   // test, never as two different wordings.
   function validateCustomRange(startTs, endTs) {
+    // 04-10 Task 1: the one deliberate exception to this function's rule
+    // that every message is a verbatim copy of a server rejection string.
+    // The server takes epoch integers and therefore has no equivalent
+    // rejection to copy for a client-side-only parse failure; falling
+    // through to "Enter both a start and an end time." would state a false
+    // reason -- the operator did enter both fields. Checked ahead of the
+    // finite/ordering/span/future checks below so this reason is never
+    // masked by one of those instead.
+    if (startTs === NONEXISTENT_LOCAL_TIME || endTs === NONEXISTENT_LOCAL_TIME) {
+      return {
+        valid: false,
+        message: 'That local time does not exist on this date — the clock jumps forward here (DST). Enter a time outside the absent hour.',
+      };
+    }
     if (startTs === null || endTs === null || !Number.isFinite(startTs) || !Number.isFinite(endTs)) {
       return {valid: false, message: 'Enter both a start and an end time.'};
     }
@@ -3591,6 +3629,7 @@
     parseLocalRangeInput, formatLocalRangeInput, validateCustomRange,
     setInvestigationRange, pushRange, popRange, clearRangeStack,
     resolveRangeBounds, rangeStack: () => state.rangeStack, RANGE_STACK_LIMIT,
+    NONEXISTENT_LOCAL_TIME,
   };
   // 04-03: each chart's unit label is set once from HOST_METRIC_UNITS, the
   // single source of truth the renderers below also read.
