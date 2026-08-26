@@ -384,7 +384,7 @@ below cover this phase's own shape-rooted STATE and PARITY coverage.
 
 | Category | Element(s) | Status | Resolution / Reason |
 |----------|------------|--------|---------------------|
-| zero-one-many, populated | E1 — Main dashboard `html.light` audit (8 `display:none` instances) | ✅ resolved (explicit) | Exhaustively enumerated and classified above — 6 deliberate-calm/decorative, 0 unresolved; `.svc-uptime-pct` explicitly extends D-03 rather than being silently left ambiguous |
+| zero-one-many, populated | E1 — Main dashboard `html.light` audit (8 `display:none` instances) | ✅ resolved (explicit) | Exhaustively enumerated and classified above — all 8 classified (5 deliberate-calm + 3 decorative), 0 unresolved; `.svc-uptime-pct` explicitly extends D-03 rather than being silently left ambiguous |
 | **populated, partial** | E2 — Degraded state (worker/host/service) | ✅ resolved (explicit) | Definition, per-surface backend/client split, and Phase 6 limitation all stated in "The Six States" above; distinguishable from `stale`/`unknown` by construction (mutually exclusive tiers) |
 | error, partial | E3 — `error`/`degraded`/`partial` accent2 collision | ✅ resolved (explicit) | Box-vs-inline structural rule stated in Color's explicit negative; testable per-theme via `getComputedStyle` `display`/`border-style` |
 | loading, empty, error, populated, partial, stale, unknown, degraded | E4 — Six-state distinctness across both themes | ✅ resolved (explicit) | Each state's glyph/color/shape combination declared in "The Six States" table; no state relies on color alone |
