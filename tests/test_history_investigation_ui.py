@@ -2800,6 +2800,7 @@ class HistoryInvestigationUiTests(unittest.TestCase):
     def _incidents_route(
         self, snapshot, config_fixture, *,
         events_payload_fn=None, events_status=200, record_events_urls=None,
+        events_failure_fn=None,
     ):
         def route_api(route):
             path = urlparse(route.request.url).path
@@ -2815,10 +2816,19 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             if path == '/api/events/history':
                 if record_events_urls is not None:
                     record_events_urls.append(route.request.url)
+                # 04-11: events_failure_fn is a predicate over the parsed query
+                # dict that lets a test fail one of the two parallel
+                # /api/events/history requests (filtered vs. unfiltered
+                # baseline) independently of the other -- exercised before the
+                # blanket events_status check so a caller can combine the two
+                # if it ever needs to.
+                query = parse_qs(urlparse(route.request.url).query)
+                if events_failure_fn is not None and events_failure_fn(query):
+                    route.fulfill(status=503, json={'error': 'incidents unavailable'})
+                    return
                 if events_status != 200:
                     route.fulfill(status=events_status, json={'error': 'incidents unavailable'})
                     return
-                query = parse_qs(urlparse(route.request.url).query)
                 start_ts = int(query['start_ts'][0])
                 end_ts = int(query['end_ts'][0])
                 payload = (
@@ -3074,6 +3084,112 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             self.assertFalse(page.locator('#incident-event-type-filter').is_disabled())
             self.assertFalse(page.locator('#incident-service-filter').is_disabled())
             self.assertFalse(page.locator('#clear-incident-filters').is_disabled())
+        finally:
+            page.close()
+
+    def test_baseline_total_fetch_failure_never_claims_the_filtered_count_is_the_total(self):
+        """04-11 Task 1 (04-REVIEW.md WR-01 new / 04-VERIFICATION.md gap 2): when
+        the operator has an active filter and the filtered request succeeds but
+        the parallel unfiltered-baseline request fails, the matching-count
+        region must state the total is unknown rather than silently reusing the
+        filtered count as though it were the true total.
+        """
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        standard_episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+        critical_episode = self._episode(8081, 1_700_000_100, 1_700_000_160, critical=True)
+        latch = {'on': False}
+
+        def events_payload_fn(start_ts, end_ts, query):
+            if query.get('criticality', [''])[0] == 'critical':
+                return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode])
+            return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode, standard_episode])
+
+        def events_failure_fn(query):
+            # Fails the unfiltered baseline request (no criticality param) and
+            # never the filtered one, only once the latch is switched on.
+            return latch['on'] and 'criticality' not in query
+
+        page = self.browser.new_page()
+        page.route(
+            '**/api/**',
+            self._incidents_route(
+                snapshot, config_fixture,
+                events_payload_fn=events_payload_fn, events_failure_fn=events_failure_fn,
+            ),
+        )
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            # Ordinary path first: both requests succeed, latch is off.
+            self.assertEqual(page.locator('#matching-incident-count').inner_text(), '2 of 2 incidents')
+
+            latch['on'] = True
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/events/history'
+                and parse_qs(urlparse(request.url).query).get('criticality', [''])[0] == 'critical',
+            ):
+                page.locator('#incident-criticality-filter').select_option('critical')
+            page.wait_for_function("() => document.querySelectorAll('.incident-row').length === 1", timeout=5_000)
+            count_text = page.locator('#matching-incident-count').inner_text()
+            self.assertEqual(count_text, '1 of ? incidents (total unavailable)')
+            self.assertNotEqual(count_text, '1 of 1 incidents')
+            self.assertEqual(
+                page.locator('#matching-incident-count').get_attribute('data-total-known'), 'false',
+            )
+            # A partial baseline failure degrades one number, not the whole
+            # view: no error banner, and the filtered list still renders in
+            # full.
+            self.assertIsNotNone(page.locator('#incidents-error').get_attribute('hidden'))
+            self.assertEqual(page.locator('.incident-row').count(), 1)
+        finally:
+            page.close()
+
+    def test_recovered_baseline_fetch_restores_a_known_total(self):
+        """04-11 Task 1: the unknown-total state is per-render, never
+        persistent -- once the unfiltered baseline request succeeds again, the
+        count returns to a stated, known total.
+        """
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        standard_episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+        critical_episode = self._episode(8081, 1_700_000_100, 1_700_000_160, critical=True)
+        latch = {'on': False}
+
+        def events_payload_fn(start_ts, end_ts, query):
+            if query.get('criticality', [''])[0] == 'critical':
+                return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode])
+            return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode, standard_episode])
+
+        def events_failure_fn(query):
+            return latch['on'] and 'criticality' not in query
+
+        page = self.browser.new_page()
+        page.route(
+            '**/api/**',
+            self._incidents_route(
+                snapshot, config_fixture,
+                events_payload_fn=events_payload_fn, events_failure_fn=events_failure_fn,
+            ),
+        )
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            latch['on'] = True
+            page.locator('#incident-criticality-filter').select_option('critical')
+            page.wait_for_function(
+                "() => document.getElementById('matching-incident-count')"
+                ".getAttribute('data-total-known') === 'false'",
+                timeout=5_000,
+            )
+            latch['on'] = False
+            page.locator('#incident-criticality-filter').select_option('')
+            page.wait_for_function(
+                "() => document.getElementById('matching-incident-count')"
+                ".getAttribute('data-total-known') === 'true'",
+                timeout=5_000,
+            )
+            self.assertEqual(page.locator('#matching-incident-count').inner_text(), '2 of 2 incidents')
         finally:
             page.close()
 
