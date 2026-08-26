@@ -346,7 +346,7 @@ Plans:
   4. Operator can filter incidents and transitions by service, criticality, event type, and time range; choosing an incident focuses the related service and time window.
   5. Selecting a service, incident, or time range updates related host, service, and event views together, presenting observed correlation without claiming an unsupported root cause.
 
-**Plans**: 10/10 plans executed + 2 gap-closure plans pending
+**Plans**: 10 plans executed (04-01 – 04-10) + 1 gap-closure plan pending (04-11)
 
 Plans:
 **Wave 1**
@@ -382,6 +382,10 @@ Plans:
 
 - [x] 04-09-PLAN.md — Honest incident scope: the open-episode anchor and the episode row set are resolved independently of the filtered read, expected-maintenance filtering becomes the episode’s own opening event, and ten route-level regressions pin CR-01/CR-02/WR-01 shut (wave 8)
 - [x] 04-10-PLAN.md — A local time that does not exist is rejected with a message naming the clock change instead of silently accepted (WR-02), the Incidents section states the rule that narrowed its list, and the DIA-05/DIA-06/DIA-08/HIS-04 records are reconciled with the evidence (wave 9)
+
+**Gap closure round 2 (after 04-VERIFICATION.md re-verification, status gaps_found, 5/6 — CR-01, CR-02, WR-01 (original) and WR-02 all independently re-confirmed genuinely closed at the code and test level; one new gap found in the same view, 04-REVIEW.md WR-01 (new): `renderIncidentsSection` silently substitutes the filtered count for the unfiltered baseline total when the baseline fetch fails, rendering a misleading "N of N incidents" with no uncertainty indication and no test coverage. DIA-04 independently determined SATISFIED and recommended for promotion. `renderMarkerSingle`'s ARIA role mismatch recorded in Anti-Patterns for Phase 5 to inherit, not treated as a Phase 4 gap.)**
+
+- [ ] 04-11-PLAN.md — A failed unfiltered baseline read can no longer be rendered as a known total: the matching-count states the total is unknown instead of reusing the filtered count, pinned by the 04-REVIEW.md IN-01 regression and its recovery case, with the new copy recorded in the design contract and DIA-04 promoted on cited evidence (wave 10)
 
 **UI hint**: yes
 
