@@ -2673,9 +2673,23 @@ def api_events_history():
                 maintenance=filters.get('maintenance', beacon_incidents.DEFAULT_MAINTENANCE_MODE),
                 limit=beacon_incidents.INCIDENT_ROW_BUDGET,
             )
-            ports = sorted({row['port'] for row in rows})
+            episode_rows, episode_rows_truncated = beacon_incidents.read_episode_state_changes(
+                conn,
+                start_ts=requested.start_ts,
+                end_ts=requested.end_ts,
+                port=filters.get('port'),
+                criticality=filters.get('criticality'),
+            )
+            anchor_ports = beacon_incidents.anchor_candidate_ports(
+                conn,
+                start_ts=requested.start_ts,
+                port=filters.get('port'),
+                criticality=filters.get('criticality'),
+                episode_rows=episode_rows,
+            )
             anchors = beacon_incidents.read_open_episode_anchors(
-                conn, start_ts=requested.start_ts, ports=ports,
+                conn, start_ts=requested.start_ts, ports=anchor_ports,
+                criticality=filters.get('criticality'),
             )
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
@@ -2683,7 +2697,8 @@ def api_events_history():
     payload = beacon_incidents.compose_incidents_response(
         rows, anchors,
         start_ts=requested.start_ts, end_ts=requested.end_ts,
-        filters=filters, truncated=truncated,
+        filters=filters, truncated=truncated or episode_rows_truncated,
+        episode_rows=episode_rows,
     )
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'

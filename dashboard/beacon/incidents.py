@@ -45,6 +45,13 @@ INCIDENT_ROW_BUDGET = 2048
 FLAPPING_EPISODE_THRESHOLD = 3
 FLAPPING_SPAN_SECONDS = 900
 
+# Published in the `episode_scope.grouped_from` response key: episodes are
+# always grouped from every `state_change` in the requested range for the
+# in-scope services, never from the row set the `event_type` or
+# `maintenance` filter already narrowed (D-12; 04-09-PLAN.md
+# <assumption_delta_decision>).
+EPISODE_GROUPING_SOURCE = 'all_state_changes_in_range'
+
 # The verbatim column set and joins `api_events` (dashboard/app.py) already
 # uses -- reused exactly rather than re-derived, so this module and the
 # legacy route can never silently drift apart on what an "event" row means.
@@ -151,28 +158,161 @@ def read_events_in_range(
     return rows, truncated
 
 
-def read_open_episode_anchors(conn, *, start_ts, ports):
-    """Return each port's most recent still-relevant down row before `start_ts`.
+def build_open_anchor_query(*, port, start_ts):
+    """Return `(statement, params)` for the per-port anchor seek.
 
-    For each port, at most one row is returned: the most recent
-    `state_change` with `online = 0` strictly before `start_ts`. This is what
-    lets an outage that *began* before the selected range group correctly
-    instead of appearing as a recovery with no cause. It reads durable rows
-    only and invents nothing. Uses `idx_events_port_ts`.
+    Selects the most recent `state_change` row strictly before `start_ts`
+    for the given port, regardless of its `online` value -- the caller
+    decides whether it represents an open anchor. Split out so a test can
+    inspect the exact statement text (matching `build_events_query`'s
+    reason for existing) and so `read_open_ports_as_of` can share it.
+    Uses `idx_events_port_ts`.
     """
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError('port must be an integer between 1 and 65535')
     _validate_int(start_ts, 'start_ts')
     statement = (
         'SELECT ' + EVENT_COLUMNS + ' '
         + _EVENT_FROM_JOIN
-        + 'WHERE e.port = ? AND e.event_type = ? AND e.online = 0 AND e.ts < ? '
+        + 'WHERE e.port = ? AND e.event_type = ? AND e.ts < ? '
         'ORDER BY e.ts DESC, e.id DESC LIMIT 1'
     )
+    return statement, (port, 'state_change', start_ts)
+
+
+def build_open_ports_query(*, start_ts):
+    """Return `(statement, params)` for the events-derived open-port discovery.
+
+    Selects the distinct ports with a `state_change` row whose `online` is 0
+    strictly before `start_ts` -- the candidate universe for an open anchor.
+    Reads `events` alone: no join, no subquery, no `services` table (see
+    `read_open_ports_as_of`'s docstring for why the universe must not be the
+    `services` table).
+    """
+    _validate_int(start_ts, 'start_ts')
+    statement = (
+        'SELECT DISTINCT port FROM events '
+        'WHERE event_type = ? AND online = 0 AND ts < ? AND port IS NOT NULL '
+        'ORDER BY port ASC'
+    )
+    return statement, ('state_change', start_ts)
+
+
+def read_open_episode_anchors(conn, *, start_ts, ports, criticality=None):
+    """Return each port's most recent still-relevant down row before `start_ts`.
+
+    For each port, at most one row is returned: that port's most recent
+    `state_change` strictly before `start_ts`, returned only when its
+    `online` is 0 (i.e. the port was still down at `start_ts`) and only when
+    it matches the requested `criticality`. A port that went down and
+    recovered entirely before the range -- both transitions strictly before
+    `start_ts` -- yields no anchor: its most recent prior row is the
+    recovery, not the down transition. This is what lets an outage that
+    *began* before the selected range group correctly instead of appearing
+    as a recovery with no cause, without ever fabricating an anchor for a
+    service that already recovered. It reads durable rows only and invents
+    nothing. Uses `idx_events_port_ts`.
+    """
+    _validate_int(start_ts, 'start_ts')
+    if criticality is not None and criticality not in CRITICALITY_VALUES:
+        raise ValueError('criticality must be "critical" or "standard"')
+    wanted_critical = None if criticality is None else (1 if criticality == 'critical' else 0)
+
     anchors = []
     for port in ports:
-        row = conn.execute(statement, (port, 'state_change', start_ts)).fetchone()
-        if row is not None:
-            anchors.append(row)
+        statement, params = build_open_anchor_query(port=port, start_ts=start_ts)
+        row = conn.execute(statement, params).fetchone()
+        if row is None or row['online'] != 0:
+            continue
+        if wanted_critical is not None and row['critical'] != wanted_critical:
+            continue
+        anchors.append(row)
     return anchors
+
+
+def read_open_ports_as_of(conn, *, start_ts, criticality=None):
+    """Return the sorted ports that were still down as of `start_ts`.
+
+    Step one is the candidate universe, read from the durable `events`
+    record alone via `build_open_ports_query` -- never from the `services`
+    table. A `services` row expires after `EXPIRE_DAYS` (default 7,
+    `dashboard/beacon/config.py:230`) via `DELETE FROM services WHERE
+    last_seen < ?` (`dashboard/app.py:1420`), which immediately cascades to
+    `service_meta`, while `events` are retained far longer
+    (`dashboard/beacon/telemetry.py:1061` at the configured retention,
+    `dashboard/app.py:1266` at 14 days). A service that went down and was
+    never seen again therefore loses both join rows within a week while its
+    down transition survives for months -- exactly the long-silent,
+    still-open outage CR-01 is about. A `services`-derived universe would
+    make that case permanently invisible (D-12: grouping is a view over
+    durable rows). This candidate read is a superset filter: it never
+    narrows the answer, it only bounds the work.
+
+    Step two calls `read_open_episode_anchors` for each candidate port,
+    forwarding `criticality`, and keeps the port only when an anchor came
+    back.
+    """
+    statement, params = build_open_ports_query(start_ts=start_ts)
+    candidate_ports = [row['port'] for row in conn.execute(statement, params).fetchall()]
+    open_ports = [
+        port for port in candidate_ports
+        if read_open_episode_anchors(
+            conn, start_ts=start_ts, ports=[port], criticality=criticality,
+        )
+    ]
+    return sorted(open_ports)
+
+
+def anchor_candidate_ports(conn, *, start_ts, port=None, criticality=None, episode_rows):
+    """Return the sorted set of ports eligible for an anchor lookup.
+
+    Computed independently of what matched inside the window. When `port`
+    is supplied the result is exactly `[port]` -- an explicit per-service
+    investigation always reaches the anchor seek whether or not the window
+    returned a single row for it, which is the direct CR-01 fix on the
+    per-service path. `criticality` is deliberately not applied on either
+    path here: `read_open_episode_anchors` applies it to the anchor row
+    itself, so `port=X` under a mismatching criticality still reaches the
+    seek and is then correctly dropped, and `episodes` can never disagree
+    with `events` about which services are in criticality scope.
+
+    When `port` is not supplied the result is the union of the ports
+    present in `episode_rows` and `read_open_ports_as_of(conn,
+    start_ts=start_ts, criticality=criticality)`. Neither half subsumes the
+    other and both are required: `episode_rows` is empty by construction for
+    a silently-down service -- that is the definition of CR-01 -- and the
+    discovery query alone would miss a port whose down transition falls
+    inside the window rather than before it.
+    """
+    if port is not None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError('port must be an integer between 1 and 65535')
+        return [port]
+
+    episode_ports = {row['port'] for row in episode_rows}
+    discovered_ports = set(read_open_ports_as_of(conn, start_ts=start_ts, criticality=criticality))
+    return sorted(episode_ports | discovered_ports)
+
+
+def read_episode_state_changes(
+    conn, *, start_ts, end_ts, port=None, criticality=None, limit=INCIDENT_ROW_BUDGET,
+):
+    """Read the `state_change` rows that episodes are grouped from.
+
+    A thin wrapper over `read_events_in_range` that pins `event_type` to
+    `'state_change'` and `maintenance` to `'include'`, forwarding only
+    `port` and `criticality`. `port` and `criticality` are properties of the
+    *service* and therefore scope which state machines are in view, while
+    `event_type` and `maintenance` describe *kinds of row* -- narrowing on
+    them before grouping would produce a row set that cannot represent a
+    state machine (D-12, `04-REVIEW.md` CR-02). Returns `(rows, truncated)`
+    exactly as `read_events_in_range` does.
+    """
+    return read_events_in_range(
+        conn, start_ts=start_ts, end_ts=end_ts, port=port,
+        event_type='state_change', criticality=criticality,
+        maintenance='include', limit=limit,
+    )
 
 
 def split_overrun_span(down_ts, recovered_ts, grace_until):
@@ -309,37 +449,132 @@ def _opening_event_id(episode):
     return int(transitions[0]['id']) if transitions else 0
 
 
-def compose_incidents_response(rows, anchors, *, start_ts, end_ts, filters, truncated):
-    """Compose the full `/api/events/history` response from one query result set.
+def _episode_is_suppressed(episode):
+    """An episode's suppression identity is its opening event's.
 
-    Partitions rows by port, prepends each port's anchor row when present,
-    groups, applies the overrun split (inside `group_episodes`) and the
-    flapping classification, and returns
-    `{requested, filters, episodes, events, flapping_groups, row_budget,
-    truncated, matched_count}`. `episodes` is ordered open first, then
-    `down_ts` descending, then opening event `id` descending -- a total
-    order, so equal timestamps never reorder between identical requests.
-    `events` is the flat filtered transition list ordered `ts DESC, id DESC`
-    -- both projections come from the one query result set.
+    `group_episodes` already assigns the opening (down) row's
+    `suppressed_reason` to the episode, which is precisely what makes an
+    anchor's suppression authoritative and closes WR-01.
+    """
+    return episode.get('suppressed_reason') is not None
+
+
+def _episode_evidence_window(episode, end_ts):
+    """Return `(window_start, window_end)` for matching non-state_change evidence.
+
+    `[down_ts, recovered_ts]` for a closed episode, `[down_ts, end_ts)` for
+    an open one. Using `end_ts` for an open episode bounds *evidence
+    matching only* -- it never becomes `recovered_ts` or `duration_seconds`,
+    which stay `None` (D-12/Pitfall 4).
+    """
+    if episode['open']:
+        return episode['down_ts'], end_ts
+    return episode['down_ts'], episode['recovered_ts']
+
+
+def _row_matches_episode_evidence(row, episode, end_ts):
+    if row['port'] != episode['port']:
+        return False
+    window_start, window_end = _episode_evidence_window(episode, end_ts)
+    ts = row['ts']
+    if episode['open']:
+        return window_start <= ts < window_end
+    return window_start <= ts <= window_end
+
+
+def filter_episodes(episodes, *, rows, filters, end_ts):
+    """Apply the operator's `maintenance` and `event_type` selections to
+    already-grouped episodes.
+
+    Returns `(kept_episodes, narrowed_by)` where `narrowed_by` is a sorted
+    list of the filter names that were actually applied on this request.
+    Narrowing happens *after* grouping -- episodes are always grouped from
+    the durable state_change record (D-12); only which already-grouped
+    episodes are kept is decided here.
+
+    `maintenance`: an episode is suppressed when its own `suppressed_reason`
+    is not `None`. `exclude` keeps only unsuppressed episodes, `only` keeps
+    only suppressed ones, `include` keeps all and does not appear in
+    `narrowed_by`.
+
+    `event_type`: when the value is `state_change` or absent, no narrowing
+    is applied and the name does not appear in `narrowed_by` -- every
+    episode is built from `state_change` rows by definition. For any other
+    value, an episode is kept only when at least one row in `rows` has the
+    same port and a `ts` inside the episode's evidence window
+    (`_episode_evidence_window`).
+    """
+    narrowed_by = []
+    kept = list(episodes)
+
+    maintenance = filters.get('maintenance', DEFAULT_MAINTENANCE_MODE)
+    if maintenance == 'exclude':
+        kept = [episode for episode in kept if not _episode_is_suppressed(episode)]
+        narrowed_by.append('maintenance')
+    elif maintenance == 'only':
+        kept = [episode for episode in kept if _episode_is_suppressed(episode)]
+        narrowed_by.append('maintenance')
+
+    event_type = filters.get('event_type')
+    if event_type is not None and event_type != 'state_change':
+        kept = [
+            episode for episode in kept
+            if any(_row_matches_episode_evidence(row, episode, end_ts) for row in rows)
+        ]
+        narrowed_by.append('event_type')
+
+    return kept, sorted(narrowed_by)
+
+
+def compose_incidents_response(
+    rows, anchors, *, start_ts, end_ts, filters, truncated, episode_rows,
+):
+    """Compose the full `/api/events/history` response from three query result sets.
+
+    Episodes are grouped from `episode_rows` (every in-range `state_change`
+    for the in-scope services) with each port's `anchors` row prepended when
+    present -- never from `rows`, which is the already-filtered flat
+    transition list. A port whose only evidence is its anchor (no rows at
+    all in `episode_rows`) still emits a group -- this is the path that
+    makes a silently-down service visible (CR-01). The grouped episodes are
+    then narrowed by `filter_episodes` and classified for flapping only
+    after narrowing, since the UI-SPEC's flapping rule is defined over "the
+    currently filtered list".
+
+    Returns `{requested, filters, episodes, events, flapping_groups,
+    row_budget, truncated, matched_count, episode_scope}`. `episodes` is
+    ordered open first, then `down_ts` descending, then opening event `id`
+    descending -- a total order, so equal timestamps never reorder between
+    identical requests. `events` and `matched_count` are derived from `rows`
+    exactly as before. `episode_scope` is `{'grouped_from':
+    EPISODE_GROUPING_SOURCE, 'narrowed_by': narrowed_by}`.
     """
     anchors_by_port = {anchor['port']: anchor for anchor in anchors}
 
-    rows_by_port = {}
-    for row in rows:
-        rows_by_port.setdefault(row['port'], []).append(row)
+    episode_rows_by_port = {}
+    for row in episode_rows:
+        episode_rows_by_port.setdefault(row['port'], []).append(row)
+
+    all_ports = sorted(set(episode_rows_by_port) | set(anchors_by_port))
 
     episodes = []
-    for port, port_rows in rows_by_port.items():
+    for port in all_ports:
         combined = []
         anchor = anchors_by_port.get(port)
         if anchor is not None:
             combined.append(anchor)
-        combined.extend(sorted(port_rows, key=lambda row: (row['ts'], row['id'])))
+        combined.extend(
+            sorted(episode_rows_by_port.get(port, []), key=lambda row: (row['ts'], row['id']))
+        )
         episodes.extend(group_episodes(combined))
 
-    flapping_groups = classify_flapping(episodes)
+    kept_episodes, narrowed_by = filter_episodes(
+        episodes, rows=rows, filters=filters, end_ts=end_ts,
+    )
 
-    episodes.sort(key=lambda episode: (
+    flapping_groups = classify_flapping(kept_episodes)
+
+    kept_episodes.sort(key=lambda episode: (
         0 if episode['open'] else 1,
         -episode['down_ts'],
         -_opening_event_id(episode),
@@ -350,10 +585,11 @@ def compose_incidents_response(rows, anchors, *, start_ts, end_ts, filters, trun
     return {
         'requested': {'start_ts': start_ts, 'end_ts': end_ts},
         'filters': filters,
-        'episodes': episodes,
+        'episodes': kept_episodes,
         'events': [dict(row) for row in events],
         'flapping_groups': flapping_groups,
         'row_budget': INCIDENT_ROW_BUDGET,
         'truncated': truncated,
         'matched_count': len(rows),
+        'episode_scope': {'grouped_from': EPISODE_GROUPING_SOURCE, 'narrowed_by': narrowed_by},
     }
