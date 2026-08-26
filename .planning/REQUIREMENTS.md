@@ -37,10 +37,10 @@
 - [x] **DIA-02**: The operator can inspect current CPU, memory, disk, temperature, host identity, sample time, and freshness.
 - [x] **DIA-03**: The operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
 - [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
-- [ ] **DIA-05**: The operator can select a validated custom range within retained history.
-- [ ] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
+- [x] **DIA-05**: The operator can select a validated custom range within retained history.
+- [x] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
 - [x] **DIA-07**: Correlated views present observed evidence without asserting an unsupported root cause.
-- [ ] **DIA-08**: The operator can view effective monitoring settings and change supported analytics presentation, refresh, range, and filtering preferences without exposing remote-control actions.
+- [x] **DIA-08**: The operator can view effective monitoring settings and change supported analytics presentation, refresh, range, and filtering preferences without exposing remote-control actions.
 
 ### Historical Investigation
 
@@ -129,8 +129,8 @@ Every v1 requirement maps to exactly one roadmap phase.
 | DIA-02 | Phase 3 | Complete |
 | DIA-03 | Phase 3 | Complete |
 | DIA-04 | Phase 4 | Pending |
-| DIA-05 | Phase 4 | Pending |
-| DIA-06 | Phase 4 | Pending |
+| DIA-05 | Phase 4 | Complete |
+| DIA-06 | Phase 4 | Complete |
 | DIA-07 | Phase 4 | Complete |
 | DIA-08 | Phase 3 + Phase 4 | Complete |
 | HIS-01 | Phase 4 | Complete |
@@ -159,6 +159,21 @@ service filtering half shipped in Phase 3 (recorded in `PROJECT.md`'s Phase 3 Va
 line); the range and history-filter presentation preference half ships in Phase 4
 (04-01, 04-07), because a range preference could not exist before this phase introduced
 a range.
+
+HIS-04 was found broken by `04-VERIFICATION.md` (CR-01/CR-02/WR-01): the Event type and
+service filters could hide a silently-down service's open episode, fabricate or mislabel a
+recovered incident's status, and leak a suppressed-maintenance anchor's evidence through
+`maintenance=exclude`. It was restored by gap-closure plans 04-09 (the independent
+episode-scope grouping and `filter_episodes` narrowing that closed CR-01/CR-02/WR-01
+server-side) and 04-10 (the Incidents section's on-screen disclosure of the narrowing rule).
+Its evidence is the named route-level regression tests in
+`tests/test_incidents_api.py::EpisodeScopeRegressionTests`.
+
+DIA-04 was determined satisfied by `04-VERIFICATION.md` (the six-preset ladder, its
+active-state indication, and its validated persisted preference, untouched by any confirmed
+defect) and its promotion was recommended there, but it is deliberately held at Pending here
+because a gap-closure plan may not promote a requirement unconnected to any gap in its own
+closure set — promotion is left for the next independent re-verification.
 
 **Coverage:**
 

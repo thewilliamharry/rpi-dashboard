@@ -444,11 +444,15 @@ own pattern **and** text label — never color alone, and never a status color:
 | Destructive confirmation | Not applicable — Phase 4 exposes no destructive actions, remote control, or monitoring mutations; every route is GET-only, matching D-18's scope note |
 | Incidents event-type narrowing note | `Incident rows are grouped from every state change in this range; the Event type filter keeps only incidents with a matching event during the incident.` |
 | Incidents maintenance narrowing note | `Expected-maintenance filtering applies to each incident's own opening event, so an incident that began during maintenance is filtered as expected maintenance.` |
+| Custom range — nonexistent local time | `That local time does not exist on this date — the clock jumps forward here (DST). Enter a time outside the absent hour.` |
 
-Both rows above were added by gap-closure plan 04-10 to disclose, on screen, the episode-scope
-narrowing semantics plan 04-09 introduced (`episode_scope.narrowed_by`) — closing the gap where the
-Incidents section changed count without stating the rule by which the Event type or
-expected-maintenance filter narrowed the already-grouped episode list.
+The three rows above were added by gap-closure plan 04-10. The first two disclose, on screen, the
+episode-scope narrowing semantics plan 04-09 introduced (`episode_scope.narrowed_by`) — closing the
+gap where the Incidents section changed count without stating the rule by which the Event type or
+expected-maintenance filter narrowed the already-grouped episode list. The third is the one
+client-only message in the range control: every other `validateCustomRange` message is a verbatim
+copy of a server rejection string, but the server takes epoch integers and has no equivalent
+rejection to copy for a wall-clock time its own zone never reaches.
 
 ---
 
