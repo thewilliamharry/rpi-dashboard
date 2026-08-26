@@ -483,5 +483,76 @@ class BoundsParityRowBudgetAndQueryPlanTests(unittest.TestCase):
                 conn.close()
 
 
+class EpisodeScopeRegressionTests(unittest.TestCase):
+    """Route-level regressions for 04-REVIEW.md IN-01 (CR-01, CR-02, WR-01).
+
+    Episodes must be grouped from the durable state_change record and never
+    from whatever row set the event_type/maintenance filters already
+    narrowed (D-12, option-a per 04-09-PLAN.md Task 1 checkpoint).
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.client = self.appmod.app.test_client()
+        self.now = int(time.time())
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_event(self, ts, *, port=80, event_type='state_change', online=None,
+                       error_class=None, suppressed_reason=None,
+                       maintenance_grace_until=None, down_since_ts=None):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO events(ts, port, event_type, online, previous_online, "
+                    "latency_ms, error_class, alert_status, details, suppressed_reason, "
+                    "maintenance_grace_until, down_since_ts) "
+                    "VALUES (?,?,?,?,NULL,NULL,?,NULL,NULL,?,?,?)",
+                    (ts, port, event_type, online, error_class, suppressed_reason,
+                     maintenance_grace_until, down_since_ts),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _get(self, **params):
+        query = {'start_ts': str(self.now - 1000), 'end_ts': str(self.now)}
+        query.update({key: str(value) for key, value in params.items()})
+        return self.client.get('/api/events/history', query_string=query)
+
+    def test_open_anchor_with_no_in_range_rows_still_appears_as_open_episode(self):
+        self._insert_event(self.now - 4000, port=9401, online=0)
+
+        payload = self._get().get_json()
+        episodes = [e for e in payload['episodes'] if e['port'] == 9401]
+        self.assertEqual(len(episodes), 1)
+        self.assertTrue(episodes[0]['open'])
+        self.assertEqual(episodes[0]['down_ts'], self.now - 4000)
+        self.assertIsNone(episodes[0]['recovered_ts'])
+        self.assertIsNone(episodes[0]['duration_seconds'])
+
+        # The per-service investigation path (CR-01) must reach the same anchor.
+        scoped_payload = self._get(port=9401).get_json()
+        scoped_episodes = [e for e in scoped_payload['episodes'] if e['port'] == 9401]
+        self.assertEqual(len(scoped_episodes), 1)
+        self.assertTrue(scoped_episodes[0]['open'])
+        self.assertEqual(scoped_episodes[0]['down_ts'], self.now - 4000)
+        self.assertIsNone(scoped_episodes[0]['recovered_ts'])
+        self.assertIsNone(scoped_episodes[0]['duration_seconds'])
+
+    def test_non_state_change_event_type_filter_never_reports_recovered_episode_as_open(self):
+        self._insert_event(self.now - 4000, port=9402, online=0)
+        self._insert_event(self.now - 800, port=9402, event_type='alert_sent')
+        self._insert_event(self.now - 500, port=9402, online=1)
+
+        payload = self._get(event_type='alert_sent').get_json()
+        episodes = [e for e in payload['episodes'] if e['port'] == 9402]
+        self.assertEqual(len(episodes), 1)
+        self.assertFalse(episodes[0]['open'])
+        self.assertEqual(episodes[0]['recovered_ts'], self.now - 500)
+
+
 if __name__ == '__main__':
     unittest.main()
