@@ -334,7 +334,7 @@ surfaces. The `959px` breakpoint (`advanced.css:98`, nav-rail collapse) is unrel
 |---|---|---|
 | Desktop | `>= 960px` | Persistent 224px nav rail; range control on one row; chart stack full-width, never side-by-side (unchanged, Phase 4) |
 | Narrow-medium | `720px – 959px` | Nav rail collapses to a horizontal scrollable tab list; `.service-identity` sticky-left column; shared time axis becomes horizontally scrollable within its own container (`advanced.css:139`) |
-| Narrow | `< 720px` | Header wraps to two rows; summary/evidence grids collapse to one column; filter controls collapse to one column; range control reflows to stacked rows; main-dashboard metrics/services grids collapse to one column; every discrete control keeps its 44px hit target |
+| Narrow | `< 720px` | Header wraps to two rows; summary/evidence grids collapse to one column; filter controls wrap onto additional rows within their group; range control reflows to stacked rows; main-dashboard metrics/services grids collapse to one column; every discrete control keeps its 44px hit target |
 
 ### At-risk layouts, resolved
 
@@ -350,8 +350,20 @@ surfaces. The `959px` breakpoint (`advanced.css:98`, nav-rail collapse) is unrel
   `< 960px` exactly like the shared axis already does; cluster-glyph degradation (D-17) is
   resolution-independent. No new CSS required — this phase adds a narrow-viewport Playwright
   assertion pinning this (previously unverified per `05-RESEARCH.md`), not new behavior.
-- **Filter controls:** `.service-filters`/`.incident-filters` already collapse to one column at
-  `< 720px` (now reconciled from `719px`) — unchanged behavior, corrected boundary.
+- **Filter controls:** `.service-filters`/`.incident-filters` are a **wrapping flex row**
+  (`advanced.css:36` — `display: flex; flex-wrap: wrap; gap: 8px; align-items: end`), not a grid,
+  and neither media query (`advanced.css:98`, `advanced.css:99`) touches either selector — so
+  nothing "collapses to one column" at any width, and `.service-filters label` (`advanced.css:37`,
+  `display: grid`) resolves a single implicit track at every width in both directions. What
+  narrowing actually does is **wrap the controls onto additional rows inside the group**. Measured
+  against the current stylesheets: at `720px` `#service-filters` occupies two rows (132px dark,
+  134px light) against one row (62px / 63px) at `1440px`; `scrollWidth` equals `clientWidth` for
+  both groups at every width; no control's right edge passes the group's content box; and every
+  displayed control measures exactly the `44px` hit target set at `advanced.css:38`.
+  `#incident-filters` is narrow enough to stay on one row at `720px` in the sans-serif light theme
+  (63px at both widths) and wraps to two in the monospace dark theme (114px against 62px) — so the
+  group-level claim is "wraps rather than overflows or clips", never a fixed row or track count.
+  Regression risk only; no new CSS.
 
 ---
 
