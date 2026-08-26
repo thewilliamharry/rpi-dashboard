@@ -553,6 +553,206 @@ class EpisodeScopeRegressionTests(unittest.TestCase):
         self.assertFalse(episodes[0]['open'])
         self.assertEqual(episodes[0]['recovered_ts'], self.now - 500)
 
+    def test_port_filter_surfaces_silently_down_service_with_no_in_range_rows(self):
+        self._insert_event(self.now - 4000, port=9403, online=0)
+
+        payload = self._get(port=9403).get_json()
+        # The episode came from the anchor path, not from an in-range row.
+        self.assertEqual(payload['events'], [])
+        episodes = payload['episodes']
+        self.assertEqual(len(episodes), 1)
+        self.assertTrue(episodes[0]['open'])
+
+    def test_non_state_change_event_type_filter_keeps_matching_incident_and_discloses_the_narrowing(self):
+        self._insert_event(self.now - 900, port=9404, online=0)
+        self._insert_event(self.now - 850, port=9404, event_type='alert_sent')
+        self._insert_event(self.now - 700, port=9404, online=1)
+        self._insert_event(self.now - 900, port=9405, online=0)
+        self._insert_event(self.now - 700, port=9405, online=1)
+
+        payload = self._get(event_type='alert_sent').get_json()
+        port_9404 = [e for e in payload['episodes'] if e['port'] == 9404]
+        port_9405 = [e for e in payload['episodes'] if e['port'] == 9405]
+        self.assertEqual(len(port_9404), 1)
+        self.assertFalse(port_9404[0]['open'])
+        self.assertEqual(port_9405, [])
+        self.assertEqual(payload['episode_scope']['narrowed_by'], ['event_type'])
+
+        unfiltered = self._get().get_json()
+        unfiltered_9404 = [e for e in unfiltered['episodes'] if e['port'] == 9404]
+        unfiltered_9405 = [e for e in unfiltered['episodes'] if e['port'] == 9405]
+        self.assertEqual(len(unfiltered_9404), 1)
+        self.assertFalse(unfiltered_9404[0]['open'])
+        self.assertEqual(len(unfiltered_9405), 1)
+        self.assertFalse(unfiltered_9405[0]['open'])
+        self.assertEqual(unfiltered['episode_scope']['narrowed_by'], [])
+
+    def test_maintenance_exclude_drops_episode_whose_opening_event_is_suppressed(self):
+        self._insert_event(self.now - 4000, port=9406, online=0, suppressed_reason='maintenance')
+        self._insert_event(self.now - 500, port=9406, online=1)
+
+        default_payload = self._get().get_json()
+        default_episodes = [e for e in default_payload['episodes'] if e['port'] == 9406]
+        self.assertEqual(len(default_episodes), 1)
+        self.assertEqual(default_episodes[0]['suppressed_reason'], 'maintenance')
+
+        excluded_payload = self._get(maintenance='exclude').get_json()
+        excluded_9406 = [e for e in excluded_payload['episodes'] if e['port'] == 9406]
+        self.assertEqual(excluded_9406, [])
+        self.assertFalse(
+            any(e.get('suppressed_reason') is not None for e in excluded_payload['episodes'])
+        )
+        self.assertEqual(excluded_payload['episode_scope']['narrowed_by'], ['maintenance'])
+
+    def test_maintenance_only_keeps_only_suppressed_opening_episodes(self):
+        self._insert_event(self.now - 4000, port=9406, online=0, suppressed_reason='maintenance')
+        self._insert_event(self.now - 500, port=9406, online=1)
+        self._insert_event(self.now - 600, port=9407, online=0)
+        self._insert_event(self.now - 550, port=9407, online=1)
+
+        payload = self._get(maintenance='only').get_json()
+        port_9406 = [e for e in payload['episodes'] if e['port'] == 9406]
+        port_9407 = [e for e in payload['episodes'] if e['port'] == 9407]
+        self.assertEqual(len(port_9406), 1)
+        self.assertEqual(port_9407, [])
+
+    def test_service_recovered_before_range_start_contributes_no_episode(self):
+        self._insert_event(self.now - 5000, port=9408, online=0)
+        self._insert_event(self.now - 4000, port=9408, online=1)
+
+        payload = self._get().get_json()
+        self.assertEqual([e for e in payload['episodes'] if e['port'] == 9408], [])
+
+    def test_episode_scope_discloses_grouping_source_and_applied_narrowing(self):
+        shapes = [
+            ({}, []),
+            ({'event_type': 'alert_sent'}, ['event_type']),
+            ({'maintenance': 'exclude'}, ['maintenance']),
+            ({'event_type': 'state_change'}, []),
+        ]
+        for params, expected_narrowed_by in shapes:
+            payload = self._get(**params).get_json()
+            self.assertEqual(
+                payload['episode_scope']['grouped_from'], beacon_incidents.EPISODE_GROUPING_SOURCE,
+            )
+            self.assertEqual(payload['episode_scope']['narrowed_by'], expected_narrowed_by)
+
+    def test_criticality_filter_applies_to_the_explicit_port_anchor_path(self):
+        self._insert_event(self.now - 4000, port=9409, online=0)
+
+        mismatched = self._get(port=9409, criticality='critical').get_json()
+        self.assertEqual(mismatched['episodes'], [])
+        self.assertEqual(mismatched['events'], [])
+
+        matched = self._get(port=9409, criticality='standard').get_json()
+        matched_episodes = matched['episodes']
+        self.assertEqual(len(matched_episodes), 1)
+        self.assertTrue(matched_episodes[0]['open'])
+
+    def test_anchor_seek_is_index_backed_and_open_port_discovery_is_bounded(self):
+        # `_insert_event` acquires `_db_lock` itself, so every insert happens
+        # before the single lock acquisition below -- nesting would deadlock
+        # against the module's non-reentrant lock.
+        start_ts = self.now
+        for port in (9501, 9502, 9503):
+            self._insert_event(start_ts - 100, port=port, online=0)
+        for i in range(300):
+            self._insert_event(
+                start_ts - 200 - i, port=9510 + (i % 5), event_type='monitoring_gap',
+            )
+
+        # A fixed marker unique to the anchor seek statement (present in
+        # every anchor seek regardless of whether the driver's trace
+        # callback substitutes bound parameter values into the text).
+        seek_marker = 'e.ts DESC, e.id DESC'
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                anchor_stmt, anchor_params = beacon_incidents.build_open_anchor_query(
+                    port=1, start_ts=self.now,
+                )
+                plan = [
+                    dict(row) for row in conn.execute('EXPLAIN QUERY PLAN ' + anchor_stmt, anchor_params)
+                ]
+                self.assertTrue(any('idx_events_port_ts' in row['detail'] for row in plan))
+                self.assertFalse(any('SCAN e' in row['detail'] for row in plan))
+
+                open_ports_stmt, open_ports_params = beacon_incidents.build_open_ports_query(
+                    start_ts=self.now,
+                )
+                plan2 = [
+                    dict(row)
+                    for row in conn.execute('EXPLAIN QUERY PLAN ' + open_ports_stmt, open_ports_params)
+                ]
+                for row in plan2:
+                    detail = row['detail']
+                    self.assertNotIn('services', detail.lower())
+                    self.assertNotIn('SUBQUERY', detail)
+                    self.assertNotIn('CORRELATED', detail)
+
+                seek_calls = []
+
+                def _trace(sql):
+                    if seek_marker in sql:
+                        seek_calls.append(sql)
+
+                conn.set_trace_callback(_trace)
+                try:
+                    open_ports = beacon_incidents.read_open_ports_as_of(conn, start_ts=start_ts)
+                finally:
+                    conn.set_trace_callback(None)
+                self.assertEqual(len(seek_calls), 3)
+                self.assertEqual(sorted(open_ports), [9501, 9502, 9503])
+            finally:
+                conn.close()
+
+        # Tripling the monitoring_gap volume must not change the seek
+        # count -- cost tracks distinct down-ports, not row volume.
+        for i in range(600):
+            self._insert_event(
+                start_ts - 900 - i, port=9510 + (i % 5), event_type='monitoring_gap',
+            )
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                seek_calls_after_triple = []
+
+                def _trace_after(sql):
+                    if seek_marker in sql:
+                        seek_calls_after_triple.append(sql)
+
+                conn.set_trace_callback(_trace_after)
+                try:
+                    beacon_incidents.read_open_ports_as_of(conn, start_ts=start_ts)
+                finally:
+                    conn.set_trace_callback(None)
+                self.assertEqual(len(seek_calls_after_triple), 3)
+            finally:
+                conn.close()
+
+    def test_no_anchor_or_open_port_value_is_interpolated_into_sql_text(self):
+        anchor_stmt, anchor_params = beacon_incidents.build_open_anchor_query(
+            port=65535, start_ts=1234567890,
+        )
+        self.assertNotIn('65535', anchor_stmt)
+        self.assertNotIn('1234567890', anchor_stmt)
+        self.assertEqual(anchor_params, (65535, 'state_change', 1234567890))
+
+        open_ports_stmt, open_ports_params = beacon_incidents.build_open_ports_query(
+            start_ts=1234567890,
+        )
+        self.assertNotIn('1234567890', open_ports_stmt)
+        self.assertEqual(open_ports_params, ('state_change', 1234567890))
+
+        # `critical` legitimately appears as a schema column/alias name
+        # (`COALESCE(m.critical, 0) AS critical`); what must never appear is
+        # a criticality *value* interpolated as a quoted SQL string literal.
+        for criticality in beacon_incidents.CRITICALITY_VALUES:
+            self.assertNotIn(f"'{criticality}'", anchor_stmt)
+            self.assertNotIn(f"'{criticality}'", open_ports_stmt)
+
 
 if __name__ == '__main__':
     unittest.main()
