@@ -136,7 +136,7 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _events_history_fixture(start_ts, end_ts, episodes=None, events=None):
+    def _events_history_fixture(start_ts, end_ts, episodes=None, events=None, narrowed_by=None):
         return {
             'requested': {'start_ts': start_ts, 'end_ts': end_ts},
             'filters': {'maintenance': 'include'},
@@ -146,6 +146,10 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             'row_budget': 2048,
             'truncated': False,
             'matched_count': 0,
+            # 04-09's episode_scope key: episodes are always grouped from every
+            # durable state_change in range, then narrowed by the operator's
+            # own filter selection -- narrowed_by names which filters applied.
+            'episode_scope': {'grouped_from': 'all_state_changes_in_range', 'narrowed_by': narrowed_by or []},
         }
 
     @staticmethod
@@ -3088,6 +3092,79 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         try:
             self._goto_incidents(page)
             page.locator('#incidents-truncated').wait_for(state='visible', timeout=5_000)
+        finally:
+            page.close()
+
+    def test_event_type_narrowing_is_disclosed_in_the_incidents_section(self):
+        """04-10 Task 2 (following 04-09's episode_scope key): the Incidents
+        section states, on screen, the rule by which the Event type or
+        expected-maintenance filter narrowed the already-grouped episode
+        list -- never leaving the operator to infer it from a changed count.
+        """
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+        event_type_note = (
+            'Incident rows are grouped from every state change in this range; the Event type '
+            'filter keeps only incidents with a matching event during the incident.'
+        )
+        maintenance_note = (
+            "Expected-maintenance filtering applies to each incident's own opening event, so an "
+            'incident that began during maintenance is filtered as expected maintenance.'
+        )
+        cases = [
+            ('event_type:alert_sent', ['event_type'], event_type_note),
+            ('maintenance:exclude', ['maintenance'], maintenance_note),
+            ('event_type:alert_sent', ['event_type', 'maintenance'], f'{event_type_note} {maintenance_note}'),
+        ]
+        for option, narrowed_by, expected_text in cases:
+            with self.subTest(option=option, narrowed_by=narrowed_by):
+                def events_payload_fn(start_ts, end_ts, query, narrowed_by=narrowed_by):
+                    return self._events_history_fixture(start_ts, end_ts, episodes=[episode], narrowed_by=narrowed_by)
+
+                page = self.browser.new_page()
+                page.route(
+                    '**/api/**',
+                    self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn),
+                )
+                try:
+                    self._goto_incidents(page)
+                    page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+                    with page.expect_request(lambda request: urlparse(request.url).path == '/api/events/history'):
+                        page.locator('#incident-event-type-filter').select_option(option)
+                    page.locator('#incidents-episode-scope').wait_for(state='visible', timeout=5_000)
+                    self.assertEqual(page.locator('#incidents-episode-scope').text_content(), expected_text)
+                finally:
+                    page.close()
+
+    def test_no_narrowing_leaves_the_episode_scope_note_absent(self):
+        """The disclosure is absent -- hidden with empty textContent -- both
+        on first render and after selecting then clearing a filter, so the
+        surface never carries a standing caveat that would train the
+        operator to ignore it.
+        """
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertIsNotNone(page.locator('#incidents-episode-scope').get_attribute('hidden'))
+            self.assertEqual(page.locator('#incidents-episode-scope').text_content(), '')
+            page.locator('#incident-service-filter').select_option('8080')
+            page.wait_for_timeout(50)
+            with page.expect_request(lambda request: urlparse(request.url).path == '/api/events/history'):
+                page.locator('#clear-incident-filters').click()
+            page.wait_for_timeout(50)
+            self.assertIsNotNone(page.locator('#incidents-episode-scope').get_attribute('hidden'))
+            self.assertEqual(page.locator('#incidents-episode-scope').text_content(), '')
         finally:
             page.close()
 
