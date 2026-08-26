@@ -39,7 +39,7 @@
 - [ ] **DIA-04**: The operator can select shared preset ranges from one hour through 90 days.
 - [ ] **DIA-05**: The operator can select a validated custom range within retained history.
 - [ ] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
-- [ ] **DIA-07**: Correlated views present observed evidence without asserting an unsupported root cause.
+- [x] **DIA-07**: Correlated views present observed evidence without asserting an unsupported root cause.
 - [ ] **DIA-08**: The operator can view effective monitoring settings and change supported analytics presentation, refresh, range, and filtering preferences without exposing remote-control actions.
 
 ### Historical Investigation
@@ -131,7 +131,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | DIA-04 | Phase 4 | Pending |
 | DIA-05 | Phase 4 | Pending |
 | DIA-06 | Phase 4 | Pending |
-| DIA-07 | Phase 4 | Pending |
+| DIA-07 | Phase 4 | Complete |
 | DIA-08 | Phase 3 + Phase 4 | Complete |
 | HIS-01 | Phase 4 | Complete |
 | HIS-02 | Phase 4 | Complete |
