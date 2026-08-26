@@ -402,7 +402,16 @@ Plans:
   4. Loading, empty, stale, unknown, degraded, and error states are visibly and meaningfully distinct in both themes.
   5. UI-contract or visual-regression coverage verifies shared capabilities and important states in both themes.
 
-**Plans**: TBD
+**Plans**: 6 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — Tracer: `degraded` end to end — one shared server classifier, both payloads, one banner in both documents, proven by an unstubbed dual-theme test
+- [ ] 05-02-PLAN.md — Six-state vocabulary across the advanced workspace: glyph-and-word badges, the box-versus-inline rule, and a dual-theme distinctness test
+- [ ] 05-03-PLAN.md — Theme-parity audit: the exhaustive, self-maintaining visibility inventory plus main-dashboard parity and deliberate-calm substitutes
+- [ ] 05-04-PLAN.md — Keyboard parity for chart interactions: the marker role fix, coverage-strip reachability, the focus-driven time cursor, and one shared range-apply function
+- [ ] 05-05-PLAN.md — Density drives progressive disclosure on two named surfaces, with the reachability invariant asserted and the stale incident count closed
+- [ ] 05-06-PLAN.md — Responsive reconciliation to one shared narrow boundary, and the cross-surface dual-theme contract module that closes OPS-06
+
 **UI hint**: yes
 
 ### Phase 6: Workload Resilience & Pi Acceptance
@@ -431,5 +440,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
-| 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
+| 5. Theme-Parity Analytics Experience | 0/6 | Planned | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
