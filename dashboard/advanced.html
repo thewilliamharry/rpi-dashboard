@@ -141,8 +141,10 @@
             <div id="history-temp-error" class="hist-error" role="alert" hidden></div>
           </figure>
           <div id="history-axis-scroll" class="hist-axis-scroll" role="region" aria-label="Shared history time axis" tabindex="0">
+            <svg id="incident-marker-rail" class="hist-marker-rail" viewBox="0 0 1000 16" preserveAspectRatio="none" role="img" aria-label="Incident markers"></svg>
             <svg id="history-time-axis" class="hist-axis" viewBox="0 0 1000 24" preserveAspectRatio="none" role="img" aria-label="Shared history time axis"></svg>
           </div>
+          <p id="correlation-unavailable" class="hist-correlation-unavailable" role="status" hidden></p>
         </div>
         <div id="service-history-group" class="hist-service-group" aria-label="Selected service history">
           <div id="service-history-loading" class="hist-skeleton" hidden aria-label="Loading service history"><p>Loading service history…</p></div>
@@ -167,6 +169,9 @@
             </figure>
           </div>
         </div>
+        <div id="history-time-cursor" class="hist-time-cursor" hidden></div>
+        <div id="history-cursor-readout" class="hist-cursor-readout" aria-live="polite" hidden></div>
+        <div id="incident-marker-disclosure" class="hist-marker-disclosure" role="dialog" aria-label="Clustered incidents" hidden></div>
         <div id="history-chart-tooltip" class="hist-tooltip" role="tooltip" hidden></div>
       </section>
       <section id="incidents-section" aria-labelledby="incidents-heading" hidden>

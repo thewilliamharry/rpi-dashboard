@@ -1,4 +1,5 @@
 import calendar
+import math
 import pathlib
 import re
 import threading
@@ -17,6 +18,20 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 HISTORY_PRESET_SPANS = {
     '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000, '90d': 7776000,
 }
+
+# 04-08 Task 3 (DIA-07): the seven-phrase forbidden causal-language list,
+# transcribed verbatim from 04-UI-SPEC.md "Investigation Context and
+# Correlation Contract" -> "Correlation presentation". Defined once at module
+# level so both the source sweep and the rendered-DOM sweep enforce the
+# identical list.
+FORBIDDEN_CAUSAL_PHRASES = [
+    'causes', 'caused by', 'due to', 'because of', 'led to', 'resulted in', 'triggered by',
+]
+
+
+def _find_forbidden_phrases(text):
+    lowered = (text or '').lower()
+    return [phrase for phrase in FORBIDDEN_CAUSAL_PHRASES if phrase in lowered]
 
 
 class HistoryInvestigationUiTests(unittest.TestCase):
@@ -2063,7 +2078,12 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         window.fetch = (...args) => {
           const url = String(args[0] || '');
           const isServiceTelemetry = url.includes('/api/telemetry/history') && url.includes('kind=service');
-          const isServiceEvents = url.includes('/api/events/history');
+          // Scoped to a `port` param (04-08): the shared incident-marker
+          // rail's own unfiltered `/api/events/history` fetch (no `port`)
+          // now fires in parallel on every History render and must stay
+          // un-held here -- only the SELECTED SERVICE's own scoped events
+          // fetch is this harness's concern.
+          const isServiceEvents = url.includes('/api/events/history') && url.includes('port=');
           if (!isServiceTelemetry && !isServiceEvents) return realFetch(...args);
           const pending = realFetch(...args);
           return new Promise((resolve, reject) => {
@@ -3381,6 +3401,797 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             service_query = parse_qs(urlparse(service_request_info.value.url).query)
             self.assertEqual(int(service_query['end_ts'][0]), range_end)
             self.assertLessEqual(int(service_query['end_ts'][0]), range_end)
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-08 Task 1: neutral incident markers on the shared time axis (D-17).
+    # Markers reuse fetchIncidents/`/api/events/history` verbatim (04-07) --
+    # _incidents_route already serves both the host-metric and events fixtures
+    # this task needs.
+    # ------------------------------------------------------------------
+
+    def _set_fixed_range(self, page, start_ts, end_ts):
+        page.evaluate(
+            "([s, e]) => window.__historyRangeTestHooks.setInvestigationRange("
+            "{start_ts: s, end_ts: e, origin: 'manual'})",
+            [start_ts, end_ts],
+        )
+
+    def test_three_well_separated_episodes_render_three_markers_at_down_ts_positions(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 86_400
+        episodes = [
+            self._episode(8080, start_ts + 1_000, start_ts + 1_060),
+            self._episode(8081, start_ts + 40_000, start_ts + 40_060),
+            self._episode(8082, start_ts + 80_000, start_ts + 80_060),
+        ]
+
+        def events_payload_fn(s, e, query):
+            return self._events_history_fixture(s, e, episodes=episodes)
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self._set_fixed_range(page, start_ts, end_ts)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('.hist-marker').first.wait_for(state='attached', timeout=5_000)
+            markers = page.locator('.hist-marker')
+            self.assertEqual(markers.count(), 3)
+            xs = sorted(round(float(markers.nth(i).get_attribute('cx'))) for i in range(3))
+            expected = sorted(
+                round(((episode['down_ts'] - start_ts) / (end_ts - start_ts)) * 1000) for episode in episodes
+            )
+            self.assertEqual(xs, expected)
+        finally:
+            page.close()
+
+    def test_twelve_episodes_within_one_minute_at_90d_render_one_cluster_with_full_disclosure(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        # The 90d preset is resolved from the live Date.now() at click time
+        # (boundsForPreset), and _incidents_route's telemetry handler echoes
+        # back whatever start_ts/end_ts the request actually carried -- so
+        # the episodes must be built from the SAME real (s, e) the events
+        # fetch receives, never a hardcoded window that may fall outside it.
+        def events_payload_fn(s, e, query):
+            base = s + (e - s) // 2
+            episodes = [
+                self._episode(8080 + i, base + i * 5, base + i * 5 + 30, service_name=f'Svc{i}')
+                for i in range(12)
+            ]
+            return self._events_history_fixture(s, e, episodes=episodes)
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            with page.expect_request(lambda r: urlparse(r.url).path == '/api/telemetry/history'):
+                page.locator('#range-preset-90d').click()
+            page.locator('.hist-marker-cluster').first.wait_for(state='attached', timeout=5_000)
+            self.assertEqual(page.locator('.hist-marker').count(), 0)
+            cluster = page.locator('.hist-marker-cluster').first
+            self.assertEqual(cluster.locator('.hist-marker-cluster-label').text_content(), '+12')
+            cluster.hover()
+            page.locator('.hist-marker-disclosure-item').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('.hist-marker-disclosure-item').count(), 12)
+        finally:
+            page.close()
+
+    def test_marker_colour_and_size_independent_of_criticality(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 86_400
+        critical_episode = self._episode(8080, start_ts + 1_000, start_ts + 1_060, critical=True)
+        standard_episode = self._episode(8081, start_ts + 60_000, start_ts + 60_060, critical=False)
+
+        def events_payload_fn(s, e, query):
+            return self._events_history_fixture(s, e, episodes=[critical_episode, standard_episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self._set_fixed_range(page, start_ts, end_ts)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('.hist-marker').first.wait_for(state='attached', timeout=5_000)
+            markers = page.locator('.hist-marker')
+            self.assertEqual(markers.count(), 2)
+            colours = [markers.nth(i).evaluate('(el) => getComputedStyle(el).fill') for i in range(2)]
+            radii = [markers.nth(i).get_attribute('r') for i in range(2)]
+            self.assertEqual(colours[0], colours[1])
+            self.assertEqual(radii[0], radii[1])
+            muted = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--muted').trim()")
+            expected_rgb = page.evaluate(
+                "(hex) => { const p = document.createElement('div'); p.style.color = hex; "
+                "document.body.appendChild(p); const rgb = getComputedStyle(p).color; p.remove(); return rgb; }",
+                muted,
+            )
+            self.assertEqual(colours[0], expected_rgb)
+        finally:
+            page.close()
+
+    def test_activating_marker_focuses_same_as_incident_row(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 86_400
+        episode = self._episode(8080, start_ts + 1_000, start_ts + 1_060)
+
+        def events_payload_fn(s, e, query):
+            return self._events_history_fixture(s, e, episodes=[episode])
+
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self._set_fixed_range(page, start_ts, end_ts)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('.hist-marker').first.wait_for(state='attached', timeout=5_000)
+            page.locator('.hist-marker').first.click()
+            page.locator('#investigating-service').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#investigating-service').text_content(), 'Investigating: Test Service')
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-08 Task 2: one hover cursor across the whole stack, one readout
+    # (D-17). Pointer-driven updates are coalesced through
+    # requestAnimationFrame -- only the cursor's transform and the readout's
+    # text content ever change per frame (Research Pitfall 3, R-01).
+    # ------------------------------------------------------------------
+
+    def test_hovering_stack_positions_cursor_and_writes_readout_with_host_values(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        host_points = {
+            'cpu': [self._point(start_ts, 10.0), self._point(start_ts + 1_800, 20.0)],
+            'ram': [self._point(start_ts, 30.0), self._point(start_ts + 1_800, 40.0)],
+            'disk': [self._point(start_ts, 50.0), self._point(start_ts + 1_800, 55.0)],
+            'temp': [self._point(start_ts, 41.0), self._point(start_ts + 1_800, 42.0)],
+        }
+        coverage = [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}]
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', [''])[0]
+                route.fulfill(status=200, json=self._metric_fixture(metric, host_points[metric], start_ts, end_ts, coverage=coverage))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=200, json=self._events_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self._set_fixed_range(page, start_ts, end_ts)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function(
+                "() => { const d = document.querySelector('#chart-cpu path').getAttribute('d') || ''; return d.length > 0; }",
+                timeout=5_000,
+            )
+            box = page.locator('#chart-cpu').bounding_box()
+            page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+            page.locator('#history-time-cursor').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-cursor-readout').wait_for(state='visible', timeout=5_000)
+            readout = page.locator('#history-cursor-readout').text_content()
+            self.assertIn('CPU:', readout)
+            self.assertIn('Memory:', readout)
+            self.assertIn('Disk:', readout)
+            self.assertIn('Temperature:', readout)
+            self.assertIn('Service state:', readout)
+            self.assertIn('Service latency:', readout)
+        finally:
+            page.close()
+
+    def test_ten_pointer_moves_leave_paths_bands_and_markers_unchanged(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        host_points = {m: [self._point(start_ts + i * 300, float(i)) for i in range(12)] for m in ('cpu', 'ram', 'disk', 'temp')}
+        coverage = [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}]
+        service_points = [
+            self._service_point(start_ts + i * 300, online_seconds=300, latency_avg=float(i)) for i in range(12)
+        ]
+        episode = self._episode(8080, start_ts + 100, start_ts + 400)
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                if query.get('kind', [''])[0] == 'service':
+                    route.fulfill(status=200, json=self._service_history_fixture(start_ts, end_ts, points=service_points))
+                    return
+                metric = query.get('metric', [''])[0]
+                route.fulfill(status=200, json=self._metric_fixture(metric, host_points[metric], start_ts, end_ts, coverage=coverage))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=200, json=self._events_history_fixture(start_ts, end_ts, episodes=[episode]))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self._set_fixed_range(page, start_ts, end_ts)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.wait_for_function(
+                "() => { const d = document.querySelector('#service-latency-chart path').getAttribute('d') || ''; return d.length > 0; }",
+                timeout=5_000,
+            )
+            page.locator('.hist-marker').first.wait_for(state='attached', timeout=5_000)
+            snapshot_before = {
+                metric: page.locator(f'#chart-{metric} path').get_attribute('d')
+                for metric in ('cpu', 'ram', 'disk', 'temp')
+            }
+            snapshot_before['latency'] = page.locator('#service-latency-chart path').get_attribute('d')
+            band_before = page.eval_on_selector_all(
+                '.hist-band-segment', 'nodes => nodes.map(n => n.getAttribute("x") + "," + n.getAttribute("width"))',
+            )
+            markers_before = page.eval_on_selector_all('.hist-marker', 'nodes => nodes.map(n => n.getAttribute("cx"))')
+            box = page.locator('#chart-cpu').bounding_box()
+            y = box['y'] + box['height'] / 2
+            readouts = set()
+            for fraction in (0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95):
+                page.mouse.move(box['x'] + box['width'] * fraction, y)
+                page.wait_for_timeout(20)
+                readouts.add(page.locator('#history-cursor-readout').text_content())
+            snapshot_after = {
+                metric: page.locator(f'#chart-{metric} path').get_attribute('d')
+                for metric in ('cpu', 'ram', 'disk', 'temp')
+            }
+            snapshot_after['latency'] = page.locator('#service-latency-chart path').get_attribute('d')
+            band_after = page.eval_on_selector_all(
+                '.hist-band-segment', 'nodes => nodes.map(n => n.getAttribute("x") + "," + n.getAttribute("width"))',
+            )
+            markers_after = page.eval_on_selector_all('.hist-marker', 'nodes => nodes.map(n => n.getAttribute("cx"))')
+            self.assertEqual(snapshot_before, snapshot_after)
+            self.assertEqual(band_before, band_after)
+            self.assertEqual(markers_before, markers_after)
+            self.assertGreater(len(readouts), 1)
+        finally:
+            page.close()
+
+    def test_cursor_reads_absence_for_non_observed_instant(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3_600
+        coverage = [
+            {'start_ts': start_ts, 'end_ts': start_ts + 1_800, 'state': 'collection_gap'},
+            {'start_ts': start_ts + 1_800, 'end_ts': end_ts, 'state': 'observed'},
+        ]
+        points = [self._point(start_ts, 10.0), self._point(start_ts + 1_800, 20.0), self._point(start_ts + 3_000, 30.0)]
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', [''])[0]
+                if metric == 'cpu':
+                    route.fulfill(status=200, json=self._metric_fixture('cpu', points, start_ts, end_ts, coverage=coverage))
+                    return
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=200, json=self._events_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self._set_fixed_range(page, start_ts, end_ts)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function(
+                "() => { const d = document.querySelector('#chart-cpu path').getAttribute('d') || ''; return d.length > 0; }",
+                timeout=5_000,
+            )
+            not_observed_readout = page.evaluate(
+                '(ts) => window.__historyCursorTestHooks.readoutForInstant(ts)', start_ts + 300,
+            )
+            self.assertIn('CPU: Unknown', not_observed_readout)
+            observed_readout = page.evaluate(
+                '(ts) => window.__historyCursorTestHooks.readoutForInstant(ts)', start_ts + 3_000,
+            )
+            self.assertIn('CPU: 30', observed_readout)
+        finally:
+            page.close()
+
+    def test_cursor_and_markers_absent_while_indicator_and_back_present_during_loading(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        fixture = self._empty_history_fixture(1_700_000_000, 1_700_003_600)
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=200, json=self._events_history_fixture(1_700_000_000, 1_700_003_600))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.add_init_script(self.HISTORY_FETCH_HOLD_HARNESS)
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.evaluate(
+                "() => window.__historyRangeTestHooks.pushRange("
+                "{descriptor: {preset: '24h'}, origin: 'drag', label: 'test'})",
+            )
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-cpu-loading').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function('window.__heldHistoryReleases.length === 4', timeout=5_000)
+            self.assertFalse(page.evaluate('() => window.__historyCursorTestHooks.correlationReady()'))
+            box = page.locator('#chart-cpu').bounding_box()
+            page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+            page.wait_for_timeout(50)
+            self.assertIsNotNone(page.locator('#history-time-cursor').get_attribute('hidden'))
+            self.assertEqual(page.locator('.hist-marker').count(), 0)
+            self.assertEqual(page.locator('.hist-marker-cluster').count(), 0)
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            page.evaluate('window.__releaseAllHeldHistoryFetches()')
+            page.locator('#history-cpu-loading').wait_for(state='hidden', timeout=5_000)
+            self.assertTrue(page.evaluate('() => window.__historyCursorTestHooks.correlationReady()'))
+        finally:
+            page.close()
+
+    def test_escape_and_pointerleave_clear_cursor(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+            page.locator('#history-time-cursor').wait_for(state='visible', timeout=5_000)
+            page.mouse.move(box['x'] + box['width'] / 2, box['y'] - 200)
+            page.locator('#history-time-cursor').wait_for(state='hidden', timeout=5_000)
+            page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+            page.locator('#history-time-cursor').wait_for(state='visible', timeout=5_000)
+            page.keyboard.press('Escape')
+            page.locator('#history-time-cursor').wait_for(state='hidden', timeout=5_000)
+        finally:
+            page.close()
+
+    def test_drag_in_progress_suppresses_cursor(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(box['x'] + box['width'] * 0.5, y)
+            page.locator('#history-time-cursor').wait_for(state='visible', timeout=5_000)
+            page.mouse.down()
+            page.mouse.move(box['x'] + box['width'] * 0.6, y)
+            page.locator('#history-time-cursor').wait_for(state='hidden', timeout=5_000)
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            page.mouse.up()
+        finally:
+            page.close()
+
+    def test_cursor_line_colour_resolves_accent(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            box = page.locator('#chart-cpu').bounding_box()
+            page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+            page.locator('#history-time-cursor').wait_for(state='visible', timeout=5_000)
+            accent = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
+            expected_rgb = page.evaluate(
+                "(hex) => { const p = document.createElement('div'); p.style.color = hex; "
+                "document.body.appendChild(p); const rgb = getComputedStyle(p).color; p.remove(); return rgb; }",
+                accent,
+            )
+            background = page.evaluate(
+                "getComputedStyle(document.getElementById('history-time-cursor')).backgroundColor",
+            )
+            self.assertEqual(background, expected_rgb)
+        finally:
+            page.close()
+
+    def test_sixty_pointer_moves_measured_and_coalesced_r01(self):
+        """R-01's interaction half (04-08 Task 2): a measured mean per-frame
+        cost for cursor movement across the full six-surface stack, plus
+        proof the coalescing genuinely coalesces (committed frames <=
+        pointer events). See 04-08-SUMMARY.md for the recorded baseline.
+        """
+        span = HISTORY_PRESET_SPANS['90d']
+        end_ts = 4_100_000_000
+        start_ts = end_ts - span
+        total_points = 2048
+        step = max(1, (end_ts - start_ts) // total_points)
+        host_points = {
+            metric: [self._point(start_ts + i * step, float(i % 100)) for i in range(total_points)]
+            for metric in ('cpu', 'ram', 'disk', 'temp')
+        }
+        coverage = [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}]
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', [''])[0]
+                route.fulfill(status=200, json=self._metric_fixture(metric, host_points[metric], start_ts, end_ts, coverage=coverage))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=200, json=self._events_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            with page.expect_request(lambda r: urlparse(r.url).path == '/api/telemetry/history'):
+                page.locator('#range-preset-90d').click()
+            page.wait_for_function(
+                "() => { const d = document.querySelector('#chart-cpu path').getAttribute('d') || ''; return d.length > 0; }",
+                timeout=20_000,
+            )
+            page.evaluate('window.__historyCursorTestHooks.resetCursorFrameCount()')
+            box = page.locator('#chart-cpu').bounding_box()
+            y = box['y'] + box['height'] / 2
+            pointer_events = 60
+            start_perf = page.evaluate('performance.now()')
+            for i in range(pointer_events):
+                fraction = (i % 50) / 50
+                page.mouse.move(box['x'] + box['width'] * fraction, y)
+            page.wait_for_timeout(150)
+            end_perf = page.evaluate('performance.now()')
+            frame_count = page.evaluate('window.__historyCursorTestHooks.cursorFrameCount()')
+            self.assertGreater(frame_count, 0)
+            self.assertLessEqual(frame_count, pointer_events)
+            elapsed_ms = end_perf - start_perf
+            mean_per_frame = elapsed_ms / frame_count
+            self.assertTrue(math.isfinite(mean_per_frame))
+            print(
+                f"\nR-01 baseline: cursor mean cost per committed frame across "
+                f"{pointer_events} pointer-move events, six-surface stack, 90d preset, "
+                f"2048 pts/series: {mean_per_frame:.3f}ms ({frame_count} frames committed) "
+                f"(developer machine, not Pi-class)"
+            )
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
+    # 04-08 Task 3: the no-causation gate (DIA-07) and correlation-failure
+    # honesty. FORBIDDEN_CAUSAL_PHRASES/_find_forbidden_phrases are the
+    # module-level constant and helper both sweeps below share.
+    # ------------------------------------------------------------------
+
+    def test_source_sweep_finds_zero_forbidden_causal_phrases(self):
+        for relative in ('dashboard/advanced.js', 'dashboard/advanced.html', 'dashboard/advanced.css'):
+            with self.subTest(file=relative):
+                text = (ROOT / relative).read_text(encoding='utf-8')
+                found = _find_forbidden_phrases(text)
+                self.assertEqual(found, [], f"{relative} contains forbidden phrase(s): {found}")
+
+    def test_no_causation_dom_sweep_across_defined_states(self):
+        """Drives History and Incidents through loading, populated, marker
+        cluster disclosure, cursor readout, open/overrun/suppressed/flapping
+        incidents, expanded transitions, and a truncated banner -- asserting
+        the concatenated visible text and every title attribute/SVG <title>
+        contain none of the seven forbidden phrases in any of them.
+        """
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        open_episode = self._episode(8080, 1_700_000_000, None)
+        overrun_episode = self._episode(
+            8081, 1_700_000_100, 1_700_001_100,
+            maintenance_grace_until=1_700_000_400, overrun=True, grace_seconds=300, fault_seconds=700,
+        )
+        suppressed_episode = self._episode(8082, 1_700_000_500, 1_700_000_560, suppressed_reason='confirmed_maintenance')
+        flap_a = self._episode(8083, 1_700_000_600, 1_700_000_610, flapping_group_id=1)
+        flap_b = self._episode(8083, 1_700_000_650, 1_700_000_660, flapping_group_id=1)
+        flap_c = self._episode(8083, 1_700_000_700, 1_700_000_710, flapping_group_id=1)
+        episodes = [open_episode, overrun_episode, suppressed_episode, flap_a, flap_b, flap_c]
+        flapping_groups = [{'id': 1, 'count': 3, 'span_seconds': 110}]
+        points = [self._point(1_700_000_000 + i * 60, float(i)) for i in range(20)]
+
+        def events_payload_fn(s, e, query):
+            payload = self._events_history_fixture(s, e, episodes=episodes)
+            payload['flapping_groups'] = flapping_groups
+            payload['truncated'] = True
+            return payload
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', [''])[0] or 'cpu'
+                route.fulfill(status=200, json=self._metric_fixture(metric, points, 1_700_000_000, 1_700_001_200))
+                return
+            if path == '/api/events/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                route.fulfill(status=200, json=events_payload_fn(1_700_000_000, 1_700_001_200, query))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+
+        def sweep():
+            body_text = page.locator('body').inner_text()
+            titles = page.eval_on_selector_all('[title]', 'nodes => nodes.map(n => n.getAttribute("title"))')
+            svg_titles = page.eval_on_selector_all('title', 'nodes => nodes.map(n => n.textContent)')
+            combined = ' '.join([body_text, *titles, *svg_titles])
+            found = _find_forbidden_phrases(combined)
+            self.assertEqual(found, [], f"forbidden phrase found in rendered DOM: {found}")
+
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            sweep()  # loading
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.wait_for_function(
+                "() => { const d = document.querySelector('#chart-cpu path').getAttribute('d') || ''; return d.length > 0; }",
+                timeout=5_000,
+            )
+            sweep()  # populated, including the marker rail
+            markers = page.locator('.hist-marker, .hist-marker-cluster')
+            if markers.count() > 0:
+                markers.first.hover()
+                page.wait_for_timeout(50)
+                sweep()  # marker/cluster disclosure
+            box = page.locator('#chart-cpu').bounding_box()
+            page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+            page.wait_for_timeout(50)
+            sweep()  # cursor readout
+            page.locator('[data-section="incidents"]').click()
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            sweep()  # populated incidents: open, overrun, suppressed, flapping
+            page.locator('.incident-transitions-toggle').first.click()
+            sweep()  # expanded transitions
+            page.locator('#incidents-truncated').wait_for(state='visible', timeout=5_000)
+            sweep()  # truncated banner
+        finally:
+            page.close()
+
+    def test_no_causation_in_empty_and_error_states(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                metric = query.get('metric', [''])[0]
+                if metric == 'temp':
+                    route.fulfill(status=503, json={'error': 'temperature sensor unavailable'})
+                    return
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=503, json={'error': 'incidents unavailable'})
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-temp-error').wait_for(state='visible', timeout=5_000)
+            page.locator('#correlation-unavailable').wait_for(state='visible', timeout=5_000)
+            body_text = page.locator('body').inner_text()
+            titles = page.eval_on_selector_all('[title]', 'nodes => nodes.map(n => n.getAttribute("title"))')
+            found = _find_forbidden_phrases(' '.join([body_text, *titles]))
+            self.assertEqual(found, [])
+            page.locator('[data-section="incidents"]').click()
+            page.locator('#incidents-error').wait_for(state='visible', timeout=5_000)
+            found = _find_forbidden_phrases(page.locator('body').inner_text())
+            self.assertEqual(found, [])
+        finally:
+            page.close()
+
+    def test_correlation_fetch_failure_renders_unavailable_note_and_zero_markers(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        points = [self._point(1_700_000_000, 10.0)]
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._metric_fixture('cpu', points, start_ts, end_ts))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=503, json={'error': 'incidents unavailable'})
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('#correlation-unavailable').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(
+                page.locator('#correlation-unavailable').inner_text(),
+                'Correlation markers unavailable for this range',
+            )
+            self.assertEqual(page.locator('.hist-marker').count(), 0)
+            self.assertEqual(page.locator('.hist-marker-cluster').count(), 0)
+        finally:
+            page.close()
+
+    def test_correlation_failure_leaves_navigation_controls_operable(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Alpha')]
+        config_fixture = self._config_fixture()
+        points = [self._point(1_700_000_000, 10.0)]
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._metric_fixture('cpu', points, start_ts, end_ts))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=503, json={'error': 'incidents unavailable'})
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('#correlation-unavailable').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('#investigating-service').wait_for(state='visible', timeout=5_000)
+            page.evaluate(
+                "() => window.__historyRangeTestHooks.setInvestigationRange("
+                "{start_ts: 1700000000, end_ts: 1700000600, origin: 'drag', label: 'test'})",
+            )
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            self.assertTrue(page.locator('#investigating-service').is_visible())
+            self.assertTrue(page.locator('#clear-selected-service').is_visible())
+            self.assertTrue(page.locator('#range-back').is_enabled())
+            page.locator('#clear-selected-service').click()
+            self.assertFalse(page.locator('#investigating-service').is_visible())
+        finally:
+            page.close()
+
+    def test_long_investigating_label_and_back_label_truncate_without_moving_presets(self):
+        long_name = 'B' * 120
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, name=long_name)]
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                start_ts = int(query['start_ts'][0])
+                end_ts = int(query['end_ts'][0])
+                route.fulfill(status=200, json=self._empty_history_fixture(start_ts, end_ts))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=200, json=self._events_history_fixture(1, 2))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            preset_before = page.locator('#range-preset-24h').bounding_box()
+            page.locator('#history-service-picker').select_option('8080')
+            page.locator('#investigating-service').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#investigating-service').get_attribute('title'), long_name)
+            overflowing = page.locator('#investigating-service').evaluate('(el) => el.scrollWidth > el.clientWidth')
+            self.assertTrue(overflowing)
+            long_label = 'C' * 120
+            page.evaluate(
+                "(label) => window.__historyRangeTestHooks.setInvestigationRange("
+                "{start_ts: 1700000000, end_ts: 1700000600, origin: 'drag', label})",
+                long_label,
+            )
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            self.assertEqual(page.locator('#range-back').get_attribute('title'), f'Back to {long_label}')
+            back_overflowing = page.locator('#range-back').evaluate('(el) => el.scrollWidth > el.clientWidth')
+            self.assertTrue(back_overflowing)
+            preset_after = page.locator('#range-preset-24h').bounding_box()
+            self.assertAlmostEqual(preset_before['x'], preset_after['x'], delta=1)
         finally:
             page.close()
 

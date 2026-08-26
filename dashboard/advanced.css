@@ -170,7 +170,11 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
    hidden), on its own row above the presets so a pushed drag/incident focus
    is never confused with the operator's own preset choice. */
 .hist-back-row { flex-basis: 100%; }
-.hist-back { min-height: 44px; max-width: 100%; color: var(--accent); background: transparent; border: 1px solid var(--accent); padding: 0 12px; font: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Phase 4 (04-08) Task 3: a fixed 320px cap (matching .investigating-service's
+   own truncation width) rather than 100% of the row -- a label must truncate
+   regardless of viewport width, never merely "when the row happens to be
+   narrower than the text". */
+.hist-back { min-height: 44px; max-width: 320px; color: var(--accent); background: transparent; border: 1px solid var(--accent); padding: 0 12px; font: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Phase 4 (04-05) -- drag-to-select overlay (D-03): one absolutely-positioned
    element reused across every chart, never one per chart. Fixed positioning
@@ -188,7 +192,10 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 .hist-investigating-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 16px; }
 .hist-investigating-row label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
 .hist-investigating-row select { min-height: 44px; color: var(--text); background: var(--bg3); border: 1px solid var(--border); padding: 0 10px; font: inherit; }
-.investigating-service { font-weight: 600; overflow-wrap: anywhere; max-width: 320px; }
+/* Phase 4 (04-08) Task 3: truncates with a full-string title rather than
+   wrapping onto a second line and pushing the range-control header layout --
+   see the dedicated rule near the end of this file for the exact change. */
+.investigating-service { font-weight: 600; max-width: 320px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .hist-clear-service { min-height: 44px; min-width: 44px; color: var(--accent); background: transparent; border: 1px solid var(--accent); padding: 0 12px; font: inherit; cursor: pointer; }
 .hist-service-group { margin-top: 16px; }
 
@@ -259,3 +266,34 @@ html.light #advanced-refresh:hover { background: rgba(0, 102, 204, 0.10); }
 /* Claude's Discretion resolved (flapping): purely presentational -- no
    status colour, since it neither merges rows nor asserts a fault. */
 .incident-flapping-banner { padding: 8px 12px; border: 1px solid var(--border2); background: var(--bg2); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+/* Phase 4 (04-08) -- incident marker rail (D-17): one neutral --muted marker
+   per episode's own down_ts, positioned against the exact shared axis scale.
+   Never coloured, sized or weighted by severity/criticality (explicit UI-SPEC
+   negative) -- .hist-marker/.hist-marker-cluster carry no state-token class. */
+.hist-marker-rail { display: block; width: 100%; height: 16px; }
+.hist-marker { fill: var(--muted); cursor: pointer; }
+.hist-marker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hist-marker-cluster { cursor: pointer; }
+.hist-marker-cluster-glyph { fill: var(--muted); }
+.hist-marker-cluster-label { font-family: var(--font-mono); font-size: 9px; fill: var(--bg); pointer-events: none; }
+.hist-marker-cluster:focus-visible .hist-marker-cluster-glyph { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A dense incident period degrades into a counted glyph whose disclosure is
+   its own bounded, internally-scrollable list -- the shared time axis itself
+   never becomes a scroll surface (UI-SPEC "Chart Contract"). */
+.hist-marker-disclosure { position: fixed; z-index: 20; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; color: var(--text); background: var(--bg2); border: 1px solid var(--border); padding: 4px; font-size: 12px; }
+.hist-marker-disclosure[hidden] { display: none; }
+.hist-marker-disclosure-item { text-align: left; color: var(--text); background: transparent; border: none; padding: 4px 6px; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+html:not(.light) .hist-marker-disclosure-item:hover { background: rgba(0, 212, 255, 0.08); }
+html.light .hist-marker-disclosure-item:hover { background: var(--bg3); }
+.hist-correlation-unavailable { margin: 8px 0 0; padding: 8px; border: 1px solid var(--border); color: var(--muted); overflow-wrap: anywhere; font-size: 12px; }
+
+/* Phase 4 (04-08) -- the cross-chart hover cursor and its shared readout
+   (D-17): one line spanning the whole six-surface stack, accent-coloured per
+   the UI-SPEC's explicit reservation for this phase's interactive
+   investigation controls. Its left/top/height are set once per hover
+   session; movement then updates only the transform (R-01). */
+.hist-time-cursor { position: fixed; z-index: 12; width: 1px; pointer-events: none; background: var(--accent); }
+.hist-time-cursor[hidden] { display: none; }
+.hist-cursor-readout { margin: 8px 0; padding: 8px; border: 1px solid var(--accent); color: var(--accent); background: var(--bg2); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.hist-cursor-readout[hidden] { display: none; }
