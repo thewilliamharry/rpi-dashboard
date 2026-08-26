@@ -346,7 +346,7 @@ Plans:
   4. Operator can filter incidents and transitions by service, criticality, event type, and time range; choosing an incident focuses the related service and time window.
   5. Selecting a service, incident, or time range updates related host, service, and event views together, presenting observed correlation without claiming an unsupported root cause.
 
-**Plans**: 7/8 plans executed
+**Plans**: 8/8 plans executed
 
 Plans:
 **Wave 1**
@@ -376,7 +376,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 04-08-PLAN.md — Correlation without causation: neutral clustering incident markers, one cross-chart hover cursor, and an enforced no-causal-language gate (wave 7)
+- [x] 04-08-PLAN.md — Correlation without causation: neutral clustering incident markers, one cross-chart hover cursor, and an enforced no-causal-language gate (wave 7)
 
 **UI hint**: yes
 
@@ -421,6 +421,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
-| 4. Historical Investigation | 7/8 | In Progress|  |
+| 4. Historical Investigation | 8/8 | In Progress|  |
 | 5. Theme-Parity Analytics Experience | 0/TBD | Not started | - |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
