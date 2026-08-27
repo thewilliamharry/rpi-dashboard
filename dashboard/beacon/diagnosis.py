@@ -673,7 +673,13 @@ def get_current_diagnosis(db_path, settings, now):
         'settings': _settings_payload(settings),
         'safety': {
             'worker_stale': pipeline['worker']['freshness']['state'] in {'stale', 'unknown'},
-            'worker_degraded': pipeline['worker']['freshness']['state'] == 'aging',
+            # 05-07 Task 3 (gap 2 / WR-01): guards the same contradiction
+            # api_scan_status's A-04 comment names -- an on-disk recovery
+            # marker is computed independently of heartbeat freshness, so
+            # without the `not recovery_required` conjunct this payload
+            # could assert both "monitoring is paused" and "monitoring
+            # continues" about the same worker at the same instant.
+            'worker_degraded': pipeline['worker']['freshness']['state'] == 'aging' and not recovery_required,
             'recovery_required': recovery_required,
         },
         'exceptions': compose_active_exceptions(
