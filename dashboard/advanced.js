@@ -2234,9 +2234,15 @@
 
   // Clears the overlay on pointer-cancel, on Escape, and on a drag that ends
   // where it began (see commitDragSelect's own degenerate-drag check, which
-  // calls this same cleanup rather than duplicating it).
+  // calls this same cleanup rather than duplicating it). Also defensively
+  // abandons a pending keyboard range anchor (05-07 Task 1, gap 1 / CR-01):
+  // every drag exit path -- commit (commitDragSelect calls this
+  // unconditionally), Escape (dragEscapeListener), and pointercancel (the
+  // direct handler) -- must never let a stale anchor survive a mouse
+  // gesture, even though beginDragSelect below already clears it on entry.
   function cancelDragSelect() {
     if (pendingDragFrame !== null) { cancelAnimationFrame(pendingDragFrame); pendingDragFrame = null; }
+    cancelKeyboardRangeAnchor();
     const overlay = dragOverlayEl();
     if (overlay) { overlay.hidden = true; overlay.style.width = '0px'; }
     dragState = null;
@@ -2249,8 +2255,15 @@
   // never two competing range-setting paths. The canonical #range-start/
   // #range-end fields remain the fully keyboard-operable, statable path to
   // any range (DIA-05) alongside both gestures.
+  //
+  // 05-07 Task 1 (gap 1 / CR-01): a mouse gesture always supersedes a
+  // pending keyboard anchor. cancelKeyboardRangeAnchor() runs first, before
+  // the overlay is un-hidden below, because it also hides the overlay and
+  // resets its width to 0px -- calling it after would hide the overlay this
+  // drag just showed.
   function beginDragSelect(event) {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    cancelKeyboardRangeAnchor();
     const chartSvg = event.currentTarget;
     const container = stackContainerEl();
     if (!chartSvg || !container) return;
