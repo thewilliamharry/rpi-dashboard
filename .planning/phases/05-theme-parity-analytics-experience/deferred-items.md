@@ -60,3 +60,35 @@ Open question for phase verification: does
 `test_stale_to_fresh_page_persists_actions_and_records_recovery` flake at `515eee8` at a
 comparable rate? Until someone measures that, treat this as "timing-sensitive test, cause not
 localised" rather than "known pre-existing flake".
+
+## Entry 3 — planning defect: wave grouping cannot see semantic cross-plan dependencies
+
+Found by the orchestrator at the wave-4 merge, not by either executor.
+
+05-05 and 05-06 were grouped into the same parallel wave because their declared
+`files_modified` sets do not intersect:
+
+- 05-05: `dashboard/advanced.js`, `tests/test_advanced_ui.py`, `tests/test_history_investigation_ui.py`
+- 05-06: `dashboard/advanced.css`, `tests/test_theme_parity_ui.py`
+
+The intra-wave overlap check compares file paths, so it saw no conflict. But the dependency was
+real and **semantic**: 05-06's whole purpose is to change a constant (the narrow breakpoint,
+719px -> 720px) that two assertions inside 05-05's `tests/test_advanced_ui.py` hardcode. Changing
+the constant necessarily invalidated assertions in a file 05-06 was not allowed to touch.
+
+What actually happened: 05-06 finished with 2 failing tests it could not legally fix, diagnosed
+them precisely, and reported the exact two-line reconciliation rather than editing across scope.
+The orchestrator applied it after both worktrees merged (`54ba02b`). Cost was one reconciliation
+commit, not a merge conflict or a silent overwrite — the reporting behaviour worked.
+
+The generalisable defect: **`files_modified` overlap is necessary but not sufficient for wave
+safety.** A plan that changes a shared constant, a wire literal, a CSS custom property, a
+threshold or a route is coupled to every file asserting on that value, regardless of who owns
+those files. Two candidate mitigations for the next planning round:
+
+1. Have plans declare `constants_changed` (or `asserts_on`) alongside `files_modified`, and have
+   wave grouping intersect that against a grep of the repo, not just against other plans' paths.
+2. When a plan's objective is literally "reconcile value X across surfaces", serialise it into
+   its own wave by default — the blast radius of a constant change is not knowable from paths.
+
+Not fixed here: this is a change to the planner/wave-grouping logic, not to phase 05's code.
