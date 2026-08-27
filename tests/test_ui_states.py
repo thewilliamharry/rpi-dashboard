@@ -153,6 +153,44 @@ class UiStateBrowserTests(unittest.TestCase):
             'maintenance_grace_until': None,
         }
 
+    def _theme_parity_dashboard_fixture(self):
+        """The shared main-dashboard fixture for 05-03's theme-parity contract tests.
+
+        Three services cover the zero/one/many-adjacent "many" case: one online
+        service carries preview_status='queued' (the only one of the three), so
+        Task 3's .svc-preview-status assertion depends on a real fixture fact rather
+        than passing vacuously; the other two have no preview_status at all, matching
+        dashboard/app.js:286-292's queued/running/failed/expired-only emission.
+        """
+        queued_online = self._service(8500, online=True)
+        plain_online = self._service(8501, online=True)
+        del plain_online['preview_status']
+        plain_offline = self._service(8502, online=False)
+        del plain_offline['preview_status']
+        return {
+            'services': [queued_online, plain_online, plain_offline],
+            'events': [self._event(ts=1_700_000_000, online=False, previous_online=True, service_name='Service 8502')],
+        }
+
+    def _theme_parity_route_api(self, fixture):
+        """Deterministic stub for the main dashboard's five endpoints, including the
+        worker_degraded field plan 05-01 added (set false: not under test here)."""
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            payloads = {
+                '/api/stats': {'hostname': 'beacon', 'sample_ts': 1_700_000_000, 'cpu': 42, 'ram': 55, 'disk': 61, 'ram_used': 1, 'ram_total': 2, 'disk_used': 1, 'disk_total': 2, 'temp': 40},
+                '/api/history': [],
+                '/api/scan-status': {
+                    'worker_ready': True, 'worker_stale': False, 'recovery_required': False,
+                    'worker_degraded': False, 'stage': 'idle', 'scanning': False,
+                    'last_completed_found': len(fixture['services']), 'last_discovery': 1_700_000_000,
+                },
+                '/api/services': fixture['services'],
+                '/api/events': fixture['events'],
+            }
+            route.fulfill(status=200, json=payloads.get(path, {}))
+        return route_api
+
     def _maintenance_route(self, fixture):
         """Build a route handler stubbing /api/service-meta/<port> GET/PUT for the maintenance editor tests."""
         def route_api(route):
@@ -1418,6 +1456,76 @@ class UiStateBrowserTests(unittest.TestCase):
                 self.assertNotEqual(hover_colour, accent3)
         finally:
             page.close()
+
+    # -- Phase 05 Plan 03: theme-parity contract ------------------------------
+
+    def test_shared_dashboard_capability_is_present_and_displayed_in_both_themes(self):
+        """Everything the theme-parity contract calls reachable-and-visible on the main
+        dashboard is proven present and displayed in both themes, from first render."""
+
+        def computed(locator, prop):
+            return locator.evaluate(f'(node) => getComputedStyle(node)[{prop!r}]')
+
+        def is_displayed(locator):
+            return computed(locator, 'display') != 'none' and computed(locator, 'visibility') != 'hidden'
+
+        fixture = self._theme_parity_dashboard_fixture()
+        route_api = self._theme_parity_route_api(fixture)
+
+        body_colors = {}
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+                if theme == 'light':
+                    page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                page.route('**/api/**', route_api)
+                try:
+                    page.goto(self.base_url, wait_until='networkidle')
+
+                    arc_wraps = page.locator('.arc-wrap')
+                    self.assertEqual(arc_wraps.count(), 3)
+                    for i in range(arc_wraps.count()):
+                        self.assertTrue(is_displayed(arc_wraps.nth(i)))
+
+                    for pct_id in ('#cpu-pct', '#ram-pct', '#disk-pct'):
+                        self.assertTrue(is_displayed(page.locator(pct_id)), pct_id)
+
+                    self.assertTrue(is_displayed(page.locator('#tb-host')))
+                    self.assertTrue(is_displayed(page.locator('#stats-ts')))
+
+                    status_rows = page.locator('.svc-status-row')
+                    self.assertEqual(status_rows.count(), 3)
+                    row_texts = []
+                    for i in range(status_rows.count()):
+                        row = status_rows.nth(i)
+                        self.assertTrue(is_displayed(row))
+                        row_texts.append(row.text_content())
+                    self.assertTrue(any('ONLINE' in text for text in row_texts))
+                    self.assertTrue(any('OFFLINE' in text for text in row_texts))
+
+                    self.assertTrue(is_displayed(page.locator('.uptime-strip').first))
+                    self.assertGreater(page.locator('.us').count(), 0)
+
+                    self.assertTrue(is_displayed(page.locator('#events-panel')))
+                    self.assertTrue(is_displayed(page.locator('#scan-label')))
+
+                    toggle = page.locator('#toggle')
+                    self.assertTrue(is_displayed(toggle))
+                    self.assertEqual(
+                        toggle.get_attribute('aria-pressed'),
+                        'true' if theme == 'light' else 'false',
+                    )
+
+                    for banner_id in ('#connection-banner', '#worker-warning', '#recovery-warning', '#degraded-warning'):
+                        self.assertEqual(page.locator(banner_id).count(), 1, banner_id)
+
+                    # Harness guard, not a parity assertion: proves the light run's
+                    # theme genuinely applied rather than silently failing.
+                    body_colors[theme] = computed(page.locator('body'), 'color')
+                finally:
+                    page.close()
+
+        self.assertNotEqual(body_colors['dark'], body_colors['light'])
 
 
 if __name__ == '__main__':
