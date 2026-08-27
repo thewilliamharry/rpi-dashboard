@@ -2171,7 +2171,10 @@ class AdvancedUiTests(unittest.TestCase):
             finally:
                 page.close()
 
-        for width, expected_columns in ((720, 3), (719, 1)):
+        # 05-06 reconciled the advanced workspace's narrow boundary from 719px to 720px so it
+        # agrees with dashboard/style.css. `max-width: 720px` matches at 720, so the wide/narrow
+        # pair shifts up by one: 721 is the widest narrow-free width, 720 is the first narrow one.
+        for width, expected_columns in ((721, 3), (720, 1)):
             page = self.browser.new_page(viewport={'width': width, 'height': 800})
             page.route('**/api/**', route_api)
             try:
@@ -2190,7 +2193,7 @@ class AdvancedUiTests(unittest.TestCase):
         self.assertIn('aria-sort', html)
         self.assertIn('aria-expanded', js)
         self.assertIn('position: sticky', css)
-        self.assertIn('@media (max-width: 719px)', css)
+        self.assertIn('@media (max-width: 720px)', css)
         self.assertIn('state_duration_seconds', js)
         self.assertIn('expected_cadence_seconds', js)
         self.assertIn('TLS trust annotation', js)
