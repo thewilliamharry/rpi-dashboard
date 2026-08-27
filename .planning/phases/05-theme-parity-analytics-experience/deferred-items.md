@@ -33,3 +33,11 @@ made the server report `worker_stale` instead of `worker_degraded` and the banne
 
 Fix applied: the new test now restores `WORKER_READY_SECONDS` and `METRIC_SAMPLE_SECONDS` via
 `addCleanup`. Full suite after the fix: 750 passed, 530 subtests passed, 0 failures.
+
+## Entry 2 — 05-03: intermittent full-suite-load flake, confirmed not caused by this plan
+
+| # | Found during | File | Issue | Why deferred |
+|---|--------------|------|-------|--------------|
+| 2 | 05-03 full-suite verification | `tests/test_ui_safety_integration.py::UiSafetyIntegrationTests::test_stale_to_fresh_page_persists_actions_and_records_recovery` | Real-wall-clock (`self.now = int(time.time())`), real Flask app, real SQLite worker-lease claim/finish sequence, then a Playwright `wait_for(timeout=18_000)` for "Monitoring gap recorded" text. Under full-suite resource contention this occasionally exceeds the 18s timeout. | 05-03 declares only `tests/test_ui_contract.py` and `tests/test_ui_states.py`; this file and test were never touched. Applying the corrected-diagnosis rigor from Entry 1 (a prior misdiagnosis here turned out to be a real deterministic env leak): confirmed this is **not** the same class of bug — grepped both files 05-03 modified for `load_app`/`os.environ`/`import os` (zero matches; the new tests never touch process environment, and use a static file server + fully-stubbed `page.route()`, not the real Flask app this failing test depends on). Ran `pytest -q` (full suite) three times against the complete 05-03 diff: run 1 failed only this test (754 passed); runs 2 and 3 both passed clean (755 passed, 0 failures, twice). The failing test also passes reliably in isolation. This is intermittent under load, not deterministic, and the mechanism (wall-clock worker-heartbeat aging + browser polling timeout) matches the same flake class already known in this phase (05-01's heartbeat-drift deviation), just a different test instance. Not fixed — out of scope for 05-03's declared files. |
+
+Also logged to `.planning/WINDOWS.md` (kind: deviation).
