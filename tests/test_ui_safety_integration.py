@@ -160,6 +160,82 @@ class UiSafetyIntegrationTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_degraded_banner_reads_identically_in_both_themes_on_both_documents(self):
+        """A real aging heartbeat raises one identically-worded banner, unstubbed, both themes."""
+        cadence = self.appmod.beacon_diagnosis.worker_heartbeat_cadence_seconds(self.appmod.SETTINGS)
+        age = 2 * cadence
+        # Deriving the age from the shared classifier (rather than a hard-coded
+        # second count) is what stops this test from re-encoding a threshold of
+        # its own; a future settings change that breaks this bound fails loudly
+        # instead of silently drifting the seeded heartbeat into another tier.
+        self.assertGreater(age, cadence)
+        self.assertLessEqual(age, self.appmod.SETTINGS.worker_ready_seconds)
+
+        def seed_aging_heartbeat():
+            # Re-seeded against a freshly read clock immediately before each
+            # subtest's navigation -- ``self.now`` was captured in ``setUp``
+            # before the (comparatively slow) Playwright/Chromium launch, and
+            # four sequential real browser navigations each take real wall
+            # time, so a heartbeat seeded once up front can drift out of the
+            # `aging` tier and into `stale` before the last subtest runs.
+            live_now = int(time.time())
+            heartbeat_ts = live_now - age
+            self.appmod.update_worker_heartbeat(now=heartbeat_ts)
+            freshness = self.appmod.beacon_diagnosis.worker_freshness(
+                live_now, heartbeat_ts, self.appmod.SETTINGS,
+            )
+            self.assertEqual(freshness['state'], 'aging')
+
+        expected_text = (
+            "Degraded — Beacon's worker heartbeat is aging. Monitoring continues; this is not a failure."
+        )
+
+        def computed(locator, prop):
+            return locator.evaluate(f'(node) => getComputedStyle(node)[{prop!r}]')
+
+        degraded_colors = {}
+        for theme in ('dark', 'light'):
+            for path in ('/', '/advanced'):
+                with self.subTest(theme=theme, path=path):
+                    seed_aging_heartbeat()
+                    page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+                    if theme == 'light':
+                        page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                    try:
+                        page.goto(f'{self.base_url}{path}', wait_until='domcontentloaded')
+                        banner = page.locator('#degraded-warning')
+                        banner.wait_for(state='visible', timeout=8_000)
+                        self.assertEqual(banner.text_content(), expected_text)
+
+                        self.assertFalse(page.locator('#worker-warning').is_visible())
+                        self.assertFalse(page.locator('#recovery-warning').is_visible())
+
+                        self.assertEqual(computed(banner, 'borderBottomStyle'), 'none')
+                        self.assertEqual(
+                            computed(page.locator('#recovery-warning'), 'borderBottomStyle'), 'solid',
+                        )
+
+                        degraded_color = computed(banner, 'color')
+                        body_color = computed(page.locator('body'), 'color')
+                        self.assertTrue(degraded_color)
+                        self.assertNotEqual(degraded_color, body_color)
+                        degraded_colors[theme] = degraded_color
+                    finally:
+                        page.close()
+
+        self.assertNotEqual(degraded_colors['dark'], degraded_colors['light'])
+
+    def test_stale_heartbeat_shows_worker_banner_and_not_the_degraded_banner(self):
+        """Exclusivity pinned from the rendered page, not only from the payload."""
+        page = self.browser.new_page(viewport={'width': 1100, 'height': 800})
+        try:
+            page.goto(self.base_url, wait_until='domcontentloaded')
+            page.locator('#worker-warning').wait_for(state='visible', timeout=8_000)
+            self.assertTrue(page.locator('#worker-warning').is_visible())
+            self.assertFalse(page.locator('#degraded-warning').is_visible())
+        finally:
+            page.close()
+
 
 if __name__ == '__main__':
     unittest.main()
