@@ -67,6 +67,8 @@ html.light body { font-family: var(--font-sans); font-weight: 300; }
 .worker-warning[hidden] { display: none; }
 .recovery-warning { color: var(--accent2); background: var(--bg3); border-bottom: 1px solid var(--accent2); }
 .recovery-warning[hidden] { display: none; }
+.degraded-warning { color: var(--accent2); background: var(--bg3); }
+.degraded-warning[hidden] { display: none; }
 html.light .safety-warning { font-family: var(--font-sans); color: #7c2d12; background: #fff7ed; border-bottom-color: #b45309; }
 .dashboard-feedback {
   position: fixed; width: 1px; height: 1px; overflow: hidden;
