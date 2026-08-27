@@ -298,7 +298,36 @@
 
   const FRESHNESS_WORDS = new Set(['fresh', 'aging', 'stale', 'unknown']);
 
+  // One vocabulary: server literal -> {glyph, word, className}. Every place the
+  // workspace shows a freshness reading routes through freshnessPresentation/
+  // freshnessBadge, so the same glyph, word and class always represent the
+  // same server literal everywhere the workspace renders it, in both themes.
+  // A Map, matching this file's existing discipline for lookup tables keyed
+  // by wire values (see EXCEPTION_COPY above).
+  const FRESHNESS_PRESENTATION = new Map([
+    ['fresh', {glyph: '●', word: 'Fresh', className: 'freshness-fresh'}],
+    ['aging', {glyph: '◈', word: 'Degraded', className: 'freshness-degraded'}],
+    ['stale', {glyph: '◐', word: 'Stale', className: 'freshness-stale'}],
+    ['unknown', {glyph: '○', word: 'Unknown', className: 'freshness-unknown'}],
+  ]);
+
+  // Fail-closed, like serviceFreshness's own allowlist: any literal outside
+  // the server's four resolves to the 'unknown' entry, so an unrecognised or
+  // absent value can never render as Fresh or Degraded.
+  function freshnessPresentation(state) {
+    return FRESHNESS_PRESENTATION.get(state) || FRESHNESS_PRESENTATION.get('unknown');
+  }
+
+  function freshnessBadge(state) {
+    const presentation = freshnessPresentation(state);
+    const badge = document.createElement('span');
+    badge.className = `freshness-badge ${presentation.className}`;
+    badge.textContent = `${presentation.glyph} ${presentation.word}`;
+    return badge;
+  }
+
   function freshnessWord(state) {
+    if (state === 'aging') return 'degraded';
     return FRESHNESS_WORDS.has(state) ? state : 'unknown';
   }
 
@@ -3507,7 +3536,8 @@
       latency.textContent = latencyValue === null ? displayValue(service.failure_class || service.last_error, '') : `${latencyValue} ms`;
       const duration = document.createElement('td'); duration.textContent = formatDuration(serviceDuration(service));
       const criticality = document.createElement('td'); criticality.textContent = service.critical ? 'Critical' : 'Standard';
-      const freshness = document.createElement('td'); freshness.textContent = `● ${serviceFreshness(service)} — ${relativeAge((service.freshness || {}).age_seconds)}`;
+      const freshness = document.createElement('td');
+      freshness.append(freshnessBadge(serviceFreshness(service)), document.createTextNode(` — ${relativeAge((service.freshness || {}).age_seconds)}`));
       row.append(identity, status, latency, duration, criticality, freshness);
       const detailRow = document.createElement('tr');
       detailRow.id = detailId; detailRow.className = 'service-detail-row'; detailRow.hidden = !expanded;

@@ -84,6 +84,23 @@
 .service-status-maintenance { color: var(--accent3); }
 .services-empty { margin-top: 12px; border: 1px solid var(--border); padding: 12px; overflow-wrap: anywhere; }
 .service-skeleton td { height: 44px; background: linear-gradient(90deg, var(--bg3), var(--border2), var(--bg3)); }
+/* UX-07 (05-02): one freshness vocabulary, distinguished by glyph, word and
+   container shape rather than hue. The badge is inline text with no border
+   of any kind -- a shape distinct from the bordered .advanced-error box, so
+   the two --accent2 meanings (an error, and a degraded reading) can never
+   collapse into each other even for a reader who cannot resolve colour.
+   .freshness-stale/.freshness-unknown deliberately resolve --text, not
+   --muted: at this 12px body size WCAG AA requires 4.5:1, and --muted fails
+   that in both themes on this table's surface (light 2.17:1, dark 4.18:1),
+   while --text clears it by a wide margin (light 19.80:1, dark 15.68:1) --
+   see this plan's Task 1 action block for the full figures. --green for
+   .freshness-fresh and --accent2 for .freshness-degraded are unchanged
+   (A-09); .freshness-fresh's light-mode --green contrast (3.30:1) is a
+   known, deliberately unfixed app-wide token gap tracked as A-34/05-DEBT.md. */
+.freshness-badge { display: inline; }
+.freshness-fresh { color: var(--green); }
+.freshness-degraded { color: var(--accent2); }
+.freshness-stale, .freshness-unknown { color: var(--text); }
 button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, .services-table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Mouse affordance for the advanced workspace's click targets: accent stays reserved for the primary refresh action per 03-UI-SPEC.md */
 .advanced-header-controls button, .advanced-header-controls select, .section-navigation button, .service-filters button, .service-filters select, .settings-grid select, .service-details-toggle, #services-table th button { cursor: pointer; }
