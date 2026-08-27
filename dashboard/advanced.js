@@ -1800,7 +1800,12 @@
       el.addEventListener('pointermove', (event) => moveTimeCursor(event.clientX));
       el.addEventListener('pointerleave', hideTimeCursor);
     });
-    window.addEventListener('keydown', (event) => { if (event.key === 'Escape') hideTimeCursor(); });
+    // 05-04 Task 3 (A-22): also abandons a pending keyboard range anchor,
+    // so Escape works even after focus has moved away from the chart --
+    // one window-level listener, not a second global key handler.
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { hideTimeCursor(); cancelKeyboardRangeAnchor(); }
+    });
   }
 
   // ------------------------------------------------------------------
@@ -2138,10 +2143,12 @@
     endDragListeners();
   }
 
-  // R-03: dragging to select a range has no keyboard equivalent in this
-  // phase -- the canonical #range-start/#range-end fields remain the fully
-  // keyboard-operable path to any range (DIA-05). This is known Phase 5 / UX-06
-  // debt, recorded here at creation rather than discovered later.
+  // 05-04 Task 3 (R-03 closed): dragging to select a range and the keyboard
+  // range-anchor gesture below (beginKeyboardRangeAnchor/completeKeyboardRange)
+  // both apply a range through one shared, single range-apply function --
+  // never two competing range-setting paths. The canonical #range-start/
+  // #range-end fields remain the fully keyboard-operable, statable path to
+  // any range (DIA-05) alongside both gestures.
   function beginDragSelect(event) {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     const chartSvg = event.currentTarget;
@@ -2174,13 +2181,27 @@
     });
   }
 
-  // Converts the two x positions to timestamps, ordering them so a
-  // right-to-left drag produces the same range as a left-to-right one, and
-  // routes through the same setInvestigationRange entry point the fields
-  // and presets use. A degenerate drag (equal timestamps, or narrower than
-  // one rendered pixel) is cancelled rather than applied -- the server
-  // would reject a zero-width range, and the gesture was almost certainly a
-  // click, not a selection.
+  // The single range-apply function both the mouse drag (commitDragSelect)
+  // and the keyboard range-anchor gesture (completeKeyboardRange) call --
+  // T-05-14: this is the only caller of setInvestigationRange for a
+  // chart-selected range, so the two gestures can never diverge. Rounds and
+  // orders the two timestamps so a reversed pair (either gesture, either
+  // direction) produces the identical range; a degenerate pair (equal, or
+  // rounding to non-strictly-increasing) applies nothing and returns false --
+  // the server would reject a zero-width range, and the gesture was almost
+  // certainly a click/tap, not a selection.
+  function applySelectedRange(tsA, tsB) {
+    const start_ts = Math.round(Math.min(tsA, tsB));
+    const end_ts = Math.round(Math.max(tsA, tsB));
+    if (end_ts <= start_ts) return false;
+    setInvestigationRange({start_ts, end_ts, origin: 'drag', label: currentRangeLabel()});
+    return true;
+  }
+
+  // Reads the two client x positions and applies its own pixel-distance
+  // guard and overlay cleanup, then hands off the actual range computation
+  // to the shared range-apply function above -- the pointer-specific work
+  // stays here, the range-apply logic lives in exactly one place.
   function commitDragSelect(event) {
     if (!dragState) return;
     const {chartRect, startClientX} = dragState;
@@ -2188,12 +2209,60 @@
     const widthPixels = Math.abs(endClientX - startClientX);
     cancelDragSelect();
     if (widthPixels < HIST_DRAG_MIN_PIXELS) return;
-    const tsA = clientXToTs(startClientX, chartRect);
-    const tsB = clientXToTs(endClientX, chartRect);
-    const start_ts = Math.round(Math.min(tsA, tsB));
-    const end_ts = Math.round(Math.max(tsA, tsB));
-    if (end_ts <= start_ts) return;
-    setInvestigationRange({start_ts, end_ts, origin: 'drag', label: currentRangeLabel()});
+    applySelectedRange(clientXToTs(startClientX, chartRect), clientXToTs(endClientX, chartRect));
+  }
+
+  // ------------------------------------------------------------------
+  // 05-04 Task 3 (R-03 closed, A-20/A-21/A-22): a keyboard equivalent to
+  // drag-to-select. Anchor a point (Shift+Enter), tab to another point, then
+  // Enter completes the range through the exact same shared range-apply
+  // function the mouse drag calls, carrying the identical fixed origin
+  // literal -- so the range stack, the range label and every downstream
+  // behaviour are identical whichever gesture produced it (A-20). The
+  // pending anchor reuses the existing drag overlay element collapsed to
+  // zero width (A-21) -- no new CSS, no second visual language.
+  // ------------------------------------------------------------------
+
+  let pendingRangeAnchor = null;
+
+  function beginKeyboardRangeAnchor(ts, target) {
+    const rect = target.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    pendingRangeAnchor = {ts, clientX};
+    const overlay = dragOverlayEl();
+    const container = stackContainerEl();
+    if (overlay && container) {
+      const containerRect = container.getBoundingClientRect();
+      overlay.style.left = `${clientX}px`;
+      overlay.style.width = '0px';
+      overlay.style.top = `${containerRect.top}px`;
+      overlay.style.height = `${containerRect.height}px`;
+      overlay.hidden = false;
+    }
+  }
+
+  // Clears the anchor and hides the overlay -- the same hide-and-reset steps
+  // cancelDragSelect performs on the overlay, reused rather than duplicated.
+  // Never touches dragState or the pointer listeners: this gesture and the
+  // mouse drag are independent, and this function must be safe to call
+  // whether or not an anchor is actually held.
+  function cancelKeyboardRangeAnchor() {
+    pendingRangeAnchor = null;
+    const overlay = dragOverlayEl();
+    if (overlay) { overlay.hidden = true; overlay.style.width = '0px'; }
+  }
+
+  // Completes the pending anchor against `ts`, applying a range through the
+  // shared range-apply function above regardless of which order the two
+  // points were visited in (A-21 recorded direction-independence; that
+  // function's own ordering is what guarantees it here too). The anchor and
+  // overlay are cleared whether or not a range was actually applied, so
+  // anchoring and completing on the same point leaves the current range
+  // untouched and the overlay gone, exactly as a zero-width mouse drag does.
+  function completeKeyboardRange(ts) {
+    if (!pendingRangeAnchor) return;
+    applySelectedRange(pendingRangeAnchor.ts, ts);
+    cancelKeyboardRangeAnchor();
   }
 
   async function fetchHostMetricHistory(metric, startTs, endTs) {
@@ -2492,6 +2561,27 @@
         moveTimeCursor(rect.left + rect.width / 2);
       });
       target.addEventListener('blur', () => { hidePointTooltip(); hideTimeCursor(); });
+      // 05-04 Task 3: Shift+Enter anchors this point (only when no anchor is
+      // already pending); Enter -- with or without Shift -- completes a
+      // pending anchor against this point; Escape abandons a pending anchor.
+      // A plain Enter with no anchor held matches none of these and does
+      // nothing at all.
+      target.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          if (pendingRangeAnchor) {
+            event.preventDefault();
+            completeKeyboardRange(point.ts);
+          } else if (event.shiftKey) {
+            event.preventDefault();
+            beginKeyboardRangeAnchor(point.ts, target);
+          }
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          cancelKeyboardRangeAnchor();
+        }
+      });
       svg.append(target);
     });
   }

@@ -2115,9 +2115,152 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
-    def test_drag_entry_point_documents_missing_keyboard_equivalent_as_phase5_debt(self):
+    def test_drag_entry_point_documents_the_keyboard_equivalent_that_closed_the_debt(self):
+        # 05-04 Task 3 closes the R-03 debt this comment used to record --
+        # the stale "no keyboard equivalent" claim must be gone, replaced by
+        # a comment naming the equivalent that now exists.
         js = (ROOT / 'dashboard/advanced.js').read_text(encoding='utf-8')
-        self.assertIn('Phase 5 / UX-06', js)
+        self.assertNotIn('no keyboard equivalent', js)
+        self.assertIn('05-04 Task 3 (R-03 closed)', js)
+
+    # ------------------------------------------------------------------
+    # 05-04 Task 3 (R-03 closed, A-20/A-21/A-22): the keyboard equivalent to
+    # drag-to-select -- Shift+Enter anchors a point target, Enter on another
+    # point target completes the range through the identical applySelectedRange
+    # the mouse drag calls, Escape abandons a pending anchor.
+    # ------------------------------------------------------------------
+
+    def test_keyboard_range_selection_applies_the_same_range_as_the_mouse_drag(self):
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            targets = page.locator('#chart-cpu .hist-point-target')
+            targets.first.wait_for(state='attached', timeout=5_000)
+            self.assertEqual(targets.count(), 2)
+            box_a = targets.nth(0).bounding_box()
+            box_b = targets.nth(1).bounding_box()
+
+            targets.nth(0).press('Shift+Enter')
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ):
+                targets.nth(1).press('Enter')
+            page.locator('#history-drag-overlay').wait_for(state='hidden', timeout=5_000)
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            keyboard_start = page.locator('#range-start').input_value()
+            keyboard_end = page.locator('#range-end').input_value()
+
+            # A mouse drag between the exact same two point targets' pixel
+            # positions must land on the identical field values.
+            page.locator('#range-back').click()
+            page.locator('#range-back').wait_for(state='detached', timeout=5_000)
+            y = box_a['y'] + box_a['height'] / 2
+            page.mouse.move(box_a['x'] + box_a['width'] / 2, y)
+            page.mouse.down()
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ):
+                page.mouse.move(box_b['x'] + box_b['width'] / 2, y)
+                page.mouse.up()
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            mouse_start = page.locator('#range-start').input_value()
+            mouse_end = page.locator('#range-end').input_value()
+            self.assertEqual(keyboard_start, mouse_start)
+            self.assertEqual(keyboard_end, mouse_end)
+
+            # Anchoring on the later point and completing on the earlier one
+            # produces the identical values -- direction never changes the result.
+            page.locator('#range-back').click()
+            page.locator('#range-back').wait_for(state='detached', timeout=5_000)
+            targets.nth(1).press('Shift+Enter')
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ):
+                targets.nth(0).press('Enter')
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            reversed_start = page.locator('#range-start').input_value()
+            reversed_end = page.locator('#range-end').input_value()
+            self.assertEqual(reversed_start, keyboard_start)
+            self.assertEqual(reversed_end, keyboard_end)
+        finally:
+            page.close()
+
+    def test_pending_range_anchor_is_abandoned_without_applying_anything(self):
+        page, _start_ts, _end_ts, counters = self._drag_ready_page()
+        try:
+            targets = page.locator('#chart-cpu .hist-point-target')
+            targets.first.wait_for(state='attached', timeout=5_000)
+            before_start = page.locator('#range-start').input_value()
+            before_end = page.locator('#range-end').input_value()
+            before_count = counters['history']
+
+            # Anchor, then Escape: overlay hidden, fields unchanged, no request.
+            targets.nth(0).press('Shift+Enter')
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            page.keyboard.press('Escape')
+            page.locator('#history-drag-overlay').wait_for(state='hidden', timeout=5_000)
+            page.wait_for_timeout(150)
+            self.assertEqual(page.locator('#range-start').input_value(), before_start)
+            self.assertEqual(page.locator('#range-end').input_value(), before_end)
+            self.assertEqual(counters['history'], before_count)
+
+            # Anchor and complete on the same single point: no range applied,
+            # fields unchanged, overlay hidden -- exactly as a zero-width drag.
+            targets.nth(0).press('Shift+Enter')
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+            targets.nth(0).press('Enter')
+            page.locator('#history-drag-overlay').wait_for(state='hidden', timeout=5_000)
+            page.wait_for_timeout(150)
+            self.assertEqual(page.locator('#range-start').input_value(), before_start)
+            self.assertEqual(page.locator('#range-end').input_value(), before_end)
+            self.assertEqual(counters['history'], before_count)
+        finally:
+            page.close()
+
+    def test_empty_points_fixture_renders_no_point_targets_and_no_key_applies_a_range(self):
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 86_400
+        fixture = self._empty_history_fixture(start_ts, end_ts)
+        counters = {'history': 0}
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                counters['history'] += 1
+                route.fulfill(status=200, json=fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.wait_for_timeout(200)
+            self.assertEqual(page.locator('#chart-cpu .hist-point-target').count(), 0)
+            before_count = counters['history']
+            before_start = page.locator('#range-start').input_value()
+            before_end = page.locator('#range-end').input_value()
+            # With zero point targets there is nothing to anchor on -- pressing
+            # the gesture's keys (with no point-target focus to receive them)
+            # issues no request and changes neither field.
+            for key in ('Shift+Enter', 'Enter', 'Escape'):
+                page.keyboard.press(key)
+            page.wait_for_timeout(150)
+            self.assertEqual(counters['history'], before_count)
+            self.assertEqual(page.locator('#range-start').input_value(), before_start)
+            self.assertEqual(page.locator('#range-end').input_value(), before_end)
+        finally:
+            page.close()
 
     # ------------------------------------------------------------------
     # 04-06 Task 1: one carried, read-only service selection (D-16).
