@@ -3740,6 +3740,121 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             page.close()
 
     # ------------------------------------------------------------------
+    # 05-04 Task 1 (04-REVIEW.md WR-02, A-19): the marker fix and the
+    # pinned role convention -- a focusable, click/keydown-actionable
+    # element in the History section carries the actionable role; a
+    # focusable, disclosure-only element carries the disclosure-only role;
+    # no third role appears on any tabindex="0" element without a decision.
+    # ------------------------------------------------------------------
+
+    def test_actionable_svg_elements_announce_as_buttons_and_disclosure_only_as_images(self):
+        snapshot = self._snapshot()
+        snapshot['services'] = [self._service(8080, 'Test Service')]
+        config_fixture = self._config_fixture()
+        start_ts = 1_700_000_000
+        end_ts = start_ts + 3600
+        host_points = {m: [self._point(start_ts + i * 300, float(i)) for i in range(12)] for m in ('cpu', 'ram', 'disk', 'temp')}
+        coverage = [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}]
+        service_points = [
+            self._service_point(start_ts + i * 300, online_seconds=300, latency_avg=float(i)) for i in range(12)
+        ]
+        # A well-separated single episode plus two episodes 2 seconds apart --
+        # well inside MARKER_MIN_SEPARATION_PX at this range's pixels-per-second,
+        # so the fixture produces exactly one single marker and one cluster.
+        single_episode = self._episode(8080, start_ts + 100, start_ts + 130)
+        cluster_episodes = [
+            self._episode(8080, start_ts + 3_000, start_ts + 3_010, service_name='Svc0'),
+            self._episode(8080, start_ts + 3_002, start_ts + 3_012, service_name='Svc1'),
+        ]
+        episodes = [single_episode, *cluster_episodes]
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                query = parse_qs(urlparse(route.request.url).query)
+                if query.get('kind', [''])[0] == 'service':
+                    route.fulfill(status=200, json=self._service_history_fixture(start_ts, end_ts, points=service_points))
+                    return
+                metric = query.get('metric', [''])[0]
+                route.fulfill(status=200, json=self._metric_fixture(metric, host_points[metric], start_ts, end_ts, coverage=coverage))
+                return
+            if path == '/api/events/history':
+                route.fulfill(status=200, json=self._events_history_fixture(start_ts, end_ts, episodes=episodes))
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            self._set_fixed_range(page, start_ts, end_ts)
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option('8080')
+            page.wait_for_function(
+                "() => { const d = document.querySelector('#service-latency-chart path').getAttribute('d') || ''; return d.length > 0; }",
+                timeout=5_000,
+            )
+            page.locator('.hist-marker').first.wait_for(state='attached', timeout=5_000)
+            page.locator('.hist-marker-cluster').first.wait_for(state='attached', timeout=5_000)
+            page.locator('.hist-band-segment').first.wait_for(state='attached', timeout=5_000)
+            page.locator('.hist-point-target').first.wait_for(state='attached', timeout=5_000)
+
+            single_marker = page.locator('.hist-marker').first
+            cluster = page.locator('.hist-marker-cluster').first
+            band_segment = page.locator('.hist-band-segment').first
+            point_target = page.locator('.hist-point-target').first
+
+            # The single marker's role now matches the cluster's -- both actionable.
+            cluster_role = cluster.get_attribute('role')
+            self.assertEqual(cluster_role, 'button')
+            self.assertEqual(single_marker.get_attribute('role'), cluster_role)
+
+            aria_label = single_marker.get_attribute('aria-label')
+            title_text = single_marker.locator('title').text_content()
+            self.assertTrue(aria_label.startswith('Investigate '))
+            self.assertFalse(title_text.startswith('Investigate'))
+
+            # Pressing Enter on the focused single marker still focuses its
+            # incident -- the role change did not disturb behaviour.
+            single_marker.focus()
+            page.keyboard.press('Enter')
+            page.locator('#investigating-service').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#investigating-service').text_content(), 'Investigating: Test Service')
+
+            # The disclosure-only elements are unchanged.
+            self.assertEqual(band_segment.get_attribute('role'), 'img')
+            self.assertEqual(point_target.get_attribute('role'), 'img')
+
+            # Every tabindex="0" SVG element in the History section (the chart
+            # markers, cluster, band segments, coverage segments and point
+            # targets A-19 pins) carries only the actionable or disclosure-only
+            # role -- a third role needs a decision. #history-axis-scroll's
+            # pre-existing role="region"/tabindex="0" is a distinct, orthogonal
+            # WCAG-2.1.1 scrollable-landmark pattern (a plain HTML div, not an
+            # SVG chart element) and is deliberately out of scope for this
+            # actionable-vs-disclosure convention -- scoped out by namespace,
+            # not by an exclusion list that could silently grow.
+            roles = page.eval_on_selector_all(
+                '#history-section [tabindex="0"]',
+                'nodes => nodes.filter(n => n.namespaceURI === "http://www.w3.org/2000/svg")'
+                '.map(n => n.getAttribute("role"))',
+            )
+            distinct_roles = set(roles)
+            self.assertTrue(
+                distinct_roles.issubset({'button', 'img'}) and len(distinct_roles) <= 2,
+                f"a focusable SVG element with a role outside {{'button', 'img'}} needs an explicit decision: {distinct_roles}",
+            )
+        finally:
+            page.close()
+
+    # ------------------------------------------------------------------
     # 04-08 Task 2: one hover cursor across the whole stack, one readout
     # (D-17). Pointer-driven updates are coalesced through
     # requestAnimationFrame -- only the cursor's transform and the readout's

@@ -1637,9 +1637,14 @@
     circle.setAttribute('r', '4');
     circle.setAttribute('class', 'hist-marker');
     circle.setAttribute('tabindex', '0');
-    circle.setAttribute('role', 'img');
+    // 05-04 Task 1 (04-REVIEW.md WR-02): this element clicks/keys to
+    // focusIncident, so per the resolved role convention (A-19) it announces
+    // as the actionable role, matching renderMarkerCluster's identical
+    // pattern -- never the disclosure-only role renderServiceStateBand and
+    // renderPointTargets correctly keep.
+    circle.setAttribute('role', 'button');
     const text = markerTitle(episode);
-    circle.setAttribute('aria-label', text);
+    circle.setAttribute('aria-label', `Investigate ${text}`);
     const title = document.createElementNS(SVG_NS, 'title');
     title.textContent = text;
     circle.append(title);
