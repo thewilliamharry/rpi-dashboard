@@ -3258,8 +3258,13 @@
     return 'unknown';
   }
 
+  // T-05-06: case-sensitive on purpose. The server emits exactly the four
+  // lowercase wire literals (fresh/aging/stale/unknown) and never a
+  // case-varied form; treating 'AGING' as equivalent to 'aging' would let an
+  // unrecognised literal masquerade as a recognised one instead of failing
+  // closed to 'unknown'.
   function serviceFreshness(service) {
-    const value = String((service.freshness || {}).state || 'unknown').toLowerCase();
+    const value = String((service.freshness || {}).state || 'unknown');
     return ['fresh', 'aging', 'stale', 'unknown'].includes(value) ? value : 'unknown';
   }
 

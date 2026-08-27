@@ -2117,6 +2117,32 @@ class AdvancedUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_an_unrecognised_or_absent_freshness_literal_renders_unknown(self):
+        """T-05-06: freshnessPresentation/serviceFreshness are fail-closed and
+        case-sensitive -- the server emits exactly the four lowercase wire
+        literals, and no case-varied, wrong-typed, or absent value can
+        masquerade as a recognised one.
+        """
+        services = [
+            maintenance_service(9711, 'Shouty literal'),
+            maintenance_service(9712, 'Null literal'),
+            maintenance_service(9713, 'Numeric literal'),
+            maintenance_service(9714, 'Object literal'),
+            maintenance_service(9715, 'Absent literal'),
+        ]
+        services[0]['freshness'] = {'state': 'AGING', 'age_seconds': 5}
+        services[1]['freshness'] = {'state': None, 'age_seconds': 5}
+        services[2]['freshness'] = {'state': 42, 'age_seconds': 5}
+        services[3]['freshness'] = {'state': {}, 'age_seconds': 5}
+        del services[4]['freshness']
+        page = self._services_page(services)
+        try:
+            for port in (9711, 9712, 9713, 9714, 9715):
+                cell_text = self._service_row_locator(page, port).locator('td').nth(4).text_content()
+                self.assertTrue(cell_text.startswith('○ Unknown — '), f'port {port}: {cell_text!r}')
+        finally:
+            page.close()
+
     def test_a_maintenance_service_is_absent_from_the_active_exceptions_list_and_count(self):
         """D-07: the server never emits an exception for a covered service, and the
         client renders exactly what the server sends -- it performs no exclusion
