@@ -1,7 +1,78 @@
 import json
 import pathlib
+import re
 import subprocess
 import unittest
+
+
+# The exhaustive, self-maintaining theme-gated visibility inventory (05-03).
+#
+# Each key is a theme-scoped selector (a selector beginning with `html.light` or
+# `html:not(.light)`) whose declaration block sets `display: none` somewhere in the
+# project's stylesheets. `extract_theme_gated_hidden_selectors` derives this set from
+# the stylesheet text at test time so the inventory can never drift silently from the
+# CSS it describes — a ninth rule appearing anywhere fails
+# `test_every_theme_gated_visibility_rule_is_enumerated_and_classified` until it is
+# classified here.
+#
+# Classification is exactly one of two values, recorded as a decision record rather
+# than a bare list:
+#   - "decorative": the rule hides a purely cosmetic flourish with no informational
+#     content of its own (or, for `.corner`/`.offline-badge`, is a dead rule that no
+#     document or script currently renders at all — see DEAD_THEME_HIDDEN_SELECTORS).
+#   - "deliberate-calm": the rule hides a genuine informational surface in light mode
+#     as a considered calm-reading choice (05-CONTEXT.md D-03 and its A-13 extension),
+#     with a recorded light-mode substitute or accepted exception (A-15).
+THEME_HIDDEN_RULES = {
+    '.arc-unit': 'decorative',           # gauge unit label ("%") — cosmetic, not a fact
+    '.sparkline': 'deliberate-calm',     # per-service trend line — D-03: gauges alone satisfy UX-01
+    '.temp-row': 'deliberate-calm',      # temperature readout row — D-03 calm reading
+    '.corner': 'decorative',             # dark HUD-corner flourish — dead rule (A-14), renders nowhere
+    '.svc-preview': 'deliberate-calm',   # service thumbnail — A-15: the one accepted exception
+    '.svc-uptime-pct': 'deliberate-calm',  # per-service 7d uptime % text — A-13 extends D-03
+    '.uptime-labels': 'deliberate-calm',   # uptime-strip day labels — D-03 calm reading
+    '.offline-badge': 'decorative',      # offline badge — dead rule (A-14), renders nowhere
+}
+
+# The two decorative classifications the audit found are dead rules: no element
+# carrying either class is rendered by any document or script (A-14). Pinned here
+# rather than deleted from the stylesheet — pinning means a future phase that starts
+# rendering either class must re-classify it before its markup can land.
+DEAD_THEME_HIDDEN_SELECTORS = {'.corner', '.offline-badge'}
+
+# Matches a top-level "selector { declarations }" block. Tolerant of an @media
+# wrapper around it (the outer @media selector-like text never resolves to a
+# "html.light "/"html:not(.light) " prefix followed by a bare braces body, so it is
+# skipped automatically; the nested rule inside the @media block is matched on its
+# own pass).
+_RULE_BLOCK_RE = re.compile(r'([^{}]+)\{([^{}]*)\}')
+# A theme-scoped selector begins with the light-theme class or the not-light negation,
+# followed by whitespace and the rest of the selector (tolerant of extra internal
+# whitespace, which is normalized before this pattern is applied).
+_THEME_SCOPED_SELECTOR_RE = re.compile(r'^(html\.light|html:not\(\.light\))\s+(.+)$')
+# Tolerant of whitespace around the colon and an optional trailing semicolon; matches
+# the declaration wherever it appears in the block, not only as the first or only rule.
+_DISPLAY_NONE_RE = re.compile(r'display\s*:\s*none\s*;?')
+
+
+def extract_theme_gated_hidden_selectors(css_text):
+    """Derive every theme-scoped selector whose declaration block sets display: none.
+
+    A selector is "theme-scoped" if it begins with the light-theme class (html.light)
+    or the not-light negation (html:not(.light)). Tolerant of the file's existing
+    formatting variations — whitespace around the colon and the brace, and the
+    display:none declaration appearing anywhere in the block alongside other
+    declarations.
+    """
+    selectors = set()
+    for raw_selector, body in _RULE_BLOCK_RE.findall(css_text):
+        selector = ' '.join(raw_selector.split())
+        match = _THEME_SCOPED_SELECTOR_RE.match(selector)
+        if not match:
+            continue
+        if _DISPLAY_NONE_RE.search(body):
+            selectors.add(match.group(2))
+    return selectors
 
 
 class UiContractTests(unittest.TestCase):
@@ -185,6 +256,51 @@ console.log(JSON.stringify({
             'Restart worker only after deploying a migration-fixed or prior compatible image',
         ]:
             self.assertIn(token, readme)
+
+    def test_every_theme_gated_visibility_rule_is_enumerated_and_classified(self):
+        css = pathlib.Path('dashboard/style.css').read_text(encoding='utf-8')
+        extracted = extract_theme_gated_hidden_selectors(css)
+
+        # Pattern self-check: a broken expression that matched nothing must not let
+        # this test pass vacuously.
+        self.assertTrue(extracted, 'pattern self-check: the extraction regex matched zero rules')
+
+        self.assertEqual(extracted, set(THEME_HIDDEN_RULES.keys()))
+        self.assertEqual(len(extracted), 8)
+        for selector, classification in THEME_HIDDEN_RULES.items():
+            self.assertIn(
+                classification, ('deliberate-calm', 'decorative'),
+                f'{selector} has an unrecognised classification: {classification!r}',
+            )
+
+    def test_advanced_workspace_hides_nothing_by_theme(self):
+        css = pathlib.Path('dashboard/advanced.css').read_text(encoding='utf-8')
+        extracted = extract_theme_gated_hidden_selectors(css)
+        self.assertEqual(
+            extracted, set(),
+            'The advanced workspace must render from one DOM tree in both themes; a '
+            'theme-gated visibility rule there is a capability-parity defect, not a '
+            f'density choice. Found: {sorted(extracted)}',
+        )
+
+    def test_decorative_theme_gated_rules_are_dead_and_render_nothing(self):
+        documents = {
+            'dashboard/index.html': pathlib.Path('dashboard/index.html').read_text(encoding='utf-8'),
+            'dashboard/advanced.html': pathlib.Path('dashboard/advanced.html').read_text(encoding='utf-8'),
+            'dashboard/app.js': pathlib.Path('dashboard/app.js').read_text(encoding='utf-8'),
+            'dashboard/advanced.js': pathlib.Path('dashboard/advanced.js').read_text(encoding='utf-8'),
+        }
+        for dead_selector in DEAD_THEME_HIDDEN_SELECTORS:
+            class_name = dead_selector.lstrip('.')
+            for doc_name, content in documents.items():
+                self.assertNotIn(
+                    class_name, content,
+                    f'{class_name} is pinned as a dead rule but appears in {doc_name}; '
+                    'it must be re-classified before this markup can land',
+                )
+        # .arc-unit, the third decorative entry, IS rendered — keeping the two
+        # categories (dead vs. decorative-but-live) distinguishable.
+        self.assertIn('arc-unit', documents['dashboard/index.html'])
 
 
 if __name__ == '__main__':
