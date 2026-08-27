@@ -187,7 +187,15 @@ function uptimeStrip(values) {
     const segment = document.createElement('span');
     const n = Number(value);
     segment.className = `us ${n < 0 ? 'unknown' : n === 0 ? 'down' : n === 1 ? 'up' : 'partial'}`;
-    segment.title = n < 0 ? 'No data' : `${(n * 100).toFixed(n === 1 ? 0 : 1)}% available`;
+    // 05-04 Task 1 (A-18): the disclosure-only image role plus an
+    // aria-label computed once and assigned to both attributes, so the
+    // hover title and the accessible name can never drift apart. Not made
+    // focusable -- a 7-day strip on every service card would insert dozens
+    // of new stops into the main dashboard's primary keyboard flow.
+    const text = n < 0 ? 'No data' : `${(n * 100).toFixed(n === 1 ? 0 : 1)}% available`;
+    segment.setAttribute('role', 'img');
+    segment.setAttribute('title', text);
+    segment.setAttribute('aria-label', text);
     strip.appendChild(segment);
   }
   const labels = document.createElement('div');

@@ -1504,7 +1504,17 @@ class UiStateBrowserTests(unittest.TestCase):
                     self.assertTrue(any('OFFLINE' in text for text in row_texts))
 
                     self.assertTrue(is_displayed(page.locator('.uptime-strip').first))
-                    self.assertGreater(page.locator('.us').count(), 0)
+                    us_segments = page.locator('.us')
+                    self.assertGreater(us_segments.count(), 0)
+                    # 05-04 Task 1 (A-18): each segment's aria-label equals its title
+                    # character for character, and is never empty -- the two are
+                    # computed from one local and assigned with setAttribute so they
+                    # can never drift apart.
+                    for i in range(us_segments.count()):
+                        segment = us_segments.nth(i)
+                        title_text = segment.get_attribute('title')
+                        self.assertTrue(title_text)
+                        self.assertEqual(segment.get_attribute('aria-label'), title_text)
 
                     self.assertTrue(is_displayed(page.locator('#events-panel')))
                     self.assertTrue(is_displayed(page.locator('#scan-label')))
