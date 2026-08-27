@@ -1527,6 +1527,80 @@ class UiStateBrowserTests(unittest.TestCase):
 
         self.assertNotEqual(body_colors['dark'], body_colors['light'])
 
+    def test_deliberate_light_mode_calm_is_hidden_not_absent_and_has_a_named_substitute(self):
+        """This phase adopts D-03's calmer reading of UX-01 (assumption A-12): on the main
+        dashboard the arc gauges satisfy UX-01, and the five deliberate-calm omissions stay
+        hidden in light mode rather than being required to show. `.svc-uptime-pct` is
+        classified as deliberate calm by the identical rationale D-03 applies to the
+        sparkline and temperature row (assumption A-13), not named in D-03 itself. The
+        service preview thumbnail (`.svc-preview`) is the one accepted exception with no
+        light-mode substitute (assumption A-15) — its capture-state text
+        (`.svc-preview-status`) is a separate class that stays visible in both themes."""
+
+        def computed(locator, prop):
+            return locator.evaluate(f'(node) => getComputedStyle(node)[{prop!r}]')
+
+        calm_selectors = ['.sparkline', '.temp-row', '.svc-preview', '.svc-uptime-pct', '.uptime-labels']
+
+        fixture = self._theme_parity_dashboard_fixture()
+        route_api = self._theme_parity_route_api(fixture)
+
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+                if theme == 'light':
+                    page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                page.route('**/api/**', route_api)
+                try:
+                    page.goto(self.base_url, wait_until='networkidle')
+
+                    for selector in calm_selectors:
+                        locator = page.locator(selector).first
+                        self.assertGreater(locator.count(), 0, selector)
+                        display = computed(locator, 'display')
+                        if theme == 'light':
+                            self.assertEqual(display, 'none', selector)
+                        else:
+                            self.assertNotEqual(display, 'none', selector)
+
+                    if theme == 'light':
+                        # The sparkline's named substitute: the numeric percentage readouts
+                        # (also the temperature row's substitute, via the same link below).
+                        for pct_id in ('#cpu-pct', '#ram-pct', '#disk-pct'):
+                            pct_locator = page.locator(pct_id)
+                            self.assertNotEqual(computed(pct_locator, 'display'), 'none', pct_id)
+                            self.assertRegex(pct_locator.text_content() or '', r'\d')
+
+                        # The named light-mode-reachable place both the sparkline trend and
+                        # the temperature history are still available.
+                        link = page.locator('#advanced-diagnosis-link')
+                        self.assertGreater(link.count(), 0)
+                        self.assertNotEqual(computed(link, 'display'), 'none')
+
+                        # The per-service uptime percentage's substitute: the uptime strip
+                        # itself, still on screen with a non-zero segment count.
+                        strip = page.locator('.uptime-strip').first
+                        self.assertNotEqual(computed(strip, 'display'), 'none')
+                        segments = page.locator('.us')
+                        self.assertGreater(segments.count(), 0)
+                        for i in range(segments.count()):
+                            self.assertTrue(segments.nth(i).get_attribute('title'))
+
+                        # The uptime-labels substitute: each segment individually readable
+                        # via its own title attribute, without the day labels.
+                        # (covered by the loop above)
+
+                        # .svc-preview is A-15's one accepted exception with no substitute;
+                        # .svc-preview-status is the separate class that reports capture
+                        # state and must stay visible.
+                        preview_status = page.locator('.svc-preview-status')
+                        self.assertEqual(preview_status.count(), 1)
+                        self.assertNotEqual(computed(preview_status.first, 'display'), 'none')
+                        self.assertTrue((preview_status.first.text_content() or '').strip())
+                        self.assertEqual(computed(page.locator('.svc-preview').first, 'display'), 'none')
+                finally:
+                    page.close()
+
 
 if __name__ == '__main__':
     unittest.main()
