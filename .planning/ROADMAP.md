@@ -402,7 +402,7 @@ Plans:
   4. Loading, empty, stale, unknown, degraded, and error states are visibly and meaningfully distinct in both themes.
   5. UI-contract or visual-regression coverage verifies shared capabilities and important states in both themes.
 
-**Plans**: 6/6 plans executed
+**Plans**: 7 plans (6 executed; 1 gap-closure plan pending)
 
 Plans:
 **Wave 1**
@@ -422,6 +422,10 @@ Plans:
 
 - [x] 05-05-PLAN.md — Density drives progressive disclosure on two named surfaces, with the reachability invariant asserted and the stale incident count closed
 - [x] 05-06-PLAN.md — Responsive reconciliation to one shared narrow boundary, and the cross-surface dual-theme contract module that closes OPS-06
+
+**Wave 5** *(gap closure — blocked on Wave 4 completion)*
+
+- [ ] 05-07-PLAN.md — Gap closure for UX-06/UX-07: a mouse gesture always abandons a pending keyboard range anchor (CR-01), and `worker_degraded` is gated on `not recovery_required` in both server surfaces (WR-01), each proved by a regression test demonstrated red first
 
 **UI hint**: yes
 
