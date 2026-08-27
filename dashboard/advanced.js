@@ -2996,7 +2996,7 @@
     const summaries = document.createElement('div');
     summaries.className = 'summary-grid';
     const host = snapshot.host || {};
-    const hostCard = addCard(summaries, 'Host', `${displayValue((host.identity || {}).hostname)} — Freshness: ${(host.freshness || {}).state || 'Unknown'}`, 'host');
+    const hostCard = addCard(summaries, 'Host', `${displayValue((host.identity || {}).hostname)} — Freshness: ${freshnessPresentation((host.freshness || {}).state).word}`, 'host');
     hostCard.setAttribute('data-testid', 'host-summary');
     addCard(summaries, 'Services', snapshot.services ? 'Current service evidence is available.' : 'Unknown', 'services');
     addCard(summaries, 'Collection Health', snapshot.pipeline ? 'Current pipeline evidence is available.' : 'Unknown', 'pipeline');
@@ -3006,7 +3006,7 @@
 
   function formatFreshnessEvidence(freshness, cadence) {
     const evidence = freshness || {};
-    return `${evidence.state || 'unknown'} — ${relativeAge(evidence.age_seconds)}; expected every ${displayValue(cadence, ' seconds')}`;
+    return `${freshnessPresentation(evidence.state).word} — ${relativeAge(evidence.age_seconds)}; expected every ${displayValue(cadence, ' seconds')}`;
   }
 
   // The four completeness states the server derives for a service's gap block.
@@ -3158,6 +3158,11 @@
           comparison.textContent = 'The worker heartbeat is fresh, but this stream is stale. Review its cadence and background-job evidence.';
           item.append(comparison);
         }
+      }
+      if (freshness.state === 'aging') {
+        const degraded = document.createElement('p');
+        degraded.textContent = `This stream is degraded. Its last sample was ${relativeAge(freshness.age_seconds)}; expected every ${displayValue(stream.cadence_seconds, ' seconds')} — not yet stale.`;
+        item.append(degraded);
       }
       list.append(item);
     });

@@ -462,7 +462,7 @@ class AdvancedUiTests(unittest.TestCase):
             page.locator('[data-section="host"]').click()
             self.assertEqual(page.locator('#host-heading').evaluate('(node) => document.activeElement === node'), True)
             host_text = page.locator('#host-section').text_content()
-            for label in ('beacon-pi', 'CPU', 'Memory', 'Disk', 'Temperature', 'Expected cadence', 'fresh'):
+            for label in ('beacon-pi', 'CPU', 'Memory', 'Disk', 'Temperature', 'Expected cadence', 'Fresh'):
                 self.assertIn(label, host_text)
         finally:
             page.close()
