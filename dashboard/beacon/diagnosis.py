@@ -118,6 +118,25 @@ def freshness_state(now, sample_ts, cadence_seconds):
     return {'state': state, 'age_seconds': age_seconds}
 
 
+def worker_heartbeat_cadence_seconds(settings):
+    """Return the immutable J1 heartbeat cadence -- the one clock every worker-freshness caller reads."""
+    heartbeat_callback = next(
+        callback for callback in WORKER_CALLBACK_INVENTORY if callback.identifier == 'J1'
+    )
+    return callback_schedule_evidence(heartbeat_callback, settings)['cadence_seconds']
+
+
+def worker_freshness(now, heartbeat_ts, settings):
+    """Classify the worker heartbeat through the one shared cadence and classifier both surfaces call.
+
+    Adds no guard of its own: ``freshness_state``'s existing strict-integer
+    discipline already resolves an absent or malformed ``heartbeat_ts`` (or
+    cadence) to ``unknown``, and duplicating that guard here would create a
+    second convention.
+    """
+    return freshness_state(now, heartbeat_ts, worker_heartbeat_cadence_seconds(settings))
+
+
 def _host_payload(row, cadence_seconds, now):
     if row is None:
         return {
@@ -347,10 +366,7 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
     if not isinstance(retention_state, dict):
         retention_state = {'state': 'normal', 'pressure_gaps': {}}
     heartbeat_ts = _runtime_timestamp(evidence['runtime'].get('worker_heartbeat'), 'ts')
-    heartbeat_callback = next(
-        callback for callback in WORKER_CALLBACK_INVENTORY if callback.identifier == 'J1'
-    )
-    worker_cadence = callback_schedule_evidence(heartbeat_callback, settings)['cadence_seconds']
+    worker_cadence = worker_heartbeat_cadence_seconds(settings)
     stream_records = []
     for stream in evidence['streams']:
         cadence = stream.get('cadence_seconds')
@@ -439,7 +455,7 @@ def compose_pipeline_diagnosis(evidence, settings, *, now):
         'worker': {
             'heartbeat_ts': heartbeat_ts,
             'expected_cadence_seconds': worker_cadence,
-            'freshness': freshness_state(now, heartbeat_ts, worker_cadence),
+            'freshness': worker_freshness(now, heartbeat_ts, settings),
             'lease_until': _runtime_timestamp(evidence['runtime'].get('worker_owner'), 'lease_until'),
         },
         'streams': {
@@ -657,6 +673,7 @@ def get_current_diagnosis(db_path, settings, now):
         'settings': _settings_payload(settings),
         'safety': {
             'worker_stale': pipeline['worker']['freshness']['state'] in {'stale', 'unknown'},
+            'worker_degraded': pipeline['worker']['freshness']['state'] == 'aging',
             'recovery_required': recovery_required,
         },
         'exceptions': compose_active_exceptions(

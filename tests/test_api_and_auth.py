@@ -302,6 +302,41 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(status[8080]['thumb_error'], 'old fallback')
         self.assertEqual(status[8082]['thumb_source'], 'screenshot')
 
+    def test_scan_status_never_reports_degraded_and_stale_together(self):
+        """A-04: an overlapping WORKER_READY_SECONDS must never assert both conditions."""
+        appmod, db_path = load_app({'WORKER_READY_SECONDS': '10', 'METRIC_SAMPLE_SECONDS': '5'})
+        client = appmod.app.test_client()
+        try:
+            # Edge (zero): no heartbeat row at all.
+            response = client.get('/api/scan-status').get_json()
+            self.assertIn('state', response['worker_freshness'])
+            self.assertEqual(response['worker_freshness']['state'], 'unknown')
+            self.assertFalse(response['worker_degraded'])
+
+            cadence = appmod.beacon_diagnosis.worker_heartbeat_cadence_seconds(appmod.SETTINGS)
+            self.assertEqual(cadence, 5)
+            # 4 * cadence == 20 (fixed); WORKER_READY_SECONDS == 10 overlaps the
+            # window (ages 11-20) where a heartbeat is both `aging` and past the
+            # operator's own readiness cutoff.
+            for age in range(1, 4 * cadence + 5):
+                with self.subTest(age=age):
+                    request_now = int(time.time())
+                    heartbeat_ts = request_now - age
+                    with appmod._db_lock:
+                        conn = appmod.get_db()
+                        conn.execute(
+                            'INSERT INTO runtime_state(key,value,updated_ts) VALUES(?,?,?) '
+                            'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts',
+                            ('worker_heartbeat', json.dumps({'ts': heartbeat_ts}), heartbeat_ts),
+                        )
+                        conn.commit()
+                        conn.close()
+                    response = client.get('/api/scan-status').get_json()
+                    self.assertIn('state', response['worker_freshness'])
+                    self.assertFalse(response['worker_stale'] and response['worker_degraded'])
+        finally:
+            cleanup_db(db_path)
+
     def test_service_meta_path_normalization_variants(self):
         self._insert_service()
         cases = [

@@ -149,6 +149,50 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         finally:
             cleanup_db(db_path)
 
+    def test_worker_freshness_is_one_shared_classification_for_both_surfaces(self):
+        """One classifier decides worker freshness for every surface (05-CONTEXT D-01)."""
+        appmod, db_path = load_app({'METRIC_SAMPLE_SECONDS': '5'})
+        client = appmod.app.test_client()
+        now = 1_700_000_100
+        try:
+            with appmod._db_lock:
+                conn = appmod.get_db()
+                conn.execute(
+                    'INSERT INTO runtime_state(key,value,updated_ts) VALUES(?,?,?) '
+                    'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts',
+                    ('worker_heartbeat', json.dumps({'ts': now}), now),
+                )
+                conn.commit()
+                conn.close()
+            for age, expected_state, expected_degraded in (
+                (5, 'fresh', False),
+                (20, 'aging', True),
+                (21, 'stale', False),
+            ):
+                with self.subTest(age=age):
+                    self._freeze_clock(now + age)
+                    payload = client.get('/api/advanced/current').get_json()
+                    direct = appmod.beacon_diagnosis.worker_freshness(now + age, now, appmod.SETTINGS)
+                    self.assertEqual(direct, payload['pipeline']['worker']['freshness'])
+                    self.assertEqual(direct['state'], expected_state)
+                    self.assertEqual(payload['safety']['worker_degraded'], expected_degraded)
+                    self.assertFalse(
+                        payload['safety']['worker_stale'] and payload['safety']['worker_degraded'],
+                    )
+        finally:
+            cleanup_db(db_path)
+
+        # Edge (zero): with no heartbeat row at all, the shared classifier and both
+        # payloads must agree on `unknown`, never `degraded`.
+        appmod2, db_path2 = load_app({'METRIC_SAMPLE_SECONDS': '5'})
+        try:
+            self._freeze_clock(1_700_000_005)
+            payload = appmod2.app.test_client().get('/api/advanced/current').get_json()
+            self.assertEqual(payload['pipeline']['worker']['freshness']['state'], 'unknown')
+            self.assertFalse(payload['safety']['worker_degraded'])
+        finally:
+            cleanup_db(db_path2)
+
     def test_direct_route_tracer_preserves_middleware_assets_and_get_only_api(self):
         asset_directory = Path(self.appmod.__file__).resolve().parent
         for path, mimetype, filename in [
