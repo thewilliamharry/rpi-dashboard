@@ -193,6 +193,64 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         finally:
             cleanup_db(db_path2)
 
+    def test_safety_never_reports_degraded_while_recovery_is_required(self):
+        """05-07 Task 2 (gap 2 / WR-01): a real on-disk recovery marker beside a real
+        aging-not-stale heartbeat must suppress safety.worker_degraded in the
+        /api/advanced/current payload -- the same invariant Test B pins at
+        /api/scan-status, pinned here at the advanced workspace's own safety
+        block."""
+        # Plain load_app() -- no env override. The sibling test above passes
+        # {'METRIC_SAMPLE_SECONDS': '5'}; that is a no-op on the J1 cadence,
+        # which is the fixed literal 5 (worker_main.py:84), and this surface
+        # needs nothing else: get_current_diagnosis's safety['worker_degraded']
+        # is derived from the freshness tier alone and never consults
+        # worker_ready_seconds.
+        appmod, db_path = load_app()
+        client = appmod.app.test_client()
+        marker_path = None
+        try:
+            cadence = appmod.beacon_diagnosis.worker_heartbeat_cadence_seconds(appmod.SETTINGS)
+            self.assertEqual(cadence, 5)
+            now = 1_700_000_100
+            with appmod._db_lock:
+                conn = appmod.get_db()
+                conn.execute(
+                    'INSERT INTO runtime_state(key,value,updated_ts) VALUES(?,?,?) '
+                    'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts',
+                    ('worker_heartbeat', json.dumps({'ts': now}), now),
+                )
+                conn.commit()
+                conn.close()
+            self._freeze_clock(now + 2 * cadence)
+
+            marker_path = Path(db_path).parent / appmod.RECOVERY_MARKER
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        'failed_target_version': 7,
+                        'reason_class': 'RecoveryError',
+                        'backup_catalog_id': 'backup-05-07-test',
+                        'timestamp': now,
+                        'restore_in_progress': True,
+                    },
+                    sort_keys=True,
+                ) + '\n',
+                encoding='utf-8',
+            )
+
+            payload = client.get('/api/advanced/current').get_json()
+            self.assertEqual(payload['pipeline']['worker']['freshness']['state'], 'aging')
+            self.assertFalse(payload['safety']['worker_stale'])
+            self.assertTrue(payload['safety']['recovery_required'])
+            self.assertFalse(payload['safety']['worker_degraded'])
+            self.assertFalse(
+                payload['safety']['recovery_required'] and payload['safety']['worker_degraded'],
+            )
+        finally:
+            if marker_path is not None:
+                marker_path.unlink(missing_ok=True)
+            cleanup_db(db_path)
+
     def test_direct_route_tracer_preserves_middleware_assets_and_get_only_api(self):
         asset_directory = Path(self.appmod.__file__).resolve().parent
         for path, mimetype, filename in [

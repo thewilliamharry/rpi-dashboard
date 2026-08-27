@@ -349,6 +349,73 @@ class ApiAndAuthTests(unittest.TestCase):
         finally:
             cleanup_db(db_path)
 
+    def test_scan_status_never_reports_degraded_while_recovery_is_required(self):
+        """05-07 Task 2 (gap 2 / WR-01): a real on-disk recovery marker beside a real
+        aging-not-stale heartbeat must suppress worker_degraded in the
+        /api/scan-status payload -- the operator must never see both a
+        paused-monitoring and a monitoring-continues reading about the same
+        worker at the same instant."""
+        _previous = os.environ.get('WORKER_READY_SECONDS')
+        if _previous is None:
+            self.addCleanup(os.environ.pop, 'WORKER_READY_SECONDS', None)
+        else:
+            self.addCleanup(os.environ.__setitem__, 'WORKER_READY_SECONDS', _previous)
+
+        # WORKER_READY_SECONDS=30 puts the readiness cutoff above the whole
+        # `aging` band (4 * cadence == 20 under the fixed J1 cadence of 5),
+        # so the seeded 10s age below is unambiguously `aging` and
+        # unambiguously not past the cutoff. METRIC_SAMPLE_SECONDS is
+        # deliberately not passed here -- it is a no-op on the J1 cadence
+        # (worker_main.py:84's fixed literal ('seconds', 5)), and passing it
+        # would teach a false causal model of the config surface (05-DEBT.md
+        # section 2 W-6).
+        appmod, db_path = load_app({'WORKER_READY_SECONDS': '30'})
+        client = appmod.app.test_client()
+        marker_path = None
+        try:
+            cadence = appmod.beacon_diagnosis.worker_heartbeat_cadence_seconds(appmod.SETTINGS)
+            self.assertEqual(cadence, 5)
+            now = int(time.time())
+            heartbeat_ts = now - 2 * cadence
+            with appmod._db_lock:
+                conn = appmod.get_db()
+                conn.execute(
+                    'INSERT INTO runtime_state(key,value,updated_ts) VALUES(?,?,?) '
+                    'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts',
+                    ('worker_heartbeat', json.dumps({'ts': heartbeat_ts}), heartbeat_ts),
+                )
+                conn.commit()
+                conn.close()
+
+            marker_path = os.path.join(os.path.dirname(db_path), appmod.RECOVERY_MARKER)
+            with open(marker_path, 'w', encoding='utf-8') as handle:
+                json.dump(
+                    {
+                        'failed_target_version': 7,
+                        'reason_class': 'RecoveryError',
+                        'backup_catalog_id': 'backup-05-07-test',
+                        'timestamp': int(time.time()),
+                        'restore_in_progress': True,
+                    },
+                    handle,
+                    sort_keys=True,
+                )
+                handle.write('\n')
+
+            response = client.get('/api/scan-status').get_json()
+            self.assertEqual(response['worker_freshness']['state'], 'aging')
+            self.assertFalse(response['worker_stale'])
+            self.assertTrue(response['recovery_required'])
+            self.assertFalse(response['worker_degraded'])
+            self.assertFalse(response['recovery_required'] and response['worker_degraded'])
+        finally:
+            if marker_path is not None:
+                try:
+                    os.remove(marker_path)
+                except FileNotFoundError:
+                    pass
+            cleanup_db(db_path)
+
     def test_service_meta_path_normalization_variants(self):
         self._insert_service()
         cases = [
