@@ -402,7 +402,7 @@ Plans:
   4. Loading, empty, stale, unknown, degraded, and error states are visibly and meaningfully distinct in both themes.
   5. UI-contract or visual-regression coverage verifies shared capabilities and important states in both themes.
 
-**Plans**: 7 plans (6 executed; 1 gap-closure plan pending)
+**Plans**: 7/7 plans executed (6 executed; 1 gap-closure plan pending)
 
 Plans:
 **Wave 1**
@@ -425,7 +425,7 @@ Plans:
 
 **Wave 5** *(gap closure — blocked on Wave 4 completion)*
 
-- [ ] 05-07-PLAN.md — Gap closure for UX-06/UX-07: a mouse gesture always abandons a pending keyboard range anchor (CR-01), and `worker_degraded` is gated on `not recovery_required` in both server surfaces (WR-01), each proved by a regression test demonstrated red first
+- [x] 05-07-PLAN.md — Gap closure for UX-06/UX-07: a mouse gesture always abandons a pending keyboard range anchor (CR-01), and `worker_degraded` is gated on `not recovery_required` in both server surfaces (WR-01), each proved by a regression test demonstrated red first
 
 **UI hint**: yes
 
@@ -455,5 +455,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
-| 5. Theme-Parity Analytics Experience | 6/6 | In Progress|  |
+| 5. Theme-Parity Analytics Experience | 7/7 | In Progress|  |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
