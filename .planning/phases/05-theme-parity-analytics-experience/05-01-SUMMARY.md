@@ -171,6 +171,12 @@ None - no external service configuration required.
 - `UX-07` and `OPS-06` are NOT marked complete in `REQUIREMENTS.md` — `requirements.ready-ids` confirmed 0/2 ready, since sibling plans 05-02 through 05-06 also declare these IDs and have not yet produced their own `*-SUMMARY.md`. This plan's `requirements-completed` frontmatter records its own contribution only; the checkbox flips once the last declaring plan finishes.
 - No blockers for the remaining Phase 5 plans.
 
+## Self-Check: PASSED
+
+All created/modified files and all commit hashes referenced above verified present:
+- `dashboard/beacon/diagnosis.py`, `.planning/phases/05-theme-parity-analytics-experience/05-01-SUMMARY.md`, `.planning/phases/05-theme-parity-analytics-experience/deferred-items.md` — found
+- Commits `5722047`, `12a8fc0`, `c4c3d40`, `c160e6d` — found in `git log --oneline --all`
+
 ---
 *Phase: 05-theme-parity-analytics-experience*
 *Completed: 2026-08-27*
