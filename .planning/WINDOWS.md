@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 13
+open_count: 14
 waived_count: 0
 fixed_count: 5
-total_count: 18
-last_updated: 2026-08-27T14:16:22.736Z
+total_count: 19
+last_updated: 2026-08-27T15:21:32.497Z
 ---
 
 # Broken Windows Ledger
@@ -33,6 +33,7 @@ last_updated: 2026-08-27T14:16:22.736Z
 | 16 | 03 | deviation | .planning/STATE.md |  | Over-broad sed relabelled 109 pre-existing [Phase ?] decision lines as Phase 03; fully reverted before commit | open |  | 2026-08-19T15:11:41.132Z |  |
 | 17 | 05 | deviation | tests/helpers.py |  | Misdiagnosis, not a flake: test_lease_takeover_records_one_monitoring_gap failed because 05-01's new test_scan_status_never_reports_degraded_and_stale_together leaked WORKER_READY_SECONDS=10 via tests/helpers.py load_app (which never restores os.environ), shrinking the gap below queues.acquire_worker_lease's 20s ready_seconds. Baseline 515eee8 was fully green. Fixed by restoring the env in that test. Underlying hazard -- load_app leaks all extra_env -- remains open. | fixed |  | 2026-08-27T13:06:44.345Z | 2026-08-27T00:00:00.000Z |
 | 18 | 05 | deviation | tests/test_ui_safety_integration.py |  | test_stale_to_fresh_page_persists_actions_and_records_recovery: intermittent full-suite-load timeout (wall-clock worker-heartbeat aging + 18s Playwright wait), passes in isolation and in 2/3 full-suite runs; confirmed unrelated to 05-03 (file not in 05-03's declared scope, no env/os mutation in 05-03's new tests). See deferred-items.md Entry 2. | open |  | 2026-08-27T14:16:22.736Z |  |
+| 19 | 05 | deviation | tests/test_advanced_ui.py |  | 05-06 reconciled dashboard/advanced.css narrow boundary 719px->720px; two hardcoded assertions in test_advanced_ui.py (lines ~2037, ~2056) still assert the old 719px value and now fail. Owned by parallel plan 05-05; needs a 2-line follow-up fix during wave-4 merge (see 05-06-SUMMARY.md). | open |  | 2026-08-27T15:21:32.497Z |  |
 
 ````json
 [
@@ -250,6 +251,18 @@ last_updated: 2026-08-27T14:16:22.736Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-27T14:16:22.736Z",
+    "resolved_at": null
+  },
+  {
+    "id": 19,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "tests/test_advanced_ui.py",
+    "line": null,
+    "description": "05-06 reconciled dashboard/advanced.css narrow boundary 719px->720px; two hardcoded assertions in test_advanced_ui.py (lines ~2037, ~2056) still assert the old 719px value and now fail. Owned by parallel plan 05-05; needs a 2-line follow-up fix during wave-4 merge (see 05-06-SUMMARY.md).",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T15:21:32.497Z",
     "resolved_at": null
   }
 ]
