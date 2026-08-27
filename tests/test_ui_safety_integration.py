@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import pathlib
 import shutil
@@ -224,6 +225,66 @@ class UiSafetyIntegrationTests(unittest.TestCase):
                         page.close()
 
         self.assertNotEqual(degraded_colors['dark'], degraded_colors['light'])
+
+    def test_recovery_marker_with_aging_heartbeat_renders_only_the_recovery_banner_on_both_documents(self):
+        """05-07 Task 2 (gap 2 / WR-01): a real on-disk recovery marker beside a real
+        aging-not-stale heartbeat must render exactly one worker safety banner --
+        the recovery banner, never the degraded banner alongside it -- on both
+        documents and both themes."""
+        cadence = self.appmod.beacon_diagnosis.worker_heartbeat_cadence_seconds(self.appmod.SETTINGS)
+        age = 2 * cadence
+        self.assertGreater(age, cadence)
+        self.assertLessEqual(age, self.appmod.SETTINGS.worker_ready_seconds)
+
+        def seed_aging_heartbeat():
+            live_now = int(time.time())
+            heartbeat_ts = live_now - age
+            self.appmod.update_worker_heartbeat(now=heartbeat_ts)
+            freshness = self.appmod.beacon_diagnosis.worker_freshness(
+                live_now, heartbeat_ts, self.appmod.SETTINGS,
+            )
+            self.assertEqual(freshness['state'], 'aging')
+
+        # A real on-disk marker in the shape _write_recovery_marker produces,
+        # written into the same per-test temp directory DB_PATH's parent
+        # resolves to -- tearDown's tmpdir.cleanup() removes it, so nothing
+        # survives outside this test.
+        marker_path = pathlib.Path(self.tmpdir.name) / self.appmod.RECOVERY_MARKER
+        marker_path.write_text(
+            json.dumps(
+                {
+                    'failed_target_version': 7,
+                    'reason_class': 'RecoveryError',
+                    'backup_catalog_id': 'backup-05-07-test',
+                    'timestamp': int(time.time()),
+                    'restore_in_progress': True,
+                },
+                sort_keys=True,
+            ) + '\n',
+            encoding='utf-8',
+        )
+
+        expected_recovery_text = (
+            'Upgrade recovery is required. Monitoring is paused. Follow the '
+            'documented recovery command before restarting Beacon.'
+        )
+
+        for theme in ('dark', 'light'):
+            for path in ('/', '/advanced'):
+                with self.subTest(theme=theme, path=path):
+                    seed_aging_heartbeat()
+                    page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+                    if theme == 'light':
+                        page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                    try:
+                        page.goto(f'{self.base_url}{path}', wait_until='domcontentloaded')
+                        recovery = page.locator('#recovery-warning')
+                        recovery.wait_for(state='visible', timeout=8_000)
+                        self.assertFalse(page.locator('#degraded-warning').is_visible())
+                        self.assertFalse(page.locator('#worker-warning').is_visible())
+                        self.assertEqual(recovery.text_content(), expected_recovery_text)
+                    finally:
+                        page.close()
 
     def test_stale_heartbeat_shows_worker_banner_and_not_the_degraded_banner(self):
         """Exclusivity pinned from the rendered page, not only from the payload."""

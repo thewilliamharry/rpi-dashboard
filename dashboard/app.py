@@ -3038,17 +3038,22 @@ def api_scan_status():
     # Primary representation (A-03): the full three-tier classification, from the
     # same shared classifier the advanced payload calls -- no second age comparison.
     state['worker_freshness'] = beacon_diagnosis.worker_freshness(now, heartbeat_ts, SETTINGS)
+    state['worker_heartbeat_ts'] = heartbeat_ts
+    state['worker_heartbeat_age_seconds'] = heartbeat_age_seconds
+    state['worker_lease_until'] = owner.get('lease_until') if isinstance(owner, dict) else None
+    state['recovery_required'] = worker_stale or (Path(DB_PATH).parent / RECOVERY_MARKER).is_file()
     # A-04: the operator-configured readiness cutoff and the fixed 4x-cadence
     # "aging" boundary are independently configurable and can overlap when the
     # cutoff is set below 4x cadence. The `not worker_stale` conjunct guarantees
     # this page never asserts both "monitoring paused" (worker_stale) and
     # "monitoring continues, this is not a failure" (worker_degraded) about the
-    # same heartbeat.
-    state['worker_degraded'] = (not worker_stale) and state['worker_freshness']['state'] == 'aging'
-    state['worker_heartbeat_ts'] = heartbeat_ts
-    state['worker_heartbeat_age_seconds'] = heartbeat_age_seconds
-    state['worker_lease_until'] = owner.get('lease_until') if isinstance(owner, dict) else None
-    state['recovery_required'] = worker_stale or (Path(DB_PATH).parent / RECOVERY_MARKER).is_file()
+    # same heartbeat. 05-07 Task 3 (gap 2 / WR-01): the `not recovery_required`
+    # conjunct guards the same contradiction against an on-disk recovery
+    # marker -- computed independently of heartbeat freshness -- so without it
+    # the page could assert both "monitoring is paused" (recovery_required)
+    # and "monitoring continues" (worker_degraded) about the same worker at
+    # the same instant.
+    state['worker_degraded'] = (not worker_stale) and (not state['recovery_required']) and state['worker_freshness']['state'] == 'aging'
     state['queued_requests'] = int(queued)
     if latest_request:
         state['latest_request_id'] = int(latest_request['id'])
