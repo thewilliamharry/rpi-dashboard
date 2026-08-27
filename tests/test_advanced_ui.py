@@ -2,7 +2,8 @@ import pathlib
 import re
 import threading
 import unittest
-from urllib.parse import urlparse
+from collections import Counter
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
@@ -122,6 +123,142 @@ def maintenance_service(port, name, *, availability='online', maintenance=None, 
     if overrun is not None:
         row['overrun'] = overrun
     return row
+
+
+# Phase 5 05-05 Task 2/3: minimal fixture builders for a History/Incidents
+# investigation surface, in the same shapes tests/test_history_investigation_ui.py
+# already establishes -- kept local to this file (rather than imported) since
+# this plan's files_modified list names only tests/test_advanced_ui.py.
+
+def config_fixture():
+    return {
+        'timezone': 'UTC', 'alerting_enabled': False,
+        'uptime_buckets': [], 'trigger_rate_limit': 4, 'trigger_rate_window_seconds': 60,
+    }
+
+
+def host_metric_fixture(start_ts, end_ts):
+    """Deliberately empty: zero points and an 'observed' coverage interval (which
+    draws no coverage-strip segment) so all four host metrics contribute zero
+    dynamically-created, id-less elements -- avoiding the false collision an
+    identically-shaped repeat across chart-cpu/ram/disk/temp would otherwise
+    produce under the id-or-(tag,class,index) descriptor scheme below.
+    """
+    return {
+        'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+        'selector': {'kind': 'host', 'metric': 'cpu'},
+        'effective_resolution_seconds': max(1, end_ts - start_ts),
+        'point_budget': 2048,
+        'source_resolutions_seconds': [max(1, end_ts - start_ts)],
+        'points': [],
+        'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}],
+        'aggregation_pending': [],
+    }
+
+
+def service_history_fixture(start_ts, end_ts, port):
+    span = max(1, end_ts - start_ts)
+    points = [{
+        'ts': start_ts, 'online_seconds': int(span * 0.9), 'offline_seconds': int(span * 0.1),
+        'unknown_seconds': 0, 'gap_seconds': 0,
+        'latency_min': 5.0, 'latency_max': 15.0, 'latency_avg': 10.0,
+        'check_count': 10, 'failure_class_counts': {},
+    }]
+    return {
+        'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+        'selector': {'kind': 'service', 'port': port},
+        'effective_resolution_seconds': span,
+        'point_budget': 2048,
+        'source_resolutions_seconds': [span],
+        'points': points,
+        'coverage': [{'start_ts': start_ts, 'end_ts': end_ts, 'state': 'observed'}],
+        'aggregation_pending': [],
+    }
+
+
+def incident_episode(port, service_name, down_ts, recovered_ts, transitions=None):
+    return {
+        'port': port, 'service_name': service_name, 'critical': False,
+        'down_ts': down_ts, 'raised_ts': down_ts, 'recovered_ts': recovered_ts,
+        'open': False, 'duration_seconds': recovered_ts - down_ts,
+        'failure_class': None, 'suppressed_reason': None,
+        'maintenance_grace_until': None,
+        'transitions': transitions if transitions is not None else [
+            {'event_type': 'state_change', 'ts': down_ts, 'online': 0},
+            {'event_type': 'state_change', 'ts': recovered_ts, 'online': 1},
+        ],
+        'overrun': False, 'grace_seconds': 0, 'fault_seconds': recovered_ts - down_ts,
+        'flapping_group_id': None,
+    }
+
+
+def events_history_fixture(start_ts, end_ts, episodes):
+    return {
+        'requested': {'start_ts': start_ts, 'end_ts': end_ts},
+        'filters': {'maintenance': 'include'},
+        'episodes': episodes, 'events': [], 'flapping_groups': [],
+        'row_budget': 2048, 'truncated': False, 'matched_count': len(episodes),
+        'episode_scope': {'grouped_from': 'all_state_changes_in_range', 'narrowed_by': []},
+    }
+
+
+def build_investigation_route(snapshot, port, episode):
+    """One combined /api/** handler serving config, host/service telemetry
+    history, the events/incidents feed, and the current-diagnosis snapshot --
+    enough to populate every section (Overview, Host, Services, History with
+    a selected service, Incidents, Pipeline, Settings) in a single page.
+    """
+    def route_api(route):
+        path = urlparse(route.request.url).path
+        if path == '/api/config':
+            route.fulfill(status=200, json=config_fixture())
+            return
+        if path == '/api/telemetry/history':
+            query = parse_qs(urlparse(route.request.url).query)
+            start_ts = int(query['start_ts'][0])
+            end_ts = int(query['end_ts'][0])
+            if query.get('kind', [''])[0] == 'service':
+                route.fulfill(status=200, json=service_history_fixture(start_ts, end_ts, port))
+                return
+            route.fulfill(status=200, json=host_metric_fixture(start_ts, end_ts))
+            return
+        if path == '/api/events/history':
+            query = parse_qs(urlparse(route.request.url).query)
+            start_ts = int(query['start_ts'][0])
+            end_ts = int(query['end_ts'][0])
+            route.fulfill(status=200, json=events_history_fixture(start_ts, end_ts, [episode]))
+            return
+        if path == '/api/advanced/current':
+            route.fulfill(status=200, json=snapshot)
+            return
+        route.fallback()
+    return route_api
+
+
+# The id-or-(tag,class,index-among-parent's-children) descriptor T-05-20's
+# reachability invariant is asserted against -- see
+# test_every_advanced_control_is_present_and_operable_in_both_themes. Returns
+# one 'descriptor|enabled' string per collected control so Python-side parsing
+# never has to re-derive the split.
+CONTROL_ENUMERATION_SCRIPT = """
+() => {
+    const nodes = Array.from(document.querySelectorAll('button, select, input, summary, [tabindex="0"]'));
+    return nodes.map((node) => {
+        const id = node.id || '';
+        let descriptor;
+        if (id) {
+            descriptor = `id:${id}`;
+        } else {
+            const classes = Array.from(node.classList).sort().join('.');
+            const siblings = node.parentElement ? Array.from(node.parentElement.children) : [];
+            const index = siblings.indexOf(node);
+            descriptor = `${node.tagName}:${classes}:${index}`;
+        }
+        const enabled = node.disabled === true ? 'false' : 'true';
+        return `${descriptor}|${enabled}`;
+    });
+}
+"""
 
 
 class AdvancedUiTests(unittest.TestCase):
@@ -2417,6 +2554,193 @@ class AdvancedUiTests(unittest.TestCase):
             self.assertEqual(page.locator('button[type="submit"]').count(), 0)
         finally:
             page.close()
+
+    # ------------------------------------------------------------------
+    # Phase 5 05-05: the D-02 reachability invariant, and density-driven
+    # disclosure defaults (Task 1's own extension of the existing density
+    # mechanism).
+    # ------------------------------------------------------------------
+
+    def test_every_advanced_control_is_present_and_operable_in_both_themes(self):
+        """T-05-20: the reachability invariant asserted directly, not assumed --
+        the set of interactive controls in the workspace is proven identical,
+        multiplicity included, in both themes, and no control is enabled in
+        one theme while disabled in the other.
+
+        Exactly one service and one incident episode populate the fixture --
+        never two of the same repeatable row/marker/segment shape -- so the
+        id-or-(tag,class,index-among-parent) descriptor CONTROL_ENUMERATION_SCRIPT
+        computes can never collide with itself inside a single theme; a
+        collision there would mean two different controls collapsed into one
+        counted key, which is exactly the failure mode the distinct-count
+        assertion below exists to catch.
+        """
+        port = 8080
+        snapshot = self._snapshot()
+        snapshot['services'] = [maintenance_service(port, 'Edge service', critical=True)]
+        snapshot.update({'pipeline': {}, 'settings': {}, 'exceptions': []})
+        episode = incident_episode(port, 'Edge service', 1_700_000_000, 1_700_000_600)
+
+        descriptors_by_theme = {}
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+                if theme == 'light':
+                    page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                page.route('**/api/**', build_investigation_route(snapshot, port, episode))
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.locator('[data-section="host"]').click()
+                    page.locator('#host-section').wait_for(state='visible', timeout=5_000)
+                    page.locator('[data-section="services"]').click()
+                    page.locator('#services-table').wait_for(timeout=5_000)
+                    page.locator('.service-details-toggle').first.wait_for(timeout=5_000)
+                    page.locator('[data-section="history"]').click()
+                    page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+                    page.locator('#history-service-picker').select_option(str(port))
+                    page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+                    page.locator('[data-section="incidents"]').click()
+                    page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+                    page.locator('[data-section="pipeline"]').click()
+                    page.locator('#pipeline-section').wait_for(state='visible', timeout=5_000)
+                    page.locator('[data-section="settings"]').click()
+                    page.locator('#density-preference').wait_for(state='visible', timeout=5_000)
+                    page.locator('[data-section="overview"]').click()
+                    page.locator('#overview-section').wait_for(state='visible', timeout=5_000)
+                    descriptors_by_theme[theme] = page.evaluate(CONTROL_ENUMERATION_SCRIPT)
+                finally:
+                    page.close()
+
+        dark_descriptors = descriptors_by_theme['dark']
+        light_descriptors = descriptors_by_theme['light']
+        dark_counter = Counter(dark_descriptors)
+        light_counter = Counter(light_descriptors)
+
+        self.assertGreater(len(dark_counter), 0)
+        self.assertGreater(len(light_counter), 0)
+        # Counter, not set: a control missing from one theme *and* a changed
+        # multiplicity both fail here with a readable diff.
+        self.assertEqual(dark_counter, light_counter)
+
+        # len(counter), never sum(counter.values()) -- the sum equals the
+        # collected-element count for every possible input (a Counter always
+        # balances), so only the distinct-key count can catch two controls
+        # sharing one descriptor.
+        self.assertEqual(len(dark_counter), len(dark_descriptors))
+        self.assertEqual(len(light_counter), len(light_descriptors))
+
+        def enabled_states(descriptors):
+            states = {}
+            for entry in descriptors:
+                base, enabled = entry.rsplit('|', 1)
+                states[base] = enabled
+            return states
+
+        dark_states = enabled_states(dark_descriptors)
+        light_states = enabled_states(light_descriptors)
+        for key, enabled in dark_states.items():
+            self.assertEqual(enabled, light_states[key], f'{key} enabled state differs between dark and light')
+
+    def test_density_drives_disclosure_defaults_and_theme_only_supplies_the_default_density(self):
+        """D-02: density, not theme, drives the default disclosure state of the
+        two named surfaces -- theme only supplies density's own default when
+        no explicit preference is set. Reads DOM presence, enabled state,
+        open state and text content throughout -- never a colour -- so a
+        theme rendering every control in an unreadable colour would still
+        fail elsewhere but cannot pass this test by accident.
+        """
+        port = 8080
+        snapshot = self._snapshot()
+        snapshot['services'] = [maintenance_service(port, 'Edge service', critical=True)]
+        snapshot.update({'pipeline': {}, 'settings': {}, 'exceptions': []})
+        episode = incident_episode(port, 'Edge service', 1_700_000_000, 1_700_000_600)
+
+        def open_investigation(page):
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-service-picker').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-service-picker').select_option(str(port))
+            page.locator('#service-history-content').wait_for(state='visible', timeout=5_000)
+
+        def detail_open(page):
+            return page.locator('#service-availability-detail').evaluate('(node) => node.open')
+
+        def transitions_toggle(page):
+            return page.locator('.incident-transitions-toggle').first
+
+        def transitions_list(page):
+            return page.locator('.incident-transitions').first
+
+        results = {}
+
+        # Light theme, no explicit density preference: comfortable, so both
+        # surfaces default closed/collapsed.
+        light_page = self.browser.new_page()
+        light_page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+        light_page.route('**/api/**', build_investigation_route(snapshot, port, episode))
+        try:
+            open_investigation(light_page)
+            self.assertTrue(light_page.evaluate("document.body.classList.contains('density-comfortable')"))
+            self.assertFalse(detail_open(light_page))
+            light_page.locator('[data-section="incidents"]').click()
+            light_page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(transitions_toggle(light_page).get_attribute('aria-expanded'), 'false')
+            self.assertFalse(transitions_list(light_page).is_visible())
+
+            # One keyboard-operable activation of the <summary> reveals the
+            # same content dark shows by default.
+            light_page.locator('[data-section="history"]').click()
+            summary = light_page.locator('#service-availability-detail summary')
+            summary.focus()
+            summary.press('Enter')
+            self.assertTrue(detail_open(light_page))
+            self.assertTrue(light_page.locator('#service-availability-detail-body').is_visible())
+            results['detail_text_light'] = light_page.locator('#service-availability-detail-body').text_content()
+
+            # One activation of the incident row's own toggle reveals the same
+            # transitions content dark shows by default.
+            light_page.locator('[data-section="incidents"]').click()
+            transitions_toggle(light_page).click()
+            self.assertEqual(transitions_toggle(light_page).get_attribute('aria-expanded'), 'true')
+            self.assertTrue(transitions_list(light_page).is_visible())
+            results['transitions_text_light'] = transitions_list(light_page).text_content()
+
+            # Still light theme: an explicit compact density selection flips
+            # both defaults -- theme supplies only the default, never a gate.
+            light_page.locator('[data-section="settings"]').click()
+            light_page.locator('#density-preference').select_option('compact')
+            self.assertTrue(detail_open(light_page))
+            self.assertEqual(transitions_toggle(light_page).get_attribute('aria-expanded'), 'true')
+        finally:
+            light_page.close()
+
+        # Dark theme (default), no explicit density preference: compact, so
+        # both surfaces default open/expanded.
+        dark_page = self.browser.new_page()
+        dark_page.route('**/api/**', build_investigation_route(snapshot, port, episode))
+        try:
+            open_investigation(dark_page)
+            self.assertTrue(dark_page.evaluate("document.body.classList.contains('density-compact')"))
+            self.assertTrue(detail_open(dark_page))
+            results['detail_text_dark'] = dark_page.locator('#service-availability-detail-body').text_content()
+
+            dark_page.locator('[data-section="incidents"]').click()
+            dark_page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(transitions_toggle(dark_page).get_attribute('aria-expanded'), 'true')
+            self.assertTrue(transitions_list(dark_page).is_visible())
+            results['transitions_text_dark'] = transitions_list(dark_page).text_content()
+
+            # Still dark theme: an explicit comfortable density selection
+            # flips both defaults the other way.
+            dark_page.locator('[data-section="settings"]').click()
+            dark_page.locator('#density-preference').select_option('comfortable')
+            self.assertFalse(detail_open(dark_page))
+            self.assertEqual(transitions_toggle(dark_page).get_attribute('aria-expanded'), 'false')
+        finally:
+            dark_page.close()
+
+        self.assertEqual(results['detail_text_light'], results['detail_text_dark'])
+        self.assertEqual(results['transitions_text_light'], results['transitions_text_dark'])
 
 
 if __name__ == '__main__':
