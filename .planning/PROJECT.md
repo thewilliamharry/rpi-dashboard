@@ -29,13 +29,13 @@ At a glance, the operator can trust what is running, what is failing, and how th
 - ✓ Historical APIs return bounded, server-selected resolution with explicit observed, gap, unknown, expired, and pending states — validated in Phase 2
 - ✓ Operator can open a separate advanced analytics and monitoring page from either theme, and return without losing theme choice — validated in Phase 3 (UX-02)
 - ✓ Advanced analytics provides detailed current-state diagnosis for the host Pi, every configured or discovered service, effective monitoring settings, and collection health — validated in Phase 3 (TEL-06, DIA-01, DIA-02, DIA-03, DIA-08)
+- ✓ Existing dashboard UI and interactions form a cohesive, responsive experience while preserving the distinct intent of light and dark modes — validated in Phase 5 (UX-05, UX-06, UX-07)
+- ✓ Compact preview analytics remain available on the main dashboard in both themes — validated in Phase 5 (UX-01)
+- ✓ Advanced analytics exposes the same monitoring capabilities and settings in both themes while adapting presentation and density to each theme — validated in Phase 5 (UX-03, UX-04)
 
 ### Active
 
-- [ ] Existing dashboard UI and interactions form a cohesive, responsive experience while preserving the distinct intent of light and dark modes
-- [ ] Compact preview analytics remain available on the main dashboard in both themes
 - [ ] Advanced analytics provides 90 days of bounded historical system and service data
-- [ ] Advanced analytics exposes the same monitoring capabilities and settings in both themes while adapting presentation and density to each theme
 
 ### Out of Scope
 
@@ -102,4 +102,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-20 after Phase 3 completion*
+*Last updated: 2026-08-28 after Phase 5 completion*
