@@ -2217,6 +2217,114 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_mouse_drag_abandons_a_pending_keyboard_anchor_so_a_later_plain_enter_applies_nothing(self):
+        # 05-07 Task 1 (gap 1 / CR-01): a mouse drag anywhere in the chart
+        # stack must abandon a keyboard-armed anchor, so a later plain Enter
+        # on an unrelated point target applies no stale range.
+        page, _start_ts, _end_ts, counters = self._drag_ready_page()
+        try:
+            targets = page.locator('#chart-cpu .hist-point-target')
+            targets.first.wait_for(state='attached', timeout=5_000)
+            self.assertEqual(targets.count(), 2)
+
+            # (a) Arm a keyboard anchor on the first point.
+            targets.nth(0).press('Shift+Enter')
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+
+            # (b) A real mouse drag on the same chart -- the range the
+            # operator actually chose -- must both apply and abandon the
+            # pending anchor.
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.2
+            x2 = box['x'] + box['width'] * 0.8
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            with page.expect_request(
+                lambda request: urlparse(request.url).path == '/api/telemetry/history',
+            ):
+                page.mouse.move(x2, y)
+                page.mouse.up()
+            page.locator('#range-back').wait_for(state='attached', timeout=5_000)
+            post_drag_start = page.locator('#range-start').input_value()
+            post_drag_end = page.locator('#range-end').input_value()
+            count_after_drag = counters['history']
+
+            # (c) A plain Enter on a point target never anchored in this
+            # sequence.
+            targets.nth(1).press('Enter')
+            page.wait_for_timeout(200)
+
+            # (d) Nothing changed: the drag's own range stands, no request
+            # fired for the stale anchor, and the overlay stays hidden.
+            self.assertEqual(page.locator('#range-start').input_value(), post_drag_start)
+            self.assertEqual(page.locator('#range-end').input_value(), post_drag_end)
+            self.assertEqual(counters['history'], count_after_drag)
+            self.assertTrue(page.locator('#history-drag-overlay').is_hidden())
+        finally:
+            page.close()
+
+    def test_cancelled_mouse_drag_also_abandons_a_pending_keyboard_anchor(self):
+        # 05-07 Task 1 (gap 1 / CR-01): the cancelled-drag half -- a drag
+        # abandoned mid-gesture must also clear a pending keyboard anchor,
+        # guarding cancelDragSelect's own defensive call.
+        #
+        # This deliberately does NOT abandon the drag with Escape. A
+        # separate, pre-existing window-level listener (05-04 Task 3, A-22,
+        # bindTimeCursorHandlers) already unconditionally calls
+        # cancelKeyboardRangeAnchor() on every Escape keydown, independent of
+        # drag state or cancelDragSelect. Using Escape here would pass
+        # whether or not cancelDragSelect's own defensive call exists,
+        # silently failing to reproduce the gap. A native `pointercancel`
+        # event is dispatched instead -- cancelDragSelect is registered as
+        # its direct window listener (see beginDragSelect), so this exercises
+        # exactly the call site the fix adds, with no Escape confound.
+        page, _start_ts, _end_ts, counters = self._drag_ready_page()
+        try:
+            targets = page.locator('#chart-cpu .hist-point-target')
+            targets.first.wait_for(state='attached', timeout=5_000)
+            self.assertEqual(targets.count(), 2)
+            before_start = page.locator('#range-start').input_value()
+            before_end = page.locator('#range-end').input_value()
+            before_count = counters['history']
+
+            # Arm a keyboard anchor on the first point.
+            targets.nth(0).press('Shift+Enter')
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+
+            # Start a real mouse drag on the same chart.
+            box = page.locator('#chart-cpu').bounding_box()
+            x1 = box['x'] + box['width'] * 0.25
+            x2 = box['x'] + box['width'] * 0.75
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x1, y)
+            page.mouse.down()
+            page.mouse.move(x2, y)
+            page.locator('#history-drag-overlay').wait_for(state='visible', timeout=5_000)
+
+            # Abandon the drag mid-gesture with a native pointercancel, the
+            # same event cancelDragSelect is registered against directly.
+            page.evaluate(
+                "() => window.dispatchEvent(new PointerEvent('pointercancel', {bubbles: true, cancelable: true}))",
+            )
+            page.locator('#history-drag-overlay').wait_for(state='hidden', timeout=5_000)
+            page.mouse.up()
+            page.wait_for_timeout(150)
+            self.assertEqual(counters['history'], before_count)
+
+            # A plain Enter on the second point target -- never anchored --
+            # must apply nothing, because the cancelled drag already
+            # abandoned the pending anchor.
+            targets.nth(1).press('Enter')
+            page.wait_for_timeout(200)
+
+            self.assertEqual(page.locator('#range-start').input_value(), before_start)
+            self.assertEqual(page.locator('#range-end').input_value(), before_end)
+            self.assertEqual(counters['history'], before_count)
+            self.assertTrue(page.locator('#history-drag-overlay').is_hidden())
+        finally:
+            page.close()
+
     def test_empty_points_fixture_renders_no_point_targets_and_no_key_applies_a_range(self):
         snapshot = self._snapshot()
         config_fixture = self._config_fixture()
