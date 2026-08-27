@@ -298,7 +298,36 @@
 
   const FRESHNESS_WORDS = new Set(['fresh', 'aging', 'stale', 'unknown']);
 
+  // One vocabulary: server literal -> {glyph, word, className}. Every place the
+  // workspace shows a freshness reading routes through freshnessPresentation/
+  // freshnessBadge, so the same glyph, word and class always represent the
+  // same server literal everywhere the workspace renders it, in both themes.
+  // A Map, matching this file's existing discipline for lookup tables keyed
+  // by wire values (see EXCEPTION_COPY above).
+  const FRESHNESS_PRESENTATION = new Map([
+    ['fresh', {glyph: '●', word: 'Fresh', className: 'freshness-fresh'}],
+    ['aging', {glyph: '◈', word: 'Degraded', className: 'freshness-degraded'}],
+    ['stale', {glyph: '◐', word: 'Stale', className: 'freshness-stale'}],
+    ['unknown', {glyph: '○', word: 'Unknown', className: 'freshness-unknown'}],
+  ]);
+
+  // Fail-closed, like serviceFreshness's own allowlist: any literal outside
+  // the server's four resolves to the 'unknown' entry, so an unrecognised or
+  // absent value can never render as Fresh or Degraded.
+  function freshnessPresentation(state) {
+    return FRESHNESS_PRESENTATION.get(state) || FRESHNESS_PRESENTATION.get('unknown');
+  }
+
+  function freshnessBadge(state) {
+    const presentation = freshnessPresentation(state);
+    const badge = document.createElement('span');
+    badge.className = `freshness-badge ${presentation.className}`;
+    badge.textContent = `${presentation.glyph} ${presentation.word}`;
+    return badge;
+  }
+
   function freshnessWord(state) {
+    if (state === 'aging') return 'degraded';
     return FRESHNESS_WORDS.has(state) ? state : 'unknown';
   }
 
@@ -2967,7 +2996,7 @@
     const summaries = document.createElement('div');
     summaries.className = 'summary-grid';
     const host = snapshot.host || {};
-    const hostCard = addCard(summaries, 'Host', `${displayValue((host.identity || {}).hostname)} — Freshness: ${(host.freshness || {}).state || 'Unknown'}`, 'host');
+    const hostCard = addCard(summaries, 'Host', `${displayValue((host.identity || {}).hostname)} — Freshness: ${freshnessPresentation((host.freshness || {}).state).word}`, 'host');
     hostCard.setAttribute('data-testid', 'host-summary');
     addCard(summaries, 'Services', snapshot.services ? 'Current service evidence is available.' : 'Unknown', 'services');
     addCard(summaries, 'Collection Health', snapshot.pipeline ? 'Current pipeline evidence is available.' : 'Unknown', 'pipeline');
@@ -2977,7 +3006,7 @@
 
   function formatFreshnessEvidence(freshness, cadence) {
     const evidence = freshness || {};
-    return `${evidence.state || 'unknown'} — ${relativeAge(evidence.age_seconds)}; expected every ${displayValue(cadence, ' seconds')}`;
+    return `${freshnessPresentation(evidence.state).word} — ${relativeAge(evidence.age_seconds)}; expected every ${displayValue(cadence, ' seconds')}`;
   }
 
   // The four completeness states the server derives for a service's gap block.
@@ -3130,6 +3159,11 @@
           item.append(comparison);
         }
       }
+      if (freshness.state === 'aging') {
+        const degraded = document.createElement('p');
+        degraded.textContent = `This stream is degraded. Its last sample was ${relativeAge(freshness.age_seconds)}; expected every ${displayValue(stream.cadence_seconds, ' seconds')} — not yet stale.`;
+        item.append(degraded);
+      }
       list.append(item);
     });
 
@@ -3224,8 +3258,13 @@
     return 'unknown';
   }
 
+  // T-05-06: case-sensitive on purpose. The server emits exactly the four
+  // lowercase wire literals (fresh/aging/stale/unknown) and never a
+  // case-varied form; treating 'AGING' as equivalent to 'aging' would let an
+  // unrecognised literal masquerade as a recognised one instead of failing
+  // closed to 'unknown'.
   function serviceFreshness(service) {
-    const value = String((service.freshness || {}).state || 'unknown').toLowerCase();
+    const value = String((service.freshness || {}).state || 'unknown');
     return ['fresh', 'aging', 'stale', 'unknown'].includes(value) ? value : 'unknown';
   }
 
@@ -3507,7 +3546,8 @@
       latency.textContent = latencyValue === null ? displayValue(service.failure_class || service.last_error, '') : `${latencyValue} ms`;
       const duration = document.createElement('td'); duration.textContent = formatDuration(serviceDuration(service));
       const criticality = document.createElement('td'); criticality.textContent = service.critical ? 'Critical' : 'Standard';
-      const freshness = document.createElement('td'); freshness.textContent = `● ${serviceFreshness(service)} — ${relativeAge((service.freshness || {}).age_seconds)}`;
+      const freshness = document.createElement('td');
+      freshness.append(freshnessBadge(serviceFreshness(service)), document.createTextNode(` — ${relativeAge((service.freshness || {}).age_seconds)}`));
       row.append(identity, status, latency, duration, criticality, freshness);
       const detailRow = document.createElement('tr');
       detailRow.id = detailId; detailRow.className = 'service-detail-row'; detailRow.hidden = !expanded;
