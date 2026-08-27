@@ -402,12 +402,12 @@ Plans:
   4. Loading, empty, stale, unknown, degraded, and error states are visibly and meaningfully distinct in both themes.
   5. UI-contract or visual-regression coverage verifies shared capabilities and important states in both themes.
 
-**Plans**: 6 plans
+**Plans**: 1/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 05-01-PLAN.md — Tracer: `degraded` end to end — one shared server classifier, both payloads, one banner in both documents, proven by an unstubbed dual-theme test
+- [x] 05-01-PLAN.md — Tracer: `degraded` end to end — one shared server classifier, both payloads, one banner in both documents, proven by an unstubbed dual-theme test
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -451,5 +451,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
-| 5. Theme-Parity Analytics Experience | 0/6 | Planned | - |
+| 5. Theme-Parity Analytics Experience | 1/6 | In Progress|  |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
