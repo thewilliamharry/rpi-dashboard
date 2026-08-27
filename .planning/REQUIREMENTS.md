@@ -53,13 +53,13 @@
 
 ### Experience and Themes
 
-- [ ] **UX-01**: Existing compact analytics previews remain on the main dashboard in both light and dark modes.
+- [x] **UX-01**: Existing compact analytics previews remain on the main dashboard in both light and dark modes.
 - [x] **UX-02**: The operator can move clearly between the main dashboard and advanced analytics without losing theme choice.
-- [ ] **UX-03**: Advanced analytics exposes the same data, filters, settings, and investigations in both themes.
-- [ ] **UX-04**: Light mode presents analytics with calmer grouping and progressive disclosure, while dark mode may present denser simultaneous context.
-- [ ] **UX-05**: Advanced analytics remains usable at supported narrow and desktop viewport widths.
-- [ ] **UX-06**: Status and chart information is available through text, labels, and keyboard-accessible interactions rather than colour alone.
-- [ ] **UX-07**: Loading, empty, stale, unknown, degraded, and error states are visibly distinct.
+- [x] **UX-03**: Advanced analytics exposes the same data, filters, settings, and investigations in both themes.
+- [x] **UX-04**: Light mode presents analytics with calmer grouping and progressive disclosure, while dark mode may present denser simultaneous context.
+- [x] **UX-05**: Advanced analytics remains usable at supported narrow and desktop viewport widths.
+- [x] **UX-06**: Status and chart information is available through text, labels, and keyboard-accessible interactions rather than colour alone.
+- [x] **UX-07**: Loading, empty, stale, unknown, degraded, and error states are visibly distinct.
 
 ### Operational Resilience
 
@@ -68,7 +68,7 @@
 - [ ] **OPS-03**: Thumbnail storage and expiry remain bounded without placing large preview blobs in the primary telemetry path.
 - [ ] **OPS-04**: Automated tests cover migrations, restart recovery, concurrent web/worker database access, scheduler ownership, and failed background jobs.
 - [x] **OPS-05**: Automated tests cover outbound-target validation, DNS/redirect handling, TLS behavior, and mutation-request protections.
-- [ ] **OPS-06**: Both themes have UI-contract or visual-regression coverage for shared capabilities and important states.
+- [x] **OPS-06**: Both themes have UI-contract or visual-regression coverage for shared capabilities and important states.
 - [ ] **OPS-07**: A Raspberry Pi-class acceptance run verifies responsiveness, resource budgets, recovery, and sampling continuity under representative load.
 
 ## v2 Requirements
@@ -139,19 +139,19 @@ Every v1 requirement maps to exactly one roadmap phase.
 | HIS-04 | Phase 4 | Complete |
 | HIS-05 | Phase 4 | Complete |
 | HIS-06 | Phase 4 | Complete |
-| UX-01 | Phase 5 | Pending |
+| UX-01 | Phase 5 | Complete |
 | UX-02 | Phase 3 | Complete |
-| UX-03 | Phase 5 | Pending |
-| UX-04 | Phase 5 | Pending |
-| UX-05 | Phase 5 | Pending |
-| UX-06 | Phase 5 | Pending |
-| UX-07 | Phase 5 | Pending |
+| UX-03 | Phase 5 | Complete |
+| UX-04 | Phase 5 | Complete |
+| UX-05 | Phase 5 | Complete |
+| UX-06 | Phase 5 | Complete |
+| UX-07 | Phase 5 | Complete |
 | OPS-01 | Phase 6 | Pending |
 | OPS-02 | Phase 6 | Pending |
 | OPS-03 | Phase 6 | Pending |
 | OPS-04 | Phase 6 | Pending |
 | OPS-05 | Phase 1 | Complete |
-| OPS-06 | Phase 5 | Pending |
+| OPS-06 | Phase 5 | Complete |
 | OPS-07 | Phase 6 | Pending |
 
 DIA-08 splits across two phases: the effective-settings view, refresh controls, and

@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Advanced Current Diagnosis** - Let the operator open an advanced workspace for fresh host, service, settings, and pipeline-health diagnosis. (completed 2026-08-20)
 - [ ] **Phase 03.1: Planned Maintenance Recognition (INSERTED)** - Confirm or define expected recurring service restarts without hiding downtime or overruns. (reopened 2026-08-23 — closed on automated verification 2026-08-22; human UAT then found migration 9 could not apply to any existing deployment, see 03.1-UAT.md gaps G-03.1-1 and G-03.1-2)
 - [x] **Phase 4: Historical Investigation** - Turn retained telemetry into honest range-based charts, service history, and incident investigation. (completed 2026-08-26)
-- [ ] **Phase 5: Theme-Parity Analytics Experience** - Make the dashboard and advanced workspace cohesive, responsive, accessible, and equivalent in both themes.
+- [x] **Phase 5: Theme-Parity Analytics Experience** - Make the dashboard and advanced workspace cohesive, responsive, accessible, and equivalent in both themes. (completed 2026-08-28)
 - [ ] **Phase 6: Workload Resilience & Pi Acceptance** - Ensure discovery and previews remain bounded best-effort work and prove Beacon holds up under Pi-class load.
 
 ## Phase Details
@@ -455,5 +455,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
-| 5. Theme-Parity Analytics Experience | 7/7 | In Progress|  |
+| 5. Theme-Parity Analytics Experience | 7/7 | Complete    | 2026-08-28 |
 | 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
