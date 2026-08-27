@@ -15,6 +15,40 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 UI_CONSIDERATIONS = tuple(f'UI-{number:02d}' for number in range(1, 37))
 
 
+# WCAG 2.x contrast-ratio helper (05-02 Task 3): parses either a browser
+# getComputedStyle 'rgb(...)'/'rgba(...)' string or a literal '#rrggbb' hex
+# string, so the same helper both reads live computed colors and self-checks
+# against a known literal pair. Module-level, not a method, so it carries no
+# hidden dependency on browser/page state -- it is pure arithmetic over two
+# already-resolved colors.
+def _parse_color(value):
+    value = value.strip()
+    if value.startswith('#'):
+        hex_value = value.lstrip('#')
+        return tuple(int(hex_value[index:index + 2], 16) for index in (0, 2, 4))
+    match = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', value)
+    if not match:
+        raise ValueError(f'Cannot parse color value: {value!r}')
+    return tuple(int(part) for part in match.groups())
+
+
+def _relative_luminance(rgb):
+    def channel(value):
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = rgb
+    return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+
+def _contrast_ratio(color_a, color_b):
+    """The WCAG contrast ratio between two colors, order-independent."""
+    luminance_a = _relative_luminance(_parse_color(color_a))
+    luminance_b = _relative_luminance(_parse_color(color_b))
+    lighter, darker = max(luminance_a, luminance_b), min(luminance_a, luminance_b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
 def gap_item(port, *, open_gap, detail=None):
     """One composed gap item in the shape the server's per-stream list carries."""
     return {
@@ -292,6 +326,185 @@ class AdvancedUiTests(unittest.TestCase):
                     self.assertEqual(computed(page.locator('.service-details-toggle').first, 'minHeight'), '44px')
                 finally:
                     page.close()
+
+    def test_six_states_are_distinct_in_both_themes(self):
+        """UX-07 E3/E4: all six current-diagnosis states -- fresh, degraded, stale,
+        unknown, error, loading (empty is the services-table's own seventh copy
+        state) -- read apart by glyph, word and container shape, independently
+        per theme. Extends the dual-theme subTest shape above rather than a
+        second harness.
+        """
+        four_tier_services = [
+            maintenance_service(9501, 'Fresh service'),
+            maintenance_service(9502, 'Degraded service'),
+            maintenance_service(9503, 'Stale service'),
+            maintenance_service(9504, 'Unknown service'),
+        ]
+        four_tier_services[0]['freshness'] = {'state': 'fresh', 'age_seconds': 5}
+        four_tier_services[1]['freshness'] = {'state': 'aging', 'age_seconds': 600}
+        four_tier_services[2]['freshness'] = {'state': 'stale', 'age_seconds': 6_000}
+        four_tier_services[3]['freshness'] = {'state': 'unknown', 'age_seconds': None}
+        populated_payload = self._snapshot()
+        populated_payload.update({
+            'services': four_tier_services, 'pipeline': {}, 'settings': {}, 'exceptions': [],
+        })
+        empty_payload = self._snapshot()
+        empty_payload.update({'services': [], 'pipeline': {}, 'settings': {}, 'exceptions': []})
+        expected_glyph_prefixes = {
+            9501: '● Fresh — ', 9502: '◈ Degraded — ', 9503: '◐ Stale — ', 9504: '○ Unknown — ',
+        }
+
+        degraded_colors = {}
+        # Vacuity guard, run once outside the theme loop: a helper that returns
+        # a large number for every input could make the >= 4.5 assertions below
+        # pass by accident. This literal pair is the light-mode --muted-on-bg3
+        # value this plan replaced for exactly this reason.
+        self.assertAlmostEqual(_contrast_ratio('#b0b0b0', '#f7f7f7'), 2.02, places=2)
+
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                def with_light(page):
+                    if theme == 'light':
+                        page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+                    return page
+
+                # -- Populated: four tiers, one row each; glyph, word, and legible colour. --
+                page = with_light(self.browser.new_page(viewport={'width': 1280, 'height': 900}))
+
+                def route_populated(route):
+                    if urlparse(route.request.url).path != '/api/advanced/current':
+                        route.fallback()
+                        return
+                    route.fulfill(status=200, json=populated_payload)
+
+                page.route('**/api/**', route_populated)
+                try:
+                    page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    page.locator('[data-section="services"]').click()
+                    page.locator('#services-table').wait_for(timeout=5_000)
+
+                    glyphs = set()
+                    for port, prefix in expected_glyph_prefixes.items():
+                        cell_text = self._service_row_locator(page, port).locator('td').nth(4).text_content()
+                        self.assertTrue(cell_text.startswith(prefix), f'{cell_text!r} does not start with {prefix!r}')
+                        glyphs.add(cell_text[0])
+                    self.assertEqual(len(glyphs), 4)
+
+                    degraded_span = page.locator('.freshness-degraded').first
+                    stale_span = page.locator('.freshness-stale').first
+                    unknown_span = page.locator('.freshness-unknown').first
+                    degraded_color = degraded_span.evaluate('(node) => getComputedStyle(node).color')
+                    stale_color = stale_span.evaluate('(node) => getComputedStyle(node).color')
+                    unknown_color = unknown_span.evaluate('(node) => getComputedStyle(node).color')
+                    body_color = page.evaluate('() => getComputedStyle(document.body).color')
+                    body_background = page.evaluate('() => getComputedStyle(document.body).backgroundColor')
+                    self.assertNotEqual(degraded_color, stale_color)
+                    self.assertNotEqual(degraded_color, body_color)
+                    degraded_colors[theme] = degraded_color
+
+                    # .freshness-fresh is deliberately NOT asserted here -- A-34:
+                    # light-mode --green resolves 3.30:1 against this body surface,
+                    # an app-wide token gap awaiting a human decision, tracked in
+                    # 05-DEBT.md. Asserting it here would fail on a known, accepted gap.
+                    self.assertGreaterEqual(_contrast_ratio(stale_color, body_background), 4.5)
+                    self.assertGreaterEqual(_contrast_ratio(unknown_color, body_background), 4.5)
+                    self.assertGreaterEqual(_contrast_ratio(degraded_color, body_background), 4.5)
+
+                    self.assertEqual(degraded_span.evaluate('(node) => getComputedStyle(node).borderStyle'), 'none')
+                    self.assertEqual(degraded_span.evaluate('(node) => getComputedStyle(node).display'), 'inline')
+                finally:
+                    page.close()
+
+                # -- Shape: an error is a bordered box -- the load-bearing distinction
+                #    from degraded's unbordered inline badge, checked in this same theme. --
+                error_page = with_light(self.browser.new_page(viewport={'width': 1280, 'height': 900}))
+
+                def route_error(route):
+                    if urlparse(route.request.url).path != '/api/advanced/current':
+                        route.fallback()
+                        return
+                    route.fulfill(status=503, json={'error': 'offline'})
+
+                error_page.route('**/api/**', route_error)
+                try:
+                    error_page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    error_locator = error_page.locator('#advanced-refresh-error')
+                    error_locator.wait_for(state='visible', timeout=5_000)
+                    self.assertEqual(error_locator.evaluate('(node) => getComputedStyle(node).borderStyle'), 'solid')
+                    self.assertNotEqual(error_locator.evaluate('(node) => getComputedStyle(node).display'), 'inline')
+                finally:
+                    error_page.close()
+
+                # -- Empty: the existing services-empty copy, and zero badges. --
+                empty_page = with_light(self.browser.new_page(viewport={'width': 1280, 'height': 900}))
+
+                def route_empty(route):
+                    if urlparse(route.request.url).path != '/api/advanced/current':
+                        route.fallback()
+                        return
+                    route.fulfill(status=200, json=empty_payload)
+
+                empty_page.route('**/api/**', route_empty)
+                try:
+                    empty_page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    empty_page.locator('[data-section="services"]').click()
+                    empty_page.locator('#services-empty').wait_for(state='visible', timeout=5_000)
+                    self.assertIn('No services match these filters', empty_page.locator('#services-empty').text_content())
+                    self.assertEqual(empty_page.locator('.freshness-badge').count(), 0)
+                finally:
+                    empty_page.close()
+
+                # -- Loading: a pending read never renders as a known state. The route
+                #    handler deliberately never calls fulfill/continue/abort, so the
+                #    request stays pending and the initial skeleton markup is never
+                #    replaced by renderServices(). Closed in `finally` so the
+                #    never-fulfilled route cannot leak into the next subTest. --
+                loading_page = with_light(self.browser.new_page(viewport={'width': 1280, 'height': 900}))
+
+                def route_pending(route):
+                    if urlparse(route.request.url).path != '/api/advanced/current':
+                        route.fallback()
+                    # else: intentionally left pending forever.
+
+                loading_page.route('**/api/**', route_pending)
+                try:
+                    loading_page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+                    loading_page.locator('[data-section="services"]').click()
+                    loading_page.locator('.service-skeleton').first.wait_for(state='visible', timeout=5_000)
+                    self.assertEqual(loading_page.locator('.freshness-badge').count(), 0)
+                finally:
+                    loading_page.close()
+
+        # Proves the degraded token re-resolves per theme rather than the light
+        # theme falling through to the dark value.
+        self.assertNotEqual(degraded_colors['dark'], degraded_colors['light'])
+
+    def test_freshness_filter_and_sort_still_use_the_server_wire_literals(self):
+        services = [
+            maintenance_service(9601, 'Fresh service'),
+            maintenance_service(9602, 'Degraded service'),
+            maintenance_service(9603, 'Stale service'),
+            maintenance_service(9604, 'Unknown service'),
+        ]
+        services[0]['freshness'] = {'state': 'fresh', 'age_seconds': 5}
+        services[1]['freshness'] = {'state': 'aging', 'age_seconds': 600}
+        services[2]['freshness'] = {'state': 'stale', 'age_seconds': 6_000}
+        services[3]['freshness'] = {'state': 'unknown', 'age_seconds': None}
+        page = self._services_page(services)
+        try:
+            degraded_option = page.locator('#service-freshness-filter option', has_text='Degraded')
+            self.assertEqual(degraded_option.get_attribute('value'), 'aging')
+            option_values = page.locator('#service-freshness-filter option').evaluate_all(
+                '(nodes) => nodes.map((node) => node.value)',
+            )
+            self.assertEqual(sorted(value for value in option_values if value), ['aging', 'fresh', 'stale', 'unknown'])
+
+            page.locator('#service-freshness-filter').select_option('aging')
+            rows = page.locator('#services-table tbody > tr.service-row')
+            self.assertEqual(rows.count(), 1)
+            self.assertIn(':9602', rows.first.locator('.service-port').text_content())
+        finally:
+            page.close()
 
     def test_connection_warning_retains_last_success_and_keeps_server_safety_independent(self):
         healthy = self._snapshot()
