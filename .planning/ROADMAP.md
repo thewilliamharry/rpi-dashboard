@@ -405,10 +405,21 @@ Plans:
 **Plans**: 6 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 05-01-PLAN.md — Tracer: `degraded` end to end — one shared server classifier, both payloads, one banner in both documents, proven by an unstubbed dual-theme test
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 05-02-PLAN.md — Six-state vocabulary across the advanced workspace: glyph-and-word badges, the box-versus-inline rule, and a dual-theme distinctness test
 - [ ] 05-03-PLAN.md — Theme-parity audit: the exhaustive, self-maintaining visibility inventory plus main-dashboard parity and deliberate-calm substitutes
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 05-04-PLAN.md — Keyboard parity for chart interactions: the marker role fix, coverage-strip reachability, the focus-driven time cursor, and one shared range-apply function
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 05-05-PLAN.md — Density drives progressive disclosure on two named surfaces, with the reachability invariant asserted and the stale incident count closed
 - [ ] 05-06-PLAN.md — Responsive reconciliation to one shared narrow boundary, and the cross-surface dual-theme contract module that closes OPS-06
 

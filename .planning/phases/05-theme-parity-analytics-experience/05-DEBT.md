@@ -63,7 +63,9 @@ or (c) accept 3.30:1 for success text and record the exception. Until then:
 - Executing Phase 5 must **not** change `--green`.
 - Task 3 asserts contrast for `.freshness-stale`, `.freshness-unknown` and `.freshness-degraded`
   only. The absence of a fourth assertion is deliberate and recorded here — it is not an oversight,
-  and a verifier should not read `05-02-PLAN.md:199`'s 4.5:1 rule as enforced for `fresh`.
+  and a verifier should not read `05-02-PLAN.md`'s 4.5:1 rule (the paragraph beginning "Every figure
+  below is quoted against the light/dark **body** surface") as enforced for `fresh`. Referenced by
+  quoted text rather than line number: the A-34 insertion already moved this rule once (199 → ~213).
 
 ---
 

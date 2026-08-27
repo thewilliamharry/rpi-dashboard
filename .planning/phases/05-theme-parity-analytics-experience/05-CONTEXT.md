@@ -15,6 +15,23 @@ three questions that are product decisions rather than technical ones.
 
 ## Decisions
 
+<decisions>
+- **D-01 — "degraded" is a server-emitted state, not a client-side guess** Define `degraded`
+  server-side in the `beacon/diagnosis.py` classification tier from durable evidence, then render it.
+  Never compute it from a client-side heuristic. Full rationale and constraints below.
+- **D-02 — extend the existing density mechanism to drive progressive disclosure** Reuse and extend
+  the density mechanism from `03-CONTEXT.md` D-16; do not build a second mechanism. Density changes
+  what is shown by default, never what is reachable. Full rationale below.
+- **D-03 — on the main dashboard, arc gauges alone satisfy UX-01 in light mode** The `html.light`
+  rules hiding sparklines, temp row, service previews and uptime labels are deliberate calm, not a
+  parity defect. Applies to the main dashboard ONLY, never the advanced workspace. Full rationale
+  below.
+</decisions>
+
+The three sections that follow carry each decision's full rationale, constraints, and scope fences.
+They are the authoritative statement; the block above exists so the decision-coverage gate can
+enumerate them.
+
 ### D-01 — "degraded" is a server-emitted state, not a client-side guess
 
 **Decision:** Define `degraded` server-side (in the `beacon/diagnosis.py` classification tier) from
