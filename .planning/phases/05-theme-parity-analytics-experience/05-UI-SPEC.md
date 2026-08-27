@@ -405,7 +405,7 @@ below cover this phase's own shape-rooted STATE and PARITY coverage.
 | overflow | E7 — Drag-to-select keyboard equivalent | ✅ resolved (explicit) | Two-focus-plus-Enter gesture reuses the mouse drag's own range-apply function; `Escape` cancels a pending anchor cleanly |
 | populated | E8 — Hover cursor keyboard equivalent | ✅ resolved (explicit) | Extends the existing point-target `focus` handler to drive the shared cursor, no new architecture |
 | long-text | E9 — `renderMarkerSingle` ARIA role | ✅ resolved (explicit) | Verbatim fix from `04-REVIEW.md` WR-02 applied; `role="img"` convention for the two non-actionable siblings resolved (A4) rather than left open |
-| overflow, zero-one-many | E10 — Responsive breakpoint reconciliation (719px→720px) | ✅ resolved (explicit) | Single shared narrow boundary across both stylesheets; every previously-documented narrow-width mitigation (services table scroll, filter collapse, axis scroll) is unchanged, only the boundary value moves |
+| overflow, zero-one-many | E10 — Responsive breakpoint reconciliation (719px→720px) | ✅ resolved (explicit) | Single shared narrow boundary across both stylesheets; every previously-documented narrow-width mitigation (services table scroll, filter wrapping, axis scroll) is unchanged, only the boundary value moves |
 | populated | E11 — Marker rail at narrow width | ✅ resolved (explicit) | Confirmed to inherit the existing `.hist-axis-scroll` container; no new CSS, new Playwright assertion only (OPS-06 coverage, not a behavior change) |
 
 ---
