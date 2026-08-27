@@ -99,6 +99,16 @@
     // its history did not load, so the readout reads as absence rather than
     // a stale value from a previous selection.
     serviceBandSegments: null, serviceLatencyData: null,
+    // Phase 5 05-05 (D-02 extension): per-instance operator overrides for the
+    // two density-driven disclosure defaults. In-memory only -- never touched
+    // by loadPreferences/savePreferences, so a density-driven default is a
+    // presentation choice, never a persisted preference of its own.
+    // `availabilityDetailOverride` is null when the operator has not touched
+    // the availability detail this render cycle, otherwise the operator's own
+    // open boolean. `incidentTransitionsOverrides` maps an episode key
+    // (incidentEpisodeKey) to the operator's own expanded boolean, pruned to
+    // the keys currently rendered after every incidents render (A-25).
+    availabilityDetailOverride: null, incidentTransitionsOverrides: new Map(),
   };
   const $ = (id) => document.getElementById(id);
 
@@ -224,6 +234,36 @@
     const density = state.preferences.density || (document.documentElement.classList.contains('light') ? 'comfortable' : 'compact');
     document.body.classList.toggle('density-comfortable', density === 'comfortable');
     document.body.classList.toggle('density-compact', density === 'compact');
+  }
+
+  // D-02 extension (Phase 5 05-05): the single input to the default open
+  // state of the two named disclosure surfaces. Reads only the density class
+  // applyDensity already maintains -- never the theme class directly -- so a
+  // light theme explicitly set to compact behaves exactly like a dark theme
+  // set to compact, and vice versa.
+  function densityDisclosureDefault() {
+    return document.body.classList.contains('density-compact');
+  }
+
+  // A-24: choosing a density from Settings is itself an explicit request for
+  // that density's presentation, so (unlike a re-render) it clears every
+  // per-instance override and re-applies the default to whatever is
+  // currently in the document. Never called from applyDensity() itself --
+  // applyDensity also runs at startup and on theme application, and calling
+  // this there would make an ordinary re-render clobber an operator's own
+  // override.
+  function applyDisclosureDefaults() {
+    state.availabilityDetailOverride = null;
+    state.incidentTransitionsOverrides.clear();
+    const defaultOpen = densityDisclosureDefault();
+    const detailsEl = $('service-availability-detail');
+    if (detailsEl) detailsEl.open = defaultOpen;
+    document.querySelectorAll('.incident-transitions-toggle').forEach((toggle) => {
+      const transitionsList = toggle.nextElementSibling;
+      if (transitionsList && transitionsList.classList.contains('incident-transitions')) {
+        applyIncidentTransitionsState(toggle, transitionsList, defaultOpen);
+      }
+    });
   }
 
   async function apiFetch() {
@@ -931,6 +971,17 @@
         detailBody.append(row);
       });
     }
+    // D-02 extension: the operator's own override wins when set; otherwise
+    // the density class currently in effect supplies the default. This runs
+    // on every render (refresh polls, range changes, service changes) but
+    // never resets an operator's own choice -- only applyDisclosureDefaults
+    // (an explicit density change) clears the override (A-24).
+    const detailsEl = $('service-availability-detail');
+    if (detailsEl) {
+      detailsEl.open = state.availabilityDetailOverride !== null
+        ? state.availabilityDetailOverride
+        : densityDisclosureDefault();
+    }
   }
 
   // Sums each bucket's failure_class_counts map across the range, reusing
@@ -1195,6 +1246,24 @@
     if (eventType) eventType.value = state.preferences.historyFilters.eventType || '';
   }
 
+  // Phase 5 05-05 (A-26): no episode identifier exists in the payload; the
+  // port and the down timestamp together are the stable pair every episode
+  // carries, and the pair the existing incident rendering already keys its
+  // display on. Used to key the per-instance transitions-toggle override map.
+  function incidentEpisodeKey(episode) {
+    return `${episode.port}:${episode.down_ts}`;
+  }
+
+  // Phase 5 05-05: the single place that keeps the transitions toggle's
+  // aria-expanded state, its label, and its list's hidden attribute in sync,
+  // shared by the row builder (initial state) and applyDisclosureDefaults
+  // (a density-change re-application).
+  function applyIncidentTransitionsState(toggle, transitionsList, expanded) {
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.textContent = expanded ? 'Hide transitions' : 'Show transitions';
+    transitionsList.hidden = !expanded;
+  }
+
   // D-14: renders the full down_ts-to-recovered_ts span split at grace
   // expiry into a grace-covered sub-segment and a post-grace unplanned-
   // fault sub-segment, sized by the server's own grace_seconds/fault_seconds
@@ -1315,26 +1384,30 @@
     // D-12: the raw state_change transitions this episode was grouped from,
     // available on expand -- reusing the existing expand-on-click
     // detail-row pattern (toggleServiceDetails's own aria-expanded idiom).
+    // Phase 5 05-05 (D-02 extension): the initial expanded state is the
+    // operator's own override for this episode when one exists, otherwise
+    // the density-driven default -- never a static "false".
+    const episodeKey = incidentEpisodeKey(episode);
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 'incident-transitions-toggle';
-    toggle.textContent = 'Show transitions';
-    toggle.setAttribute('aria-expanded', 'false');
     const transitionsList = document.createElement('div');
     transitionsList.className = 'incident-transitions';
-    transitionsList.hidden = true;
     (Array.isArray(episode.transitions) ? episode.transitions : []).forEach((transition) => {
       const line = document.createElement('p');
       const onlineWord = transition.online === 1 ? 'online' : transition.online === 0 ? 'offline' : 'unknown';
       line.textContent = `${displayValue(transition.event_type)} — ${formatLocalTimestamp(transition.ts, INCIDENT_TIMESTAMP_OPTIONS)} — ${onlineWord}`;
       transitionsList.append(line);
     });
+    const initialExpanded = state.incidentTransitionsOverrides.has(episodeKey)
+      ? state.incidentTransitionsOverrides.get(episodeKey)
+      : densityDisclosureDefault();
+    applyIncidentTransitionsState(toggle, transitionsList, initialExpanded);
     toggle.addEventListener('click', (event) => {
       event.stopPropagation();
       const expanded = toggle.getAttribute('aria-expanded') === 'true';
-      toggle.setAttribute('aria-expanded', String(!expanded));
-      toggle.textContent = expanded ? 'Show transitions' : 'Hide transitions';
-      transitionsList.hidden = expanded;
+      applyIncidentTransitionsState(toggle, transitionsList, !expanded);
+      state.incidentTransitionsOverrides.set(episodeKey, !expanded);
     });
     row.append(toggle, transitionsList);
 
@@ -1381,6 +1454,14 @@
       fragment.append(incidentRow(episode));
     });
     list.replaceChildren(fragment);
+    // A-25: bound the override record to what is on screen. A render whose
+    // episodes no longer include a previously-overridden key drops that key
+    // rather than accumulating it; a refresh poll that returns the same
+    // episodes keeps every key untouched.
+    const renderedKeys = new Set(episodes.map(incidentEpisodeKey));
+    Array.from(state.incidentTransitionsOverrides.keys()).forEach((key) => {
+      if (!renderedKeys.has(key)) state.incidentTransitionsOverrides.delete(key);
+    });
   }
 
   // 04-10 Task 2: states, on screen, the rule by which the Event type or
@@ -3346,7 +3427,7 @@
       const option = document.createElement('option'); option.value = value; option.textContent = text; densitySelect.append(option);
     });
     densitySelect.value = state.preferences.density || '';
-    densitySelect.addEventListener('change', () => { state.preferences.density = densitySelect.value || null; applyDensity(); savePreferences(); });
+    densitySelect.addEventListener('change', () => { state.preferences.density = densitySelect.value || null; applyDensity(); applyDisclosureDefaults(); savePreferences(); });
     densityLabel.append(densitySelect);
     const rangeLabel = document.createElement('label');
     const rangeSelect = document.createElement('select');
@@ -3790,6 +3871,16 @@
   loadPreferences();
   applyDensity();
   savePreferences();
+  // D-02 extension (Phase 5 05-05): bound once, here, at module init -- never
+  // inside renderAvailability, which runs on every render -- so the listener
+  // is registered exactly once for the lifetime of the page, matching every
+  // other one-time control binding below.
+  const availabilityDetailEl = $('service-availability-detail');
+  if (availabilityDetailEl) {
+    availabilityDetailEl.addEventListener('toggle', () => {
+      state.availabilityDetailOverride = availabilityDetailEl.open;
+    });
+  }
   document.querySelectorAll('#section-navigation button').forEach((button) => button.addEventListener('click', () => selectSection(button.dataset.section)));
   $('advanced-refresh').addEventListener('click', refreshCurrentDiagnosis);
   $('pause-updates').addEventListener('click', togglePause);

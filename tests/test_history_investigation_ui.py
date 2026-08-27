@@ -3646,6 +3646,14 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             return self._events_history_fixture(start_ts, end_ts, episodes=[episode])
 
         page = self.browser.new_page()
+        # Phase 5 05-05: this test verifies the toggle's own flip mechanics,
+        # not the density-driven default (covered by
+        # test_density_drives_disclosure_defaults_and_theme_only_supplies_the_default_density),
+        # so it pins comfortable density explicitly to keep its starting
+        # point (collapsed) independent of the page's default theme/density.
+        page.add_init_script(
+            "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify({density: 'comfortable'}));",
+        )
         page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
         try:
             self._goto_incidents(page)
