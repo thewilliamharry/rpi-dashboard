@@ -1029,6 +1029,53 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_coverage_strip_segment_is_keyboard_reachable_and_discloses_on_focus(self):
+        # _history_fixture() produces exactly two unmerged, single-interval
+        # segments (count == 1 each) -- both plain-labelled with no observed
+        # count, so this fixture also covers the "no observed count" subcase.
+        history_fixture = self._history_fixture()
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+
+        def route_api(route):
+            path = urlparse(route.request.url).path
+            if path == '/api/config':
+                route.fulfill(status=200, json=config_fixture)
+                return
+            if path == '/api/telemetry/history':
+                route.fulfill(status=200, json=history_fixture)
+                return
+            if path == '/api/advanced/current':
+                route.fulfill(status=200, json=snapshot)
+                return
+            route.fallback()
+
+        page = self.browser.new_page()
+        page.route('**/api/**', route_api)
+        try:
+            page.goto(f'{self.base_url}/advanced', wait_until='domcontentloaded')
+            page.locator('[data-section="history"]').click()
+            page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+            segments = page.locator('#strip-cpu .hist-coverage-segment')
+            segments.first.wait_for(timeout=5_000)
+            self.assertEqual(segments.count(), 2)
+            for i in range(2):
+                segment = segments.nth(i)
+                self.assertEqual(segment.get_attribute('tabindex'), '0')
+                self.assertEqual(segment.get_attribute('role'), 'img')
+                title_text = segment.locator('title').text_content()
+                self.assertTrue(title_text)
+                self.assertEqual(segment.get_attribute('aria-label'), title_text)
+
+            first_text = segments.first.locator('title').text_content()
+            segments.first.focus()
+            page.locator('#history-chart-tooltip').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('#history-chart-tooltip').text_content(), first_text)
+            segments.first.blur()
+            page.locator('#history-chart-tooltip').wait_for(state='hidden', timeout=5_000)
+        finally:
+            page.close()
+
     def test_tooltip_updates_without_regenerating_chart_paths_on_pointer_moves(self):
         start_ts = 1_700_000_000
         end_ts = start_ts + 3600
@@ -3914,6 +3961,33 @@ class HistoryInvestigationUiTests(unittest.TestCase):
             self.assertIn('Temperature:', readout)
             self.assertIn('Service state:', readout)
             self.assertIn('Service latency:', readout)
+        finally:
+            page.close()
+
+    def test_focusing_a_point_target_moves_the_shared_time_cursor(self):
+        # _drag_ready_page's fixture is served for every metric, so all four
+        # host charts load with the same two points -- correlationReady() is
+        # satisfied and #chart-cpu has two focusable point targets.
+        page, _start_ts, _end_ts, _counters = self._drag_ready_page()
+        try:
+            targets = page.locator('#chart-cpu .hist-point-target')
+            targets.first.wait_for(state='attached', timeout=5_000)
+            self.assertEqual(targets.count(), 2)
+
+            targets.nth(0).focus()
+            page.locator('#history-time-cursor').wait_for(state='visible', timeout=5_000)
+            page.locator('#history-cursor-readout').wait_for(state='visible', timeout=5_000)
+            first_readout = page.locator('#history-cursor-readout').text_content()
+            self.assertTrue(first_readout)
+
+            targets.nth(1).focus()
+            page.wait_for_timeout(100)
+            second_readout = page.locator('#history-cursor-readout').text_content()
+            self.assertNotEqual(first_readout, second_readout)
+
+            targets.nth(1).blur()
+            page.locator('#history-time-cursor').wait_for(state='hidden', timeout=5_000)
+            page.locator('#history-cursor-readout').wait_for(state='hidden', timeout=5_000)
         finally:
             page.close()
 

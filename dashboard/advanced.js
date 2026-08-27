@@ -2484,8 +2484,14 @@
       target.addEventListener('focus', () => {
         const rect = target.getBoundingClientRect();
         schedulePointTooltipUpdate(metric, point, rect.left, rect.top);
+        // 05-04 Task 2 (R-03): tabbing across a chart drives the same shared
+        // cross-chart cursor the pointer path drives, through the exact same
+        // function -- its own readiness/drag guards are untouched, so a
+        // cursor suppressed while the stack is loading stays suppressed for
+        // the keyboard path too.
+        moveTimeCursor(rect.left + rect.width / 2);
       });
-      target.addEventListener('blur', hidePointTooltip);
+      target.addEventListener('blur', () => { hidePointTooltip(); hideTimeCursor(); });
       svg.append(target);
     });
   }
@@ -2529,9 +2535,25 @@
       rect.setAttribute('width', String(width));
       rect.setAttribute('height', String(HIST_STRIP_HEIGHT));
       rect.setAttribute('class', `hist-coverage-segment hist-pattern-${segment.pattern}`);
+      // 05-04 Task 2: computed once so the hover <title>, the accessible
+      // name and the keyboard-focus tooltip disclosure can never drift
+      // apart. Disclosure-only (A-19/A-23) -- the segment discloses, it
+      // does not activate anything.
+      const text = segment.count > 1 ? segmentTooltipText(segment) : segment.label;
+      rect.setAttribute('tabindex', '0');
+      rect.setAttribute('role', 'img');
+      rect.setAttribute('aria-label', text);
       const title = document.createElementNS(SVG_NS, 'title');
-      title.textContent = segment.count > 1 ? segmentTooltipText(segment) : segment.label;
+      title.textContent = text;
       rect.append(title);
+      // No pointer handlers here: the <title> already serves hover, and a
+      // pointer path would change Phase 4-verified hover behaviour. Focus
+      // reuses the state band's own shared tooltip mechanism verbatim.
+      rect.addEventListener('focus', () => {
+        const box = rect.getBoundingClientRect();
+        scheduleBandTooltipUpdate(text, box.left, box.top);
+      });
+      rect.addEventListener('blur', hidePointTooltip);
       svg.append(rect);
     });
   }
