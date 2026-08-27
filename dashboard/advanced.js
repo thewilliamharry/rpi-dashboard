@@ -2931,6 +2931,7 @@
     $('connection-banner').hidden = !state.connectionUnavailable;
     $('worker-warning').hidden = !safety.worker_stale;
     $('recovery-warning').hidden = !safety.recovery_required;
+    $('degraded-warning').hidden = !safety.worker_degraded;
   }
 
   function renderOverview(snapshot) {
