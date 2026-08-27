@@ -19,6 +19,7 @@ import pathlib
 import re
 import threading
 import unittest
+from collections import Counter
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
@@ -44,6 +45,56 @@ DESKTOP_WIDTH_PX = 1440
 # the pattern does not assume it). `prefers-reduced-motion` queries carry no
 # `max-width` term and are correctly skipped.
 _MEDIA_MAX_WIDTH_RE = re.compile(r'@media[^{]*?max-width:\s*(\d+)px')
+
+# The JS evaluated against `#service-filters`/`#incident-filters`: every displayed
+# control's height and right edge (for the 44px hit-target and no-overflow claims),
+# the group's own scroll/client width (for the no-overflow claim) and rendered
+# height (for the boundary-vs-desktop comparison), and the number of distinct rows
+# among the group's own displayed direct children. Rows are counted by rounded
+# bounding-box **bottom** edge, not top: `align-items: end` aligns bottoms, so top
+# edges differ within a single row and would miscount.
+_MEASURE_FILTER_GROUP_JS = """
+(node) => {
+    const style = getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    const paddingRight = parseFloat(style.paddingRight) || 0;
+    const borderRight = parseFloat(style.borderRightWidth) || 0;
+    const contentRight = rect.right - paddingRight - borderRight;
+    const directChildren = Array.from(node.children).filter((el) => el.offsetParent !== null);
+    const rowBottoms = new Set(directChildren.map((el) => Math.round(el.getBoundingClientRect().bottom)));
+    const controls = Array.from(node.querySelectorAll('input, select, button'))
+        .filter((el) => el.offsetParent !== null);
+    return {
+        height: rect.height,
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+        contentRight: contentRight,
+        rows: rowBottoms.size,
+        controlCount: controls.length,
+        controlHeights: controls.map((el) => el.getBoundingClientRect().height),
+        controlRights: controls.map((el) => el.getBoundingClientRect().right),
+    };
+}
+"""
+
+# The descriptor rule this plan states in full (deliberately duplicated from
+# plan 05-05's identical rule rather than shared -- 05-05 is the same wave and its
+# helper is not guaranteed to exist when this executes): a control's descriptor is
+# its `id` when it has one, otherwise its tag name, its class list and its
+# zero-based index among its parent element's children, joined.
+_DESCRIPTOR_JS = """
+() => {
+    function descriptor(el) {
+        if (el.id) return el.id;
+        const parent = el.parentElement;
+        const index = parent ? Array.prototype.indexOf.call(parent.children, el) : -1;
+        return [el.tagName, Array.from(el.classList).join('.'), index].join('|');
+    }
+    return Array.from(document.querySelectorAll('input, select, button'))
+        .filter((el) => el.offsetParent !== null)
+        .map(descriptor);
+}
+"""
 
 
 class NarrowBoundaryPinTests(unittest.TestCase):
@@ -357,6 +408,174 @@ class ThemeParityUiTests(unittest.TestCase):
         # T-05-26: a light run that silently failed to apply must fail loudly
         # rather than pass the layout assertions above by accident.
         self.assertNotEqual(resolved_colors['dark'], resolved_colors['light'])
+
+    # ------------------------------------------------------------------
+    # Task 3: at the narrow boundary, content scrolls -- it never disappears
+    # ------------------------------------------------------------------
+
+    def test_at_risk_narrow_layouts_scroll_rather_than_hide_in_both_themes(self):
+        fixture = self._build_fixture()
+
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme, surface='advanced'):
+                page = self._open(theme, '/advanced', NARROW_BOUNDARY_PX, fixture)
+                try:
+                    page.locator('.summary-grid').wait_for(timeout=5_000)
+
+                    # -- Four-chart host stack + marker rail --
+                    page.locator('[data-section="history"]').click()
+                    page.locator('#history-section').wait_for(state='visible', timeout=5_000)
+
+                    chart_tops = []
+                    for metric in ('cpu', 'ram', 'disk', 'temp'):
+                        locator = page.locator(f'#chart-{metric}')
+                        self.assertTrue(locator.is_visible(), f'#chart-{metric} not displayed ({theme})')
+                        box = locator.bounding_box()
+                        self.assertIsNotNone(box, f'#chart-{metric} has no bounding box ({theme})')
+                        self.assertGreater(box['width'], 0, f'#chart-{metric} has zero width ({theme})')
+                        chart_tops.append(round(box['y']))
+                    self.assertEqual(
+                        len(chart_tops), len(set(chart_tops)),
+                        f'two or more host charts share a bounding-box top coordinate ({theme}) -- '
+                        'they must be stacked, never side by side',
+                    )
+
+                    axis_scroll = page.locator('#history-axis-scroll')
+                    axis_metrics = axis_scroll.evaluate(
+                        '(node) => ({scrollWidth: node.scrollWidth, clientWidth: node.clientWidth})'
+                    )
+                    self.assertGreaterEqual(axis_metrics['scrollWidth'], axis_metrics['clientWidth'])
+
+                    marker_rail = page.locator('#incident-marker-rail')
+                    self.assertTrue(marker_rail.is_visible(), f'marker rail not displayed ({theme})')
+                    rail_box = marker_rail.bounding_box()
+                    self.assertIsNotNone(rail_box, f'marker rail has no bounding box ({theme})')
+                    self.assertGreater(rail_box['width'], 0, f'marker rail has zero width ({theme})')
+                    self.assertTrue(
+                        marker_rail.evaluate("(node) => !!node.closest('#history-axis-scroll')"),
+                        f'marker rail is not a descendant of the shared axis scroll container ({theme})',
+                    )
+
+                    # -- Services table + service-identity sticky column --
+                    page.locator('[data-section="services"]').click()
+                    page.locator('#services-table-body tr.service-row').first.wait_for(timeout=5_000)
+                    self.assertEqual(page.locator('#services-table-body tr.service-row').count(), 3)
+
+                    table_scroll = page.locator('.services-table-scroll')
+                    boundary_table_metrics = table_scroll.evaluate(
+                        '(node) => ({scrollWidth: node.scrollWidth, clientWidth: node.clientWidth})'
+                    )
+                    self.assertGreater(
+                        boundary_table_metrics['scrollWidth'], boundary_table_metrics['clientWidth'],
+                        f'services table does not overflow (scroll) at the boundary ({theme})',
+                    )
+                    boundary_header_count = page.locator('#services-table thead th').count()
+                    identity_position = page.locator('.service-identity').first.evaluate(
+                        '(node) => getComputedStyle(node).position'
+                    )
+                    self.assertEqual(identity_position, 'sticky', f'.service-identity not sticky ({theme})')
+
+                    service_filters_boundary = page.locator('#service-filters').evaluate(_MEASURE_FILTER_GROUP_JS)
+                    boundary_descriptors = Counter(page.evaluate(_DESCRIPTOR_JS))
+
+                    # -- Resize to desktop width (same page, same DOM) --
+                    page.set_viewport_size({'width': DESKTOP_WIDTH_PX, 'height': 900})
+                    desktop_header_count = page.locator('#services-table thead th').count()
+                    service_filters_desktop = page.locator('#service-filters').evaluate(_MEASURE_FILTER_GROUP_JS)
+                    desktop_descriptors = Counter(page.evaluate(_DESCRIPTOR_JS))
+
+                    self.assertEqual(
+                        boundary_header_count, desktop_header_count,
+                        f'services table header cell count changed between widths ({theme}) -- '
+                        'a column was dropped rather than reached by scrolling',
+                    )
+
+                    # Nothing hidden to fit (T-05-25): the boundary collection must be a
+                    # superset of the desktop collection, with both non-empty. A "not a
+                    # strict subset" check would pass while one control was lost and an
+                    # unrelated one gained; an empty-vs-empty comparison would pass
+                    # trivially. The superset-on-non-empty form closes both.
+                    self.assertTrue(len(desktop_descriptors) > 0 and len(boundary_descriptors) > 0)
+                    self.assertTrue(
+                        desktop_descriptors <= boundary_descriptors,
+                        f'a control present at desktop width is missing at the narrow boundary ({theme})',
+                    )
+
+                    # -- Filter groups: #service-filters (still on Services section) --
+                    self.assertEqual(service_filters_boundary['controlCount'], 6)
+                    self.assertEqual(service_filters_desktop['controlCount'], 6)
+                    for height in service_filters_boundary['controlHeights']:
+                        self.assertGreaterEqual(height, 44)
+                    self.assertLessEqual(
+                        service_filters_boundary['scrollWidth'], service_filters_boundary['clientWidth'],
+                    )
+                    for right in service_filters_boundary['controlRights']:
+                        self.assertLessEqual(right, service_filters_boundary['contentRight'] + 1)
+                    self.assertGreaterEqual(service_filters_boundary['height'], service_filters_desktop['height'])
+                    self.assertGreater(
+                        service_filters_boundary['height'], service_filters_desktop['height'],
+                        f'#service-filters is not strictly taller at the boundary than at desktop ({theme})',
+                    )
+                    self.assertGreater(
+                        service_filters_boundary['rows'], service_filters_desktop['rows'],
+                        f'#service-filters does not occupy strictly more rows at the boundary ({theme})',
+                    )
+
+                    # -- Resize back to the boundary before switching sections --
+                    page.set_viewport_size({'width': NARROW_BOUNDARY_PX, 'height': 900})
+
+                    # -- Filter groups: #incident-filters (Incidents section) --
+                    page.locator('[data-section="incidents"]').click()
+                    page.locator('#incident-filters').wait_for(state='visible', timeout=5_000)
+                    incident_filters_boundary = page.locator('#incident-filters').evaluate(_MEASURE_FILTER_GROUP_JS)
+
+                    page.set_viewport_size({'width': DESKTOP_WIDTH_PX, 'height': 900})
+                    incident_filters_desktop = page.locator('#incident-filters').evaluate(_MEASURE_FILTER_GROUP_JS)
+                    page.set_viewport_size({'width': NARROW_BOUNDARY_PX, 'height': 900})
+
+                    self.assertEqual(incident_filters_boundary['controlCount'], 4)
+                    self.assertEqual(incident_filters_desktop['controlCount'], 4)
+                    for height in incident_filters_boundary['controlHeights']:
+                        self.assertGreaterEqual(height, 44)
+                    self.assertLessEqual(
+                        incident_filters_boundary['scrollWidth'], incident_filters_boundary['clientWidth'],
+                    )
+                    for right in incident_filters_boundary['controlRights']:
+                        self.assertLessEqual(right, incident_filters_boundary['contentRight'] + 1)
+                    self.assertGreaterEqual(
+                        incident_filters_boundary['height'], incident_filters_desktop['height'],
+                    )
+                    self.assertGreaterEqual(
+                        incident_filters_boundary['rows'], incident_filters_desktop['rows'],
+                    )
+                    # Deliberately no strict-inequality claim for #incident-filters: it
+                    # stays on one row at the boundary in the sans-serif light theme
+                    # while wrapping to two in the monospace dark theme, so only the
+                    # >= claim holds for it (05-06-PLAN.md Task 3).
+                finally:
+                    page.close()
+
+        # -- The zero and many cases at the boundary, on the main dashboard --
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme, surface='dashboard-empty'):
+                empty_fixture = self._build_fixture(dashboard_services=[])
+                page = self._open(theme, '/', NARROW_BOUNDARY_PX, empty_fixture)
+                try:
+                    page.locator('.svc-empty').wait_for(state='visible', timeout=5_000)
+                    box = page.locator('.svc-empty').bounding_box()
+                    self.assertIsNotNone(box)
+                    self.assertGreater(box['width'] * box['height'], 0)
+                finally:
+                    page.close()
+
+            with self.subTest(theme=theme, surface='dashboard-many'):
+                many_fixture = self._build_fixture()
+                page = self._open(theme, '/', NARROW_BOUNDARY_PX, many_fixture)
+                try:
+                    page.locator('.svc-card').first.wait_for(timeout=5_000)
+                    self.assertEqual(page.locator('.svc-card').count(), 3)
+                finally:
+                    page.close()
 
 
 if __name__ == '__main__':
