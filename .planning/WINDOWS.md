@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 12
+open_count: 13
 waived_count: 0
 fixed_count: 5
-total_count: 17
-last_updated: 2026-08-27T13:06:44.345Z
+total_count: 18
+last_updated: 2026-08-27T14:16:22.736Z
 ---
 
 # Broken Windows Ledger
@@ -32,6 +32,7 @@ last_updated: 2026-08-27T13:06:44.345Z
 | 15 | 03 | deviation | tests/test_advanced_diagnosis_api.py |  | Plan 03-16 Task 2's acceptance selector 'pytest -k attach' deselects all tests and exits 5; the intended proof of the per-service gap-join element guard did not exist. Closed in-round by adding test_a_malformed_gap_element_cannot_raise_out_of_the_service_join, but the plan-defect class (unsatisfiable acceptance selector, second occurrence in this phase after 03-13's grep gate) remains open for the next planning round. | open |  | 2026-08-19T09:25:32.982Z |  |
 | 16 | 03 | deviation | .planning/STATE.md |  | Over-broad sed relabelled 109 pre-existing [Phase ?] decision lines as Phase 03; fully reverted before commit | open |  | 2026-08-19T15:11:41.132Z |  |
 | 17 | 05 | deviation | tests/helpers.py |  | Misdiagnosis, not a flake: test_lease_takeover_records_one_monitoring_gap failed because 05-01's new test_scan_status_never_reports_degraded_and_stale_together leaked WORKER_READY_SECONDS=10 via tests/helpers.py load_app (which never restores os.environ), shrinking the gap below queues.acquire_worker_lease's 20s ready_seconds. Baseline 515eee8 was fully green. Fixed by restoring the env in that test. Underlying hazard -- load_app leaks all extra_env -- remains open. | fixed |  | 2026-08-27T13:06:44.345Z | 2026-08-27T00:00:00.000Z |
+| 18 | 05 | deviation | tests/test_ui_safety_integration.py |  | test_stale_to_fresh_page_persists_actions_and_records_recovery: intermittent full-suite-load timeout (wall-clock worker-heartbeat aging + 18s Playwright wait), passes in isolation and in 2/3 full-suite runs; confirmed unrelated to 05-03 (file not in 05-03's declared scope, no env/os mutation in 05-03's new tests). See deferred-items.md Entry 2. | open |  | 2026-08-27T14:16:22.736Z |  |
 
 ````json
 [
@@ -238,6 +239,18 @@ last_updated: 2026-08-27T13:06:44.345Z
     "reason": "",
     "recorded_at": "2026-08-27T13:06:44.345Z",
     "resolved_at": "2026-08-27T00:00:00.000Z"
+  },
+  {
+    "id": 18,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "tests/test_ui_safety_integration.py",
+    "line": null,
+    "description": "test_stale_to_fresh_page_persists_actions_and_records_recovery: intermittent full-suite-load timeout (wall-clock worker-heartbeat aging + 18s Playwright wait), passes in isolation and in 2/3 full-suite runs; confirmed unrelated to 05-03 (file not in 05-03's declared scope, no env/os mutation in 05-03's new tests). See deferred-items.md Entry 2.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T14:16:22.736Z",
+    "resolved_at": null
   }
 ]
 ````
