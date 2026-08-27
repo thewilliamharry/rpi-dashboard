@@ -1,68 +1,98 @@
 # Technology Stack
 
-**Analysis Date:** 2026-07-24
+**Analysis Date:** 2026-08-27
 
 ## Languages
 
 **Primary:**
-- Python 3.11–3.12 (`dashboard/app.py`, `dashboard/worker.py`) - Flask web API, SQLite persistence, discovery and background jobs.
-- JavaScript (browser, `dashboard/app.js`) - dashboard UI behavior and API client.
-- HTML/CSS (`dashboard/index.html`, `dashboard/style.css`) - single-page dashboard presentation.
+- Python 3.11–3.12 - Backend API, worker processes, database migrations, CLI utilities
+- JavaScript (vanilla, no framework) - Frontend dashboard and advanced UI
+- HTML5/CSS3 - Markup and styling for web interface
 
 ## Runtime
 
 **Environment:**
-- Python `python:3.12-slim-bookworm` container (`dashboard/Dockerfile`), requiring Python `>=3.11,<3.13`.
+- Docker container (Python 3.12-slim-bookworm base image)
+- Single-user non-root execution (UID 10001, GID 10001)
+- Read-only root filesystem with tmpfs for /tmp and /data volume mount
 
 **Package Manager:**
-- uv `0.11.28`, dependencies locked in `dashboard/uv.lock`.
-- Lockfile: present
+- `uv` (0.11.28) - Python dependency management and virtual environment
+- Lockfile: `dashboard/uv.lock` (present and frozen)
 
 ## Frameworks
 
 **Core:**
-- Flask `3.1.3` - HTTP routes and JSON/static responses (`dashboard/app.py`).
-- Gunicorn `26.0.0` - production WSGI server, one worker with eight threads (`dashboard/Dockerfile`).
-- APScheduler `3.11.3` - UTC interval/date jobs for metrics, probes, discovery, previews and cleanup (`dashboard/worker.py`).
+- Flask 3.1.3 - REST API web framework, routing, request/response handling
+- APScheduler 3.11.3 - Scheduled job execution (service discovery, metrics collection, maintenance)
 
 **Testing:**
-- pytest `>=9,<10` (`dashboard/pyproject.toml`, `tests/`).
-- pip-audit `2.10.1` for dependency vulnerability checks.
+- Pytest 9.0.2+ - Unit and integration test framework
+- Playwright 1.61.0 - Browser automation for contract tests (Chromium browser)
 
-**Build/Dev:**
-- Docker Compose (`docker-compose.yml`) orchestrates `data-init`, `worker`, and `web`.
-- Playwright `1.61.0` with bundled Chromium (`dashboard/Dockerfile`) captures service thumbnails and supports smoke checks.
+**Build/Runtime:**
+- Gunicorn 26.0.0 - Production WSGI application server (1 worker, 8 threads, 60s timeout)
+- Docker Compose - Local development and deployment orchestration
 
 ## Key Dependencies
 
 **Critical:**
-- `requests==2.34.2` and `urllib3==2.7.0` - HTTP service probing, redirects, and optional alert webhook delivery (`dashboard/app.py`).
-- `beautifulsoup4==4.15.0` - parse discovered HTML titles and metadata (`dashboard/app.py`).
-- `psutil==7.2.2` - CPU, RAM, disk, temperature and process/system metrics (`dashboard/app.py`).
-- Python stdlib `sqlite3` - embedded persistent database at `/data/dashboard.db`.
+- `requests` 2.34.2 - HTTP client for service probing, webhook delivery, HTML content retrieval
+- `urllib3` 2.7.0 - HTTP connection pooling and SSL/TLS handling (transitive via requests)
+- `beautifulsoup4` 4.15.0 - HTML parsing for service previews and content extraction
+- `psutil` 7.2.2 - System metrics collection (CPU, RAM, disk, temperature)
+- `playwright` 1.61.0 - Headless browser automation for screenshot/preview generation
+- `tzdata` 2026.3 - Timezone database for IANA zone support
 
-**Infrastructure:**
-- `playwright==1.61.0`/Chromium - isolated browser previews.
-- `threading` locks/semaphores - coordinate SQLite, scans, browser and uptime workers.
+**Task Scheduling:**
+- `apscheduler` 3.11.3 - Job scheduling (depends on `tzlocal`)
+
+**Security & Auditing:**
+- `pip-audit` 2.10.1 (dev) - Vulnerability scanning for Python dependencies
 
 ## Configuration
 
 **Environment:**
-- Runtime is configured through Compose environment (`docker-compose.yml`) and `os.environ` defaults in `dashboard/app.py`.
-- Key settings include `DB_PATH`, discovery/metric intervals, trusted host/network allowlists, `EXTRA_SCAN_PORTS`, `ALERT_WEBHOOK_URL`, alert cooldown/filtering, and `ENABLE_PROMETHEUS`.
+- Configuration loaded from environment variables at startup
+- Settings immutable in `dashboard/beacon/config.py` via `load_settings()` function
+- No config files required; all settings have safe defaults
+
+**Key Runtime Configuration:**
+- `DB_PATH` - SQLite database location (default: `/data/dashboard.db`)
+- `TRUSTED_HOSTS` - IP addresses/networks allowed to access dashboard (default: local networks)
+- `ALERT_WEBHOOK_URL` - Optional webhook endpoint for alert notifications
+- `ENABLE_PROMETHEUS` - Enable Prometheus metrics endpoint at `/metrics` (default: disabled)
+- `TZ` - IANA timezone name for timestamps (default: `UTC`)
+- Telemetry retention, sampling, and history parameters (7 dev settings with validation)
+- Maintenance window and scan rate limiting settings
 
 **Build:**
-- `dashboard/Dockerfile` pins base image by digest, installs frozen uv dependencies and Chromium, and runs as UID/GID 10001.
-- `dashboard/pyproject.toml` defines package metadata, versions and pytest paths.
+- `Dockerfile` at `dashboard/Dockerfile` - Multi-stage container build
+- `docker-compose.yml` - Local composition with 4 services: `data-init`, `migrate`, `worker`, `web`
+- `pyproject.toml` - Dependency declarations and pytest configuration
+- `.github/workflows/ci.yml` - GitHub Actions CI pipeline (unit tests, Docker image scan, ARM runtime verification)
 
 ## Platform Requirements
 
 **Development:**
-- Docker Compose, uv, and Python 3.11/3.12; tests run with `uv run --project dashboard python -m pytest -q`.
+- Docker and Docker Compose
+- Python 3.11+
+- `uv` 0.11.28 or compatible
+- Bash shell for scripts
 
 **Production:**
-- 64-bit Raspberry Pi OS with Docker Compose; host networking is required by `worker` to probe LAN services. Named volume `dashboard-data` provides writable SQLite storage while containers remain read-only.
+- Raspberry Pi (ARMv7 or ARMv8 CPU) or compatible ARM/x86 Linux system
+- Docker runtime
+- 256MB–1GB RAM allocation per service (web, worker, migrate containers)
+- Persistent volume for SQLite database and preview cache
+- Network access to local services (typically on port 80 for dashboard, 8100 for extra scans)
+
+**Container Requirements:**
+- Linux kernel with `CAP_CHOWN` for data initialization
+- Capability dropping for security (`CAP_DROP: [ALL]`)
+- Read-only root filesystem enforcement
+- tmpfs mounts for temporary data (no-exec, nosuid, nodev flags)
 
 ---
 
-*Stack analysis: 2026-07-24*
+*Stack analysis: 2026-08-27*
