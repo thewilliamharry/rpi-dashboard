@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 import time
 import unittest
 from contextlib import contextmanager
@@ -304,6 +305,17 @@ class ApiAndAuthTests(unittest.TestCase):
 
     def test_scan_status_never_reports_degraded_and_stale_together(self):
         """A-04: an overlapping WORKER_READY_SECONDS must never assert both conditions."""
+        # ``load_app`` writes its env into ``os.environ`` and never restores it, so the
+        # deliberately-lowered cutoff below would otherwise outlive this test and be read
+        # by every later module that reloads ``dashboard.app`` -- including
+        # ``test_runtime_ownership``, whose monitoring-gap expectation is derived from
+        # ``WORKER_READY_SECONDS`` and silently stops exceeding the 20s gap threshold.
+        for _key in ('WORKER_READY_SECONDS', 'METRIC_SAMPLE_SECONDS'):
+            _previous = os.environ.get(_key)
+            if _previous is None:
+                self.addCleanup(os.environ.pop, _key, None)
+            else:
+                self.addCleanup(os.environ.__setitem__, _key, _previous)
         appmod, db_path = load_app({'WORKER_READY_SECONDS': '10', 'METRIC_SAMPLE_SECONDS': '5'})
         client = appmod.app.test_client()
         try:

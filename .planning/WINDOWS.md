@@ -1,8 +1,8 @@
 ---
 schema_version: 1
-open_count: 13
+open_count: 12
 waived_count: 0
-fixed_count: 4
+fixed_count: 5
 total_count: 17
 last_updated: 2026-08-27T13:06:44.345Z
 ---
@@ -31,7 +31,7 @@ last_updated: 2026-08-27T13:06:44.345Z
 | 14 | 03 | deviation | dashboard/beacon/diagnosis.py |  | 03-13 acceptance criterion 'grep -c gap_evidence_truncated == 1' is unsatisfiable: the field needs one producer line and one consumer line (count is 2). Code left correct; gate reported, not gamed. | open |  | 2026-08-19T06:18:34.692Z |  |
 | 15 | 03 | deviation | tests/test_advanced_diagnosis_api.py |  | Plan 03-16 Task 2's acceptance selector 'pytest -k attach' deselects all tests and exits 5; the intended proof of the per-service gap-join element guard did not exist. Closed in-round by adding test_a_malformed_gap_element_cannot_raise_out_of_the_service_join, but the plan-defect class (unsatisfiable acceptance selector, second occurrence in this phase after 03-13's grep gate) remains open for the next planning round. | open |  | 2026-08-19T09:25:32.982Z |  |
 | 16 | 03 | deviation | .planning/STATE.md |  | Over-broad sed relabelled 109 pre-existing [Phase ?] decision lines as Phase 03; fully reverted before commit | open |  | 2026-08-19T15:11:41.132Z |  |
-| 17 | 05 | deviation | tests/test_runtime_ownership.py |  | test_lease_takeover_records_one_monitoring_gap fails intermittently in the full suite (0 != 1 monitoring_gap rows) but passes in isolation; unrelated to 05-01's changes, pre-existing cross-test flake | open |  | 2026-08-27T13:06:44.345Z |  |
+| 17 | 05 | deviation | tests/helpers.py |  | Misdiagnosis, not a flake: test_lease_takeover_records_one_monitoring_gap failed because 05-01's new test_scan_status_never_reports_degraded_and_stale_together leaked WORKER_READY_SECONDS=10 via tests/helpers.py load_app (which never restores os.environ), shrinking the gap below queues.acquire_worker_lease's 20s ready_seconds. Baseline 515eee8 was fully green. Fixed by restoring the env in that test. Underlying hazard -- load_app leaks all extra_env -- remains open. | fixed |  | 2026-08-27T13:06:44.345Z | 2026-08-27T00:00:00.000Z |
 
 ````json
 [
@@ -231,13 +231,13 @@ last_updated: 2026-08-27T13:06:44.345Z
     "id": 17,
     "kind": "deviation",
     "phase": "05",
-    "file": "tests/test_runtime_ownership.py",
+    "file": "tests/helpers.py",
     "line": null,
-    "description": "test_lease_takeover_records_one_monitoring_gap fails intermittently in the full suite (0 != 1 monitoring_gap rows) but passes in isolation; unrelated to 05-01's changes, pre-existing cross-test flake",
-    "status": "open",
+    "description": "Misdiagnosis, not a flake: test_lease_takeover_records_one_monitoring_gap failed because 05-01's new test_scan_status_never_reports_degraded_and_stale_together leaked WORKER_READY_SECONDS=10 via tests/helpers.py load_app (which never restores os.environ), shrinking the gap below queues.acquire_worker_lease's 20s ready_seconds. Baseline 515eee8 was fully green. Fixed by restoring the env in that test. Underlying hazard -- load_app leaks all extra_env -- remains open.",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-08-27T13:06:44.345Z",
-    "resolved_at": null
+    "resolved_at": "2026-08-27T00:00:00.000Z"
   }
 ]
 ````
