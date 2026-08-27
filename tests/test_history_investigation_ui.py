@@ -4728,6 +4728,179 @@ class HistoryInvestigationUiTests(unittest.TestCase):
         finally:
             page.close()
 
+    # ------------------------------------------------------------------
+    # Phase 5 05-05 Task 3: overrides survive re-renders, and a failed
+    # filtered incidents read never leaves a number it did not produce.
+    # ------------------------------------------------------------------
+
+    def test_failed_filtered_incidents_fetch_clears_the_matching_incident_count(self):
+        """A-27: the early-return path renderIncidentsSection takes when the
+        filtered fetch fails must never leave a previous render's populated
+        count standing beside the error banner.
+        """
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        critical_episode = self._episode(8081, 1_700_000_100, 1_700_000_160, critical=True)
+        standard_episode = self._episode(8080, 1_700_000_000, 1_700_000_060)
+        latch = {'on': False}
+
+        def events_payload_fn(start_ts, end_ts, query):
+            if query.get('criticality', [''])[0] == 'critical':
+                return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode])
+            return self._events_history_fixture(start_ts, end_ts, episodes=[critical_episode, standard_episode])
+
+        def events_failure_fn(query):
+            # Fails only the filtered request (the one carrying the
+            # operator's own criticality selection), never the unfiltered
+            # baseline -- the opposite direction from
+            # test_baseline_total_fetch_failure_never_claims_the_filtered_count_is_the_total.
+            return latch['on'] and query.get('criticality', [''])[0] == 'critical'
+
+        page = self.browser.new_page()
+        # Seeded so the very first render already carries the criticality
+        # filter -- the filtered and unfiltered-baseline requests must
+        # differ in their query string for events_failure_fn to be able to
+        # fail only one of the two.
+        page.add_init_script(
+            "localStorage.setItem('beacon-advanced-preferences-v1', JSON.stringify("
+            "{historyFilters: {criticality: 'critical'}}));",
+        )
+        page.route(
+            '**/api/**',
+            self._incidents_route(
+                snapshot, config_fixture,
+                events_payload_fn=events_payload_fn, events_failure_fn=events_failure_fn,
+            ),
+        )
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            count = page.locator('#matching-incident-count')
+            self.assertEqual(count.inner_text(), '1 of 2 incidents')
+            self.assertEqual(count.get_attribute('data-matching-known'), 'true')
+
+            latch['on'] = True
+            page.locator('#range-preset-24h').click()
+            page.locator('#incidents-error').wait_for(state='visible', timeout=5_000)
+            self.assertEqual(count.inner_text(), 'Incident count unavailable')
+            self.assertEqual(count.get_attribute('data-total-known'), 'false')
+            self.assertEqual(count.get_attribute('data-matching-known'), 'false')
+            # The list itself is cleared too -- the same early-return path.
+            self.assertEqual(page.locator('.incident-row').count(), 0)
+
+            # A subsequent successful fetch returns the count to a known
+            # reading: the unavailable state is per-render, never sticky.
+            latch['on'] = False
+            page.locator('#range-preset-24h').click()
+            page.locator('#incidents-error').wait_for(state='hidden', timeout=5_000)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(count.inner_text(), '1 of 2 incidents')
+            self.assertEqual(count.get_attribute('data-matching-known'), 'true')
+        finally:
+            page.close()
+
+        # Edge (zero): a genuinely empty range reads a known zero, never the
+        # unavailable string -- an empty result and a failed read must stay
+        # distinguishable.
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture))
+        try:
+            self._goto_incidents(page)
+            page.locator('#incidents-empty').wait_for(state='visible', timeout=5_000)
+            count = page.locator('#matching-incident-count')
+            self.assertEqual(count.inner_text(), '0 of 0 incidents')
+            self.assertNotEqual(count.inner_text(), 'Incident count unavailable')
+            self.assertEqual(count.get_attribute('data-matching-known'), 'true')
+        finally:
+            page.close()
+
+    def test_an_operator_toggle_survives_re_render_and_other_rows_keep_the_density_default(self):
+        """A-24/A-25: a re-render that returns the same episodes preserves
+        every per-row override; a render whose episodes no longer include a
+        key drops that key rather than accumulating it.
+        """
+        snapshot = self._snapshot()
+        config_fixture = self._config_fixture()
+        episode_a = self._episode(8080, 1_700_000_000, 1_700_000_060)
+        episode_b = self._episode(8081, 1_700_000_100, 1_700_000_160)
+        episode_c = self._episode(8082, 1_700_000_200, 1_700_000_260)
+        full_episodes = [episode_a, episode_b, episode_c]
+        pruned_episodes = [episode_a, episode_c]  # excludes episode_b's own key
+        current = {'episodes': full_episodes}
+
+        def events_payload_fn(start_ts, end_ts, query):
+            return self._events_history_fixture(start_ts, end_ts, episodes=current['episodes'])
+
+        # Compact density (dark theme, default, no explicit preference):
+        # every row starts expanded. Collapse exactly one row and prove the
+        # other two keep the density default across a same-episodes render.
+        page = self.browser.new_page()
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            self.assertEqual(page.locator('.incident-row').count(), 3)
+            toggles = page.locator('.incident-transitions-toggle')
+            for index in range(3):
+                self.assertEqual(toggles.nth(index).get_attribute('aria-expanded'), 'true')
+
+            toggles.nth(1).click()
+            self.assertEqual(toggles.nth(1).get_attribute('aria-expanded'), 'false')
+            self.assertEqual(toggles.nth(0).get_attribute('aria-expanded'), 'true')
+            self.assertEqual(toggles.nth(2).get_attribute('aria-expanded'), 'true')
+
+            page.locator('#range-preset-24h').click()
+            page.wait_for_function("() => document.querySelectorAll('.incident-row').length === 3", timeout=5_000)
+            toggles = page.locator('.incident-transitions-toggle')
+            self.assertEqual(toggles.nth(1).get_attribute('aria-expanded'), 'false')
+            self.assertEqual(toggles.nth(0).get_attribute('aria-expanded'), 'true')
+            self.assertEqual(toggles.nth(2).get_attribute('aria-expanded'), 'true')
+        finally:
+            page.close()
+
+        # Comfortable density (light theme, default, no explicit preference):
+        # every row starts collapsed. Expand exactly one row, prove the
+        # override survives a same-episodes render, then prove pruning: a
+        # render whose episodes exclude the overridden key drops it, so
+        # re-rendering the original episodes shows that row back on the
+        # density default rather than the stale override.
+        current['episodes'] = full_episodes
+        page = self.browser.new_page()
+        page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+        page.route('**/api/**', self._incidents_route(snapshot, config_fixture, events_payload_fn=events_payload_fn))
+        try:
+            self._goto_incidents(page)
+            page.locator('.incident-row').first.wait_for(state='visible', timeout=5_000)
+            toggles = page.locator('.incident-transitions-toggle')
+            for index in range(3):
+                self.assertEqual(toggles.nth(index).get_attribute('aria-expanded'), 'false')
+
+            toggles.nth(1).click()
+            self.assertEqual(toggles.nth(1).get_attribute('aria-expanded'), 'true')
+            self.assertEqual(toggles.nth(0).get_attribute('aria-expanded'), 'false')
+            self.assertEqual(toggles.nth(2).get_attribute('aria-expanded'), 'false')
+
+            page.locator('#range-preset-24h').click()
+            page.wait_for_function("() => document.querySelectorAll('.incident-row').length === 3", timeout=5_000)
+            toggles = page.locator('.incident-transitions-toggle')
+            self.assertEqual(toggles.nth(1).get_attribute('aria-expanded'), 'true')
+            self.assertEqual(toggles.nth(0).get_attribute('aria-expanded'), 'false')
+            self.assertEqual(toggles.nth(2).get_attribute('aria-expanded'), 'false')
+
+            current['episodes'] = pruned_episodes
+            page.locator('#range-preset-24h').click()
+            page.wait_for_function("() => document.querySelectorAll('.incident-row').length === 2", timeout=5_000)
+
+            current['episodes'] = full_episodes
+            page.locator('#range-preset-24h').click()
+            page.wait_for_function("() => document.querySelectorAll('.incident-row').length === 3", timeout=5_000)
+            toggles = page.locator('.incident-transitions-toggle')
+            self.assertEqual(toggles.nth(1).get_attribute('aria-expanded'), 'false')
+            self.assertEqual(toggles.nth(0).get_attribute('aria-expanded'), 'false')
+            self.assertEqual(toggles.nth(2).get_attribute('aria-expanded'), 'false')
+        finally:
+            page.close()
+
 
 class HistoryDstAnnotationLondonTests(unittest.TestCase):
     """04-04 Task 3: a zone that observes DST annotates its two transitions.

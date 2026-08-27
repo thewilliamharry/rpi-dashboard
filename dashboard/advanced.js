@@ -1198,6 +1198,22 @@
       el.textContent = `${matching} of ${total} incidents`;
       el.dataset.totalKnown = 'true';
     }
+    el.dataset.matchingKnown = 'true';
+  }
+
+  // Phase 5 05-05 (A-27): a previous render's populated count must never
+  // stand beside an error banner -- that blurs the populated state and the
+  // error state, exactly what UX-07's state-distinctness goal forbids. Sets
+  // an explicit unavailable reading and both dataset flags false, so the
+  // three readings (known matching/known total, known matching/unknown
+  // total, neither known) stay distinguishable in the DOM without parsing
+  // text.
+  function clearMatchingIncidentCount() {
+    const el = $('matching-incident-count');
+    if (!el) return;
+    el.textContent = 'Incident count unavailable';
+    el.dataset.totalKnown = 'false';
+    el.dataset.matchingKnown = 'false';
   }
 
   // Populated from the same current snapshot's service list the Services
@@ -1536,6 +1552,9 @@
       if (emptyEl) emptyEl.hidden = true;
       if (episodeScopeEl) { episodeScopeEl.hidden = true; episodeScopeEl.textContent = ''; }
       if (listEl) listEl.replaceChildren();
+      // A-27: a previous render's populated count must not stand beside an
+      // error banner.
+      clearMatchingIncidentCount();
       return;
     }
     if (errorEl) { errorEl.hidden = true; errorEl.textContent = ''; }
