@@ -77,6 +77,34 @@
       "source": "canonical migrations 2-8 applied to operator/production.db (operator-confirmed deployed shape)",
       "minimum_schema_version": 8,
       "target_version": 9
+    },
+    {
+      "fingerprint": "45ae79d8367e944d48f80ba476bc99a60ee52000799970ff35157f0d93c0acd8",
+      "fixture": "current-v6.db",
+      "source": "canonical migrations to 9 applied to initial-2026-04.db, current-v4.db, and current-v6.db (identical v9 shape)",
+      "minimum_schema_version": 9,
+      "target_version": 9
+    },
+    {
+      "fingerprint": "92b425777beaf069465c7cf1495ebf57801000f0245f9bf0fb5fdfb444092e60",
+      "fixture": "metadata-events-2026-04.db",
+      "source": "canonical migrations to 9 applied to metadata-events-2026-04.db",
+      "minimum_schema_version": 9,
+      "target_version": 9
+    },
+    {
+      "fingerprint": "58e3523d291b84ef6b98826265d963183c89d6bc7e877190c5cd8d2701eb6518",
+      "fixture": "runtime-queues-2026-07.db",
+      "source": "canonical migrations to 9 applied to runtime-queues-2026-07.db",
+      "minimum_schema_version": 9,
+      "target_version": 9
+    },
+    {
+      "fingerprint": "b0c4d5704da608629e1e8a2fdf19bc10a0dc1802a1d946b23e131e417981c5f8",
+      "fixture": "operator/production.db",
+      "source": "canonical migrations 2-9 applied to operator/production.db (operator-confirmed deployed shape)",
+      "minimum_schema_version": 9,
+      "target_version": 9
     }
   ]
 }

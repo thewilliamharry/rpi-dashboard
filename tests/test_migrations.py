@@ -57,6 +57,23 @@ V8_FINGERPRINTS = {
     'runtime-queues-2026-07.db': '33f50b9b569c66a0340f230aac615440211166b849db22c40d01bdfc889f921c',
     'operator/production.db': 'f8d977dedd2fb494d7c94899b40639bed3c717238c049f1f70064c4a80c4075f',
 }
+# Every tracked lineage carried forward to schema version 9 -- the shape a deployment
+# of the previous release actually sits at when migration 10 arrives. Three lineages
+# converge on one v9 shape, mirroring the v8 precedent above. These are hashes of raw
+# sqlite_master DDL text, so they cannot be reasoned about -- only recomputed.
+V9_FINGERPRINTS = {
+    'initial-2026-04.db': '45ae79d8367e944d48f80ba476bc99a60ee52000799970ff35157f0d93c0acd8',
+    'current-v4.db': '45ae79d8367e944d48f80ba476bc99a60ee52000799970ff35157f0d93c0acd8',
+    'current-v6.db': '45ae79d8367e944d48f80ba476bc99a60ee52000799970ff35157f0d93c0acd8',
+    'metadata-events-2026-04.db': '92b425777beaf069465c7cf1495ebf57801000f0245f9bf0fb5fdfb444092e60',
+    'runtime-queues-2026-07.db': '58e3523d291b84ef6b98826265d963183c89d6bc7e877190c5cd8d2701eb6518',
+    'operator/production.db': 'b0c4d5704da608629e1e8a2fdf19bc10a0dc1802a1d946b23e131e417981c5f8',
+}
+# Map from schema version to the per-lineage fingerprints at that version.
+# test_support_floor_admits_every_tracked_lineage_at_the_previous_version looks its
+# expectations up by MIGRATIONS[-1].version - 1, so shipping migration N means adding
+# an N - 1 entry here and the matching floor entries, and nothing else.
+LINEAGE_FINGERPRINTS = {8: V8_FINGERPRINTS, 9: V9_FINGERPRINTS}
 EXPECTED_FINGERPRINTS = {
     'initial-2026-04.db': '4330feaa6a22043681d7d55fec900b3279fec9302f68e41417df29653c7cf906',
     'metadata-events-2026-04.db': '8ac9833951d13e2b02deffd4be57f0bec8ce9e8d4771224d1a0fbbc07274abef',
@@ -159,7 +176,7 @@ class MigrationTests(unittest.TestCase):
             collect_inventory(FIXTURE_DIR / CURRENT_V4_FIXTURE)['schema_fingerprint'],
             collect_inventory(FIXTURE_DIR / CURRENT_V6_FIXTURE)['schema_fingerprint'],
             OPERATOR_V7_FINGERPRINT,
-        } | set(V8_FINGERPRINTS.values())
+        } | set(V8_FINGERPRINTS.values()) | set(V9_FINGERPRINTS.values())
         self.assertEqual(set(supported), expected)
         for entry in supported.values():
             self.assertIn('fixture', entry)
@@ -208,12 +225,15 @@ class MigrationTests(unittest.TestCase):
                 conn.commit()
                 before_rows = snapshot_legacy_rows(conn)
 
-            self.assertEqual(run_migrations(settings).applied_versions, (8, 9))
+            self.assertEqual(
+                run_migrations(settings).applied_versions,
+                tuple(range(8, MIGRATIONS[-1].version + 1)),
+            )
             with sqlite3.connect(target) as conn:
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self.assertEqual(
                     conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
-                    9,
+                    MIGRATIONS[-1].version,
                 )
                 self.assertEqual(
                     conn.execute('SELECT COUNT(*) FROM background_job_health').fetchone()[0],
@@ -240,9 +260,12 @@ class MigrationTests(unittest.TestCase):
         carried to ``MIGRATIONS[-1].version - 1``.  Migration 9 shipped without
         those entries and no test caught it, because the suite only ever exercised
         v7 -> (8, 9) in a single run and never a deployment already sitting at v8.
-        This guard fails the moment migration N ships without its N-1 entries.
+        This guard fails the moment migration N ships without its N-1 entries --
+        looked up here as ``LINEAGE_FINGERPRINTS[MIGRATIONS[-1].version - 1]``, so
+        shipping migration N only requires adding its N-1 entry to that map.
         """
         newest = MIGRATIONS[-1].version
+        previous = LINEAGE_FINGERPRINTS[newest - 1]
         floor = {
             entry['fingerprint']
             for entry in json.loads(
@@ -250,11 +273,11 @@ class MigrationTests(unittest.TestCase):
             )['supported_schemas']
         }
         missing = {}
-        for fixture_name in V8_FINGERPRINTS:
+        for fixture_name in previous:
             with tempfile.TemporaryDirectory() as directory:
                 target, _ = self._carry_lineage_to(fixture_name, newest - 1, directory)
                 fingerprint = collect_inventory(target)['schema_fingerprint']
-                self.assertEqual(fingerprint, V8_FINGERPRINTS[fixture_name])
+                self.assertEqual(fingerprint, previous[fixture_name])
                 if fingerprint not in floor:
                     missing[fixture_name] = fingerprint
         self.assertEqual(
@@ -264,18 +287,22 @@ class MigrationTests(unittest.TestCase):
             f'{newest - 1}; a deployment of the previous release cannot upgrade: {missing}',
         )
 
-    def test_a_deployment_already_at_v8_applies_only_migration_nine(self):
-        """The real upgrade path: already at 8, not arriving from 7 in one run.
+    def test_a_deployment_at_the_previous_version_applies_only_the_newest_migration(self):
+        """The real upgrade path: already at the previous version, not arriving in one run.
 
         Regression for the operator report where every live deployment failed with
-        UnsupportedSchemaError because its v8 fingerprint was absent from the floor.
+        UnsupportedSchemaError because its previous-version fingerprint was absent
+        from the floor.
         """
+        newest = MIGRATIONS[-1].version
         with tempfile.TemporaryDirectory() as directory:
-            target, settings = self._carry_lineage_to('operator/production.db', 8, directory)
-            self.assertEqual(collect_inventory(target)['migration_versions'], [2, 3, 4, 5, 6, 7, 8])
+            target, settings = self._carry_lineage_to('operator/production.db', newest - 1, directory)
+            self.assertEqual(
+                collect_inventory(target)['migration_versions'], list(range(2, newest)),
+            )
             self.assertEqual(
                 collect_inventory(target)['schema_fingerprint'],
-                V8_FINGERPRINTS['operator/production.db'],
+                LINEAGE_FINGERPRINTS[newest - 1]['operator/production.db'],
             )
             with sqlite3.connect(target) as conn:
                 conn.execute(
@@ -291,12 +318,12 @@ class MigrationTests(unittest.TestCase):
                 conn.commit()
                 before_rows = snapshot_legacy_rows(conn)
 
-            self.assertEqual(run_migrations(settings).applied_versions, (9,))
+            self.assertEqual(run_migrations(settings).applied_versions, (newest,))
 
             with sqlite3.connect(target) as conn:
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self.assertEqual(
-                    conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 9
+                    conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], newest
                 )
                 self.assertTrue(conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='maintenance_windows'"
@@ -326,7 +353,7 @@ class MigrationTests(unittest.TestCase):
             target = Path(directory) / CURRENT_V4_FIXTURE
             copy2(source, target)
             result = run_migrations(Settings(db_path=str(target)))
-            self.assertEqual(result.applied_versions, (5, 6, 7, 8, 9))
+            self.assertEqual(result.applied_versions, tuple(range(5, MIGRATIONS[-1].version + 1)))
             with sqlite3.connect(target) as conn:
                 assert_legacy_rows_preserved(self, before_rows, conn)
                 self._assert_telemetry_schema(conn)
@@ -338,8 +365,14 @@ class MigrationTests(unittest.TestCase):
             settings = Settings(db_path=str(target))
 
             result = run_migrations(settings)
-            self.assertEqual(result.applied_versions, (7, 8, 9))
-            self.assertEqual(len(result.backups), 3)
+            self.assertEqual(result.applied_versions, tuple(range(7, MIGRATIONS[-1].version + 1)))
+            self.assertEqual(
+                len(result.backups),
+                sum(
+                    1 for migration in MIGRATIONS
+                    if migration.version in result.applied_versions and migration.schema_changing
+                ),
+            )
 
             with sqlite3.connect(target) as conn:
                 streams = list(conn.execute(
@@ -516,7 +549,10 @@ class MigrationTests(unittest.TestCase):
                 )
                 conn.commit()
 
-            self.assertEqual(run_migrations(Settings(db_path=str(target))).applied_versions, (7, 8, 9))
+            self.assertEqual(
+                run_migrations(Settings(db_path=str(target))).applied_versions,
+                tuple(range(7, MIGRATIONS[-1].version + 1)),
+            )
 
             with sqlite3.connect(target) as conn:
                 self.assertEqual(conn.execute(
@@ -528,7 +564,10 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(conn.execute(
                     "SELECT value FROM runtime_state WHERE key='telemetry_retention_state'"
                 ).fetchone()[0], expected_state)
-                self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 9)
+                self.assertEqual(
+                    conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
+                    MIGRATIONS[-1].version,
+                )
 
     def test_operator_service_port_remains_the_service_rollup_stream_key(self):
         source = OPERATOR_FIXTURE_DIR / 'production.db'
