@@ -2,7 +2,7 @@
 phase: 6
 slug: workload-resilience-pi-acceptance
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
-status: draft
+status: planned
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-08-28
@@ -44,11 +44,19 @@ created: 2026-08-28
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| _pending planner_ | — | — | OPS-01 | — | Essential sampling stays within cadence under contention | integration | `uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py -k cadence_under_contention` | ❌ W0 | ⬜ pending |
-| _pending planner_ | — | — | OPS-02 | — | Bounded preview retry reaches a terminal degraded state, never blocks core jobs | integration | `uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py -k preview_retry_bounded` | ❌ W0 | ⬜ pending |
-| _pending planner_ | — | — | OPS-03 | — | Thumbnail blobs off the primary telemetry path, size-capped and TTL-expiring | migration + unit | `uv run --project dashboard python -m pytest -q tests/test_migrations.py -k thumbnail_relocation` | ❌ W0 | ⬜ pending |
-| _pending planner_ | — | — | OPS-04 | — | Concurrent web/worker SQLite access and restart recovery are corruption-free and fenced | integration | `uv run --project dashboard python -m pytest -q tests/test_worker_ownership_matrix.py tests/test_workload_resilience.py -k restart_recovery` | ❌ W0 | ⬜ pending |
-| _pending planner_ | — | — | OPS-07 | — | Representative-load run meets response-time, resource-budget, freshness and job-health bounds | e2e / acceptance | `python tests/pi_load_acceptance.py --duration 600` | ❌ W0 | ⬜ pending |
+| 06-01-T2 | 06-01 | 1 | OPS-03 | T-06-01, T-06-02, T-06-03 | Thumbnail blobs live only in the bounded store; the migration never destroys the only copy | integration (tracer) | `uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py` | ❌ W0 (this task creates it) | ⬜ pending |
+| 06-01-T3 | 06-01 | 1 | OPS-03 | T-06-02 | The worker-ownership contract declares the new database surface; one module owns the write | contract | `uv run --project dashboard python -m pytest -q` | ✅ | ⬜ pending |
+| 06-02-T1 | 06-02 | 2 | OPS-03 | T-06-08, T-06-09 | Every deployed lineage at v9 is admitted; migrated blobs are preserved byte-for-byte | migration | `uv run --project dashboard python -m pytest -q tests/test_migrations.py -k thumbnail_relocation` | ✅ (extends existing) | ⬜ pending |
+| 06-02-T2 | 06-02 | 2 | OPS-03 | T-06-06, T-06-07, T-06-10 | TTL and total-byte budget enforced hourly; bad config falls back to the documented default | unit + integration | `uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py` | ✅ | ⬜ pending |
+| 06-03-T1 | 06-03 | 3 | OPS-02 | T-06-11, T-06-15 | Retry is bounded and deferred by real elapsed backoff; superseded revisions still fence | unit + integration | `uv run --project dashboard python -m pytest -q tests/test_durable_queues.py` | ✅ | ⬜ pending |
+| 06-03-T2 | 06-03 | 3 | OPS-02 | T-06-12, T-06-13, T-06-14 | Exhausted retries reach a distinct degraded terminal state, visible in both themes, without blocking J1-J4 | integration | `uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py -k preview_retry_bounded` | ✅ | ⬜ pending |
+| 06-04-T1 | 06-04 | 4 | OPS-01 | T-06-16 | The essential lane is claimed by J1 and J2 alone, enforced by a static contract | contract | `uv run --project dashboard python -m pytest -q tests/test_worker_ownership_matrix.py` | ✅ | ⬜ pending |
+| 06-04-T2 | 06-04 | 4 | OPS-01 | T-06-17, T-06-18, T-06-19 | Essential sampling stays within cadence under contention, judged by `freshness_state` | integration | `uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py -k cadence_under_contention` | ✅ | ⬜ pending |
+| 06-05-T1 | 06-05 | 5 | OPS-04 | T-06-21, T-06-22, T-06-24 | WAL is in force and read back; inspection, backup and upgrade all work with sidecars present | integration + migration | `uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py tests/test_migrations.py tests/test_backup_recovery.py` | ✅ | ⬜ pending |
+| 06-05-T2 | 06-05 | 5 | OPS-04 | T-06-20, T-06-23, T-06-25 | Concurrent web/worker access is corruption-free; a restarted worker fences the dead epoch | integration | `uv run --project dashboard python -m pytest -q tests/test_worker_ownership_matrix.py tests/test_workload_resilience.py -k restart_recovery` | ✅ | ⬜ pending |
+| 06-05-T3 | 06-05 | 5 | OPS-04 | T-06-24 | The `_db_lock` boundary is documented as deferred rather than silently unchanged (D-01) | doc + contract | `uv run --project dashboard python -m pytest -q tests/test_release_contract.py tests/test_ui_contract.py` | ✅ | ⬜ pending |
+| 06-06-T1 | 06-06 | 6 | OPS-07 | T-06-27, T-06-28, T-06-30 | The harness judges cadence with the product's own oracle and fails honestly on missing evidence | e2e / acceptance | `python tests/pi_load_acceptance.py --self-test && uv run --project dashboard python -m pytest -q tests/test_workload_resilience.py` | ❌ W0 (this task creates it) | ⬜ pending |
+| 06-06-T2 | 06-06 | 6 | OPS-07 | T-06-26, T-06-29 | A Pi-class run is labelled `acceptance`; a non-Pi run is labelled `smoke` and never counted as acceptance | e2e / acceptance | `uv run --project dashboard python -m pytest -q && python tests/pi_load_acceptance.py --self-test` | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 

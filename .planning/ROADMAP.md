@@ -442,7 +442,41 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: TBD
+**Plans**: 6 plans
+
+- [ ] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
+- [ ] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
+- [ ] 06-03-PLAN.md — Bounded preview retry with backoff and a visible degraded state
+- [ ] 06-04-PLAN.md — Essential-lane isolation: cleanup off the metrics thread, cadence proven under contention
+- [ ] 06-05-PLAN.md — WAL enablement, concurrent web/worker access, and restart recovery
+- [ ] 06-06-PLAN.md — Raspberry Pi-class load acceptance harness and run
+
+**Wave 1**
+
+- `06-01` — Thumbnails leave the primary telemetry path (tracer; contains a blocking one-way-door decision checkpoint)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- `06-02` — Support floor at schema version 10, TTL and byte budget
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- `06-03` — Bounded preview retry and the degraded state
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- `06-04` — Executor lane separation and cadence-under-contention coverage
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- `06-05` — WAL, concurrency, restart recovery, and the documented `_db_lock` deferral
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- `06-06` — Pi-class load acceptance harness and the acceptance run
+
+*Waves are strictly sequential: every plan writes `tests/test_workload_resilience.py` and/or
+`dashboard/app.py`, so no two plans in this phase have disjoint `files_modified`.*
 
 ## Progress
 
@@ -456,4 +490,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
 | 5. Theme-Parity Analytics Experience | 7/7 | Complete    | 2026-08-28 |
-| 6. Workload Resilience & Pi Acceptance | 0/TBD | Not started | - |
+| 6. Workload Resilience & Pi Acceptance | 0/6 | Not started | - |
