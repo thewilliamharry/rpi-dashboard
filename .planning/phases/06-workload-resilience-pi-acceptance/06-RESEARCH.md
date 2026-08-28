@@ -372,22 +372,28 @@ The Pi-acceptance harness (and new regression tests) should call this directly t
 
 **If this table is empty:** N/A — see entries above; all are genuine open decisions best surfaced to the user/planner rather than resolved silently by this research.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All three questions were resolved during planning. Each carries a **Resolution** line naming the
+> artifact that closed it. Nothing below is still open.
 
 1. **Exact WAL rollout mechanics for an already-deployed production database**
    - What we know: `journal_mode` is never set anywhere in the codebase today; `PROJECT.md` explicitly defers this decision to Phase 6.
    - What's unclear: Whether the operator's existing production `dashboard.db` (referenced elsewhere as "the operator-confirmed production fingerprint" in `.planning/STATE.md`'s Phase 1 decisions) is already in WAL mode from some earlier manual operation, or in the SQLite default (rollback-journal) mode — this determines whether enabling WAL is a no-op confirmation or an actual first-time mode change with real sidecar-file implications.
    - Recommendation: The plan should include a step that reads `PRAGMA journal_mode` from the actual production database fingerprint/backup before deciding the migration's behavior, using the same evidence-based approach `01-04-PLAN.md` used for the original migration-support-floor inventory.
+   - **Resolution (`06-05-PLAN.md` Task 1):** The rollout does not depend on knowing the starting mode. `connect_db` issues `PRAGMA journal_mode=WAL` unconditionally and `configured_journal_mode` reads back the mode actually in force, so both starting modes converge on the same end state; `test_connections_run_in_wal_mode_from_either_starting_mode` proves both paths against synthetic fixtures. The production reading the recommendation asked for is captured as *evidence* by Task 1's `<human-check>`, non-blocking: when a Pi or a copy of the deployed database is reachable, the before/after `journal_mode` and `wal_bytes` readings are attached to the plan summary; when it is not, the starting mode is recorded as `unverified` and carried as `D-DEBT-06-03` in `06-DEBT.md` (Task 3) rather than assumed. The two consequences the question flagged — WAL-mode schema inspection and WAL-mode verified backup — are handled unconditionally in the same task (`inventory.py`'s `PRAGMA query_only=ON` fallback, and normalizing the backup artifact to rollback-journal mode).
 
 2. **Exact retry-count/backoff numbers and TTL duration for the new thumbnail store**
    - What we know: No existing convention specifies these; `THUMB_REFRESH_DAYS=1` is a *refresh* cadence, not a retry-backoff or storage-TTL value.
    - What's unclear: Whether a new TTL should mirror `THUMB_REFRESH_DAYS`, be independently configurable, or use a fixed multiple.
    - Recommendation: Treat as a `Claude's Discretion`-equivalent decision for the planner to make explicitly and document, since no CONTEXT.md exists to constrain it and no code precedent fixes the number.
+   - **Resolution (user decision D-02, implemented in `06-02-PLAN.md` Task 2 and `06-03-PLAN.md` Tasks 1-2):** D-02 delegated the numbers to the planner on the condition that they be specified, env-exposed, and carry recorded rationale. Chosen and locked: `THUMBNAIL_TTL_DAYS = 7` (survives six consecutive missed daily `THUMB_REFRESH_DAYS` cycles and equals `EXPIRE_DAYS`, so a thumbnail can never outlive its own service's visibility window), `THUMBNAIL_STORE_MAX_BYTES = 67_108_864` (matches the existing `telemetry_backlog_reserve_bytes` reserve; an order of magnitude below the telemetry store it shares a disk with), `PREVIEW_MAX_ATTEMPTS = 3`, `PREVIEW_RETRY_BASE_SECONDS = 60` and `PREVIEW_RETRY_MAX_SECONDS = 600` (60s doubling, capped at 600s). Every value is loaded through `_positive_int`, so a bad env value falls back to the documented default rather than to "no limit" (PROH-OPS-03-04), and all five are exposed in the `docker-compose.yml` shared environment anchor. The question's specific framing — mirror `THUMB_REFRESH_DAYS`, or independent — is answered: independent and configurable, with `THUMB_REFRESH_DAYS` used as the *reasoning* input rather than the value.
 
 3. **Whether `_db_lock`'s scope should narrow as part of this phase or remain a documented follow-up**
    - What we know: `AR-03-01` already accepted a narrow, reasoned exception for one route; `PROJECT.md` groups this with the WAL decision for Phase 6.
    - What's unclear: Whether the phase's scope (as written) expects `_db_lock` itself to be touched, or only the WAL/underlying SQLite concurrency model, leaving `_db_lock` untouched pending its own future evaluation.
    - Recommendation: Default to *not* touching `_db_lock`'s scope beyond what OPS-04's "concurrent web/worker database activity" testing requires to prove correct, given Pitfall 4's risk — but flag this explicitly for the planner/user to confirm the intended boundary.
+   - **Resolution (user decision D-01, implemented in `06-05-PLAN.md` Tasks 1 and 3):** The boundary was confirmed by the user exactly as recommended — WAL only, `_db_lock`'s scope UNCHANGED at every call site this phase. It is enforced, not merely intended: `PROH-OPS-04-02` forbids any route or job gaining unserialized access as a side effect of the journal-mode change, and Task 1's acceptance criteria require a `git diff` scoped to `dashboard/app.py` showing no change to any `_db_lock` occurrence. The narrowing is recorded as `D-DEBT-06-01` in `06-DEBT.md` (Task 3), citing this phase's own evidence — the journal-mode readings, the concurrent-writer and restart-recovery test results, and the pre-existing `AR-03-01` accepted risk for `api_advanced_current` — plus what would need to be true to proceed.
 
 ## Environment Availability
 
