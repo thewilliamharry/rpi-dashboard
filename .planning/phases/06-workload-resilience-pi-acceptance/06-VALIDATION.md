@@ -24,7 +24,7 @@ created: 2026-08-28
 | **Quick run command** | `uv run --project dashboard python -m pytest -q -k <module_or_test>` |
 | **Full suite command** | `uv run --project dashboard python -m pytest -q` |
 | **Quick command runtime** | Sub-second to a few seconds per module; well inside the 120s budget below |
-| **Full suite runtime** | *Not yet measured.* **06-01 Task 4 (wave 1) measures it once with `time uv run --project dashboard python -m pytest -q` and replaces this cell with the observed wall-clock duration and the date measured.** It is measured against a green suite: 06-01 Tasks 2 and 3 each carry a full-suite-exits-0 acceptance criterion, so by Task 4 the repository is green and the number is a real runtime rather than a failing run's. Nine tasks across this phase assert on an unscoped full-suite run, so this number is the contract they are budgeted against — it must be a measurement, not an estimate. |
+| **Full suite runtime** | *Not yet measured.* **06-01 Task 4 (wave 1) measures it once with `time uv run --project dashboard python -m pytest -q` and replaces this cell with the observed wall-clock duration and the date measured.** It is measured against a green suite: 06-01 Tasks 2 and 3 each carry a full-suite-exits-0 acceptance criterion, so by Task 4 the repository is green and the number is a real runtime rather than a failing run's. Eleven tasks across this phase assert on an unscoped full-suite run, so this number is the contract they are budgeted against — it must be a measurement, not an estimate. |
 
 ---
 
@@ -34,8 +34,8 @@ created: 2026-08-28
 - **After every plan wave:** Run `uv run --project dashboard python -m pytest -q`
 - **Before `/gsd-verify-work`:** Full suite must be green
 - **Max feedback latency (quick command):** 120 seconds for `pytest -q -k <touched module>`. This budget is fixed and does not move.
-- **Max feedback latency (full suite):** provisionally 120 seconds, pending the measurement 06-01 Task 3 records above. Reconciliation rule, so the contract is never left violated: if the measured full-suite runtime is at or under 120 seconds, this line stands unchanged. If it exceeds 120 seconds, 06-01 Task 3 replaces this line with the measured value rounded up to the next 30 seconds, annotated as measured rather than assumed. The quick-command budget above is not weakened in either case — the two commands carry separate budgets because they answer different questions.
-- **Why the distinction:** nine tasks in this phase verify with the unscoped full suite (06-01 T2/T3, 06-02 T2, 06-04 T2, 06-05 T1/T2/T3, 06-06 T1/T2). Holding an unmeasured suite to a quick-command budget is a contract that cannot be evaluated; measuring it once in wave 1 makes every later wave's assertion checkable.
+- **Max feedback latency (full suite):** provisionally 120 seconds, pending the measurement 06-01 Task 4 records above. Reconciliation rule, so the contract is never left violated: if the measured full-suite runtime is at or under 120 seconds, this line stands unchanged. If it exceeds 120 seconds, 06-01 Task 4 replaces this line with the measured value rounded up to the next 30 seconds, annotated as measured rather than assumed. The quick-command budget above is not weakened in either case — the two commands carry separate budgets because they answer different questions.
+- **Why the distinction:** eleven tasks in this phase verify with the unscoped full suite (06-01 T2/T3/T4, 06-02 T1, 06-03 T2, 06-04 T2, 06-05 T1/T2/T3, 06-06 T1/T2). Holding an unmeasured suite to a quick-command budget is a contract that cannot be evaluated; measuring it once in wave 1 makes every later wave's assertion checkable.
 - **Phase gate addendum:** OPS-07's Pi-class harness run is additionally required as human-gated evidence if no live Pi is reachable from the automated environment (see `06-RESEARCH.md` § Environment Availability).
 
 ---
