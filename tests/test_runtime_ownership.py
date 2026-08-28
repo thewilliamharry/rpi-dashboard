@@ -176,7 +176,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertIs(operations.acquire_worker_lease, queues.acquire_worker_lease)
 
     def test_thumbnail_repository_persists_success_and_failure_for_api_reads(self):
-        from dashboard.beacon.repositories import ThumbnailRepository
+        from dashboard.beacon.repositories import ThumbnailStoreRepository
 
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
@@ -185,32 +185,44 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 "VALUES (?,?,?,?,?,?,?)",
                 (8080, 'Preview service', 1, 1, 1, 1.0, None),
             )
-            repository = ThumbnailRepository()
+            # A TTL far larger than any real deployment's so the stored
+            # expires_ts stays in the future relative to the wall-clock ``now``
+            # `/api/thumbnail/<port>` reads later in this test, even though the
+            # captured_ts values below are deliberately small, fixed literals.
+            repository = ThumbnailStoreRepository(ttl_seconds=10**10)
             repository.store_thumbnail_result(
                 conn, 8080, None, None, None, 'x' * 300, ts=111,
             )
             failed = conn.execute(
-                "SELECT thumb_data, thumb_mime, thumb_ts, thumb_source, thumb_attempt_ts, thumb_error "
+                "SELECT thumb_ts, thumb_source, thumb_attempt_ts, thumb_error "
                 "FROM services WHERE port=8080"
+            ).fetchone()
+            failed_thumbnail = conn.execute(
+                "SELECT 1 FROM thumbnails WHERE port=8080"
             ).fetchone()
             repository.store_thumbnail_result(
                 conn, 8080, b'png-bytes', 'image/png', 'screenshot', None, ts=222,
             )
             succeeded = conn.execute(
-                "SELECT thumb_data, thumb_mime, thumb_ts, thumb_source, thumb_attempt_ts, thumb_error "
+                "SELECT thumb_ts, thumb_source, thumb_attempt_ts, thumb_error "
                 "FROM services WHERE port=8080"
+            ).fetchone()
+            succeeded_thumbnail = conn.execute(
+                "SELECT data, mime FROM thumbnails WHERE port=8080"
             ).fetchone()
             conn.commit()
             conn.close()
 
         self.assertEqual(
             tuple(failed),
-            (None, 'image/jpeg', None, None, 111, 'x' * 240),
+            (None, None, 111, 'x' * 240),
         )
+        self.assertIsNone(failed_thumbnail)
         self.assertEqual(
             tuple(succeeded),
-            (b'png-bytes', 'image/png', 222, 'screenshot', 222, None),
+            (222, 'screenshot', 222, None),
         )
+        self.assertEqual(tuple(succeeded_thumbnail), (b'png-bytes', 'image/png'))
         thumbnail = self.client.get('/api/thumbnail/8080')
         self.assertEqual(thumbnail.status_code, 200)
         self.assertEqual(thumbnail.data, b'png-bytes')

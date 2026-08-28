@@ -209,8 +209,13 @@ class ApiAndAuthTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute(
-                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source='screenshot' WHERE port=8080",
-                (b'compatibility-thumbnail', 'image/png', now),
+                "UPDATE services SET thumb_ts=?, thumb_source='screenshot' WHERE port=8080",
+                (now,),
+            )
+            conn.execute(
+                "INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) "
+                "VALUES(8080, ?, ?, ?, 'screenshot', ?)",
+                (b'compatibility-thumbnail', 'image/png', now, now + 86400),
             )
             conn.execute(
                 "INSERT INTO events(ts,port,event_type,online,previous_online,details) VALUES(?,?,?,?,?,?)",
@@ -276,9 +281,14 @@ class ApiAndAuthTests(unittest.TestCase):
             ]
             for port, title, data, mime, thumb_ts, source, attempt_ts, error in rows:
                 conn.execute(
-                    "INSERT INTO services (port, title, first_seen, last_seen, is_online, thumb_data, thumb_mime, thumb_ts, thumb_source, thumb_attempt_ts, thumb_error) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (port, title, now - 120, now, 1, data, mime, thumb_ts, source, attempt_ts, error),
+                    "INSERT INTO services (port, title, first_seen, last_seen, is_online, thumb_ts, thumb_source, thumb_attempt_ts, thumb_error) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (port, title, now - 120, now, 1, thumb_ts, source, attempt_ts, error),
+                )
+                conn.execute(
+                    "INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (port, data, mime, thumb_ts, source, now + 86400),
                 )
                 conn.execute(
                     "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags) VALUES (?,?,?,?,?,?)",
@@ -657,14 +667,17 @@ class ApiAndAuthTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             row = conn.execute(
-                "SELECT title, thumb_data, thumb_mime, thumb_source FROM services WHERE port=8080"
+                "SELECT title, thumb_source FROM services WHERE port=8080"
+            ).fetchone()
+            thumbnail = conn.execute(
+                "SELECT data, mime FROM thumbnails WHERE port=8080"
             ).fetchone()
             conn.close()
 
         self.assertEqual(row['title'], 'Path Title')
-        self.assertIsNotNone(row['thumb_data'])
-        self.assertEqual(row['thumb_mime'], 'image/png')
         self.assertEqual(row['thumb_source'], 'screenshot')
+        self.assertIsNotNone(thumbnail['data'])
+        self.assertEqual(thumbnail['mime'], 'image/png')
 
     def test_thumbnail_result_records_error_and_clears_it_on_success(self):
         self._insert_service()
@@ -672,20 +685,26 @@ class ApiAndAuthTests(unittest.TestCase):
             conn = self.appmod.get_db()
             self.appmod._store_thumbnail_result(conn, 8080, None, None, None, 'browser missing', ts=111)
             failed = conn.execute(
-                "SELECT thumb_data, thumb_source, thumb_attempt_ts, thumb_error FROM services WHERE port=8080"
+                "SELECT thumb_source, thumb_attempt_ts, thumb_error FROM services WHERE port=8080"
+            ).fetchone()
+            failed_thumbnail = conn.execute(
+                "SELECT 1 FROM thumbnails WHERE port=8080 AND expires_ts > 111"
             ).fetchone()
             self.appmod._store_thumbnail_result(conn, 8080, b'png-bytes', 'image/png', 'screenshot', None, ts=222)
             succeeded = conn.execute(
-                "SELECT thumb_data, thumb_mime, thumb_source, thumb_ts, thumb_attempt_ts, thumb_error FROM services WHERE port=8080"
+                "SELECT thumb_source, thumb_ts, thumb_attempt_ts, thumb_error FROM services WHERE port=8080"
+            ).fetchone()
+            succeeded_thumbnail = conn.execute(
+                "SELECT data, mime FROM thumbnails WHERE port=8080"
             ).fetchone()
             conn.close()
 
-        self.assertIsNone(failed['thumb_data'])
         self.assertIsNone(failed['thumb_source'])
         self.assertEqual(failed['thumb_attempt_ts'], 111)
         self.assertEqual(failed['thumb_error'], 'browser missing')
-        self.assertEqual(bytes(succeeded['thumb_data']), b'png-bytes')
-        self.assertEqual(succeeded['thumb_mime'], 'image/png')
+        self.assertIsNone(failed_thumbnail)
+        self.assertEqual(bytes(succeeded_thumbnail['data']), b'png-bytes')
+        self.assertEqual(succeeded_thumbnail['mime'], 'image/png')
         self.assertEqual(succeeded['thumb_source'], 'screenshot')
         self.assertEqual(succeeded['thumb_ts'], 222)
         self.assertEqual(succeeded['thumb_attempt_ts'], 222)
@@ -716,8 +735,13 @@ class ApiAndAuthTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute(
-                "UPDATE services SET title=?, thumb_data=?, thumb_mime=?, thumb_ts=? WHERE port=?",
-                ('Existing Title', b'old-bytes', 'image/png', 12345, 8080),
+                "UPDATE services SET title=?, thumb_ts=? WHERE port=?",
+                ('Existing Title', 12345, 8080),
+            )
+            conn.execute(
+                "INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) "
+                "VALUES(8080, ?, ?, ?, 'screenshot', ?)",
+                (b'old-bytes', 'image/png', 12345, 12345 + 86400 * 365),
             )
             conn.commit()
             conn.close()
@@ -752,14 +776,17 @@ class ApiAndAuthTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             row = conn.execute(
-                "SELECT title, thumb_data, thumb_mime FROM services WHERE port=8080"
+                "SELECT title FROM services WHERE port=8080"
+            ).fetchone()
+            thumbnail = conn.execute(
+                "SELECT data, mime FROM thumbnails WHERE port=8080"
             ).fetchone()
             preview = conn.execute("SELECT status, error FROM preview_requests WHERE port=8080").fetchone()
             conn.close()
 
         self.assertEqual(row['title'], 'Existing Title')
-        self.assertEqual(bytes(row['thumb_data']), b'old-bytes')
-        self.assertEqual(row['thumb_mime'], 'image/png')
+        self.assertEqual(bytes(thumbnail['data']), b'old-bytes')
+        self.assertEqual(thumbnail['mime'], 'image/png')
         self.assertEqual(preview['status'], 'failed')
         self.assertIn('title refresh failed', preview['error'])
 

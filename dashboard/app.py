@@ -66,6 +66,10 @@ THUMB_MAX_BYTES = 2 * 1024 * 1024
 THUMB_REFRESH_DAYS = SETTINGS.thumb_refresh_days
 PREVIEW_SETTLE_MS = 5_000
 PREVIEW_BROWSER_BUDGET_MS = 27_000
+# The phase's chosen default TTL for the bounded thumbnail store (D-02). The
+# runtime-configurable THUMBNAIL_TTL_DAYS setting lands in 06-02; this constant
+# seeds the store until then.
+THUMBNAIL_TTL_SECONDS = 7 * 86400
 # Sentinel that survives both of _legacy_screenshot_service's and
 # _legacy_refresh_service_preview's blanket `except Exception` handlers
 # unmodified, because it travels through the already-existing
@@ -1352,10 +1356,12 @@ def _legacy_do_discovery(source='scheduled'):
         with _mutation_write_transaction(authority, now=now) as conn:
             existing_rows = conn.execute(
                 "SELECT s.port, s.title, s.is_online, s.thumb_ts, s.thumb_source, "
-                "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
+                "EXISTS (SELECT 1 FROM thumbnails t WHERE t.port = s.port AND t.data IS NOT NULL "
+                "AND t.source='screenshot' AND (t.expires_ts IS NULL OR t.expires_ts > ?)) AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
                 "COALESCE(m.critical, 0) AS critical "
-                "FROM services s LEFT JOIN service_meta m ON m.port = s.port"
+                "FROM services s LEFT JOIN service_meta m ON m.port = s.port",
+                (now,),
             ).fetchall()
             existing = {row['port']: dict(row) for row in existing_rows}
 
@@ -1501,11 +1507,12 @@ def _legacy_do_uptime_check(only_down=False):
             where = "WHERE s.last_seen >= ? AND s.is_online = 0" if only_down else "WHERE s.last_seen >= ?"
             rows = conn.execute(
                 "SELECT s.port, s.title, s.is_online, s.state_since, "
-                "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
+                "EXISTS (SELECT 1 FROM thumbnails t WHERE t.port = s.port AND t.data IS NOT NULL "
+                "AND t.source='screenshot' AND (t.expires_ts IS NULL OR t.expires_ts > ?)) AS has_thumb, "
                 "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
                 "COALESCE(m.critical, 0) AS critical, COALESCE(m.healthy_statuses, '200-399') AS healthy_statuses "
                 "FROM services s LEFT JOIN service_meta m ON m.port = s.port " + where,
-                (expire_cutoff,),
+                (now, expire_cutoff),
             ).fetchall()
 
         # Network I/O is deliberately outside the SQLite lock so the metrics
@@ -1682,6 +1689,11 @@ def _monitoring_operations():
     )
 
 
+def _thumbnail_store():
+    """Return the bounded thumbnail store collaborator (OPS-03)."""
+    return beacon_repositories.ThumbnailStoreRepository(ttl_seconds=THUMBNAIL_TTL_SECONDS)
+
+
 def _preview_operations():
     """Bind legacy browser storage details without importing them in worker modules."""
     return beacon_previews.PreviewOperations(
@@ -1691,7 +1703,7 @@ def _preview_operations():
         shutdown_browser=_legacy_shutdown_browser,
         screenshot_service=_legacy_screenshot_service,
         fetch_thumbnail=_legacy_fetch_thumbnail,
-        thumbnail_repository=beacon_repositories.ThumbnailRepository(),
+        thumbnail_repository=_thumbnail_store(),
         refresh_service_preview=_legacy_refresh_service_preview,
     )
 
@@ -2713,7 +2725,8 @@ def api_services():
     with _db_lock, database_access(DB_PATH) as conn:
         services = conn.execute(
             "SELECT s.port, s.title, s.first_seen, s.last_seen, s.is_online, s.state_since, "
-            "(s.thumb_data IS NOT NULL AND s.thumb_source='screenshot') AS has_thumb, "
+            "EXISTS (SELECT 1 FROM thumbnails t WHERE t.port = s.port AND t.data IS NOT NULL "
+            "AND t.source='screenshot' AND (t.expires_ts IS NULL OR t.expires_ts > ?)) AS has_thumb, "
             "s.last_latency_ms, s.last_error, "
             "COALESCE(m.display_name, '') AS display_name, COALESCE(m.url, '') AS url, "
             "COALESCE(m.critical, 0) AS critical, COALESCE(m.pinned_order, s.port) AS pinned_order, "
@@ -2721,7 +2734,7 @@ def api_services():
             "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
             "WHERE s.last_seen >= ? "
             "ORDER BY COALESCE(m.pinned_order, s.port) ASC, s.port ASC",
-            (expire_cutoff,),
+            (now, expire_cutoff),
         ).fetchall()
 
         checks_by_port = defaultdict(list)
@@ -2973,14 +2986,11 @@ def api_service_meta(port):
 @app.route("/api/thumbnail/<int:port>")
 def api_thumbnail(port):
     with _db_lock, database_access(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT thumb_data, thumb_mime FROM services WHERE port=? AND thumb_source='screenshot'",
-            (port,),
-        ).fetchone()
+        row = beacon_repositories.read_thumbnail(conn, port, now=int(time.time()))
 
-    if row and row['thumb_data']:
-        resp = make_response(bytes(row['thumb_data']))
-        resp.headers['Content-Type'] = row['thumb_mime'] or 'image/jpeg'
+    if row and row['data']:
+        resp = make_response(bytes(row['data']))
+        resp.headers['Content-Type'] = row['mime'] or 'image/jpeg'
         resp.headers['Cache-Control'] = 'public, max-age=300'
         return resp
 

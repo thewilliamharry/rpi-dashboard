@@ -329,6 +329,64 @@ class MigrationTests(unittest.TestCase):
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='maintenance_windows'"
                 ).fetchone())
 
+    def test_migration_ten_thumbnail_relocation_preserves_every_captured_blob(self):
+        """OPS-03: migration 10 relocates every captured blob without losing one.
+
+        A tracked lineage carried to the previous version, seeded with two
+        distinct captured thumbnails and one service that was never captured,
+        upgrades to the newest migration with both blobs present byte-identically
+        in ``thumbnails`` and ``services.thumb_data`` empty for every row.
+        """
+        newest = MIGRATIONS[-1].version
+        with tempfile.TemporaryDirectory() as directory:
+            target, settings = self._carry_lineage_to('operator/production.db', newest - 1, directory)
+            with sqlite3.connect(target) as conn:
+                conn.execute(
+                    'INSERT INTO services(port, title, first_seen, last_seen, is_online, '
+                    'thumb_data, thumb_mime, thumb_ts, thumb_source) VALUES(?,?,?,?,?,?,?,?,?)',
+                    (8100, 'Blob service one', 1_700_000_000, 1_700_000_010, 1,
+                     b'thumbnail-bytes-one', 'image/png', 1_700_000_010, 'screenshot'),
+                )
+                conn.execute(
+                    'INSERT INTO services(port, title, first_seen, last_seen, is_online, '
+                    'thumb_data, thumb_mime, thumb_ts, thumb_source) VALUES(?,?,?,?,?,?,?,?,?)',
+                    (8101, 'Blob service two', 1_700_000_000, 1_700_000_010, 1,
+                     b'thumbnail-bytes-two', 'image/jpeg', 1_700_000_020, 'screenshot'),
+                )
+                conn.execute(
+                    'INSERT INTO services(port, title, first_seen, last_seen, is_online) '
+                    'VALUES(?,?,?,?,?)',
+                    (8102, 'No blob service', 1_700_000_000, 1_700_000_010, 1),
+                )
+                conn.commit()
+                before_rows = snapshot_legacy_rows(conn)
+
+            self.assertEqual(run_migrations(settings).applied_versions, (newest,))
+
+            with sqlite3.connect(target) as conn:
+                assert_legacy_rows_preserved(self, before_rows, conn)
+                self.assertEqual(
+                    conn.execute(
+                        'SELECT data, mime FROM thumbnails WHERE port=?', (8100,)
+                    ).fetchone(),
+                    (b'thumbnail-bytes-one', 'image/png'),
+                )
+                self.assertEqual(
+                    conn.execute(
+                        'SELECT data, mime FROM thumbnails WHERE port=?', (8101,)
+                    ).fetchone(),
+                    (b'thumbnail-bytes-two', 'image/jpeg'),
+                )
+                self.assertIsNone(
+                    conn.execute('SELECT 1 FROM thumbnails WHERE port=?', (8102,)).fetchone()
+                )
+                self.assertEqual(
+                    conn.execute(
+                        'SELECT COUNT(*) FROM services WHERE thumb_data IS NOT NULL'
+                    ).fetchone()[0],
+                    0,
+                )
+
     def test_unsupported_schema_error_names_the_fingerprint_and_the_evidence_command(self):
         """An operator cannot supply floor evidence for a shape the error never names."""
         with tempfile.TemporaryDirectory() as directory:
