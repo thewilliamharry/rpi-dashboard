@@ -220,9 +220,14 @@ class SecurityAndScanningTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute(
-                "INSERT INTO services (port, title, first_seen, last_seen, is_online, thumb_data, thumb_mime, thumb_ts) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (3000, 'Legacy Thumb', now - 120, now, 1, b'old-bytes', 'image/png', now),
+                "INSERT INTO services (port, title, first_seen, last_seen, is_online, thumb_ts) "
+                "VALUES (?,?,?,?,?,?)",
+                (3000, 'Legacy Thumb', now - 120, now, 1, now),
+            )
+            conn.execute(
+                "INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) "
+                "VALUES(3000, ?, ?, ?, NULL, ?)",
+                (b'old-bytes', 'image/png', now, now + 86400),
             )
             conn.execute(
                 "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags) VALUES (?,?,?,?,?,?)",
@@ -273,12 +278,16 @@ class SecurityAndScanningTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             row = conn.execute(
-                "SELECT thumb_data, thumb_mime, thumb_source FROM services WHERE port=3000"
+                "SELECT thumb_source FROM services WHERE port=3000"
+            ).fetchone()
+            thumbnail = conn.execute(
+                "SELECT data, mime, source FROM thumbnails WHERE port=3000"
             ).fetchone()
             conn.close()
 
         self.assertEqual(captured_thumb, [])
-        self.assertEqual(bytes(row['thumb_data']), b'old-bytes')
+        self.assertEqual(bytes(thumbnail['data']), b'old-bytes')
+        self.assertIsNone(thumbnail['source'])
         self.assertIsNone(row['thumb_source'])
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
@@ -291,9 +300,14 @@ class SecurityAndScanningTests(unittest.TestCase):
         with self.appmod._db_lock:
             conn = self.appmod.get_db()
             conn.execute(
-                "INSERT INTO services (port, title, first_seen, last_seen, is_online, thumb_data, thumb_mime, thumb_ts, thumb_source) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (3000, 'Fresh Thumb', now - 120, now, 1, b'fresh-bytes', 'image/png', now, 'screenshot'),
+                "INSERT INTO services (port, title, first_seen, last_seen, is_online, thumb_ts, thumb_source) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (3000, 'Fresh Thumb', now - 120, now, 1, now, 'screenshot'),
+            )
+            conn.execute(
+                "INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) "
+                "VALUES(3000, ?, ?, ?, 'screenshot', ?)",
+                (b'fresh-bytes', 'image/png', now, now + 86400),
             )
             conn.execute(
                 "INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags) VALUES (?,?,?,?,?,?)",

@@ -306,7 +306,7 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
                 'last_success_ts', 'state', 'error_class', 'updated_ts',
             },
         )
-        self.assertEqual(migrations.MIGRATIONS[-1].version, 9)
+        self.assertIn(9, versions)
         self.assertIn(8, versions)
 
     def test_job_health_transitions_preserve_success_and_bound_failure_class(self):

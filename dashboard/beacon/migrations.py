@@ -571,6 +571,60 @@ def _migration_9_planned_maintenance(conn):
     _add_column(conn, 'services', 'overrun_raised_ts INTEGER')
 
 
+# The phase's chosen default backfill TTL (D-02): 7 days. The runtime-configurable
+# THUMBNAIL_TTL_DAYS setting lands in 06-02; this constant only seeds expires_ts for
+# thumbnail rows that existed before that setting did, so a pre-migration blob is not
+# retained indefinitely just because it predates the configurable TTL.
+THUMBNAIL_BACKFILL_TTL_SECONDS = 7 * 86400
+
+
+def _migration_10_bounded_thumbnail_store(conn):
+    """Relocate preview thumbnail blobs off the primary services telemetry table.
+
+    OPS-03: a 2 MiB BLOB column on ``services`` -- the row every scheduled sampling
+    job (J3, J4, J5, discovery) reads and writes for basic online/offline state -- is
+    exactly the "large preview blobs on the primary telemetry path" OPS-03 forbids.
+    This migration creates a dedicated, TTL-expiring ``thumbnails`` table, backfills
+    every existing captured blob into it, and empties the blob columns on
+    ``services``. The backfill INSERT and the emptying UPDATE run inside the same
+    ``BEGIN IMMEDIATE`` transaction ``_apply_pending_migrations`` already wraps every
+    migration in, so a failure at any point leaves ``services.thumb_data`` untouched
+    (PROH-OPS-03-01). ``services.thumb_ts``, ``thumb_source``, ``thumb_attempt_ts``
+    and ``thumb_error`` stay in place and still written -- they are small per-service
+    diagnostic facts read by ``/api/thumbnail-status`` and the discovery refresh
+    gate; only the blob and its content type leave the primary table.
+
+    A fourth, unrelated step -- adding ``preview_requests.next_attempt_ts`` -- rides
+    in this same migration deliberately. Adding a second migration version would
+    force a second full support-floor fingerprint round (six lineage fingerprints
+    across two JSON manifests plus the test_migrations.py guard) for no schema
+    benefit; the column stays unused until 06-03 wires bounded preview retry.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS thumbnails (
+            port INTEGER PRIMARY KEY,
+            data BLOB,
+            mime TEXT,
+            captured_ts INTEGER,
+            source TEXT,
+            expires_ts INTEGER
+        )
+    """)
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_thumbnails_expires ON thumbnails(expires_ts)'
+    )
+    conn.execute(
+        'INSERT OR IGNORE INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) '
+        'SELECT port, thumb_data, thumb_mime, thumb_ts, thumb_source, COALESCE(thumb_ts, 0) + ? '
+        'FROM services WHERE thumb_data IS NOT NULL',
+        (THUMBNAIL_BACKFILL_TTL_SECONDS,),
+    )
+    conn.execute(
+        'UPDATE services SET thumb_data=NULL, thumb_mime=NULL WHERE thumb_data IS NOT NULL'
+    )
+    _add_column(conn, 'preview_requests', 'next_attempt_ts INTEGER')
+
+
 MIGRATIONS = (
     Migration(1, 'baseline_schema', True, _migration_1_baseline),
     Migration(2, 'service_diagnostics', True, _migration_2_service_diagnostics),
@@ -581,6 +635,7 @@ MIGRATIONS = (
     Migration(7, 'canonical_host_streams', True, _migration_7_canonical_host_streams),
     Migration(8, 'background_job_health', True, _migration_8_background_job_health),
     Migration(9, 'planned_maintenance', True, _migration_9_planned_maintenance),
+    Migration(10, 'bounded_thumbnail_store', True, _migration_10_bounded_thumbnail_store),
 )
 
 

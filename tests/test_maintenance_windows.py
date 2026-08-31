@@ -508,7 +508,9 @@ class MigrationNineTests(unittest.TestCase):
                 )
                 service_columns = {row[1] for row in conn.execute('PRAGMA table_info(services)')}
                 self.assertIn('overrun_raised_ts', service_columns)
-                self.assertEqual(MIGRATIONS[-1].version, 9)
+                self.assertIn(
+                    9, {row[0] for row in conn.execute('SELECT version FROM schema_migrations')},
+                )
             finally:
                 conn.close()
 

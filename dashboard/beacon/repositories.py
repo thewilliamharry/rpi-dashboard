@@ -706,8 +706,19 @@ def get_host_stream_bounds(conn):
     return (row['first_ts'], row['last_ts']) if row and row['first_ts'] is not None else None
 
 
-class ThumbnailRepository:
-    """Own thumbnail result persistence while callers retain transaction scope."""
+class ThumbnailStoreRepository:
+    """Own thumbnail bytes in the bounded ``thumbnails`` store (OPS-03).
+
+    The sole module-owned write path for thumbnail bytes -- satisfies the
+    ``ThumbnailResultRepository`` protocol in ``previews.py`` -- while keeping
+    the blob and its content type off the ``services`` primary telemetry
+    table. ``services`` keeps carrying the small per-service diagnostic
+    metadata columns (``thumb_ts``, ``thumb_source``, ``thumb_attempt_ts``,
+    ``thumb_error``) it already did -- only the blob and mime moved here.
+    """
+
+    def __init__(self, ttl_seconds=7 * 86400):
+        self.ttl_seconds = ttl_seconds
 
     def store_thumbnail_result(
         self, conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None,
@@ -715,16 +726,35 @@ class ThumbnailRepository:
         timestamp = int(time.time()) if ts is None else int(ts)
         if thumb_data and thumb_source == 'screenshot':
             conn.execute(
-                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=?, "
-                "thumb_attempt_ts=?, thumb_error=NULL WHERE port=?",
-                (thumb_data, thumb_mime, timestamp, thumb_source, timestamp, port),
+                'INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) '
+                'VALUES(?,?,?,?,?,?) '
+                'ON CONFLICT(port) DO UPDATE SET data=excluded.data, mime=excluded.mime, '
+                'captured_ts=excluded.captured_ts, source=excluded.source, '
+                'expires_ts=excluded.expires_ts',
+                (port, thumb_data, thumb_mime, timestamp, thumb_source, timestamp + self.ttl_seconds),
+            )
+            conn.execute(
+                "UPDATE services SET thumb_ts=?, thumb_source=?, thumb_attempt_ts=?, thumb_error=NULL "
+                "WHERE port=?",
+                (timestamp, thumb_source, timestamp, port),
             )
             return
         conn.execute(
-            "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL, "
-            "thumb_attempt_ts=?, thumb_error=? WHERE port=?",
+            "UPDATE services SET thumb_ts=NULL, thumb_source=NULL, thumb_attempt_ts=?, thumb_error=? "
+            "WHERE port=?",
             (timestamp, (thumb_error or 'screenshot failed')[:240], port),
         )
+
+
+def read_thumbnail(conn, port, *, now):
+    """Return the bounded read projection for a stored, unexpired screenshot."""
+    row = conn.execute(
+        'SELECT data, mime, captured_ts, source, expires_ts FROM thumbnails '
+        "WHERE port=? AND data IS NOT NULL AND source='screenshot' "
+        'AND (expires_ts IS NULL OR expires_ts > ?)',
+        (port, int(now)),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def get_service_metadata(conn, port):
