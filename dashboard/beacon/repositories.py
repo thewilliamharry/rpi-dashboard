@@ -757,6 +757,64 @@ def read_thumbnail(conn, port, *, now):
     return dict(row) if row else None
 
 
+# The thumbnails table is keyed by port, so its natural ceiling is the
+# discovery sweep's port universe -- roughly 85 ports today, 65535 in the
+# worst conceivable case. 512 is comfortably above the former and safely
+# below the latter (06-PATTERNS.md Shared Patterns -- bounded/clamped `limit`
+# parameters on read projections, sourced from read_background_job_health's
+# max(1, min(int(limit), 128)) clamp).
+THUMBNAIL_EVICTION_SCAN_LIMIT = 512
+
+
+def thumbnail_store_bytes(conn):
+    """Return the summed blob size of every stored thumbnail, 0 when empty."""
+    row = conn.execute('SELECT COALESCE(SUM(LENGTH(data)), 0) AS bytes FROM thumbnails').fetchone()
+    return row['bytes']
+
+
+def delete_expired_thumbnails(conn, *, now):
+    """Delete rows whose expires_ts has passed; NULL/future expires_ts survive."""
+    cursor = conn.execute(
+        'DELETE FROM thumbnails WHERE expires_ts IS NOT NULL AND expires_ts <= ?', (int(now),),
+    )
+    return cursor.rowcount
+
+
+def evict_thumbnails_over_budget(conn, *, max_bytes, scan_limit=THUMBNAIL_EVICTION_SCAN_LIMIT):
+    """Evict oldest-captured-first until the store is at or below max_bytes.
+
+    The walk reads at most `scan_limit` rows in one pass. A pathologically
+    oversized store may not reach the budget in a single call -- that is
+    correct and intentional, not a bug to "fix" by removing the LIMIT.
+    Eviction converges across passes: the caller (J8) runs this every hour,
+    so each pass deletes what its bounded scan selected and the next pass
+    continues from the resulting state.
+    """
+    max_bytes = max(0, int(max_bytes))
+    if thumbnail_store_bytes(conn) <= max_bytes:
+        return 0
+    scan_limit = max(1, min(int(scan_limit), 4096))
+    rows = conn.execute(
+        'SELECT port, LENGTH(data) AS bytes FROM thumbnails '
+        'ORDER BY captured_ts ASC, port ASC LIMIT ?',
+        (scan_limit,),
+    ).fetchall()
+    total = thumbnail_store_bytes(conn)
+    to_delete = []
+    for row in rows:
+        if total <= max_bytes:
+            break
+        to_delete.append(row['port'])
+        total -= row['bytes']
+    if not to_delete:
+        return 0
+    placeholders = ','.join('?' for _ in to_delete)
+    cursor = conn.execute(
+        f'DELETE FROM thumbnails WHERE port IN ({placeholders})', to_delete,
+    )
+    return cursor.rowcount
+
+
 def get_service_metadata(conn, port):
     row = conn.execute(
         "SELECT m.port, COALESCE(m.display_name, '') AS display_name, "

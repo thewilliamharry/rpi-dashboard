@@ -145,7 +145,7 @@ PRODUCTION_OWNERSHIP_INVENTORY = (
     ),
     _row(
         'J8', ('cleanup_history',), 'scheduler job cleanup', 'scheduled',
-        ('stats_history', 'service_checks', 'events', 'scan_rate_hits', 'host_metric_rollups', 'service_rollups', 'telemetry_streams', 'telemetry_coverage', 'telemetry_rollup_jobs', 'runtime_state'), (), ('before_cleanup_transaction',),
+        ('stats_history', 'service_checks', 'events', 'scan_rate_hits', 'host_metric_rollups', 'service_rollups', 'telemetry_streams', 'telemetry_coverage', 'telemetry_rollup_jobs', 'runtime_state', 'thumbnails'), (), ('before_cleanup_transaction',),
     ),
     _row(
         'J9', ('run_discovery', 'read_scan_state'), 'scheduler job startup_discovery', 'scheduled',

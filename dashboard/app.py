@@ -66,10 +66,11 @@ THUMB_MAX_BYTES = 2 * 1024 * 1024
 THUMB_REFRESH_DAYS = SETTINGS.thumb_refresh_days
 PREVIEW_SETTLE_MS = 5_000
 PREVIEW_BROWSER_BUDGET_MS = 27_000
-# The phase's chosen default TTL for the bounded thumbnail store (D-02). The
-# runtime-configurable THUMBNAIL_TTL_DAYS setting lands in 06-02; this constant
-# seeds the store until then.
-THUMBNAIL_TTL_SECONDS = 7 * 86400
+# The bounded thumbnail store's two D-02 bounds, sourced from Settings so a
+# bad THUMBNAIL_TTL_DAYS / THUMBNAIL_STORE_MAX_BYTES env value falls back to
+# the documented default rather than disabling the bound (PROH-OPS-03-04).
+THUMBNAIL_TTL_SECONDS = SETTINGS.thumbnail_ttl_days * 86400
+THUMBNAIL_STORE_MAX_BYTES = SETTINGS.thumbnail_store_max_bytes
 # Sentinel that survives both of _legacy_screenshot_service's and
 # _legacy_refresh_service_preview's blanket `except Exception` handlers
 # unmodified, because it travels through the already-existing
@@ -2016,6 +2017,8 @@ def worker_cleanup_history(authority, now=None):
         beacon_telemetry.run_retention_batch(conn, now=now, policy=_telemetry_policy())
         beacon_telemetry.detect_collection_gaps(conn, now=now)
         conn.execute('DELETE FROM scan_rate_hits WHERE ts < ?', (now - TRIGGER_SCAN_WINDOW_SECONDS,))
+        beacon_repositories.delete_expired_thumbnails(conn, now=now)
+        beacon_repositories.evict_thumbnails_over_budget(conn, max_bytes=THUMBNAIL_STORE_MAX_BYTES)
     return True
 
 

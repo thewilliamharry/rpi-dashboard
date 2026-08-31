@@ -28,6 +28,20 @@ class Settings:
     db_path: str = '/data/dashboard.db'
     expire_days: int = 7
     thumb_refresh_days: int = 1
+    # THUMB_REFRESH_DAYS=1 means a live, discoverable service has its preview
+    # re-captured daily, so a 7-day TTL survives six consecutive missed
+    # refresh cycles -- a week of worker downtime or an unreachable service --
+    # before evicting. It also equals expire_days=7, the horizon after which a
+    # service disappears from /api/services entirely, so a thumbnail can never
+    # outlive its own service's visibility window (D-02).
+    thumbnail_ttl_days: int = 7
+    # Worst case without a budget is THUMB_MAX_BYTES (2 MiB) times the ~85
+    # ports the discovery sweep can find, roughly 170 MiB on a Pi whose whole
+    # telemetry store is capped at telemetry_db_max_bytes = 536_870_912. 64
+    # MiB matches the existing telemetry_backlog_reserve_bytes reserve, holds
+    # ~32 full-size captures, and keeps the preview store an order of
+    # magnitude below the telemetry store it shares a disk with (D-02).
+    thumbnail_store_max_bytes: int = 67_108_864
     metric_sample_seconds: int = 5
     metric_history_seconds: int = 60
     worker_ready_seconds: int = 20
@@ -229,6 +243,10 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         db_path=source.get('DB_PATH', '/data/dashboard.db'),
         expire_days=_positive_int(source, 'EXPIRE_DAYS', 7),
         thumb_refresh_days=_positive_int(source, 'THUMB_REFRESH_DAYS', 1),
+        thumbnail_ttl_days=_positive_int(source, 'THUMBNAIL_TTL_DAYS', 7),
+        thumbnail_store_max_bytes=_positive_int(
+            source, 'THUMBNAIL_STORE_MAX_BYTES', 67_108_864,
+        ),
         metric_sample_seconds=_positive_int(source, 'METRIC_SAMPLE_SECONDS', 5),
         metric_history_seconds=_positive_int(source, 'METRIC_HISTORY_SECONDS', 60),
         worker_ready_seconds=_positive_int(source, 'WORKER_READY_SECONDS', 20),

@@ -20,9 +20,13 @@ from pathlib import Path
 from shutil import copy2
 from unittest import mock
 
-from dashboard.beacon.config import Settings
+from dashboard.beacon import queues
+from dashboard.beacon import repositories as beacon_repositories
+from dashboard.beacon import telemetry as beacon_telemetry
+from dashboard.beacon.config import Settings, load_settings
 from dashboard.beacon.migrations import MIGRATIONS, run_migrations
 from dashboard.beacon.repositories import ThumbnailStoreRepository
+from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
 
@@ -191,6 +195,170 @@ class ThumbnailMigrationTests(unittest.TestCase):
                     ).fetchone(),
                     (b'deployed-thumbnail-bytes', 'image/png'),
                 )
+
+
+class ThumbnailBudgetTests(unittest.TestCase):
+    """OPS-03: the thumbnail store is bounded by a TTL and a total-byte budget."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.client = self.appmod.app.test_client()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_service(self, port):
+        now = int(time.time())
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO services (port, title, first_seen, last_seen, is_online, "
+                "last_latency_ms, last_error) VALUES (?,?,?,?,?,?,?)",
+                (port, 'Preview service', now - 120, now, 1, 12.0, None),
+            )
+            conn.commit()
+            conn.close()
+
+    def _seed_thumbnail(self, conn, port, size_bytes, *, captured_ts, expires_ts):
+        conn.execute(
+            'INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) '
+            'VALUES(?,?,?,?,?,?)',
+            (port, b'x' * size_bytes, 'image/png', captured_ts, 'screenshot', expires_ts),
+        )
+
+    def test_thumbnail_store_stays_within_ttl_and_byte_budget(self):
+        now = int(time.time())
+        one_mib = 1024 * 1024
+
+        # Behavior: delete_expired_thumbnails removes exactly the rows whose
+        # expires_ts has passed; NULL or future expires_ts survive.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            self._seed_thumbnail(conn, 8001, 10, captured_ts=now - 100, expires_ts=now - 1)
+            self._seed_thumbnail(conn, 8002, 10, captured_ts=now - 100, expires_ts=now + 1_000)
+            self._seed_thumbnail(conn, 8003, 10, captured_ts=now - 100, expires_ts=None)
+            conn.commit()
+            removed = beacon_repositories.delete_expired_thumbnails(conn, now=now)
+            conn.commit()
+            remaining_ports = {row['port'] for row in conn.execute('SELECT port FROM thumbnails')}
+            conn.close()
+        self.assertEqual(removed, 1)
+        self.assertEqual(remaining_ports, {8002, 8003})
+
+        # Behavior: thumbnail_store_bytes sums LENGTH(data); 0 for an empty store.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute('DELETE FROM thumbnails')
+            conn.commit()
+            self.assertEqual(beacon_repositories.thumbnail_store_bytes(conn), 0)
+            self._seed_thumbnail(conn, 8004, 100, captured_ts=now, expires_ts=now + 1_000)
+            self._seed_thumbnail(conn, 8005, 200, captured_ts=now, expires_ts=now + 1_000)
+            conn.commit()
+            self.assertEqual(beacon_repositories.thumbnail_store_bytes(conn), 300)
+            conn.close()
+
+        # OPS-03 backstop: a store already under the byte budget is not evicted.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            evicted = beacon_repositories.evict_thumbnails_over_budget(conn, max_bytes=1_000_000)
+            conn.commit()
+            remaining = {row['port'] for row in conn.execute('SELECT port FROM thumbnails')}
+            conn.close()
+        self.assertEqual(evicted, 0)
+        self.assertEqual(remaining, {8004, 8005})
+
+        # Behavior: evict_thumbnails_over_budget deletes oldest-captured_ts-first
+        # until at or below max_bytes -- a three-row 1 MiB-each store bounded at
+        # 2 MiB retains exactly the two newest rows.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute('DELETE FROM thumbnails')
+            self._seed_thumbnail(conn, 8010, one_mib, captured_ts=now - 300, expires_ts=now + 10_000)
+            self._seed_thumbnail(conn, 8011, one_mib, captured_ts=now - 200, expires_ts=now + 10_000)
+            self._seed_thumbnail(conn, 8012, one_mib, captured_ts=now - 100, expires_ts=now + 10_000)
+            conn.commit()
+            evicted = beacon_repositories.evict_thumbnails_over_budget(conn, max_bytes=2 * one_mib)
+            conn.commit()
+            remaining = {row['port'] for row in conn.execute('SELECT port FROM thumbnails')}
+            conn.close()
+        self.assertEqual(evicted, 1)
+        self.assertEqual(remaining, {8011, 8012})
+
+        # Behavior: the eviction walk is bounded by scan_limit and converges
+        # across passes -- scan_limit=1 against a three-row over-budget store
+        # deletes exactly one row per call, emptying the store after three calls.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute('DELETE FROM thumbnails')
+            self._seed_thumbnail(conn, 8020, one_mib, captured_ts=now - 300, expires_ts=now + 10_000)
+            self._seed_thumbnail(conn, 8021, one_mib, captured_ts=now - 200, expires_ts=now + 10_000)
+            self._seed_thumbnail(conn, 8022, one_mib, captured_ts=now - 100, expires_ts=now + 10_000)
+            conn.commit()
+            first = beacon_repositories.evict_thumbnails_over_budget(conn, max_bytes=0, scan_limit=1)
+            conn.commit()
+            after_first = conn.execute('SELECT COUNT(*) AS n FROM thumbnails').fetchone()['n']
+            second = beacon_repositories.evict_thumbnails_over_budget(conn, max_bytes=0, scan_limit=1)
+            conn.commit()
+            after_second = conn.execute('SELECT COUNT(*) AS n FROM thumbnails').fetchone()['n']
+            third = beacon_repositories.evict_thumbnails_over_budget(conn, max_bytes=0, scan_limit=1)
+            conn.commit()
+            after_third = conn.execute('SELECT COUNT(*) AS n FROM thumbnails').fetchone()['n']
+            conn.close()
+        self.assertEqual((first, after_first), (1, 2))
+        self.assertEqual((second, after_second), (1, 1))
+        self.assertEqual((third, after_third), (1, 0))
+
+        # Behavior: a non-positive or unparseable THUMBNAIL_TTL_DAYS /
+        # THUMBNAIL_STORE_MAX_BYTES falls back to the documented default,
+        # never to "no limit" (PROH-OPS-03-04).
+        self.assertEqual(load_settings({'THUMBNAIL_TTL_DAYS': '0'}).thumbnail_ttl_days, 7)
+        self.assertEqual(load_settings({'THUMBNAIL_TTL_DAYS': 'abc'}).thumbnail_ttl_days, 7)
+        self.assertEqual(
+            load_settings({'THUMBNAIL_STORE_MAX_BYTES': '0'}).thumbnail_store_max_bytes, 67_108_864,
+        )
+        self.assertEqual(
+            load_settings({'THUMBNAIL_STORE_MAX_BYTES': 'abc'}).thumbnail_store_max_bytes, 67_108_864,
+        )
+
+        # Behavior + OPS-03 backstop: a J8 run deletes expired rows and enforces
+        # the byte budget inside its existing transaction, evicting an
+        # over-budget-but-unexpired row even though nothing has expired for it
+        # -- proving the two bounds interact independently. Once evicted,
+        # GET /api/services reports has_thumb falsy for that port on the very
+        # next read (PROH-OPS-03-03).
+        port = 8080
+        self._insert_service(port)
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            self._seed_thumbnail(conn, 9001, 10, captured_ts=now - 100, expires_ts=now - 1)
+            over_budget_bytes = self.appmod.THUMBNAIL_STORE_MAX_BYTES + 1
+            self._seed_thumbnail(
+                conn, port, over_budget_bytes, captured_ts=now - 50, expires_ts=now + 10_000,
+            )
+            conn.commit()
+            conn.close()
+
+        lease = queues.acquire_worker_lease(self.db_path, 'thumbnail-budget-test', now=now)
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=lambda: now)
+        snapshot = beacon_telemetry.StorageSnapshot(
+            database_bytes=0, wal_bytes=0, shm_bytes=0, free_bytes=10 ** 9,
+        )
+        with (
+            mock.patch.object(self.appmod.beacon_telemetry, 'measure_storage', return_value=snapshot),
+            mock.patch.object(self.appmod.beacon_telemetry, 'run_retention_batch'),
+        ):
+            self.appmod.worker_cleanup_history(authority, now=now)
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            remaining_after_j8 = {row['port'] for row in conn.execute('SELECT port FROM thumbnails')}
+            conn.close()
+        self.assertNotIn(9001, remaining_after_j8)
+        self.assertNotIn(port, remaining_after_j8)
+
+        services = self.client.get('/api/services').get_json()
+        service = next(item for item in services if item['port'] == port)
+        self.assertFalse(service['has_thumb'])
 
 
 if __name__ == '__main__':
