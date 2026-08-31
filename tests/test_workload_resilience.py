@@ -10,17 +10,24 @@ self-test).
 
 06-01 seeds this file with the OPS-03 thumbnail relocation tracer: a captured
 thumbnail is stored in, and served from, the bounded ``thumbnails`` store.
+
+06-04 adds ``CadenceUnderContentionTests`` for OPS-01: J1/J2 keep their
+cadence, judged by ``freshness_state``, while cleanup, discovery, queue-drain
+and preview work all run concurrently on their own lane-isolated executors.
 """
 
+import importlib
 import sqlite3
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from shutil import copy2
 from types import SimpleNamespace
 from unittest import mock
 
+from dashboard.beacon import diagnosis as beacon_diagnosis
 from dashboard.beacon import queues
 from dashboard.beacon import repositories as beacon_repositories
 from dashboard.beacon import telemetry as beacon_telemetry
@@ -486,6 +493,172 @@ class PreviewRetryTests(unittest.TestCase):
         self.assertEqual(essential_after, essential_before)
         for job_id in ('J1', 'J2', 'J3', 'J4'):
             self.assertEqual(essential_after[job_id]['state'], 'succeeded')
+
+
+class CadenceUnderContentionTests(unittest.TestCase):
+    """OPS-01: J1/J2 keep their cadence -- judged only by the product's own
+    freshness_state classifier -- while cleanup, discovery, queue-drain and
+    preview work all run concurrently through real, lane-isolated
+    ThreadPoolExecutors built by build_scheduler.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.worker = importlib.reload(importlib.import_module('dashboard.worker'))
+        self.operations = self.worker.build_worker_operations()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def test_essential_cadence_under_contention(self):
+        now = int(time.time())
+        metric_sample_seconds = 1
+        settings = SimpleNamespace(db_path=self.db_path, metric_sample_seconds=metric_sample_seconds)
+
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'cadence-contention-worker', now=now, lease_seconds=3_600,
+        )
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=time.time)
+        base_services = worker_main.build_worker_services(self.operations, settings)
+        services = replace(base_services, authority=authority)
+
+        # Build the scheduler purely to harvest its real, lane-isolated
+        # executors -- driving jobs through dispatch_callback directly (not
+        # APScheduler's own timing) keeps this deterministic while still
+        # exercising the exact ThreadPoolExecutor objects production uses.
+        # Each pool is resolved from that job's own declared `executor`
+        # field, not a lane name assumed by this test: if J8 is ever
+        # reassigned back onto 'metrics', `_pool_for('J8')` below resolves
+        # to the very same single thread as J1/J2 and the contention this
+        # test proves away comes right back.
+        built_scheduler = worker_main.build_scheduler(services)
+
+        def _pool_for(job_id):
+            lane = worker_main._CALLBACKS_BY_ID[job_id].executor
+            return built_scheduler._executors[lane]._pool
+
+        cleanup_pool = _pool_for('J8')
+        metrics_pool = _pool_for('J1')
+        probes_pool = _pool_for('J3')
+        screenshots_pool = _pool_for('J6')
+
+        cleanup_sleep_seconds = 8
+        discovery_sleep_seconds = 3
+
+        def slow_cleanup(_authority):
+            time.sleep(cleanup_sleep_seconds)
+            return True
+
+        def slow_discovery(_authority, source='scheduled'):
+            time.sleep(discovery_sleep_seconds)
+            return 'completed'
+
+        cleanup_services = replace(services, cleanup_history=slow_cleanup)
+        discovery_services = replace(
+            services, run_discovery=slow_discovery, read_scan_state=lambda: {},
+        )
+
+        # Occupy both threads of the shared 'probes' lane with slow
+        # discovery-shaped stand-ins for J7 and J9, the way a real 180s
+        # discovery pass would.
+        discovery_future_j7 = probes_pool.submit(
+            worker_main.dispatch_callback, discovery_services, 'J7',
+        )
+        discovery_future_j9 = probes_pool.submit(
+            worker_main.dispatch_callback, discovery_services, 'J9',
+        )
+        time.sleep(0.2)
+        self.assertFalse(discovery_future_j7.done())
+        self.assertFalse(discovery_future_j9.done())
+
+        # J3 and J4 still dispatch while the probes lane is fully contended
+        # by the two discovery stand-ins above, within their own declared
+        # misfire_grace_time -- read from the inventory, not a literal here.
+        j3_grace_seconds = worker_main._CALLBACKS_BY_ID['J3'].misfire_grace_time
+        j4_grace_seconds = worker_main._CALLBACKS_BY_ID['J4'].misfire_grace_time
+        j3_future = probes_pool.submit(worker_main.dispatch_callback, services, 'J3')
+        j4_future = probes_pool.submit(worker_main.dispatch_callback, services, 'J4')
+        self.assertIsNot(j4_future.result(timeout=j4_grace_seconds), False)
+        self.assertIsNot(j3_future.result(timeout=j3_grace_seconds), False)
+
+        # J5 (queue drain) and J6 (preview) round out the best-effort
+        # workload named in this task's behavior; both durable queues are
+        # empty, so these are quick, real polls on their own lanes.
+        j5_future = probes_pool.submit(worker_main.dispatch_callback, services, 'J5')
+        j6_future = screenshots_pool.submit(worker_main.dispatch_callback, services, 'J6')
+        self.assertIsNot(j5_future.result(timeout=10), False)
+        self.assertIsNot(j6_future.result(timeout=10), False)
+
+        # J8's own single-thread 'cleanup' lane absorbs a deliberately slow
+        # pass -- one that sleeps well past both J1's and J2's cadence.
+        # Submitted immediately before the wall-clock loop below so the
+        # full sleep window lines up against it: if J8 is ever reassigned
+        # back onto 'metrics', this submission lands in the very same
+        # single thread the loop's J1/J2 submissions queue behind.
+        cleanup_future = cleanup_pool.submit(
+            worker_main.dispatch_callback, cleanup_services, 'J8',
+        )
+
+        # J1 and J2 keep dispatching on their own dedicated 'metrics' lane,
+        # wall-clock, for as long as J8's slow cleanup pass runs on its own
+        # 'cleanup' lane. If J8 ever shares 'metrics' again, these
+        # submissions queue behind it on the single thread and this
+        # `.result(timeout=...)` call times out well before the cleanup
+        # pass completes.
+        while not cleanup_future.done():
+            j1_future = metrics_pool.submit(worker_main.dispatch_callback, services, 'J1')
+            j2_future = metrics_pool.submit(worker_main.dispatch_callback, services, 'J2')
+            self.assertIsNot(j1_future.result(timeout=5), False)
+            self.assertIsNot(j2_future.result(timeout=5), False)
+            time.sleep(0.3)
+
+        self.assertIsNot(cleanup_future.result(timeout=5), False)
+        self.assertIsNot(discovery_future_j7.result(timeout=5), False)
+        self.assertIsNot(discovery_future_j9.result(timeout=5), False)
+
+        now_final = int(time.time())
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            health = {
+                row['job_id']: dict(row)
+                for row in beacon_repositories.read_background_job_health(conn, limit=32)
+            }
+
+        # Assertion 4 (PROH-OPS-01-02): every dispatched best-effort job still
+        # left a durable background_job_health row -- deferral is observable,
+        # never silent.
+        for job_id in ('J1', 'J2', 'J3', 'J4', 'J5', 'J6', 'J7', 'J8', 'J9'):
+            self.assertIn(job_id, health, f'{job_id} missing from background_job_health')
+
+        # Assertion 1.
+        self.assertEqual(health['J1']['state'], 'succeeded')
+        self.assertEqual(health['J2']['state'], 'succeeded')
+
+        # Assertion 2: the oracle is freshness_state itself, fed each job's
+        # own cadence read from the production inventory -- never a numeric
+        # threshold invented here.
+        j1_cadence_seconds = dict(worker_main._CALLBACKS_BY_ID['J1'].trigger_kwargs)['seconds']
+        j1_freshness = beacon_diagnosis.freshness_state(
+            now_final, health['J1']['last_success_ts'], j1_cadence_seconds,
+        )
+        j2_freshness = beacon_diagnosis.freshness_state(
+            now_final, health['J2']['last_success_ts'], metric_sample_seconds,
+        )
+        self.assertIn(j1_freshness['state'], {'fresh', 'aging'})
+        self.assertIn(j2_freshness['state'], {'fresh', 'aging'})
+
+        # Branch outcome (06-RESEARCH.md assumption A2): assertion 3 above
+        # (J3/J4 dispatching while the probes lane was fully contended)
+        # passed without needing a dedicated 'queues' lane for J5 -- the
+        # cleanup lane alone was sufficient. A2 is CONFIRMED. The lane-name
+        # set below is read off the production inventory, not asserted from
+        # a literal, so Branch B (a 'queues' lane) would change this set
+        # itself rather than invalidate the assertion.
+        lane_names = {
+            callback.executor for callback in worker_main.WORKER_CALLBACK_INVENTORY
+            if callback.scheduler_id
+        }
+        self.assertEqual(lane_names, {'metrics', 'probes', 'screenshots', 'cleanup'})
 
 
 if __name__ == '__main__':

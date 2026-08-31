@@ -88,7 +88,7 @@ WORKER_CALLBACK_INVENTORY = (
     WorkerCallback('J5', ('process_scan_requests',), 'scan', 'scheduled', ('scan_requests', 'scan_state', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'events', 'preview_requests'), ('webhook_delivery',), scheduler_id='scan_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='probes', misfire_grace_time=10),
     WorkerCallback('J6', ('process_preview_requests',), 'preview', 'scheduled', ('preview_requests', 'services', 'events', 'thumbnails'), ('thumbnail_publication', 'browser_resource_lifecycle'), scheduler_id='preview_requests', trigger='interval', trigger_kwargs=(('seconds', 2),), executor='screenshots', misfire_grace_time=10),
     WorkerCallback('J7', ('run_discovery', 'read_scan_state'), 'scheduled_discovery', 'scheduled', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='scheduled_discovery', trigger='interval', trigger_kwargs=(('hours', 24),), executor='probes', misfire_grace_time=300),
-    WorkerCallback('J8', ('cleanup_history',), 'cleanup', 'scheduled', ('stats_history', 'service_checks', 'events', 'scan_rate_hits', 'host_metric_rollups', 'service_rollups', 'telemetry_streams', 'telemetry_coverage', 'telemetry_rollup_jobs', 'runtime_state', 'thumbnails'), (), scheduler_id='cleanup', trigger='interval', trigger_kwargs=(('hours', 1),), executor='metrics', misfire_grace_time=300),
+    WorkerCallback('J8', ('cleanup_history',), 'cleanup', 'scheduled', ('stats_history', 'service_checks', 'events', 'scan_rate_hits', 'host_metric_rollups', 'service_rollups', 'telemetry_streams', 'telemetry_coverage', 'telemetry_rollup_jobs', 'runtime_state', 'thumbnails'), (), scheduler_id='cleanup', trigger='interval', trigger_kwargs=(('hours', 1),), executor='cleanup', misfire_grace_time=300),
     WorkerCallback('J9', ('run_discovery', 'read_scan_state'), 'startup_discovery', 'scheduled', ('scan_state', 'events', 'services', 'service_meta', 'service_checks', 'service_tls_posture', 'preview_requests'), ('webhook_delivery',), scheduler_id='startup_discovery', trigger='date', trigger_kwargs=(('run_date', None),), executor='probes', misfire_grace_time=300),
     WorkerCallback('L1', ('shutdown_browser', 'release_worker_lease'), 'finalize', 'lifecycle_finalization', ('worker_owner',), ('browser_resource_lifecycle',), False),
 )
@@ -454,9 +454,16 @@ def stop_worker(*_args):
 
 def build_scheduler(services):
     """Create the bounded UTC scheduler without starting it."""
+    # Lane ownership (OPS-01): 'metrics' carries J1 and J2 only -- the two
+    # fast, bounded, essential callbacks every freshness surface depends on.
+    # 'cleanup' exists so a slow retention/reap pass (J8) can never sit in
+    # front of them on a shared single thread. 'probes' carries the
+    # service-check and discovery family (J3, J4, J5, J7, J9). 'screenshots'
+    # carries the single-owner browser (J6).
     executors = {
         'default': ThreadPoolExecutor(1),
         'metrics': ThreadPoolExecutor(1),
+        'cleanup': ThreadPoolExecutor(1),
         'probes': ThreadPoolExecutor(2),
         'screenshots': ThreadPoolExecutor(1),
     }
