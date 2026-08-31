@@ -14,11 +14,17 @@ thumbnail is stored in, and served from, the bounded ``thumbnails`` store.
 06-04 adds ``CadenceUnderContentionTests`` for OPS-01: J1/J2 keep their
 cadence, judged by ``freshness_state``, while cleanup, discovery, queue-drain
 and preview work all run concurrently on their own lane-isolated executors.
+
+06-05 adds ``WalModeTests`` (WAL from either starting mode -- the rollout
+logic proven against synthetic fixtures) and ``ConcurrentAccessTests``
+(concurrent web/worker writers and worker-restart fencing under WAL) for
+OPS-04.
 """
 
 import importlib
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -33,6 +39,13 @@ from dashboard.beacon import repositories as beacon_repositories
 from dashboard.beacon import telemetry as beacon_telemetry
 from dashboard.beacon import worker_main
 from dashboard.beacon.config import Settings, load_settings
+from dashboard.beacon.db import (
+    ManagedConnection,
+    configured_journal_mode,
+    connect_db,
+    exclusive_database_maintenance,
+    write_transaction,
+)
 from dashboard.beacon.migrations import MIGRATIONS, run_migrations
 from dashboard.beacon.repositories import ThumbnailStoreRepository
 from dashboard.beacon.worker_authority import WorkerAuthority
@@ -659,6 +672,261 @@ class CadenceUnderContentionTests(unittest.TestCase):
             if callback.scheduler_id
         }
         self.assertEqual(lane_names, {'metrics', 'probes', 'screenshots', 'cleanup'})
+
+
+class WalModeTests(unittest.TestCase):
+    """OPS-04: every connect_db() connection runs in WAL, whichever mode the
+    database started in -- the rollout logic proven against synthetic
+    fixtures rather than assumed from a single starting shape.
+    """
+
+    def test_connections_run_in_wal_mode_from_either_starting_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            # Starting mode 1: SQLite's own default (rollback journal) -- a
+            # fresh database that has never had journal_mode touched.
+            default_mode_db = Path(directory) / 'default-mode.db'
+            sqlite3.connect(default_mode_db).close()
+            conn = connect_db(str(default_mode_db))
+            try:
+                self.assertEqual(configured_journal_mode(conn), 'wal')
+            finally:
+                conn.close()
+
+            # Starting mode 2: already in WAL before connect_db ever sees it.
+            already_wal_db = Path(directory) / 'already-wal.db'
+            with sqlite3.connect(already_wal_db) as seed:
+                self.assertEqual(seed.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+            conn = connect_db(str(already_wal_db))
+            try:
+                self.assertEqual(configured_journal_mode(conn), 'wal')
+            finally:
+                conn.close()
+
+    def test_connect_db_releases_flock_and_reraises_when_the_wal_pragma_fails(self):
+        """The existing except-Exception branch covers the new PRAGMA too --
+        a failure setting journal mode must still release the shared
+        maintenance lease and propagate, never leave a dangling lock or a
+        silently-not-WAL connection.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'wal-pragma-failure.db'
+            sqlite3.connect(target).close()
+            # sqlite3.Connection itself is an immutable C type and cannot be
+            # monkeypatched; ManagedConnection is the plain Python subclass
+            # connect_db actually instantiates (factory=ManagedConnection),
+            # so patching its bound execute is both possible and exact.
+            original_execute = ManagedConnection.execute
+
+            def failing_execute(self, sql, *args, **kwargs):
+                if isinstance(sql, str) and sql.startswith('PRAGMA journal_mode='):
+                    raise sqlite3.OperationalError('synthetic PRAGMA failure')
+                return original_execute(self, sql, *args, **kwargs)
+
+            with mock.patch.object(ManagedConnection, 'execute', failing_execute):
+                with self.assertRaises(sqlite3.OperationalError):
+                    connect_db(str(target))
+
+            # If the failure path had not released the shared lease, this
+            # exclusive maintenance acquisition would be excluded by the
+            # dead connection's dangling flock.
+            with exclusive_database_maintenance(str(target), timeout_seconds=0):
+                pass
+
+
+class ConcurrentAccessTests(unittest.TestCase):
+    """OPS-04: concurrent web/worker SQLite access and worker restart
+    recovery under WAL -- now the default for every connect_db() connection,
+    so these are genuine WAL-mode regressions, not journal-mode-agnostic
+    coverage that happened to run under WAL.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def test_concurrent_web_and_worker_writers_are_corruption_free(self):
+        """OPS-04 evidence for concurrent access. PROH-OPS-04-01: every write
+        this stress run reports as committed is readable afterwards, and a
+        write that did not commit is never reported -- or durably recorded --
+        as having succeeded.
+        """
+        iterations_per_thread = 20
+        web_thread_count = 8
+        errors = []
+        errors_lock = threading.Lock()
+        committed_markers = set()
+        committed_lock = threading.Lock()
+
+        def web_worker(thread_index):
+            try:
+                for i in range(iterations_per_thread):
+                    marker = f'web-{thread_index}-{i}'
+                    with self.appmod._db_lock, self.appmod.database_access(self.db_path) as conn:
+                        conn.execute(
+                            "INSERT INTO events(ts, port, event_type, details) VALUES(?,?,?,?)",
+                            (int(time.time()), 0, 'stress_probe', marker),
+                        )
+                        conn.commit()
+                    with committed_lock:
+                        committed_markers.add(marker)
+            except Exception as exc:  # noqa: BLE001 -- every thread's failure must surface
+                with errors_lock:
+                    errors.append(exc)
+
+        def worker_writer():
+            try:
+                for i in range(iterations_per_thread):
+                    marker = f'worker-{i}'
+                    with write_transaction(self.db_path) as conn:
+                        conn.execute(
+                            "INSERT INTO events(ts, port, event_type, details) VALUES(?,?,?,?)",
+                            (int(time.time()), 0, 'stress_probe', marker),
+                        )
+                    with committed_lock:
+                        committed_markers.add(marker)
+            except Exception as exc:  # noqa: BLE001
+                with errors_lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=web_worker, args=(index,)) for index in range(web_thread_count)
+        ]
+        threads.append(threading.Thread(target=worker_writer))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+            recorded = {
+                row[0] for row in conn.execute(
+                    "SELECT details FROM events WHERE event_type='stress_probe'"
+                )
+            }
+        self.assertEqual(recorded, committed_markers)
+
+        # Companion assertion, same PROH-OPS-04-01: a write_transaction body
+        # that raises rolls back and propagates -- never a partial row.
+        with self.assertRaises(sqlite3.OperationalError):
+            with write_transaction(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO events(ts, port, event_type, details) VALUES(?,?,?,?)",
+                    (int(time.time()), 0, 'stress_probe', 'never-committed'),
+                )
+                conn.execute('SELECT * FROM this_table_does_not_exist')
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM events WHERE details='never-committed'"
+                ).fetchone()
+            )
+
+    def test_worker_restart_recovery_fences_the_dead_epoch(self):
+        """The restart_recovery evidence 06-VALIDATION.md maps to OPS-04.
+
+        A worker claims a preview, then a hard restart is simulated by a new
+        epoch acquiring the durable worker lease without the old epoch ever
+        releasing it -- the existing takeover pattern from
+        tests/test_durable_queues.py and tests/test_worker_ownership_matrix.py.
+        recover_queues_for_worker under the new epoch must un-claim the dead
+        epoch's row, the new epoch must be able to claim and complete it, the
+        dead epoch's own terminal write must be rejected and change nothing,
+        and background_job_health must reflect the true outcome rather than a
+        stale 'running' state.
+        """
+        port = 8090
+        now = 1_000
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO services (port, title, first_seen, last_seen, is_online) "
+                "VALUES (?,?,?,?,?)",
+                (port, 'Restart recovery probe', now - 120, now, 1),
+            )
+            conn.commit()
+            conn.close()
+
+        lease_a = queues.acquire_worker_lease(self.db_path, 'worker-a', now=now, lease_seconds=30)
+        authority_a = WorkerAuthority.from_lease(lease_a, self.db_path, clock=lambda: now)
+        queues.enqueue_preview(self.db_path, port, now=now)
+
+        claim = queues.claim_preview_for_worker(authority_a, now=now, lease_seconds=60)
+        self.assertIsNotNone(claim)
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            beacon_repositories.record_background_job_started(conn, 'J6', now=now)
+            conn.commit()
+            conn.close()
+
+        # Hard restart: worker-a's dead epoch is never released. A new epoch
+        # can only acquire the durable lease once worker-a's own lease has
+        # expired (lease_seconds=30 above), and this restart point is also
+        # past the preview lease worker-a's claim holds (lease_seconds=60) --
+        # exactly what a real crash-and-restart leaves behind.
+        restart_now = now + 70
+        lease_b = queues.acquire_worker_lease(
+            self.db_path, 'worker-b', now=restart_now, lease_seconds=3_600,
+        )
+        authority_b = WorkerAuthority.from_lease(lease_b, self.db_path, clock=lambda: restart_now)
+
+        queues.recover_queues_for_worker(authority_b, now=restart_now)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            recovered_row = conn.execute(
+                'SELECT status, lease_owner FROM preview_requests WHERE id=?', (claim.request_id,),
+            ).fetchone()
+        self.assertEqual(recovered_row['status'], 'queued')
+        self.assertIsNone(recovered_row['lease_owner'])
+
+        successor_claim = queues.claim_preview_for_worker(authority_b, now=restart_now)
+        self.assertIsNotNone(successor_claim)
+        self.assertEqual(successor_claim.request_id, claim.request_id)
+
+        with self.appmod._worker_write_transaction(authority_b, now=restart_now) as conn:
+            queues.finish_preview_for_worker_in_transaction(
+                conn, authority_b, successor_claim.request_id,
+                revision=successor_claim.revision, status='completed', now=restart_now,
+            )
+            beacon_repositories.record_background_job_succeeded(conn, 'J6', now=restart_now)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            final_row = conn.execute(
+                'SELECT status, lease_owner FROM preview_requests WHERE id=?', (claim.request_id,),
+            ).fetchone()
+        self.assertEqual(final_row['status'], 'completed')
+        self.assertIsNone(final_row['lease_owner'])
+
+        # The dead epoch is no longer the current worker authority at all --
+        # its terminal write is rejected outright and changes nothing.
+        with self.assertRaises(queues.LeaseLost):
+            with self.appmod._worker_write_transaction(authority_a, now=restart_now) as conn:
+                queues.finish_preview_for_worker_in_transaction(
+                    conn, authority_a, claim.request_id,
+                    revision=claim.revision, status='completed', now=restart_now,
+                )
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            unchanged_row = conn.execute(
+                'SELECT status FROM preview_requests WHERE id=?', (claim.request_id,),
+            ).fetchone()
+        self.assertEqual(unchanged_row['status'], 'completed')
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            health = {
+                row['job_id']: dict(row)
+                for row in beacon_repositories.read_background_job_health(conn)
+            }
+        self.assertEqual(health['J6']['state'], 'succeeded')
 
 
 if __name__ == '__main__':

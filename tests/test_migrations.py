@@ -387,6 +387,53 @@ class MigrationTests(unittest.TestCase):
                     0,
                 )
 
+    def test_a_wal_mode_deployment_inspects_backs_up_and_upgrades(self):
+        """OPS-04: WAL is now connect_db's default -- inspection, backup, and
+        upgrade must all work against a deployment already carrying a
+        non-empty -wal sidecar, not just against a fresh rollback-journal file.
+
+        A tracked lineage carried to the previous schema version, switched to
+        WAL and written through so a real -wal sidecar exists, upgrades to the
+        newest migration through run_migrations without raising; collect_inventory
+        succeeds against it beforehand and reports the mode and sidecar size
+        truthfully; and the pre-migration verified backup this upgrade produces
+        passes its own mode=ro integrity check with no sidecar of its own.
+        """
+        newest = MIGRATIONS[-1].version
+        with tempfile.TemporaryDirectory() as directory:
+            target, settings = self._carry_lineage_to('operator/production.db', newest - 1, directory)
+            with sqlite3.connect(target) as conn:
+                self.assertEqual(conn.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+                conn.execute(
+                    'INSERT INTO services(port, title, first_seen, last_seen, is_online) '
+                    'VALUES(?,?,?,?,?)',
+                    (8199, 'WAL rollout probe', 1_700_000_000, 1_700_000_010, 1),
+                )
+                conn.commit()
+            wal_sidecar = Path(str(target) + '-wal')
+            self.assertTrue(wal_sidecar.is_file())
+            self.assertGreater(wal_sidecar.stat().st_size, 0)
+
+            report = collect_inventory(target)
+            self.assertEqual(report['journal_mode'], 'wal')
+            self.assertGreater(report['wal_bytes'], 0)
+
+            self.assertEqual(run_migrations(settings).applied_versions, (newest,))
+
+            with sqlite3.connect(target) as conn:
+                self.assertEqual(
+                    conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],
+                    newest,
+                )
+
+            backups = sorted((target.parent / 'backups').glob('dashboard-*-pre-v*.db'))
+            self.assertTrue(backups, 'a schema-changing migration must produce a verified backup')
+            backup = backups[-1]
+            with sqlite3.connect('file:{}?mode=ro'.format(backup), uri=True) as check:
+                self.assertEqual(check.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+            self.assertFalse(Path(str(backup) + '-wal').exists())
+            self.assertFalse(Path(str(backup) + '-shm').exists())
+
     def test_unsupported_schema_error_names_the_fingerprint_and_the_evidence_command(self):
         """An operator cannot supply floor evidence for a shape the error never names."""
         with tempfile.TemporaryDirectory() as directory:
@@ -868,8 +915,15 @@ class MigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / 'production.db'
             copy2(OPERATOR_FIXTURE_DIR / 'production.db', target)
-            before = target.read_bytes()
             access = connect_db(target)
+            # Captured AFTER the ordinary access connects, not before: OPS-04
+            # (06-05) makes connect_db set journal_mode=WAL on every
+            # connection, which flips the header's format-version bytes the
+            # instant this connection opens -- before run_migrations is ever
+            # called. That is the correct, expected WAL-rollout side effect;
+            # the invariant this test proves is that the BLOCKED migration
+            # attempt below writes nothing further beyond it.
+            before = target.read_bytes()
             try:
                 # Zero budget preserves the single-attempt behaviour this test
                 # exercised before contention retry existed -- without it, the
@@ -1009,8 +1063,17 @@ class MigrationTests(unittest.TestCase):
                 # are thread-affine, and BEGIN EXCLUSIVE (never BEGIN
                 # IMMEDIATE -- see the plan's rationale) is what actually
                 # excludes the fast path's SELECT-only readers.
+                #
+                # OPS-04 (06-05): connect_db now sets journal_mode=WAL on
+                # every connection, and under WAL, BEGIN EXCLUSIVE behaves
+                # exactly like BEGIN IMMEDIATE -- it excludes other writers
+                # but no longer blocks readers on its own (that is the whole
+                # point of WAL). PRAGMA locking_mode=EXCLUSIVE restores real,
+                # file-level exclusivity for this test's contention window,
+                # which is what actually blocks the fast path's reader below.
                 writer = connect_db(target)
                 try:
+                    writer.execute('PRAGMA locking_mode=EXCLUSIVE')
                     writer.execute('BEGIN EXCLUSIVE')
                     ready_event.set()
                     release_event.wait(timeout=5)
@@ -1162,8 +1225,12 @@ class MigrationTests(unittest.TestCase):
     def test_exhausted_contention_is_reported_as_contention_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
             target = self._copied_fixture(directory, 'initial-2026-04.db')
-            before = target.read_bytes()
             access = connect_db(target)
+            # Captured AFTER the ordinary access connects -- see the sibling
+            # test above for why (OPS-04, 06-05: connect_db now sets WAL on
+            # every connection, which mutates the header format-version bytes
+            # on connect, independent of whether a migration ever runs).
+            before = target.read_bytes()
             try:
                 with self.assertRaises(MigrationContended) as raised:
                     run_migrations(
@@ -1434,6 +1501,32 @@ class InventoryTests(unittest.TestCase):
             )
         after = source.stat()
         self.assertEqual((before.st_size, before.st_mtime_ns), (after.st_size, after.st_mtime_ns))
+
+    def test_cli_inspects_a_wal_mode_database_through_the_query_only_fallback(self):
+        """OPS-04: a mode=ro URI connection cannot initialize a WAL database's
+        -shm file, so _readonly_connection falls back to a normal connection
+        with PRAGMA query_only=ON. The CLI must still exit 0 and report the
+        real journal mode without mutating the source.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'wal-fixture.db'
+            copy2(FIXTURE_DIR / 'metadata-events-2026-04.db', source)
+            with sqlite3.connect(source) as conn:
+                self.assertEqual(conn.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+            output = Path(directory) / 'wal-report.json'
+            result = subprocess.run(
+                [
+                    sys.executable, '-m', 'beacon.inventory',
+                    '--db', str(source), '--output', str(output),
+                ],
+                env={**os.environ, 'PYTHONPATH': 'dashboard'},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(output.read_text(encoding='utf-8'))
+            self.assertEqual(report['journal_mode'], 'wal')
 
     def test_operator_fixture_matches_report_schema_without_operational_records(self):
         report = json.loads(
