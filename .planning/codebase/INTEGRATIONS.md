@@ -42,7 +42,7 @@
   - Single file at `/data/dashboard.db` (mounted volume)
   - No ORM; raw SQL queries in `dashboard/beacon/repositories.py`, `dashboard/beacon/migrations.py`
   - Connection pooling via custom `ManagedConnection` class with maintenance lock (`dashboard/beacon/db.py`)
-  - PRAGMA settings: `busy_timeout=30000`, `foreign_keys=ON`, `journal_mode=WAL` (implicit)
+  - PRAGMA settings, all set explicitly in `connect_db`: `busy_timeout=30000`, `foreign_keys=ON`, `journal_mode=WAL`
   - Transactions managed explicitly: `read_transaction()`, `write_transaction()` context managers
   - Schema versioned via `dashboard/beacon/migrations.py` (hand-written migrations, no Alembic)
 

@@ -58,6 +58,17 @@ Service health defaults to HTTP 200–399. The editor accepts exceptional codes/
 
 The named volume stores metrics, services, checks, events, runtime state, queued work, rate limits, and screenshots. Beacon creates verified automatic pre-migration backups during supported schema upgrades.
 
+### SQLite WAL mode and sidecar files
+
+Every Beacon connection runs in WAL journal mode, set explicitly by `connect_db` in `dashboard/beacon/db.py`. As a result, `/data/dashboard.db` is routinely accompanied by two sidecar files, `dashboard.db-wal` and `dashboard.db-shm`. Both live in the same `dashboard-data` named volume as the main database file and are created and managed automatically — no operator action is required for ordinary operation.
+
+This matters only for backup or copy operations performed outside the built-in automatic backups:
+
+- The retained verified backups under `/data/backups` are written in rollback-journal mode and never carry `-wal`/`-shm` sidecars, so they can be copied or moved as a single file.
+- Any other copy of the live database (e.g., for the external operator verification below) must include all three files (`dashboard.db`, `dashboard.db-wal`, `dashboard.db-shm`) taken together, and only while Beacon is stopped — copying `dashboard.db` alone while it is live can omit data that has not yet been checkpointed out of the WAL file.
+
+The failed-upgrade recovery procedure below already checkpoints and removes the sidecars before installing a restored backup, so that procedure is unaffected by WAL being the default.
+
 ### Failed-upgrade recovery
 
 If an upgrade reports that recovery is required, use this single supported offline procedure. Do not run recovery while web or worker could write `/data/dashboard.db`.
