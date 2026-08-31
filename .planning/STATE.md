@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 6
-current_phase_name: Workload Resilience & Pi Acceptance
+current_phase: 06
+current_phase_name: workload-resilience-pi-acceptance
 status: executing
 stopped_at: Phase 4 UI-SPEC approved
-last_updated: "2026-08-28T09:22:19.218Z"
+last_updated: "2026-08-28T09:53:22.615Z"
 last_activity: 2026-08-28
 last_activity_desc: Phase 05 complete, transitioned to Phase 6
 progress:
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 05 — theme-parity-analytics-experience
+**Current focus:** Phase 06 — workload-resilience-pi-acceptance
 
 ## Current Position
 
-Phase: 6 — Workload Resilience & Pi Acceptance
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-08-28 — Phase 05 complete, transitioned to Phase 6
+Phase: 06 (workload-resilience-pi-acceptance) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 06
+Last activity: 2026-08-28 — Phase 06 execution started
 
 Progress: [██████████] 100%
 

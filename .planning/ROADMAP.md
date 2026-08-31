@@ -442,9 +442,9 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: 6 plans
+**Plans**: 1/6 plans executed
 
-- [ ] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
+- [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [ ] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
 - [ ] 06-03-PLAN.md — Bounded preview retry with backoff and a visible degraded state
 - [ ] 06-04-PLAN.md — Essential-lane isolation: cleanup off the metrics thread, cadence proven under contention
@@ -490,4 +490,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
 | 5. Theme-Parity Analytics Experience | 7/7 | Complete    | 2026-08-28 |
-| 6. Workload Resilience & Pi Acceptance | 0/6 | Not started | - |
+| 6. Workload Resilience & Pi Acceptance | 1/6 | In Progress|  |
