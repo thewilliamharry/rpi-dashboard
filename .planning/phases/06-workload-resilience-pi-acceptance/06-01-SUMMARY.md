@@ -211,3 +211,10 @@ None - no external service configuration required.
 ---
 *Phase: 06-workload-resilience-pi-acceptance*
 *Completed: 2026-09-01*
+
+## Self-Check: PASSED
+
+All created/modified files confirmed present on disk (`tests/test_workload_resilience.py`,
+`dashboard/beacon/migrations.py`, `dashboard/beacon/repositories.py`, `06-VALIDATION.md`,
+this SUMMARY.md). All four commits confirmed present in `git log --oneline --all`:
+`a743e86` (Task 2), `c7160f4` (Task 3), `21fc4dd` (Task 4), `d401173` (SUMMARY).
