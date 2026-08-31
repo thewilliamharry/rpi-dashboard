@@ -36,6 +36,13 @@ SCHEDULER_JOB_IDS = {
     'cleanup': 'J8', 'startup_discovery': 'J9',
 }
 DYNAMIC_MATRIX_ROW_IDS = ('S1', 'S2', 'S3', 'J1', 'J2', 'J3', 'J4', 'J5', 'J6', 'J7', 'J8', 'J9')
+# OPS-01: the single declared source of lane truth. A future lane change
+# (e.g. Branch B's 'queues' lane for J5, see 06-04-PLAN.md Task 2) must move
+# this map in the same commit as the code, or this contract goes red.
+EXPECTED_EXECUTOR_LANES = {
+    'J1': 'metrics', 'J2': 'metrics', 'J3': 'probes', 'J4': 'probes',
+    'J5': 'probes', 'J6': 'screenshots', 'J7': 'probes', 'J8': 'cleanup', 'J9': 'probes',
+}
 
 
 class WorkerOwnershipStaticContractTests(unittest.TestCase):
@@ -138,6 +145,38 @@ class WorkerOwnershipStaticContractTests(unittest.TestCase):
         for callback in scheduled:
             with self.subTest(scheduler_callback=callback.identifier):
                 self.assertEqual(jobs[callback.scheduler_id].func.args[-1], callback.identifier)
+
+    def test_every_scheduled_callback_declares_its_expected_executor_lane(self):
+        """OPS-01: the essential 'metrics' lane is claimed by J1 and J2 alone.
+
+        A future regression -- quietly parking another job on the essential
+        lane, or dropping the dedicated 'cleanup' lane -- must fail this test
+        loudly rather than only showing up as a timing symptom under load.
+        """
+        scheduled = {
+            callback.identifier: callback
+            for callback in worker_main.WORKER_CALLBACK_INVENTORY
+            if callback.scheduler_id
+        }
+        self.assertEqual(set(scheduled), set(EXPECTED_EXECUTOR_LANES))
+        for identifier, expected_lane in EXPECTED_EXECUTOR_LANES.items():
+            with self.subTest(identifier=identifier):
+                self.assertEqual(scheduled[identifier].executor, expected_lane)
+
+        worker = importlib.import_module('dashboard.worker')
+        services = worker_main.build_worker_services(
+            worker.build_worker_operations(),
+            SimpleNamespace(db_path=':memory:', metric_sample_seconds=60),
+        )
+        built_scheduler = worker_main.build_scheduler(services)
+        declared_lanes = {callback.executor for callback in scheduled.values()}
+        self.assertLessEqual(declared_lanes, set(built_scheduler._executors))
+
+        metrics_lane_claimants = {
+            identifier for identifier, callback in scheduled.items()
+            if callback.executor == 'metrics'
+        }
+        self.assertEqual(metrics_lane_claimants, {'J1', 'J2'})
 
 
 class WorkerOwnershipTakeoverMatrixTests(unittest.TestCase):
