@@ -19,6 +19,14 @@ from .worker_authority import WorkerAuthority
 
 WORKER_OWNER_KEY = 'worker_owner'
 
+# Terminal status for a preview request that exhausted its bounded retry
+# budget (preview_max_attempts). Distinct from 'failed' (a single attempt's
+# failure, which today is never actually written as a terminal status by the
+# retry-aware worker path -- see schedule_preview_retry_in_transaction) and
+# from 'expired'/'superseded' (deadline/coalescing outcomes unrelated to
+# capture failure).
+PREVIEW_STATUS_DEGRADED = 'degraded'
+
 
 class LeaseHeld(RuntimeError):
     """Another unexpired worker owns the durable worker lease."""
@@ -50,6 +58,7 @@ class QueueRequest:
     port: int | None = None
     revision: int | None = None
     coalesced: bool = False
+    attempt_count: int | None = None
 
 
 class ScanLeaseHeartbeat:
@@ -322,6 +331,7 @@ def _queue_request(row, *, coalesced=False):
         port=row['port'] if 'port' in row.keys() else None,
         revision=row['revision'] if 'revision' in row.keys() else None,
         coalesced=coalesced,
+        attempt_count=row['attempt_count'] if 'attempt_count' in row.keys() else None,
     )
 
 
@@ -642,27 +652,29 @@ def claim_preview(db_path, worker_id, *, worker_owner_token, now=None, lease_sec
         row = conn.execute("""
             SELECT p.id FROM preview_requests p
              WHERE p.status='queued' AND p.deadline_ts > ?
+               AND (p.next_attempt_ts IS NULL OR p.next_attempt_ts <= ?)
                AND NOT EXISTS (
                    SELECT 1 FROM preview_requests newer
                     WHERE newer.port=p.port AND newer.revision > p.revision
                )
              ORDER BY p.requested_ts, p.id LIMIT 1
-        """, (now,)).fetchone()
+        """, (now, now)).fetchone()
         if not row:
             conn.commit()
             return None
         request_id = int(row['id'])
         changed = conn.execute(
             "UPDATE preview_requests SET status='running', started_ts=?, lease_owner=?, lease_until=?, "
-            "attempt_count=attempt_count + 1, error=NULL WHERE id=? AND status='queued' AND deadline_ts > ?",
-            (now, str(worker_id), now + int(lease_seconds), request_id, now),
+            "attempt_count=attempt_count + 1, error=NULL WHERE id=? AND status='queued' AND deadline_ts > ? "
+            "AND (next_attempt_ts IS NULL OR next_attempt_ts <= ?)",
+            (now, str(worker_id), now + int(lease_seconds), request_id, now, now),
         ).rowcount
         if not changed:
             conn.commit()
             return None
         claimed = conn.execute(
-            "SELECT id, port, revision, status, requested_ts, deadline_ts, lease_owner, lease_until "
-            "FROM preview_requests WHERE id=?", (request_id,),
+            "SELECT id, port, revision, status, requested_ts, deadline_ts, lease_owner, lease_until, "
+            "attempt_count, next_attempt_ts FROM preview_requests WHERE id=?", (request_id,),
         ).fetchone()
         conn.commit()
         return _queue_request(claimed)
@@ -720,6 +732,58 @@ def finish_preview_in_transaction(
         "lease_owner=NULL, lease_until=NULL WHERE id=? AND revision=? AND status='running' "
         "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
         (status, now, now, error, result, request_id, revision, str(worker_id), now, now),
+    ).rowcount
+    if not changed:
+        raise LeaseLost('preview lease was lost')
+
+
+def preview_retry_decision(attempt_count, *, max_attempts, base_seconds, max_seconds):
+    """Return the backoff (seconds) before another attempt, or None when exhausted.
+
+    Pure function, no DB access -- directly unit-testable. Doubling-with-cap,
+    the same exponential-with-cap shape as
+    Settings.telemetry_retry_base_seconds/telemetry_retry_max_seconds (D-02),
+    clamped to at least 1 second.
+    """
+    if int(attempt_count) >= int(max_attempts):
+        return None
+    return max(1, min(int(base_seconds) * (2 ** (int(attempt_count) - 1)), int(max_seconds)))
+
+
+def schedule_preview_retry_in_transaction(
+    conn, request_id, worker_id, *, worker_owner_token, revision, error,
+    backoff_seconds, now=None,
+):
+    """Defer a failed attempt back to 'queued' with a real elapsed backoff.
+
+    Mirrors finish_preview_in_transaction's guard sequence verbatim (same
+    superseded-revision and lost-lease fencing) so a retry can never be
+    scheduled against a row this worker no longer owns or that has already
+    moved on to a newer revision. attempt_count is left untouched --
+    claim_preview already incremented it, and incrementing again here would
+    halve the effective budget.
+    """
+    now = _now(now)
+    _assert_current_worker_owner(conn, worker_id, worker_owner_token, now)
+    row = conn.execute(
+        'SELECT port FROM preview_requests WHERE id=? AND revision=?', (request_id, revision),
+    ).fetchone()
+    if not row:
+        raise LeaseLost('preview request no longer exists')
+    newer = conn.execute(
+        'SELECT 1 FROM preview_requests WHERE port=? AND revision > ? LIMIT 1',
+        (row['port'], revision),
+    ).fetchone()
+    if newer:
+        raise LeaseLost('preview revision was superseded')
+    changed = conn.execute(
+        "UPDATE preview_requests SET status='queued', next_attempt_ts=?, started_ts=NULL, error=?, "
+        "lease_owner=NULL, lease_until=NULL WHERE id=? AND revision=? AND status='running' "
+        "AND lease_owner=? AND lease_until > ? AND deadline_ts > ?",
+        (
+            now + int(backoff_seconds), str(error)[:240] if error is not None else None,
+            request_id, revision, str(worker_id), now, now,
+        ),
     ).rowcount
     if not changed:
         raise LeaseLost('preview lease was lost')
@@ -871,6 +935,17 @@ def finish_preview_for_worker_in_transaction(
     return finish_preview_in_transaction(
         conn, request_id, authority.worker_id, worker_owner_token=authority.owner_token,
         revision=revision, status=status, error=error, result=result, now=now,
+    )
+
+
+def schedule_preview_retry_for_worker_in_transaction(
+    conn, authority, request_id, *, revision, error, backoff_seconds, now=None,
+):
+    now = authority.now() if now is None else int(now)
+    assert_current_worker_authority(conn, authority, now)
+    return schedule_preview_retry_in_transaction(
+        conn, request_id, authority.worker_id, worker_owner_token=authority.owner_token,
+        revision=revision, error=error, backoff_seconds=backoff_seconds, now=now,
     )
 
 
