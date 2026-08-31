@@ -42,6 +42,20 @@ class Settings:
     # ~32 full-size captures, and keeps the preview store an order of
     # magnitude below the telemetry store it shares a disk with (D-02).
     thumbnail_store_max_bytes: int = 67_108_864
+    # D-02: 3 attempts (one initial + two retries) bounds one preview request's
+    # worst-case browser occupancy at roughly 3 x PREVIEW_BROWSER_BUDGET_MS
+    # (27s) = ~81s, small against the request's own 1800s deadline_ts.
+    preview_max_attempts: int = 3
+    # D-02: 60s base, doubling per attempt (mirrors the existing
+    # telemetry_retry_base_seconds/telemetry_retry_max_seconds exponential-
+    # with-cap shape, scaled down because a preview is cheaper and far more
+    # visible to the operator than a telemetry rollup). With 3 attempts the
+    # total backoff is 60 + 120 = 180s, so the whole retry sequence finishes
+    # well inside the 1800s deadline.
+    preview_retry_base_seconds: int = 60
+    # D-02: 600s cap on the same doubling curve; only binds if an operator
+    # raises preview_max_attempts.
+    preview_retry_max_seconds: int = 600
     metric_sample_seconds: int = 5
     metric_history_seconds: int = 60
     worker_ready_seconds: int = 20
@@ -247,6 +261,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         thumbnail_store_max_bytes=_positive_int(
             source, 'THUMBNAIL_STORE_MAX_BYTES', 67_108_864,
         ),
+        preview_max_attempts=_positive_int(source, 'PREVIEW_MAX_ATTEMPTS', 3),
+        preview_retry_base_seconds=_positive_int(source, 'PREVIEW_RETRY_BASE_SECONDS', 60),
+        preview_retry_max_seconds=_positive_int(source, 'PREVIEW_RETRY_MAX_SECONDS', 600),
         metric_sample_seconds=_positive_int(source, 'METRIC_SAMPLE_SECONDS', 5),
         metric_history_seconds=_positive_int(source, 'METRIC_HISTORY_SECONDS', 60),
         worker_ready_seconds=_positive_int(source, 'WORKER_READY_SECONDS', 20),

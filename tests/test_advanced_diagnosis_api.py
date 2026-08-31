@@ -482,7 +482,11 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             self.assertEqual(row['state'], 'succeeded')
             self.assertIsNone(row['error_class'])
             queue_row = self._latest_queue_row('preview_requests')
-            self.assertEqual(queue_row['status'], 'failed')
+            # 06-03 (OPS-02): a per-service capture fault on its first attempt
+            # is now bounded-retry-pending ('queued' with a future
+            # next_attempt_ts) rather than immediately terminal -- the warning
+            # text itself is still preserved on the row either way.
+            self.assertEqual(queue_row['status'], 'queued')
             self.assertEqual(queue_row['error'], 'preview capture failed')
 
         diagnosis = self.appmod.beacon_diagnosis
@@ -555,8 +559,10 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
         self.assertIsNone(row['error_class'])
 
         # The previewed service's own health, on its own surface, undiminished.
+        # 06-03 (OPS-02): the first attempt lands bounded-retry-pending
+        # ('queued' with a future next_attempt_ts) rather than terminal.
         queue_row = self._latest_queue_row('preview_requests')
-        self.assertEqual(queue_row['status'], 'failed')
+        self.assertEqual(queue_row['status'], 'queued')
         self.assertEqual(queue_row['error'], 'title not found at configured path')
 
         diagnosis = self.appmod.beacon_diagnosis
@@ -620,8 +626,12 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             self.assertEqual(row['state'], 'failed')
             self.assertEqual(row['error_class'], 'PreviewCaptureUnavailable')
 
+            # 06-03 (OPS-02): the per-request row still lands bounded-retry-
+            # pending on its first attempt exactly like any other per-service
+            # capture fault -- this is orthogonal to, and does not suppress,
+            # the genuine J6 job fault asserted above via PreviewCaptureUnavailable.
             queue_row = self._latest_queue_row('preview_requests')
-            self.assertEqual(queue_row['status'], 'failed')
+            self.assertEqual(queue_row['status'], 'queued')
             self.assertEqual(queue_row['error'], 'thumbnail refresh failed')
 
             # The durable column the sentinel flows through -- the same one
@@ -668,8 +678,10 @@ class AdvancedDiagnosisApiTests(unittest.TestCase):
             self.assertEqual(row['state'], 'succeeded')
             self.assertIsNone(row['error_class'])
 
+            # 06-03 (OPS-02): bounded-retry-pending on the first attempt, same
+            # as every other per-service capture fault above.
             queue_row = self._latest_queue_row('preview_requests')
-            self.assertEqual(queue_row['status'], 'failed')
+            self.assertEqual(queue_row['status'], 'queued')
             self.assertEqual(
                 queue_row['error'],
                 'title refresh failed (exception); thumbnail refresh skipped',

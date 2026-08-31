@@ -3,6 +3,7 @@ import sqlite3
 import unittest
 
 from dashboard.beacon import queues
+from dashboard.beacon.config import load_settings
 from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
@@ -467,6 +468,88 @@ class DurableQueueTests(unittest.TestCase):
                         (request.request_id,),
                     ).fetchone())
                 self.assertEqual(after, before)
+
+    def test_preview_retry_decision_is_bounded_and_capped(self):
+        # Pure function, no DB access -- doubling with a cap, terminal at
+        # attempt_count >= max_attempts.
+        self.assertEqual(
+            queues.preview_retry_decision(1, max_attempts=3, base_seconds=60, max_seconds=600), 60,
+        )
+        self.assertEqual(
+            queues.preview_retry_decision(2, max_attempts=3, base_seconds=60, max_seconds=600), 120,
+        )
+        self.assertIsNone(
+            queues.preview_retry_decision(3, max_attempts=3, base_seconds=60, max_seconds=600),
+        )
+        self.assertIsNone(
+            queues.preview_retry_decision(4, max_attempts=3, base_seconds=60, max_seconds=600),
+        )
+        # Never exceeds max_seconds even when the doubling curve would.
+        self.assertEqual(
+            queues.preview_retry_decision(5, max_attempts=10, base_seconds=60, max_seconds=600), 600,
+        )
+
+        # A non-positive or unparseable PREVIEW_MAX_ATTEMPTS / _BASE_SECONDS /
+        # _MAX_SECONDS falls back to the documented default (3 / 60 / 600).
+        self.assertEqual(load_settings({'PREVIEW_MAX_ATTEMPTS': '0'}).preview_max_attempts, 3)
+        self.assertEqual(load_settings({'PREVIEW_MAX_ATTEMPTS': 'abc'}).preview_max_attempts, 3)
+        self.assertEqual(
+            load_settings({'PREVIEW_RETRY_BASE_SECONDS': '0'}).preview_retry_base_seconds, 60,
+        )
+        self.assertEqual(
+            load_settings({'PREVIEW_RETRY_MAX_SECONDS': 'abc'}).preview_retry_max_seconds, 600,
+        )
+
+    def test_preview_retry_reschedules_with_backoff_and_is_not_claimable_early(self):
+        request = queues.enqueue_preview(self.db_path, 8080, now=1_000)
+        owner_a = self._acquire_owner('worker-a', 1_001, lease_seconds=120)
+        claimed = queues.claim_preview(
+            self.db_path, 'worker-a', worker_owner_token=owner_a.owner_token,
+            now=1_001, lease_seconds=60,
+        )
+        self.assertEqual(claimed.request_id, request.request_id)
+        self.assertEqual(claimed.attempt_count, 1)
+
+        with queues._connect(self.db_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            queues.schedule_preview_retry_in_transaction(
+                conn, claimed.request_id, 'worker-a', worker_owner_token=owner_a.owner_token,
+                revision=claimed.revision, error='capture failed', backoff_seconds=60, now=1_001,
+            )
+            conn.commit()
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                'SELECT status, next_attempt_ts, lease_owner, lease_until, started_ts, error, '
+                'attempt_count FROM preview_requests WHERE id=?', (claimed.request_id,),
+            ).fetchone()
+        self.assertEqual(row, ('queued', 1_061, None, None, None, 'capture failed', 1))
+
+        # A retry-pending row is not claimable before its backoff elapses...
+        self.assertIsNone(queues.claim_preview(
+            self.db_path, 'worker-a', worker_owner_token=owner_a.owner_token, now=1_060,
+        ))
+        # ...and is claimable exactly once `now` reaches next_attempt_ts, with
+        # the post-increment attempt_count carried on the new claim.
+        retried = queues.claim_preview(
+            self.db_path, 'worker-a', worker_owner_token=owner_a.owner_token, now=1_061,
+        )
+        self.assertIsNotNone(retried)
+        self.assertEqual(retried.request_id, claimed.request_id)
+        self.assertEqual(retried.attempt_count, 2)
+
+        # schedule_preview_retry_in_transaction raises LeaseLost under exactly
+        # the conditions finish_preview_in_transaction does: here, a revision
+        # that has since been superseded by a newer request for the same port.
+        queues.enqueue_preview(self.db_path, 8080, now=1_062)
+        with queues._connect(self.db_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            with self.assertRaises(queues.LeaseLost):
+                queues.schedule_preview_retry_in_transaction(
+                    conn, retried.request_id, 'worker-a', worker_owner_token=owner_a.owner_token,
+                    revision=retried.revision, error='capture failed', backoff_seconds=60, now=1_063,
+                )
+            conn.rollback()
 
 
 if __name__ == '__main__':

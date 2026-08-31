@@ -86,6 +86,27 @@ class UiStateTests(unittest.TestCase):
     def test_the_maintenance_editor_consumes_the_servers_published_default_grace(self):
         self.assertIn('default_grace_minutes', self.js)
 
+    def test_degraded_preview_copy_is_distinct_from_never_captured_and_unboxed(self):
+        """OPS-02: a repeatedly-failing preview reads differently from a never-captured one.
+
+        The degraded entry in previewCopy carries the Degraded row's `◈` glyph
+        from Phase 5's six-state contract (05-UI-SPEC.md), and the dark-mode
+        fallback badge renders distinct text ('PREVIEW UNAVAILABLE') from the
+        never-captured fallback ('NO PREVIEW'). style.css styles the degraded
+        fallback without a border declaration -- the Degraded state is never
+        boxed; only `error` gets a border.
+        """
+        self.assertIn('◈ Preview capture failing — retries exhausted', self.js)
+        self.assertIn("degraded:", self.js)
+        self.assertIn("textContent: previewDegraded ? 'PREVIEW UNAVAILABLE' : 'NO PREVIEW'", self.js)
+        self.assertNotEqual('PREVIEW UNAVAILABLE', 'NO PREVIEW')
+
+        self.assertIn('.svc-preview-fallback.degraded', self.css)
+        rule_start = self.css.index('.svc-preview-fallback.degraded')
+        rule_end = self.css.index('}', rule_start)
+        degraded_rule = self.css[rule_start:rule_end]
+        self.assertNotIn('border', degraded_rule)
+
 
 class UiStateBrowserTests(unittest.TestCase):
     """Exercise the dependency-free dashboard against deterministic API fixtures."""

@@ -428,6 +428,12 @@ html.light .corner { display: none; }
   display: none; flex-direction: column; align-items: center; justify-content: center;
   gap: 4px; color: var(--muted); font-size: 10px; letter-spacing: 0.1em;
 }
+/* Degraded (OPS-02): dark-mode enrichment only -- html.light .svc-preview
+   hides the whole preview area below, which is why the .svc-preview-status
+   copy is the theme-parity-safe primary surface. Never boxed: the Degraded
+   row of the six-state contract (05-UI-SPEC.md) is explicitly unbordered;
+   only the error state gets a border. */
+.svc-preview-fallback.degraded { color: var(--accent2); }
 .fallback-port {
   font-family: var(--font-sans);
   font-size: 28px; font-weight: 700; color: var(--muted2); letter-spacing: 0.05em;

@@ -228,13 +228,14 @@ function buildServiceCard(service) {
   link.setAttribute('aria-label', `Open ${service.display_name || service.title || `port ${service.port}`}`);
   const preview = document.createElement('div');
   preview.className = 'svc-preview';
+  const previewDegraded = service.preview_status === 'degraded';
   const fallback = document.createElement('div');
-  fallback.className = 'svc-preview-fallback';
+  fallback.className = previewDegraded ? 'svc-preview-fallback degraded' : 'svc-preview-fallback';
   fallback.style.display = service.has_thumb ? 'none' : 'flex';
   const fallbackPort = document.createElement('span');
   fallbackPort.className = 'fallback-port';
   fallbackPort.textContent = `:${service.port}`;
-  fallback.append(fallbackPort, Object.assign(document.createElement('span'), {textContent: 'NO PREVIEW'}));
+  fallback.append(fallbackPort, Object.assign(document.createElement('span'), {textContent: previewDegraded ? 'PREVIEW UNAVAILABLE' : 'NO PREVIEW'}));
   if (service.has_thumb) {
     const image = document.createElement('img');
     image.className = 'svc-thumb';
@@ -297,6 +298,7 @@ function buildServiceCard(service) {
     running: 'Refreshing preview',
     failed: 'Preview refresh failed — saved settings are unaffected',
     expired: 'Preview refresh expired — save service details to request a new preview.',
+    degraded: '◈ Preview capture failing — retries exhausted',
   }[service.preview_status];
   if (previewCopy) meta.appendChild(Object.assign(document.createElement('div'), {className: 'svc-preview-status', textContent: previewCopy}));
   meta.appendChild(uptimeStrip(service.uptime_buckets));

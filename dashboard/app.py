@@ -66,6 +66,13 @@ THUMB_MAX_BYTES = 2 * 1024 * 1024
 THUMB_REFRESH_DAYS = SETTINGS.thumb_refresh_days
 PREVIEW_SETTLE_MS = 5_000
 PREVIEW_BROWSER_BUDGET_MS = 27_000
+# The bounded preview retry policy's three D-02 knobs, sourced from Settings so
+# a bad PREVIEW_MAX_ATTEMPTS / _RETRY_BASE_SECONDS / _RETRY_MAX_SECONDS env
+# value falls back to the documented default (3, 60, 600) rather than
+# disabling the bound.
+PREVIEW_MAX_ATTEMPTS = SETTINGS.preview_max_attempts
+PREVIEW_RETRY_BASE_SECONDS = SETTINGS.preview_retry_base_seconds
+PREVIEW_RETRY_MAX_SECONDS = SETTINGS.preview_retry_max_seconds
 # The bounded thumbnail store's two D-02 bounds, sourced from Settings so a
 # bad THUMBNAIL_TTL_DAYS / THUMBNAIL_STORE_MAX_BYTES env value falls back to
 # the documented default rather than disabling the bound (PROH-OPS-03-04).
@@ -2269,10 +2276,26 @@ def worker_process_preview_requests(authority):
                     separators=(',', ':'), sort_keys=True,
                 ),
             )
-            beacon_queues.finish_preview_for_worker_in_transaction(
-                conn, authority, claim.request_id, revision=claim.revision,
-                status='failed' if warning else 'completed', error=warning,
-            )
+            if warning:
+                backoff_seconds = beacon_queues.preview_retry_decision(
+                    claim.attempt_count, max_attempts=PREVIEW_MAX_ATTEMPTS,
+                    base_seconds=PREVIEW_RETRY_BASE_SECONDS, max_seconds=PREVIEW_RETRY_MAX_SECONDS,
+                )
+                if backoff_seconds is None:
+                    beacon_queues.finish_preview_for_worker_in_transaction(
+                        conn, authority, claim.request_id, revision=claim.revision,
+                        status=beacon_queues.PREVIEW_STATUS_DEGRADED, error=warning,
+                    )
+                else:
+                    beacon_queues.schedule_preview_retry_for_worker_in_transaction(
+                        conn, authority, claim.request_id, revision=claim.revision,
+                        error=warning, backoff_seconds=backoff_seconds,
+                    )
+            else:
+                beacon_queues.finish_preview_for_worker_in_transaction(
+                    conn, authority, claim.request_id, revision=claim.revision,
+                    status='completed',
+                )
             if title:
                 conn.execute("UPDATE services SET title=? WHERE port=?", (title, claim.port))
             if data or thumb_error:
@@ -2284,9 +2307,11 @@ def worker_process_preview_requests(authority):
             )
     except beacon_queues.LeaseLost:
         raise
-    # The per-request row above is already durable and complete
-    # (preview_requests reads its own real status='failed' text, and the
-    # preview_capture event carries error_class=THUMB_ERROR_BROWSER_UNAVAILABLE)
+    # The per-request row above is already durable and complete (a per-service
+    # capture failure below the retry budget lands on preview_requests as
+    # status='queued' with a future next_attempt_ts; one that exhausts the
+    # budget lands as status='degraded'; the preview_capture event carries
+    # error_class=THUMB_ERROR_BROWSER_UNAVAILABLE on either outcome)
     # -- but a browser that could not even launch is a fault of the machinery
     # this job owns, not of the previewed service, and warning cannot carry
     # that distinction; dispatch_callback records this as a genuine job_failed
@@ -3002,18 +3027,39 @@ def api_thumbnail(port):
 
 @app.route("/api/thumbnail-status")
 def api_thumbnail_status():
+    now = int(time.time())
     with _db_lock, database_access(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT s.port, s.thumb_source, s.thumb_ts, s.thumb_attempt_ts, s.thumb_error, "
-            "COALESCE(m.url, '') AS url "
+            "COALESCE(m.url, '') AS url, "
+            "EXISTS (SELECT 1 FROM thumbnails t WHERE t.port = s.port AND t.data IS NOT NULL "
+            "AND t.source='screenshot' AND (t.expires_ts IS NULL OR t.expires_ts > ?)) AS has_thumb "
             "FROM services s LEFT JOIN service_meta m ON m.port = s.port "
-            "ORDER BY s.port ASC"
+            "ORDER BY s.port ASC",
+            (now,),
         ).fetchall()
+        # Reuse the same latest-per-port projection api_services already uses
+        # to derive preview_status, so thumb_state is built only from stored
+        # facts and cannot drift from that other surface's own reading.
+        preview_rows = conn.execute(
+            "SELECT port, status FROM preview_requests "
+            "WHERE id IN (SELECT MAX(id) FROM preview_requests GROUP BY port)"
+        ).fetchall()
+    previews_by_port = {row['port']: row['status'] for row in preview_rows}
 
     result = []
     for row in rows:
         port = int(row['port'])
         effective_url = _safe_service_url(row['url'], port)
+        preview_status = previews_by_port.get(port)
+        if preview_status == beacon_queues.PREVIEW_STATUS_DEGRADED:
+            thumb_state = beacon_queues.PREVIEW_STATUS_DEGRADED
+        elif row['has_thumb']:
+            thumb_state = 'ok'
+        elif preview_status in ('queued', 'running'):
+            thumb_state = 'pending'
+        else:
+            thumb_state = 'empty'
         result.append({
             "port": port,
             "url": effective_url,
@@ -3021,6 +3067,7 @@ def api_thumbnail_status():
             "thumb_ts": row['thumb_ts'],
             "thumb_attempt_ts": row['thumb_attempt_ts'],
             "thumb_error": row['thumb_error'],
+            "thumb_state": thumb_state,
         })
     return jsonify(result)
 
