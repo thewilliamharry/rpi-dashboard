@@ -18,11 +18,13 @@ import time
 import unittest
 from pathlib import Path
 from shutil import copy2
+from types import SimpleNamespace
 from unittest import mock
 
 from dashboard.beacon import queues
 from dashboard.beacon import repositories as beacon_repositories
 from dashboard.beacon import telemetry as beacon_telemetry
+from dashboard.beacon import worker_main
 from dashboard.beacon.config import Settings, load_settings
 from dashboard.beacon.migrations import MIGRATIONS, run_migrations
 from dashboard.beacon.repositories import ThumbnailStoreRepository
@@ -359,6 +361,131 @@ class ThumbnailBudgetTests(unittest.TestCase):
         services = self.client.get('/api/services').get_json()
         service = next(item for item in services if item['port'] == port)
         self.assertFalse(service['has_thumb'])
+
+
+class _MutableClock:
+    """A deterministic, externally-advanceable clock for authority injection."""
+
+    def __init__(self, now):
+        self.now_ts = int(now)
+
+    def __call__(self):
+        return self.now_ts
+
+
+class PreviewRetryTests(unittest.TestCase):
+    """OPS-02: a repeatedly-failing preview exhausts a bounded budget without
+    ever blocking the essential J1-J4 lanes.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app()
+        self.client = self.appmod.app.test_client()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_service(self, port, *, now):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                "INSERT INTO services (port, title, first_seen, last_seen, is_online, "
+                "last_latency_ms, last_error) VALUES (?,?,?,?,?,?,?)",
+                (port, 'Flaky preview service', now - 120, now, 1, 12.0, None),
+            )
+            conn.commit()
+            conn.close()
+
+    def test_preview_retry_bounded_reaches_degraded_without_blocking_essential_jobs(self):
+        port = 8080
+        now = int(time.time())
+        self._insert_service(port, now=now)
+        queues.enqueue_preview(self.db_path, port, now=now)
+
+        lease = queues.acquire_worker_lease(
+            self.db_path, 'preview-retry-worker', now=now, lease_seconds=3_600,
+        )
+        clock = _MutableClock(now)
+        authority = WorkerAuthority.from_lease(lease, self.db_path, clock=clock)
+
+        # The essential J1-J4 lanes already carry durable evidence of success
+        # -- the assertion below is that a bounded, exhausting J6 retry run
+        # never disturbs a single one of these rows while it runs.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for job_id in ('J1', 'J2', 'J3', 'J4'):
+                beacon_repositories.record_background_job_succeeded(conn, job_id, now=now)
+            conn.commit()
+            essential_before = {
+                row['job_id']: row
+                for row in beacon_repositories.read_background_job_health(conn)
+                if row['job_id'] in {'J1', 'J2', 'J3', 'J4'}
+            }
+            conn.close()
+
+        services = SimpleNamespace(
+            settings=SimpleNamespace(db_path=self.db_path),
+            authority=authority,
+            clock=clock,
+            admission=worker_main.WorkerAdmission(),
+            process_preview_requests=self.appmod.worker_process_preview_requests,
+        )
+
+        max_attempts = self.appmod.PREVIEW_MAX_ATTEMPTS
+        base_seconds = self.appmod.PREVIEW_RETRY_BASE_SECONDS
+        max_seconds = self.appmod.PREVIEW_RETRY_MAX_SECONDS
+
+        for attempt in range(1, max_attempts + 1):
+            with mock.patch.object(
+                self.appmod, '_legacy_refresh_service_preview',
+                return_value=(None, None, None, None, None, 'capture failed'),
+            ):
+                self.assertIs(worker_main.dispatch_callback(services, 'J6'), True)
+
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    'SELECT status, attempt_count, next_attempt_ts FROM preview_requests '
+                    'WHERE port=?', (port,),
+                ).fetchone()
+            status, attempt_count, next_attempt_ts = row
+            self.assertEqual(attempt_count, attempt)
+
+            if attempt < max_attempts:
+                # Below the budget: bounded-retry-pending with real elapsed
+                # backoff, and /api/services must not yet report degraded.
+                expected_backoff = min(base_seconds * (2 ** (attempt - 1)), max_seconds)
+                self.assertEqual(status, 'queued')
+                self.assertEqual(next_attempt_ts, clock.now_ts + expected_backoff)
+
+                api_services = self.client.get('/api/services').get_json()
+                api_service = next(item for item in api_services if item['port'] == port)
+                self.assertNotEqual(api_service['preview_status'], queues.PREVIEW_STATUS_DEGRADED)
+
+                # Not claimable before the backoff elapses...
+                self.assertIsNone(queues.claim_preview_for_worker(authority, now=next_attempt_ts - 1))
+                # ...advance the clock exactly to next_attempt_ts for the next attempt.
+                clock.now_ts = next_attempt_ts
+            else:
+                # Budget exhausted: a distinct terminal state, never a silent
+                # extra retry and never fewer than PREVIEW_MAX_ATTEMPTS claims.
+                self.assertEqual(status, queues.PREVIEW_STATUS_DEGRADED)
+
+                api_services = self.client.get('/api/services').get_json()
+                api_service = next(item for item in api_services if item['port'] == port)
+                self.assertEqual(api_service['preview_status'], queues.PREVIEW_STATUS_DEGRADED)
+
+        # The J6 exhaustion above never touched J1-J4's own durable evidence.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            essential_after = {
+                row['job_id']: row
+                for row in beacon_repositories.read_background_job_health(conn)
+                if row['job_id'] in {'J1', 'J2', 'J3', 'J4'}
+            }
+            conn.close()
+        self.assertEqual(essential_after, essential_before)
+        for job_id in ('J1', 'J2', 'J3', 'J4'):
+            self.assertEqual(essential_after[job_id]['state'], 'succeeded')
 
 
 if __name__ == '__main__':
