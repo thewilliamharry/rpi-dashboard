@@ -706,36 +706,15 @@ def get_host_stream_bounds(conn):
     return (row['first_ts'], row['last_ts']) if row and row['first_ts'] is not None else None
 
 
-class ThumbnailRepository:
-    """Own thumbnail result persistence while callers retain transaction scope."""
-
-    def store_thumbnail_result(
-        self, conn, port, thumb_data, thumb_mime, thumb_source, thumb_error, ts=None,
-    ):
-        timestamp = int(time.time()) if ts is None else int(ts)
-        if thumb_data and thumb_source == 'screenshot':
-            conn.execute(
-                "UPDATE services SET thumb_data=?, thumb_mime=?, thumb_ts=?, thumb_source=?, "
-                "thumb_attempt_ts=?, thumb_error=NULL WHERE port=?",
-                (thumb_data, thumb_mime, timestamp, thumb_source, timestamp, port),
-            )
-            return
-        conn.execute(
-            "UPDATE services SET thumb_data=NULL, thumb_mime='image/jpeg', thumb_ts=NULL, thumb_source=NULL, "
-            "thumb_attempt_ts=?, thumb_error=? WHERE port=?",
-            (timestamp, (thumb_error or 'screenshot failed')[:240], port),
-        )
-
-
 class ThumbnailStoreRepository:
     """Own thumbnail bytes in the bounded ``thumbnails`` store (OPS-03).
 
-    Satisfies the same ``ThumbnailResultRepository`` protocol
-    ``ThumbnailRepository`` does, but keeps the blob and its content type off
-    the ``services`` primary telemetry table. ``services`` keeps carrying the
-    small per-service diagnostic metadata columns (``thumb_ts``,
-    ``thumb_source``, ``thumb_attempt_ts``, ``thumb_error``) it already did --
-    only the blob and mime move.
+    The sole module-owned write path for thumbnail bytes -- satisfies the
+    ``ThumbnailResultRepository`` protocol in ``previews.py`` -- while keeping
+    the blob and its content type off the ``services`` primary telemetry
+    table. ``services`` keeps carrying the small per-service diagnostic
+    metadata columns (``thumb_ts``, ``thumb_source``, ``thumb_attempt_ts``,
+    ``thumb_error``) it already did -- only the blob and mime moved here.
     """
 
     def __init__(self, ttl_seconds=7 * 86400):

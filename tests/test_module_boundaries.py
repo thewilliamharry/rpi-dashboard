@@ -139,11 +139,20 @@ class ModuleBoundaryTests(unittest.TestCase):
         preview_source = Path('dashboard/beacon/previews.py').read_text(encoding='utf-8')
         app_source = Path('dashboard/app.py').read_text(encoding='utf-8')
 
-        self.assertIn('UPDATE services SET thumb_data=', repository_source)
+        self.assertIn(
+            'INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts)',
+            repository_source,
+        )
         self.assertIn('ThumbnailResultRepository', preview_source)
         self.assertIn('thumbnail_repository', preview_source)
-        self.assertNotIn('UPDATE services SET thumb_data=', preview_source)
-        self.assertNotIn('UPDATE services SET thumb_data=', app_source)
+        self.assertNotIn(
+            'INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts)',
+            preview_source,
+        )
+        self.assertNotIn(
+            'INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts)',
+            app_source,
+        )
         self.assertNotIn('_legacy_store_thumbnail_result', app_source)
 
 

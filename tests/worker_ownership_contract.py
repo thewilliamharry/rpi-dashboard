@@ -28,6 +28,7 @@ DATABASE_SURFACES = frozenset({
     'service_rollups',
     'telemetry_coverage',
     'telemetry_rollup_jobs',
+    'thumbnails',
 })
 
 EFFECT_SURFACES = frozenset({
@@ -133,7 +134,7 @@ PRODUCTION_OWNERSHIP_INVENTORY = (
     ),
     _row(
         'J6', ('process_preview_requests',), 'scheduler job preview_requests', 'scheduled',
-        ('preview_requests', 'services', 'events'),
+        ('preview_requests', 'services', 'events', 'thumbnails'),
         ('thumbnail_publication', 'browser_resource_lifecycle'),
         ('before_preview_claim', 'before_browser_capture', 'before_preview_completion'),
     ),
