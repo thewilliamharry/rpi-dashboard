@@ -167,3 +167,12 @@ None - no external service configuration required. Operators who want a non-defa
 ---
 *Phase: 06-workload-resilience-pi-acceptance*
 *Completed: 2026-08-31*
+
+## Self-Check: PASSED
+
+All created/modified files confirmed present on disk (`dashboard/beacon/queues.py`,
+`dashboard/beacon/config.py`, `dashboard/app.py`, `dashboard/app.js`, `dashboard/style.css`,
+`docker-compose.yml`, `tests/test_durable_queues.py`, `tests/test_workload_resilience.py`,
+`tests/test_ui_states.py`, `tests/test_advanced_diagnosis_api.py`, this SUMMARY.md). All three
+commits confirmed present in `git log --oneline --all`: `6140e4a` (Task 1), `c0d7216` (Task 2),
+`d934b46` (docs/metadata).
