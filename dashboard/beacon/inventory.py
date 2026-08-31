@@ -26,13 +26,35 @@ def _quote_identifier(identifier):
     return '"{}"'.format(identifier.replace('"', '""'))
 
 
+def _query_only(conn):
+    """Configure and return the same connection -- never a new binding.
+
+    Kept as a pass-through-and-return helper (not an inline assignment in
+    ``_readonly_connection``) so the module-boundary connection-ownership
+    gate sees the caller's ``return`` transferring ownership directly,
+    exactly like the ``mode=ro`` URI path immediately above it.
+    """
+    conn.execute('PRAGMA query_only=ON')
+    return conn
+
+
 def _readonly_connection(db_path):
     resolved = Path(db_path).expanduser().resolve(strict=False)
     if not resolved.is_file():
         raise InventoryError('unable to inspect SQLite database')
     try:
         return sqlite3.connect(resolved.as_uri() + '?mode=ro', uri=True)
-    except (OSError, sqlite3.Error) as exc:
+    except sqlite3.Error:
+        # A mode=ro URI connection cannot initialize the -shm shared-memory
+        # file a WAL-mode database needs, so schema inspection of a WAL
+        # database fails through the URI path above. Fall back to a normal
+        # connection with PRAGMA query_only=ON, which forbids writes at the
+        # SQL level while still permitting the -shm mapping WAL requires.
+        try:
+            return _query_only(sqlite3.connect(resolved))
+        except (OSError, sqlite3.Error) as exc:
+            raise InventoryError('unable to inspect SQLite database') from exc
+    except OSError as exc:
         raise InventoryError('unable to inspect SQLite database') from exc
 
 

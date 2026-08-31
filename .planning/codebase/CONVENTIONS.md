@@ -194,7 +194,7 @@
 ## Database and Persistence
 
 **Python:**
-- SQLite with WAL mode for concurrent read/write access
+- SQLite with WAL mode for concurrent read/write access, set explicitly by `connect_db` in `dashboard/beacon/db.py`
 - Explicit transactions with `conn.commit()` after mutations
 - Shared maintenance lease acquired for all requests (read and write)
 - Migrations managed in `dashboard/beacon/migrations.py` with upgrade locks

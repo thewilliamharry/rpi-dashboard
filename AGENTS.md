@@ -138,7 +138,7 @@ The product is primarily for its operator on a trusted local network. It deliber
 
 - `dashboard/app.py` contains both HTTP handlers and domain/data operations; worker imports it as a module.
 - APScheduler uses bounded thread pools for metrics, probes, screenshots, and default jobs (`dashboard/worker.py`).
-- SQLite WAL mode, explicit locks, and runtime state rows coordinate processes.
+- SQLite WAL mode is set explicitly on every connection by `connect_db` in `dashboard/beacon/db.py` (constant `JOURNAL_MODE`, read back via `configured_journal_mode`), alongside the existing `flock` sibling lease, explicit locks, and runtime state rows that coordinate processes.
 - Frontend is dependency-free vanilla JavaScript; all dynamic data comes from `/api/*` polling endpoints.
 
 ## Layers

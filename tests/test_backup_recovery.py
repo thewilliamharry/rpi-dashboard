@@ -321,6 +321,36 @@ class BackupRecoveryTests(unittest.TestCase):
             appmod.beacon_repositories.upsert_service_metadata = original_upsert
             cleanup_db(database)
 
+    def test_restore_still_removes_wal_and_shm_when_pre_restore_database_is_in_wal_mode(self):
+        """OPS-04: WAL becoming connect_db's default does not reopen the
+        failed-upgrade recovery gap. Every ordinary connection now runs in
+        WAL, so the database a failed-upgrade restore replaces routinely
+        carries live -wal/-shm sidecars -- not a corner case. The existing
+        restore path must still leave neither behind.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            database, backup = self._backup_from_fixture(directory)
+            wal = Path(str(database) + '-wal')
+            shm = Path(str(database) + '-shm')
+            with sqlite3.connect(database) as conn:
+                self.assertEqual(conn.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+                conn.execute("UPDATE services SET title='live wal state'")
+                conn.commit()
+            self.assertTrue(wal.is_file())
+            self.assertTrue(shm.is_file())
+            self._write_recovery_marker(database, backup)
+
+            result = restore_backup(database.parent, backup.name)
+
+            self.assertTrue(result.completed)
+            self.assertFalse(wal.exists())
+            self.assertFalse(shm.exists())
+            with sqlite3.connect(database) as conn:
+                self.assertEqual(
+                    conn.execute('SELECT title FROM services').fetchone()[0], 'Sample Service',
+                )
+                self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+
     def test_restore_discards_retained_wal_and_shm_before_replacement(self):
         """A WAL captured after the backup must not replay over the replacement."""
         with tempfile.TemporaryDirectory() as directory:

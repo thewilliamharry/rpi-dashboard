@@ -666,6 +666,16 @@ def create_verified_backup(db_path, *, target_version, clock=time.time):
         with closing(sqlite3.connect(database, timeout=30)) as source:
             with closing(sqlite3.connect(partial_path)) as destination:
                 source.backup(destination)
+                # The source may be in WAL, which the online backup API copies
+                # into this artifact's own header. A retained backup is a
+                # static file with no concurrency requirement, so normalize it
+                # to rollback-journal mode here, before the integrity check
+                # below reopens it with mode=ro (which cannot initialize the
+                # -shm a WAL file would need). This also guarantees a retained
+                # backup never carries -wal/-shm sidecars, keeping the
+                # existing post-restore no-sidecar assertion in recovery.py
+                # true by construction.
+                destination.execute('PRAGMA journal_mode=DELETE')
         with closing(sqlite3.connect('file:{}?mode=ro'.format(partial_path), uri=True)) as check:
             integrity = check.execute('PRAGMA integrity_check').fetchone()[0]
         if integrity != 'ok':

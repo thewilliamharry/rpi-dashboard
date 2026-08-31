@@ -10,6 +10,17 @@ import time
 MAINTENANCE_LOCK_NAME = '.beacon-maintenance.lock'
 UPGRADE_LOCK_NAME = '.beacon-upgrade.lock'
 
+# D-01: WAL, and only WAL, this phase. WAL lets readers proceed without
+# blocking on a writer -- exactly what OPS-01's "analytics queries active"
+# clause and the AR-03-01 accepted-risk note both need. journal_mode is
+# persisted in the database file's header, so issuing this PRAGMA on every
+# connection is idempotent: a database already in WAL simply confirms it, and
+# one still on the default rollback journal converts on first connection. The
+# flock sibling lease below is orthogonal and stays exactly as it is -- it
+# protects the *maintenance exclusion* (schema upgrades, restore), not
+# ordinary read/write concurrency, which is what WAL governs.
+JOURNAL_MODE = 'WAL'
+
 
 class MaintenanceBusy(RuntimeError):
     """Exclusive database maintenance could not safely exclude normal access."""
@@ -82,11 +93,22 @@ def connect_db(settings_or_path):
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA busy_timeout=30000')
         conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA journal_mode=' + JOURNAL_MODE)
         return conn
     except Exception:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
         raise
+
+
+def configured_journal_mode(conn):
+    """Return the journal mode actually in force, read from the database.
+
+    SQLite silently declines a journal_mode switch if another connection
+    holds a lock, so this reads back the mode in effect rather than trusting
+    the PRAGMA request in ``connect_db``.
+    """
+    return str(conn.execute('PRAGMA journal_mode').fetchone()[0]).lower()
 
 
 @contextmanager
