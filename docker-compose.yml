@@ -13,6 +13,8 @@ x-beacon-common: &beacon-common
     - dashboard-data:/data
   environment: &beacon-environment
     EXPIRE_DAYS: "7"
+    THUMBNAIL_TTL_DAYS: "7"
+    THUMBNAIL_STORE_MAX_BYTES: "67108864"
     METRIC_SAMPLE_SECONDS: "5"
     METRIC_HISTORY_SECONDS: "60"
     WORKER_READY_SECONDS: "20"
