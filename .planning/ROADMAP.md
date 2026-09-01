@@ -442,7 +442,7 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: 6/6 plans executed
+**Plans**: 10 plans — 6/6 of the original round executed; 4 gap-closure plans added 2026-09-01
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -450,6 +450,10 @@ Plans:
 - [x] 06-04-PLAN.md — Essential-lane isolation: cleanup off the metrics thread, cadence proven under contention
 - [x] 06-05-PLAN.md — WAL enablement, concurrent web/worker access, and restart recovery
 - [x] 06-06-PLAN.md — Raspberry Pi-class load acceptance harness and run
+- [ ] 06-07-PLAN.md — Harness honesty: resolve resource targets from the Beacon containers, not a host-wide name match
+- [ ] 06-08-PLAN.md — Remove the ~2.5s per-request uptime bucket rescan from /api/services, output unchanged
+- [ ] 06-09-PLAN.md — Close carried-forward review warnings WR-01 (read-only inspection) and WR-02 (thumb_state precedence)
+- [ ] 06-10-PLAN.md — Pi acceptance re-run, the _db_lock decision, and the debt record
 
 **Wave 1**
 
@@ -477,6 +481,30 @@ Plans:
 
 *Waves are strictly sequential: every plan writes `tests/test_workload_resilience.py` and/or
 `dashboard/app.py`, so no two plans in this phase have disjoint `files_modified`.*
+
+### Gap-closure round (added 2026-09-01, waves renumbered from 1)
+
+The OPS-07 acceptance run executed on real Pi hardware and failed (`06-UAT.md`, gap `G-06-1`). It
+surfaced two blocking defects — `/api/services` costing ~2.5s of CPU per request, and a harness whose
+resource oracle sampled an unrelated application on the same host — plus one amplifier held for a
+decision. These four plans close that gap and carry their own wave numbering.
+
+**Wave 1** — parallel; `files_modified` are disjoint
+
+- `06-07` — Container-derived resource targets and honest failure in the acceptance harness
+- `06-08` — Linear-cost uptime buckets and the offline-interval N+1, with output equivalence pinned
+
+**Wave 2** *(blocked on Wave 1)*
+
+- `06-09` — Carried-forward review warnings WR-01 and WR-02
+
+**Wave 3** *(blocked on Wave 2; contains blocking human checkpoints)*
+
+- `06-10` — Pi acceptance re-run, the blocking `_db_lock` decision checkpoint, and the debt record
+
+*`06-07` precedes every plan whose verification rests on an acceptance report: until the harness
+targets the Beacon containers, no report it emits is evidence. `06-10`'s hard dependencies are
+`06-07` and `06-08`; `06-09` is included so the hardware run validates the final build.*
 
 ## Progress
 
