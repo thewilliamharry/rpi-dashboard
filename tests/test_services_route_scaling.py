@@ -15,6 +15,7 @@ waiting for the next hardware run.
 import random
 import time
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 from dashboard.beacon import repositories as beacon_repositories
@@ -371,3 +372,93 @@ class OfflineIntervalsBulkReadTests(unittest.TestCase):
         matching = [svc for svc in body if svc['port'] == port]
         self.assertEqual(len(matching), 1)
         self.assertIn('maintenance_attributed_seconds', matching[0])
+
+
+class ServiceCountQueryGuardTests(unittest.TestCase):
+    """/api/services must issue the same query count regardless of service count.
+
+    Guards the measurement that motivated this whole plan: at --concurrency 1
+    on Pi hardware, /api/services cost p50 2504.6ms / p95 2523.3ms /
+    max 2529.8ms while every other route measured 3-98ms -- the signature of
+    per-service database work whose cost scaled with the number of
+    configured services. A reader who trips this test needs to know it is
+    protecting that hardware-measured outcome, not a stylistic preference.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _seed_services(self, count, checks_per_service=20):
+        now = int(time.time())
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for i in range(count):
+                port = 9900 + i
+                conn.execute(
+                    "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (port, f'Service {port}', now - 3600, now, 1, now - 60),
+                )
+                for j in range(checks_per_service):
+                    ts = now - (checks_per_service - j) * 30
+                    conn.execute(
+                        'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                        (ts, port, 1 if j % 3 else 0),
+                    )
+            conn.commit()
+            conn.close()
+
+    def _request_statement_count(self):
+        """Count the SQL statements one /api/services request issues.
+
+        Instruments the connection the route actually opens -- via
+        dashboard.beacon.db's ``database_access`` seam -- with sqlite3's own
+        ``set_trace_callback``, rather than a mocking framework that would
+        couple this test to the route's internal call order.
+        """
+        appmod = self.appmod
+        real_database_access = appmod.database_access
+        statements = []
+
+        @contextmanager
+        def counting_database_access(settings_or_path):
+            with real_database_access(settings_or_path) as conn:
+                conn.set_trace_callback(lambda sql: statements.append(sql))
+                try:
+                    yield conn
+                finally:
+                    conn.set_trace_callback(None)
+
+        appmod.database_access = counting_database_access
+        try:
+            response = appmod.app.test_client().get('/api/services')
+        finally:
+            appmod.database_access = real_database_access
+        self.assertEqual(response.status_code, 200)
+        return len(statements), response.get_json()
+
+    def test_query_count_is_independent_of_service_count(self):
+        self._seed_services(1)
+        one_service_count, one_service_body = self._request_statement_count()
+
+        # A fresh app/db so the two requests are otherwise comparable --
+        # neither shares connection or cache state with the other.
+        cleanup_db(self.db_path)
+        self.appmod, self.db_path = load_app({})
+        self._seed_services(8)
+        eight_service_count, eight_service_body = self._request_statement_count()
+
+        self.assertEqual(
+            one_service_count, eight_service_count,
+            'query count must not grow with service count (OPS-07: measured '
+            'p50 2504.6ms on Pi hardware at --concurrency 1 while every '
+            'other route was single-digit milliseconds)',
+        )
+        self.assertEqual(len(one_service_body), 1)
+        self.assertEqual(len(eight_service_body), 8)
+        for svc in one_service_body + eight_service_body:
+            self.assertIn('uptime_pct', svc)
+            self.assertIn('uptime_buckets', svc)
