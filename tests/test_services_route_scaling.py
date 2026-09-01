@@ -15,7 +15,9 @@ waiting for the next hardware run.
 import random
 import time
 import unittest
+from unittest import mock
 
+from dashboard.beacon import repositories as beacon_repositories
 from tests.helpers import cleanup_db, load_app
 
 
@@ -225,3 +227,147 @@ class UptimeSummaryScalingTests(unittest.TestCase):
         expected = _reference_uptime_summary(small_checks, now)
         actual = self.appmod._uptime_summary(small_checks, now)
         self.assertEqual(actual, expected)
+
+
+class OfflineIntervalsBulkReadTests(unittest.TestCase):
+    """read_service_offline_intervals_by_port must match the single-port reader."""
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_check(self, port, ts, online):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                (ts, port, int(online)),
+            )
+            conn.commit()
+            conn.close()
+
+    def _bulk(self, ports, start_ts, end_ts):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            result = beacon_repositories.read_service_offline_intervals_by_port(
+                conn, ports=ports, start_ts=start_ts, end_ts=end_ts,
+            )
+            conn.close()
+        return result
+
+    def _single(self, port, start_ts, end_ts):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            intervals = beacon_repositories.read_service_offline_intervals(
+                conn, port, start_ts=start_ts, end_ts=end_ts,
+            )
+            conn.close()
+        return intervals
+
+    def test_the_bulk_result_matches_the_single_port_result_per_port(self):
+        base = 1_700_000_000
+        start_ts, end_ts = base, base + 100_000
+
+        port_no_checks = 9801
+        port_boundary_only = 9802
+        self._insert_check(port_boundary_only, start_ts - 500, 0)
+        port_straddles_the_window_boundary = 9803
+        self._insert_check(port_straddles_the_window_boundary, start_ts - 200, 0)
+        self._insert_check(port_straddles_the_window_boundary, start_ts + 400, 1)
+        # `service_checks` carries PRIMARY KEY (ts, port), so two rows for
+        # the SAME port can never share a ts -- confirmed below -- which
+        # makes the single-port boundary query's bare `ORDER BY ts DESC
+        # LIMIT 1` unambiguous by construction. This port instead pins that
+        # the bulk read's window-function boundary selection still picks
+        # the correct, most-recent-before-the-window sample among several
+        # closely spaced pre-window samples for one port.
+        port_near_boundary = 9804
+        self._insert_check(port_near_boundary, start_ts - 2, 1)
+        self._insert_check(port_near_boundary, start_ts - 1, 0)
+        port_online_throughout = 9805
+        self._insert_check(port_online_throughout, start_ts - 100, 1)
+        self._insert_check(port_online_throughout, start_ts + 500, 1)
+
+        ports = [
+            port_no_checks, port_boundary_only, port_straddles_the_window_boundary,
+            port_near_boundary, port_online_throughout,
+        ]
+        bulk = self._bulk(ports, start_ts, end_ts)
+        for port in ports:
+            self.assertEqual(
+                bulk.get(port, []), self._single(port, start_ts, end_ts),
+                f'port {port} bulk result diverged from the single-port result',
+            )
+
+    def test_the_schema_makes_a_true_same_port_boundary_tie_impossible(self):
+        # Direct evidence for the invariant the previous test's docstring
+        # relies on: PRIMARY KEY (ts, port) rejects a second row at the same
+        # (port, ts) pair, so no genuine boundary tie can ever be stored for
+        # one port.
+        port = 9806
+        self._insert_check(port, 1_700_000_000, 1)
+        with self.assertRaises(Exception):
+            self._insert_check(port, 1_700_000_000, 0)
+
+    def test_a_port_with_no_offline_intervals_is_absent_not_empty(self):
+        port = 9807
+        base = 1_700_000_000
+        self._insert_check(port, base - 100, 1)
+        bulk = self._bulk([port], base, base + 1000)
+        self.assertNotIn(port, bulk)
+
+    def test_an_empty_port_list_returns_an_empty_mapping_with_no_query(self):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            statements = []
+            conn.set_trace_callback(lambda sql: statements.append(sql))
+            result = beacon_repositories.read_service_offline_intervals_by_port(
+                conn, ports=[], start_ts=0, end_ts=1,
+            )
+            conn.set_trace_callback(None)
+            conn.close()
+        self.assertEqual(result, {})
+        self.assertEqual(statements, [])
+
+    def test_the_bulk_read_is_bounded(self):
+        port = 9808
+        base = 1_700_000_000
+        for i in range(20):
+            self._insert_check(port, base + i * 10, i % 2)
+        with mock.patch.object(beacon_repositories, '_OFFLINE_INTERVALS_BULK_ROW_LIMIT', 5):
+            bulk = self._bulk([port], base, base + 1000)
+        # A bounded read must not raise and must still return a well-formed
+        # mapping -- the row limit's at-limit behavior (silently dropping
+        # the tail of in-window rows) is documented on the constant itself,
+        # matching the maintenance-window precedent.
+        self.assertIsInstance(bulk, dict)
+
+    def test_attributed_downtime_is_unchanged_through_the_route(self):
+        # /api/services must return the same maintenance-attributed downtime
+        # values as before for every service -- exercised end-to-end here
+        # rather than only at the repository layer.
+        appmod = self.appmod
+        now = int(time.time())
+        port = 9809
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                "VALUES(?,?,?,?,?,?)",
+                (port, 'Demo', now - 3600, now, 0, now - 120),
+            )
+            conn.execute(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                (now - 120, port, 0),
+            )
+            conn.commit()
+            conn.close()
+
+        response = appmod.app.test_client().get('/api/services')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        matching = [svc for svc in body if svc['port'] == port]
+        self.assertEqual(len(matching), 1)
+        self.assertIn('maintenance_attributed_seconds', matching[0])

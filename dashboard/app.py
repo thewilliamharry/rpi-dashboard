@@ -2799,6 +2799,7 @@ def api_services():
 
         checks_by_port = defaultdict(list)
         windows_by_port = {}
+        offline_intervals_by_port = {}
         if services:
             ports = [s['port'] for s in services]
             placeholders = ','.join('?' * len(ports))
@@ -2813,6 +2814,12 @@ def api_services():
             # query inside this loop (T-03.1-29) -- every service's coverage
             # derivation below shares this single read.
             windows_by_port = beacon_repositories.read_maintenance_windows_by_port(conn, ports=ports)
+            # Same shape as the maintenance-window bulk read above: one read
+            # for the whole port list rather than one per-service offline-
+            # interval query inside the loop below (OPS-07 gap closure).
+            offline_intervals_by_port = beacon_repositories.read_service_offline_intervals_by_port(
+                conn, ports=ports, start_ts=now - CHECK_RETENTION_SECONDS, end_ts=now,
+            )
         tls_posture = beacon_repositories.get_runtime_state(conn, 'service_tls_posture', {})
         tls_posture = tls_posture if isinstance(tls_posture, dict) else {}
         preview_rows = conn.execute(
@@ -2842,9 +2849,7 @@ def api_services():
                 if covered:
                     availability = beacon_diagnosis.MAINTENANCE_AVAILABILITY
                     maintenance_until = grace_until
-            offline_intervals = beacon_repositories.read_service_offline_intervals(
-                conn, svc['port'], start_ts=now - CHECK_RETENTION_SECONDS, end_ts=now,
-            )
+            offline_intervals = offline_intervals_by_port.get(svc['port'], [])
             maintenance_attributed_seconds = beacon_maintenance.attributed_downtime_seconds(
                 offline_intervals, port_windows, SETTINGS.timezone,
             )
