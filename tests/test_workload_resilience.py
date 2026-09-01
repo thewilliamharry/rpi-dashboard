@@ -28,7 +28,9 @@ stays honest without needing hardware.
 """
 
 import importlib
+import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -985,6 +987,134 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
             limits['worker'], limits['worker'], role='worker',
         )
         self.assertTrue(within_budget['passed'])
+
+    # -- 06-07: container-derived resource-target resolution (OPS-07) --
+    #
+    # The harness previously resolved its resource-sampling targets by
+    # scanning every process on the host for a command-line substring
+    # match. On real hardware that matched an unrelated co-tenant
+    # application's gunicorn master instead of Beacon's own web tier
+    # (06-UAT.md "Second defect"). These tests drive the replacement --
+    # resolution derived from the Beacon containers themselves via a
+    # stubbed `docker inspect` seam -- without requiring docker, a
+    # container, root, or Pi hardware.
+
+    def test_container_root_pid_resolves_from_successful_inspect(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout='4242\n', stderr='',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertEqual(pid, 4242)
+        self.assertIsNone(reason)
+        stub_runner.assert_called_once()
+        invoked_argv = stub_runner.call_args[0][0]
+        self.assertEqual(invoked_argv[:2], ['docker', 'inspect'])
+        self.assertIn('beacon-web', invoked_argv)
+
+    def test_container_root_pid_fails_on_nonzero_return_code(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object: beacon-web',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+        self.assertIn('beacon-web', reason)
+
+    def test_container_root_pid_fails_when_docker_binary_absent(self):
+        stub_runner = mock.Mock(side_effect=FileNotFoundError('docker'))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_fails_on_timeout(self):
+        stub_runner = mock.Mock(
+            side_effect=subprocess.TimeoutExpired(cmd='docker', timeout=10),
+        )
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_fails_on_unparseable_output(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout='not-a-pid\n', stderr='',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_fails_on_reported_pid_zero(self):
+        # Docker reports PID 0 for a container that exists but is not
+        # currently running -- must never be mistaken for a valid target.
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout='0\n', stderr='',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_rejects_invalid_name_before_any_runner_call(self):
+        stub_runner = mock.Mock()
+        with self.assertRaises(ValueError):
+            pi_load_acceptance._container_root_pid('beacon-web; rm -rf /', runner=stub_runner)
+        stub_runner.assert_not_called()
+
+    def test_resolve_container_process_tree_returns_root_and_children(self):
+        current_pid = os.getpid()
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout=f'{current_pid}\n', stderr='',
+        ))
+        processes, reason = pi_load_acceptance.resolve_container_process_tree(
+            'beacon-web', runner=stub_runner,
+        )
+        self.assertIsNone(reason)
+        self.assertTrue(processes)
+        self.assertEqual(processes[0].pid, current_pid)
+
+    def test_resolve_container_process_tree_propagates_inspect_failure(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object',
+        ))
+        processes, reason = pi_load_acceptance.resolve_container_process_tree(
+            'beacon-web', runner=stub_runner,
+        )
+        self.assertEqual(processes, [])
+        self.assertIsNotNone(reason)
+
+    def test_resource_targets_self_test_returns_current_process_for_both_roles(self):
+        targets = pi_load_acceptance._resource_targets(self_test=True)
+        current_pid = os.getpid()
+        self.assertEqual(targets['worker'].root_pid, current_pid)
+        self.assertEqual(targets['web'].root_pid, current_pid)
+        self.assertIsNone(targets['worker'].reason)
+        self.assertIsNone(targets['web'].reason)
+        self.assertEqual(targets['worker'].method, 'self_test')
+
+    def test_resource_targets_acceptance_resolves_from_containers(self):
+        current_pid = os.getpid()
+
+        def fake_runner(argv, **kwargs):
+            name = argv[-1]
+            pid = current_pid if name == 'beacon-web' else current_pid
+            return SimpleNamespace(returncode=0, stdout=f'{pid}\n', stderr='')
+
+        targets = pi_load_acceptance._resource_targets(
+            self_test=False, runner=fake_runner,
+        )
+        self.assertIsNone(targets['worker'].reason)
+        self.assertIsNone(targets['web'].reason)
+        self.assertEqual(targets['worker'].container, 'beacon-worker')
+        self.assertEqual(targets['web'].container, 'beacon-web')
+        self.assertEqual(targets['worker'].method, 'docker_container_tree')
+
+    def test_resource_targets_acceptance_names_reason_when_unresolved(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object',
+        ))
+        targets = pi_load_acceptance._resource_targets(self_test=False, runner=stub_runner)
+        self.assertIsNotNone(targets['worker'].reason)
+        self.assertIsNotNone(targets['web'].reason)
+        self.assertEqual(targets['worker'].processes, [])
+        self.assertEqual(targets['web'].processes, [])
 
 
 if __name__ == '__main__':
