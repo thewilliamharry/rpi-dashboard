@@ -65,7 +65,7 @@
 
 - [x] **OPS-01**: Metric sampling and service checks continue within their accepted cadence while discovery, previews, cleanup, and analytics queries are active.
 - [x] **OPS-02**: Preview work uses serialized browser ownership, bounded deadlines and retries, and a visible non-fatal degraded state.
-- [ ] **OPS-03**: Thumbnail storage and expiry remain bounded without placing large preview blobs in the primary telemetry path.
+- [x] **OPS-03**: Thumbnail storage and expiry remain bounded without placing large preview blobs in the primary telemetry path.
 - [x] **OPS-04**: Automated tests cover migrations, restart recovery, concurrent web/worker database access, scheduler ownership, and failed background jobs.
 - [x] **OPS-05**: Automated tests cover outbound-target validation, DNS/redirect handling, TLS behavior, and mutation-request protections.
 - [x] **OPS-06**: Both themes have UI-contract or visual-regression coverage for shared capabilities and important states.
@@ -148,7 +148,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | UX-07 | Phase 5 | Complete |
 | OPS-01 | Phase 6 | Complete |
 | OPS-02 | Phase 6 | Complete |
-| OPS-03 | Phase 6 | Pending |
+| OPS-03 | Phase 6 | Complete |
 | OPS-04 | Phase 6 | Complete |
 | OPS-05 | Phase 1 | Complete |
 | OPS-06 | Phase 5 | Complete |
