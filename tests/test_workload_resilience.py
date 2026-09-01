@@ -41,6 +41,8 @@ from shutil import copy2
 from types import SimpleNamespace
 from unittest import mock
 
+import psutil
+
 from dashboard.beacon import diagnosis as beacon_diagnosis
 from dashboard.beacon import queues
 from dashboard.beacon import repositories as beacon_repositories
@@ -1115,6 +1117,123 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
         self.assertIsNotNone(targets['web'].reason)
         self.assertEqual(targets['worker'].processes, [])
         self.assertEqual(targets['web'].processes, [])
+
+    # -- 06-07 Task 2: an unresolvable role is an honest, run-failing outcome --
+    #
+    # Under the old command-line matcher both roles resolved to *some*
+    # process (even if the wrong one), so the previous `all(proc is None
+    # ...)` guard never fired in practice. Under container resolution a
+    # partial failure -- one role resolved, one not -- becomes the
+    # realistic case, and that guard would let it pass silently. These
+    # tests drive the per-role replacement directly.
+
+    def test_resource_unavailable_reason_none_when_resolved_and_sampled(self):
+        target = pi_load_acceptance.ResourceTarget(
+            role='worker', container='beacon-worker', method='docker_container_tree',
+            root_pid=4242, processes=[object()], reason=None,
+        )
+        reason = pi_load_acceptance._resource_unavailable_reason('worker', target, sample_count=3)
+        self.assertIsNone(reason)
+
+    def test_resource_unavailable_reason_names_role_and_cause_when_unresolved(self):
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=None, processes=[], reason='beacon-web: docker binary not found',
+        )
+        reason = pi_load_acceptance._resource_unavailable_reason('web', target, sample_count=0)
+        self.assertIsNotNone(reason)
+        self.assertIn('web', reason)
+        self.assertIn('docker binary not found', reason)
+
+    def test_resource_unavailable_reason_explains_absence_when_resolved_but_unsampled(self):
+        target = pi_load_acceptance.ResourceTarget(
+            role='worker', container='beacon-worker', method='docker_container_tree',
+            root_pid=4242, processes=[object()], reason=None,
+        )
+        reason = pi_load_acceptance._resource_unavailable_reason('worker', target, sample_count=0)
+        self.assertIsNotNone(reason)
+        self.assertIn('worker', reason)
+        self.assertIn('beacon-worker', reason)
+
+    def test_resource_unavailable_reason_both_roles_unresolved_yields_two_distinct_reasons(self):
+        worker_target = pi_load_acceptance.ResourceTarget(
+            role='worker', container='beacon-worker', method='docker_container_tree',
+            root_pid=None, processes=[], reason='beacon-worker: docker binary not found',
+        )
+        web_target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=None, processes=[], reason='beacon-web: docker binary not found',
+        )
+        worker_reason = pi_load_acceptance._resource_unavailable_reason(
+            'worker', worker_target, sample_count=0,
+        )
+        web_reason = pi_load_acceptance._resource_unavailable_reason('web', web_target, sample_count=0)
+        self.assertIsNotNone(worker_reason)
+        self.assertIsNotNone(web_reason)
+        self.assertNotEqual(worker_reason, web_reason)
+        self.assertIn('worker', worker_reason)
+        self.assertIn('web', web_reason)
+
+    def test_run_acceptance_fails_when_one_role_unresolved_but_other_resolves(self):
+        # Under the OLD `all(proc is None ...)` guard this scenario -- one
+        # role resolved, one not -- would pass silently: `all()` requires
+        # BOTH to be unresolved. That is precisely the defect this task
+        # closes: one role resolving must never excuse the other. Patches
+        # resolve_container_process_tree directly (rather than
+        # subprocess.run) because _container_root_pid's `runner`
+        # parameter defaults to `subprocess.run` bound at def time, so
+        # patching the module attribute afterward would not reach calls
+        # made through that default.
+        appmod, db_path = load_app()
+        try:
+            now = int(time.time())
+            with appmod._db_lock:
+                conn = appmod.get_db()
+                for job_id in pi_load_acceptance.ESSENTIAL_JOB_IDS:
+                    beacon_repositories.record_background_job_succeeded(conn, job_id, now=now)
+                conn.commit()
+                conn.close()
+
+            from werkzeug.serving import make_server
+            server = make_server('127.0.0.1', 0, appmod.app, threaded=True)
+            server_port = server.server_address[1]
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                current_process = psutil.Process()
+
+                def one_role_resolves(name, *, runner=None):
+                    if name == 'beacon-worker':
+                        return [current_process], None
+                    return [], 'beacon-web: docker inspect failed (rc=1): no such object'
+
+                scenario = pi_load_acceptance.LoadScenario(
+                    duration_seconds=1,
+                    base_url=f'http://127.0.0.1:{server_port}',
+                    db_path=db_path,
+                    concurrency=1,
+                    self_test=False,
+                )
+                with mock.patch.object(
+                    pi_load_acceptance, 'resolve_container_process_tree',
+                    side_effect=one_role_resolves,
+                ):
+                    report = pi_load_acceptance.run_acceptance(scenario)
+            finally:
+                server.shutdown()
+                server_thread.join(timeout=5)
+        finally:
+            cleanup_db(db_path)
+
+        self.assertFalse(report.overall_passed)
+        web_reasons = [
+            r for r in report.failure_reasons if 'web' in r and 'resource oracle unavailable' in r
+        ]
+        self.assertTrue(web_reasons, report.failure_reasons)
+        self.assertFalse(
+            any('worker' in r and 'resource oracle unavailable' in r for r in report.failure_reasons),
+            report.failure_reasons,
+        )
 
 
 if __name__ == '__main__':
