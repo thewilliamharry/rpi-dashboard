@@ -26,7 +26,14 @@ produces and already trusts, never a parallel rule invented for this file
   ``dashboard.beacon.repositories.read_background_job_health`` for durable
   job outcomes.
 - Resources: the ``mem_limit`` values declared in ``docker-compose.yml``,
-  parsed from that file rather than duplicated as constants.
+  parsed from that file rather than duplicated as constants. The processes
+  sampled against those limits are resolved from the Beacon containers
+  themselves -- the ``worker``/``web`` ``container_name`` values pinned in
+  ``docker-compose.yml`` (``beacon-worker``, ``beacon-web``), overridable
+  via ``--worker-container``/``--web-container`` for an operator running a
+  modified compose file -- never by host-wide process matching, which on
+  real hardware sampled an unrelated co-tenant application sharing a
+  command-line substring with Beacon's own (PROH-OPS-07-02, T-06-33).
 - Response times: the dashboard's own routes, sampled under real concurrent
   HTTP load, judged against budgets declared (and reasoned about) below --
   never derived from a run this harness already made.
@@ -47,6 +54,7 @@ import math
 import os
 import platform
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -104,6 +112,16 @@ SAMPLE_INTERVAL_SECONDS = 1.0
 SELF_TEST_DURATION_SECONDS = 5
 SELF_TEST_CONCURRENCY = 4
 
+# Bounded so an unresponsive docker daemon produces a named, unresolved-role
+# failure rather than a hung run (T-06-34); 10s is generous next to a local
+# `docker inspect` call, which normally completes in well under a second.
+DOCKER_INSPECT_TIMEOUT_SECONDS = 10
+
+# Docker's own container-name grammar. Validating against it before any
+# subprocess call removes argument-injection as a concern outright rather
+# than merely sanitizing it (T-06-31).
+_CONTAINER_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+
 _MEM_UNIT_MULTIPLIERS = {'': 1, 'b': 1, 'k': 1024, 'm': 1024 ** 2, 'g': 1024 ** 3}
 
 
@@ -117,6 +135,8 @@ class LoadScenario:
     concurrency: int
     self_test: bool
     compose_path: str = str(DEFAULT_COMPOSE_PATH)
+    worker_container: str = 'beacon-worker'
+    web_container: str = 'beacon-web'
 
 
 @dataclass
@@ -147,6 +167,29 @@ class AcceptanceReport:
 
     def to_json(self):
         return json.dumps(asdict(self), indent=2, sort_keys=True, default=str)
+
+
+@dataclass
+class ResourceTarget:
+    """One role's resolved (or unresolved) resource-sampling target.
+
+    ``processes`` is the role's process set at resolution time -- non-empty
+    on success. ``root_pid`` is held separately (rather than only the
+    initial ``processes`` list) because a container-resolved role's child
+    set is re-derived from this PID on every sampling tick, not fixed at
+    run start (PROH-OPS-07-06): gunicorn recycles workers on timeout,
+    ``max_requests``, or crash, and a 600s run is long enough for that to
+    happen. ``reason`` is ``None`` only when resolution succeeded; a role
+    with a reason is never sampled and always fails the run for an
+    acceptance-shaped resolution.
+    """
+
+    role: str
+    container: object  # str for a container-resolved role, None for self_test
+    method: str  # 'docker_container_tree' or 'self_test'
+    root_pid: object = None  # int once resolved, else None
+    processes: list = field(default_factory=list)
+    reason: object = None  # str once unresolved, else None
 
 
 def _parse_mem_limit_value(raw):
@@ -354,58 +397,211 @@ def _load_worker(base_url, routes, latencies_by_route, latencies_lock, stop_even
             latencies_by_route.setdefault(route['label'], []).append(elapsed_ms)
 
 
-def _find_process_by_cmdline(patterns):
-    for proc in psutil.process_iter(['pid', 'cmdline']):
-        try:
-            cmdline = ' '.join(proc.info.get('cmdline') or [])
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-        if any(pattern in cmdline for pattern in patterns):
-            return proc
-    return None
+def _container_root_pid(name, *, runner=subprocess.run, timeout_seconds=DOCKER_INSPECT_TIMEOUT_SECONDS):
+    """Resolve a running container's root PID via ``docker inspect``.
+
+    Returns ``(pid, reason)``: a positive ``pid`` with ``reason`` ``None``
+    on success, or ``pid`` ``None`` with a short named ``reason`` on any
+    failure. Invokes docker as an argv list through ``runner`` -- never a
+    shell string, never ``shell=True`` (T-06-31) -- issuing one invocation
+    per container name so a missing container is attributable to that name
+    rather than to an ambiguous position in a multi-name result. Docker
+    reports PID ``0`` for a container that exists but is not running; that
+    is treated as a failure, never as a valid target.
+    """
+    if not _CONTAINER_NAME_RE.fullmatch(name):
+        raise ValueError(f'invalid container name: {name!r}')
+    try:
+        result = runner(
+            ['docker', 'inspect', '--format', '{{.State.Pid}}', name],
+            capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except FileNotFoundError:
+        return None, f'{name}: docker binary not found'
+    except subprocess.TimeoutExpired:
+        return None, f'{name}: docker inspect timed out after {timeout_seconds}s'
+    if result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        return None, f'{name}: docker inspect failed (rc={result.returncode}): {stderr}'
+    raw = (result.stdout or '').strip()
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None, f'{name}: unparseable docker inspect output: {raw!r}'
+    if pid == 0:
+        return None, f'{name}: container is not running (reported PID 0)'
+    return pid, None
 
 
-def _resource_targets(*, self_test):
-    """Resolve the worker/web ``psutil.Process`` handles this run samples.
+def resolve_container_process_tree(name, *, runner=subprocess.run):
+    """Resolve a container's root process plus every descendant.
 
-    Real acceptance runs match by command line -- ``worker.py`` for the
-    worker container, ``gunicorn`` for the web tier -- never by assumption.
-    A ``--self-test`` run has no separate worker/web containers (it starts
-    one in-process Flask app on a thread), so it falls back to sampling the
-    current process for both roles. This fallback only ever applies to a
-    ``smoke`` run; it never substitutes for real process-per-role evidence
-    in an ``acceptance`` run (PROH-OPS-07-02).
+    Returns ``(processes, reason)`` -- a non-empty list of
+    ``psutil.Process`` handles on success with ``reason`` unset, or an
+    empty list with a reason on failure. Recursion into ``children`` is
+    load-bearing, not defensive tidiness: on real hardware a web
+    container's root process was an idle gunicorn master while the process
+    actually serving requests was its forked child (06-UAT.md "Second
+    defect"), so sampling only the root would reproduce that exact defect
+    in a subtler form. A process that exits between enumeration and
+    sampling is tolerated by skipping it, not by failing the run.
+    """
+    root_pid, reason = _container_root_pid(name, runner=runner)
+    if root_pid is None:
+        return [], reason
+    try:
+        root_process = psutil.Process(root_pid)
+        processes = [root_process, *root_process.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        return [], f'{name}: root PID {root_pid} exited before it could be sampled'
+    return processes, None
+
+
+def _resource_targets(*, self_test, worker_container='beacon-worker', web_container='beacon-web',
+                       runner=subprocess.run):
+    """Resolve the worker/web resource-sampling targets this run samples.
+
+    Real acceptance runs resolve each role's targets from the Beacon
+    containers themselves via ``resolve_container_process_tree`` -- never
+    by host-wide command-line matching, which on real hardware sampled an
+    unrelated co-tenant application's process because it happened to share
+    a command-line substring with Beacon's own (06-UAT.md "Second
+    defect"). A role whose container cannot be resolved comes back with an
+    empty process list and a named reason; there is no fallback to any
+    other process on the host. A ``--self-test`` run has no separate
+    worker/web containers (it starts one in-process Flask app on a
+    thread), so it resolves both roles to the current process -- this
+    fallback is reachable only from ``self_test=True`` and structurally
+    unreachable from an acceptance-shaped resolution (PROH-OPS-07-02,
+    PROH-OPS-07-04).
     """
     if self_test:
         self_process = psutil.Process()
-        return {'worker': self_process, 'web': self_process}
-    return {
-        'worker': _find_process_by_cmdline(('worker.py',)),
-        'web': _find_process_by_cmdline(('gunicorn',)),
-    }
+        return {
+            role: ResourceTarget(
+                role=role, container=None, method='self_test',
+                root_pid=self_process.pid, processes=[self_process], reason=None,
+            )
+            for role in ('worker', 'web')
+        }
+    targets = {}
+    for role, container in (('worker', worker_container), ('web', web_container)):
+        processes, reason = resolve_container_process_tree(container, runner=runner)
+        root_pid = processes[0].pid if processes else None
+        targets[role] = ResourceTarget(
+            role=role, container=container, method='docker_container_tree',
+            root_pid=root_pid, processes=processes, reason=reason,
+        )
+    return targets
 
 
-def _sample_resources(role_processes, duration_seconds, samples_by_role, stop_event):
-    for proc in role_processes.values():
-        if proc is not None:
+def _live_role_processes(target):
+    """Return a role's currently-live process set for one sampling tick.
+
+    For a container-resolved role this re-walks ``children(recursive=True)``
+    from the held root PID on every call rather than returning a set fixed
+    at run start (PROH-OPS-07-06): a gunicorn worker respawn mid-run would
+    otherwise leave the role sampling only the surviving master. A root PID
+    that has disappeared is a genuine failure for this tick, surfaced as an
+    empty process list rather than a raised exception.
+    """
+    if target.method == 'self_test':
+        return list(target.processes)
+    if target.root_pid is None:
+        return []
+    try:
+        root_process = psutil.Process(target.root_pid)
+        return [root_process, *root_process.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        return []
+
+
+def _prime_cpu_percent(targets):
+    """Prime ``cpu_percent`` for every role's current process set.
+
+    ``psutil``'s first ``cpu_percent(interval=None)`` call on a process is
+    meaningless (no prior sample to diff against); priming here means the
+    first real tick already has a baseline for every process resolved at
+    run start.
+    """
+    for target in targets.values():
+        if target.reason is not None:
+            continue
+        for proc in _live_role_processes(target):
             try:
-                proc.cpu_percent(interval=None)  # prime; the first call is meaningless
+                proc.cpu_percent(interval=None)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-    deadline = time.monotonic() + duration_seconds
-    while time.monotonic() < deadline and not stop_event.is_set():
-        for role, proc in role_processes.items():
-            if proc is None:
-                continue
+
+
+def _sample_resources_tick(targets, samples_by_role, sampled_pids_by_role):
+    """Take one resource-sampling pass across every resolved role.
+
+    Re-derives each role's live process set fresh from ``_live_role_processes``
+    on every call -- not once at run start -- so a respawned child is
+    picked up on the very next tick (PROH-OPS-07-06). A role's sample is
+    the sum of RSS and CPU across its live process set: summing RSS
+    over-counts pages shared copy-on-write between a parent and its forked
+    child, so the reading is an upper bound rather than an exact figure.
+    For an acceptance oracle asserting against a ceiling, an upper bound
+    can produce a false failure but never a false pass -- the correct
+    direction to bias toward for evidence this phase has already been
+    burned by trusting (06-UAT.md "Second defect").
+    """
+    for role, target in targets.items():
+        if target.reason is not None:
+            continue
+        rss_total = 0
+        cpu_total = 0.0
+        pids_this_tick = []
+        for proc in _live_role_processes(target):
             try:
-                rss_bytes = proc.memory_info().rss
-                cpu_percent = proc.cpu_percent(interval=None)
+                rss_total += proc.memory_info().rss
+                cpu_total += proc.cpu_percent(interval=None)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-            samples_by_role.setdefault(role, []).append(
-                {'ts': int(time.time()), 'rss_bytes': rss_bytes, 'cpu_percent': cpu_percent}
-            )
+            pids_this_tick.append(proc.pid)
+        if not pids_this_tick:
+            continue
+        samples_by_role.setdefault(role, []).append({
+            'ts': int(time.time()), 'rss_bytes': rss_total, 'cpu_percent': cpu_total,
+            'pids': pids_this_tick,
+        })
+        sampled_pids_by_role.setdefault(role, set()).update(pids_this_tick)
+
+
+def _sample_resources(targets, duration_seconds, samples_by_role, sampled_pids_by_role, stop_event):
+    _prime_cpu_percent(targets)
+    deadline = time.monotonic() + duration_seconds
+    while time.monotonic() < deadline and not stop_event.is_set():
+        _sample_resources_tick(targets, samples_by_role, sampled_pids_by_role)
         time.sleep(SAMPLE_INTERVAL_SECONDS)
+
+
+def _resource_unavailable_reason(role, target, sample_count):
+    """Return a named failure reason for a role the resource oracle could not measure.
+
+    Replaces the old ``all(proc is None ...)`` guard, which required BOTH
+    roles to be unresolved before it fired -- so one role resolving
+    silently excused the other. Under container resolution a partial
+    failure is the realistic case, not an edge case, so each role is
+    judged on its own: an unresolved role's own resolution reason is
+    surfaced verbatim, and a role that resolved but produced zero samples
+    (its container could have exited mid-run) gets a reason explaining the
+    absence rather than being summarised as a ``None`` peak that quietly
+    passes. Returns ``None`` only when the role resolved and produced at
+    least one sample -- ``assert_resource_budget`` remains the sole rule
+    for whether that sample is within budget (PROH-OPS-07-01); this
+    function only ever explains *why* there is no sample to judge.
+    """
+    if target.reason is not None:
+        return f'resource oracle unavailable for {role}: container {target.container}: {target.reason}'
+    if sample_count == 0:
+        return (
+            f'resource oracle unavailable for {role}: container {target.container} resolved '
+            f'(root PID {target.root_pid}) but produced zero samples'
+        )
+    return None
 
 
 def run_acceptance(scenario):
@@ -441,19 +637,19 @@ def run_acceptance(scenario):
     latencies_by_route = {}
     latencies_lock = threading.Lock()
     resource_samples = {}
+    sampled_pids_by_role = {}
     stop_event = threading.Event()
 
-    role_processes = _resource_targets(self_test=scenario.self_test)
-    if not scenario.self_test and all(proc is None for proc in role_processes.values()):
-        report.failure_reasons.append(
-            'resource oracle unavailable: neither a worker.py nor a gunicorn process '
-            'could be found on this host'
-        )
+    role_targets = _resource_targets(
+        self_test=scenario.self_test,
+        worker_container=scenario.worker_container,
+        web_container=scenario.web_container,
+    )
 
     session = requests.Session()
     resource_thread = threading.Thread(
         target=_sample_resources,
-        args=(role_processes, scenario.duration_seconds, resource_samples, stop_event),
+        args=(role_targets, scenario.duration_seconds, resource_samples, sampled_pids_by_role, stop_event),
         daemon=True,
     )
     load_threads = [
@@ -505,8 +701,38 @@ def run_acceptance(scenario):
 
     resource_summary = {}
     resource_results = []
+    resource_targets_report = {}
     for role in ('worker', 'web'):
+        target = role_targets[role]
         samples = resource_samples.get(role) or []
+        sampled_pids = sorted(sampled_pids_by_role.get(role, set()))
+        distinct_pid_sets = {tuple(sorted(sample['pids'])) for sample in samples}
+        sampled_set_changed = len(distinct_pid_sets) > 1
+
+        # Per-role resolution provenance: names the container resolved, the
+        # method used, the root PID, the union of every PID sampled at any
+        # point in the run, and whether that set changed mid-run. Without
+        # this a run that silently substituted a respawned worker partway
+        # through is indistinguishable in the report from one continuous
+        # measurement -- an operator investigating an odd CPU curve has no
+        # way to tell which they are holding (PROH-OPS-07-06).
+        resource_targets_report[role] = {
+            'container': target.container,
+            'method': target.method,
+            'root_pid': target.root_pid,
+            'sampled_pids': sampled_pids,
+            'sampled_set_changed': sampled_set_changed,
+            'resolution_reason': target.reason,
+        }
+
+        # Every role that failed to resolve, or resolved but produced zero
+        # samples, gets its own named failure reason. One role resolving
+        # must never excuse the other -- the resource criterion covers both
+        # the worker and the web tier (PROH-OPS-07-02, PROH-OPS-07-03).
+        unavailable_reason = _resource_unavailable_reason(role, target, len(samples))
+        if unavailable_reason is not None:
+            report.failure_reasons.append(unavailable_reason)
+
         rss_values = [sample['rss_bytes'] for sample in samples]
         cpu_values = [sample['cpu_percent'] for sample in samples]
         peak_rss = max(rss_values, default=None)
@@ -521,6 +747,11 @@ def run_acceptance(scenario):
             'peak_cpu_percent': max(cpu_values, default=None),
             'mean_cpu_percent': (sum(cpu_values) / len(cpu_values)) if cpu_values else None,
         }
+        # assert_resource_budget is unchanged and stays the sole rule for
+        # whether a role's peak RSS is within budget (PROH-OPS-07-01):
+        # the resolution-level reason above explains *why* there is no
+        # sample; this assertion is what makes a missing sample an honest
+        # failure rather than a None that quietly passes.
         result = assert_resource_budget(peak_rss, memory_limits.get(role), role=role)
         resource_results.append(result)
         if not result['passed']:
@@ -534,9 +765,14 @@ def run_acceptance(scenario):
     report.assertions = {
         'cadence': {'passed': cadence_result['passed'], 'failures': cadence_result['failures']},
         'resources': {
+            # assert_resource_budget already fails on a missing peak_rss --
+            # which is exactly what an unresolved role or an empty sample
+            # set produces -- so this reduces cleanly to the same rule
+            # governing every other role: no separate, competing check.
             'passed': all(result['passed'] for result in resource_results),
             'results': resource_results,
             'summary': resource_summary,
+            'resource_targets': resource_targets_report,
         },
         'response_times': {
             'passed': response_time_result['passed'],
@@ -620,6 +856,24 @@ def build_arg_parser():
         '--self-test', action='store_true',
         help='Run a short, bounded smoke pass against a locally-started app -- no Pi required',
     )
+    parser.add_argument(
+        '--worker-container', default='beacon-worker',
+        help=(
+            "Docker container name resolved for the worker role's resource sampling "
+            "(default: beacon-worker, the container_name pinned in docker-compose.yml, so the "
+            "harness and the deployment cannot drift apart silently; override for an operator "
+            "running a modified compose file)"
+        ),
+    )
+    parser.add_argument(
+        '--web-container', default='beacon-web',
+        help=(
+            "Docker container name resolved for the web role's resource sampling "
+            "(default: beacon-web, the container_name pinned in docker-compose.yml, so the "
+            "harness and the deployment cannot drift apart silently; override for an operator "
+            "running a modified compose file)"
+        ),
+    )
     return parser
 
 
@@ -636,6 +890,8 @@ def main(argv=None):
             db_path=args.db,
             concurrency=args.concurrency,
             self_test=False,
+            worker_container=args.worker_container,
+            web_container=args.web_container,
         )
         report = run_acceptance(scenario)
 

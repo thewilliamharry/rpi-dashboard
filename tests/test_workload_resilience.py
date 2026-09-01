@@ -28,7 +28,9 @@ stays honest without needing hardware.
 """
 
 import importlib
+import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -38,6 +40,8 @@ from pathlib import Path
 from shutil import copy2
 from types import SimpleNamespace
 from unittest import mock
+
+import psutil
 
 from dashboard.beacon import diagnosis as beacon_diagnosis
 from dashboard.beacon import queues
@@ -985,6 +989,414 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
             limits['worker'], limits['worker'], role='worker',
         )
         self.assertTrue(within_budget['passed'])
+
+    # -- 06-07: container-derived resource-target resolution (OPS-07) --
+    #
+    # The harness previously resolved its resource-sampling targets by
+    # scanning every process on the host for a command-line substring
+    # match. On real hardware that matched an unrelated co-tenant
+    # application's gunicorn master instead of Beacon's own web tier
+    # (06-UAT.md "Second defect"). These tests drive the replacement --
+    # resolution derived from the Beacon containers themselves via a
+    # stubbed `docker inspect` seam -- without requiring docker, a
+    # container, root, or Pi hardware.
+
+    def test_container_root_pid_resolves_from_successful_inspect(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout='4242\n', stderr='',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertEqual(pid, 4242)
+        self.assertIsNone(reason)
+        stub_runner.assert_called_once()
+        invoked_argv = stub_runner.call_args[0][0]
+        self.assertEqual(invoked_argv[:2], ['docker', 'inspect'])
+        self.assertIn('beacon-web', invoked_argv)
+
+    def test_container_root_pid_fails_on_nonzero_return_code(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object: beacon-web',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+        self.assertIn('beacon-web', reason)
+
+    def test_container_root_pid_fails_when_docker_binary_absent(self):
+        stub_runner = mock.Mock(side_effect=FileNotFoundError('docker'))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_fails_on_timeout(self):
+        stub_runner = mock.Mock(
+            side_effect=subprocess.TimeoutExpired(cmd='docker', timeout=10),
+        )
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_fails_on_unparseable_output(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout='not-a-pid\n', stderr='',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_fails_on_reported_pid_zero(self):
+        # Docker reports PID 0 for a container that exists but is not
+        # currently running -- must never be mistaken for a valid target.
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout='0\n', stderr='',
+        ))
+        pid, reason = pi_load_acceptance._container_root_pid('beacon-web', runner=stub_runner)
+        self.assertIsNone(pid)
+        self.assertIsNotNone(reason)
+
+    def test_container_root_pid_rejects_invalid_name_before_any_runner_call(self):
+        stub_runner = mock.Mock()
+        with self.assertRaises(ValueError):
+            pi_load_acceptance._container_root_pid('beacon-web; rm -rf /', runner=stub_runner)
+        stub_runner.assert_not_called()
+
+    def test_resolve_container_process_tree_returns_root_and_children(self):
+        current_pid = os.getpid()
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=0, stdout=f'{current_pid}\n', stderr='',
+        ))
+        processes, reason = pi_load_acceptance.resolve_container_process_tree(
+            'beacon-web', runner=stub_runner,
+        )
+        self.assertIsNone(reason)
+        self.assertTrue(processes)
+        self.assertEqual(processes[0].pid, current_pid)
+
+    def test_resolve_container_process_tree_propagates_inspect_failure(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object',
+        ))
+        processes, reason = pi_load_acceptance.resolve_container_process_tree(
+            'beacon-web', runner=stub_runner,
+        )
+        self.assertEqual(processes, [])
+        self.assertIsNotNone(reason)
+
+    def test_resource_targets_self_test_returns_current_process_for_both_roles(self):
+        targets = pi_load_acceptance._resource_targets(self_test=True)
+        current_pid = os.getpid()
+        self.assertEqual(targets['worker'].root_pid, current_pid)
+        self.assertEqual(targets['web'].root_pid, current_pid)
+        self.assertIsNone(targets['worker'].reason)
+        self.assertIsNone(targets['web'].reason)
+        self.assertEqual(targets['worker'].method, 'self_test')
+
+    def test_resource_targets_acceptance_resolves_from_containers(self):
+        current_pid = os.getpid()
+
+        def fake_runner(argv, **kwargs):
+            name = argv[-1]
+            pid = current_pid if name == 'beacon-web' else current_pid
+            return SimpleNamespace(returncode=0, stdout=f'{pid}\n', stderr='')
+
+        targets = pi_load_acceptance._resource_targets(
+            self_test=False, runner=fake_runner,
+        )
+        self.assertIsNone(targets['worker'].reason)
+        self.assertIsNone(targets['web'].reason)
+        self.assertEqual(targets['worker'].container, 'beacon-worker')
+        self.assertEqual(targets['web'].container, 'beacon-web')
+        self.assertEqual(targets['worker'].method, 'docker_container_tree')
+
+    def test_resource_targets_acceptance_names_reason_when_unresolved(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object',
+        ))
+        targets = pi_load_acceptance._resource_targets(self_test=False, runner=stub_runner)
+        self.assertIsNotNone(targets['worker'].reason)
+        self.assertIsNotNone(targets['web'].reason)
+        self.assertEqual(targets['worker'].processes, [])
+        self.assertEqual(targets['web'].processes, [])
+
+    # -- 06-07 Task 2: an unresolvable role is an honest, run-failing outcome --
+    #
+    # Under the old command-line matcher both roles resolved to *some*
+    # process (even if the wrong one), so the previous `all(proc is None
+    # ...)` guard never fired in practice. Under container resolution a
+    # partial failure -- one role resolved, one not -- becomes the
+    # realistic case, and that guard would let it pass silently. These
+    # tests drive the per-role replacement directly.
+
+    def test_resource_unavailable_reason_none_when_resolved_and_sampled(self):
+        target = pi_load_acceptance.ResourceTarget(
+            role='worker', container='beacon-worker', method='docker_container_tree',
+            root_pid=4242, processes=[object()], reason=None,
+        )
+        reason = pi_load_acceptance._resource_unavailable_reason('worker', target, sample_count=3)
+        self.assertIsNone(reason)
+
+    def test_resource_unavailable_reason_names_role_and_cause_when_unresolved(self):
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=None, processes=[], reason='beacon-web: docker binary not found',
+        )
+        reason = pi_load_acceptance._resource_unavailable_reason('web', target, sample_count=0)
+        self.assertIsNotNone(reason)
+        self.assertIn('web', reason)
+        self.assertIn('docker binary not found', reason)
+
+    def test_resource_unavailable_reason_explains_absence_when_resolved_but_unsampled(self):
+        target = pi_load_acceptance.ResourceTarget(
+            role='worker', container='beacon-worker', method='docker_container_tree',
+            root_pid=4242, processes=[object()], reason=None,
+        )
+        reason = pi_load_acceptance._resource_unavailable_reason('worker', target, sample_count=0)
+        self.assertIsNotNone(reason)
+        self.assertIn('worker', reason)
+        self.assertIn('beacon-worker', reason)
+
+    def test_resource_unavailable_reason_both_roles_unresolved_yields_two_distinct_reasons(self):
+        worker_target = pi_load_acceptance.ResourceTarget(
+            role='worker', container='beacon-worker', method='docker_container_tree',
+            root_pid=None, processes=[], reason='beacon-worker: docker binary not found',
+        )
+        web_target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=None, processes=[], reason='beacon-web: docker binary not found',
+        )
+        worker_reason = pi_load_acceptance._resource_unavailable_reason(
+            'worker', worker_target, sample_count=0,
+        )
+        web_reason = pi_load_acceptance._resource_unavailable_reason('web', web_target, sample_count=0)
+        self.assertIsNotNone(worker_reason)
+        self.assertIsNotNone(web_reason)
+        self.assertNotEqual(worker_reason, web_reason)
+        self.assertIn('worker', worker_reason)
+        self.assertIn('web', web_reason)
+
+    def test_run_acceptance_fails_when_one_role_unresolved_but_other_resolves(self):
+        # Under the OLD `all(proc is None ...)` guard this scenario -- one
+        # role resolved, one not -- would pass silently: `all()` requires
+        # BOTH to be unresolved. That is precisely the defect this task
+        # closes: one role resolving must never excuse the other. Patches
+        # resolve_container_process_tree directly (rather than
+        # subprocess.run) because _container_root_pid's `runner`
+        # parameter defaults to `subprocess.run` bound at def time, so
+        # patching the module attribute afterward would not reach calls
+        # made through that default.
+        appmod, db_path = load_app()
+        try:
+            now = int(time.time())
+            with appmod._db_lock:
+                conn = appmod.get_db()
+                for job_id in pi_load_acceptance.ESSENTIAL_JOB_IDS:
+                    beacon_repositories.record_background_job_succeeded(conn, job_id, now=now)
+                conn.commit()
+                conn.close()
+
+            from werkzeug.serving import make_server
+            server = make_server('127.0.0.1', 0, appmod.app, threaded=True)
+            server_port = server.server_address[1]
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                current_process = psutil.Process()
+
+                def one_role_resolves(name, *, runner=None):
+                    if name == 'beacon-worker':
+                        return [current_process], None
+                    return [], 'beacon-web: docker inspect failed (rc=1): no such object'
+
+                scenario = pi_load_acceptance.LoadScenario(
+                    duration_seconds=1,
+                    base_url=f'http://127.0.0.1:{server_port}',
+                    db_path=db_path,
+                    concurrency=1,
+                    self_test=False,
+                )
+                with mock.patch.object(
+                    pi_load_acceptance, 'resolve_container_process_tree',
+                    side_effect=one_role_resolves,
+                ):
+                    report = pi_load_acceptance.run_acceptance(scenario)
+            finally:
+                server.shutdown()
+                server_thread.join(timeout=5)
+        finally:
+            cleanup_db(db_path)
+
+        self.assertFalse(report.overall_passed)
+        web_reasons = [
+            r for r in report.failure_reasons if 'web' in r and 'resource oracle unavailable' in r
+        ]
+        self.assertTrue(web_reasons, report.failure_reasons)
+        self.assertFalse(
+            any('worker' in r and 'resource oracle unavailable' in r for r in report.failure_reasons),
+            report.failure_reasons,
+        )
+
+    # -- 06-07 Task 3: regression coverage for the mis-targeting failure mode --
+    #
+    # Encodes the hardware failure (06-UAT.md "Second defect") as a
+    # permanent regression: an unrelated co-tenant application's process,
+    # sharing a command-line substring with Beacon's own, must never be
+    # selected; the smoke path's current-process fallback must never be
+    # reachable from an acceptance-shaped resolution; a role's sample must
+    # aggregate parent and child rather than the parent alone; and a
+    # mid-run child respawn must be picked up rather than leaving the role
+    # sampling only the surviving master. None of these require docker, a
+    # container, root, or Pi hardware.
+
+    def test_co_tenant_process_is_never_selected_by_acceptance_resolution(self):
+        # The exact scenario 06-UAT.md's "Second defect" presented: an
+        # unrelated application's gunicorn master, ordered first in the
+        # host's process table, sharing the 'gunicorn' substring with
+        # Beacon's own web tier.
+        co_tenant = mock.Mock()
+        co_tenant.info = {
+            'pid': 675687,
+            'cmdline': ['/usr/local/bin/python', '/opt/offline-portal/bin/gunicorn', 'app:create_app()'],
+        }
+
+        def fake_process_iter(*args, **kwargs):
+            yield co_tenant
+
+        current_pid = os.getpid()
+
+        def fake_runner(name, *, runner=None):
+            return [psutil.Process(current_pid)], None
+
+        with mock.patch.object(psutil, 'process_iter', side_effect=fake_process_iter) as mock_iter:
+            with mock.patch.object(
+                pi_load_acceptance, 'resolve_container_process_tree', side_effect=fake_runner,
+            ):
+                targets = pi_load_acceptance._resource_targets(self_test=False)
+
+        # An acceptance-shaped resolution never scans the host process
+        # table at all -- if it ever did, the co-tenant (ordered first)
+        # would be exactly what a substring matcher picked on the Pi.
+        mock_iter.assert_not_called()
+        worker_pids = [p.pid for p in targets['worker'].processes]
+        web_pids = [p.pid for p in targets['web'].processes]
+        self.assertNotIn(675687, worker_pids)
+        self.assertNotIn(675687, web_pids)
+        self.assertTrue(worker_pids)
+        self.assertTrue(web_pids)
+
+    def test_acceptance_resolution_never_yields_the_current_process(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object',
+        ))
+        targets = pi_load_acceptance._resource_targets(self_test=False, runner=stub_runner)
+        current_pid = os.getpid()
+        self.assertNotEqual(targets['worker'].root_pid, current_pid)
+        self.assertNotEqual(targets['web'].root_pid, current_pid)
+        self.assertEqual(targets['worker'].processes, [])
+        self.assertEqual(targets['web'].processes, [])
+        self.assertIsNotNone(targets['worker'].reason)
+        self.assertIsNotNone(targets['web'].reason)
+
+    def test_smoke_resolution_does_return_the_current_process(self):
+        # The companion of the previous test: the fallback exists, but
+        # only ever for self_test=True.
+        targets = pi_load_acceptance._resource_targets(self_test=True)
+        current_pid = os.getpid()
+        self.assertEqual(targets['worker'].root_pid, current_pid)
+        self.assertEqual(targets['web'].root_pid, current_pid)
+        self.assertEqual(targets['worker'].method, 'self_test')
+        self.assertEqual(targets['web'].method, 'self_test')
+
+    def test_sample_tick_aggregates_parent_and_busy_child_not_parent_alone(self):
+        # The exact property that would have exposed the original defect
+        # immediately: the reported figure was an idle master's RSS/CPU,
+        # while the process actually serving requests -- its forked child
+        # -- was busy.
+        idle_master = mock.Mock()
+        idle_master.pid = 907527
+        idle_master.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        idle_master.cpu_percent.return_value = 0.01
+
+        busy_child = mock.Mock()
+        busy_child.pid = 907613
+        busy_child.memory_info.return_value = SimpleNamespace(rss=88_944 * 1024)
+        busy_child.cpu_percent.return_value = 45.6
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[idle_master, busy_child], reason=None,
+        )
+        samples_by_role = {}
+        sampled_pids_by_role = {}
+        with mock.patch.object(
+            pi_load_acceptance, '_live_role_processes', return_value=[idle_master, busy_child],
+        ):
+            pi_load_acceptance._sample_resources_tick(
+                {'web': target}, samples_by_role, sampled_pids_by_role,
+            )
+
+        sample = samples_by_role['web'][0]
+        self.assertEqual(sample['rss_bytes'], 1_000_000 + 88_944 * 1024)
+        self.assertAlmostEqual(sample['cpu_percent'], 45.61)
+        self.assertEqual(set(sample['pids']), {907527, 907613})
+        # The property that matters: the recorded CPU reflects the busy
+        # child, not just the idle master's near-zero figure.
+        self.assertGreater(sample['cpu_percent'], 40)
+
+    def test_mid_run_respawn_is_sampled_and_recorded_as_a_changed_set(self):
+        # W1's failure mode, pinned directly: a gunicorn worker recycles
+        # mid-run. One-shot enumeration would leave the role sampling only
+        # the surviving master -- alive, so Task 2's empty-sample guard
+        # stays silent -- reporting near-zero CPU for a tier under load.
+        root = mock.Mock()
+        root.pid = 907527
+        root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        root.cpu_percent.return_value = 0.0
+
+        old_child = mock.Mock()
+        old_child.pid = 907613
+        old_child.memory_info.return_value = SimpleNamespace(rss=10_000_000)
+        old_child.cpu_percent.return_value = 0.4  # about to be recycled
+
+        new_child = mock.Mock()
+        new_child.pid = 907999
+        new_child.memory_info.return_value = SimpleNamespace(rss=91_000_000)
+        new_child.cpu_percent.return_value = 45.6  # the respawned, busy worker
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[root, old_child], reason=None,
+        )
+        live_sequence = [
+            [root, old_child],
+            [root, old_child],
+            [root, new_child],
+            [root, new_child],
+        ]
+        samples_by_role = {}
+        sampled_pids_by_role = {}
+        with mock.patch.object(
+            pi_load_acceptance, '_live_role_processes', side_effect=live_sequence,
+        ):
+            for _ in range(4):
+                pi_load_acceptance._sample_resources_tick(
+                    {'web': target}, samples_by_role, sampled_pids_by_role,
+                )
+
+        samples = samples_by_role['web']
+        self.assertEqual(len(samples), 4)
+        # Later samples reflect the new child, not the one it replaced.
+        self.assertIn(907999, samples[-1]['pids'])
+        self.assertNotIn(907613, samples[-1]['pids'])
+        # Assert on the sampled values, not just the bookkeeping: the
+        # role's sampled CPU after the respawn is the new child's busy
+        # figure, not the idle master's near-zero one.
+        self.assertGreater(samples[-1]['cpu_percent'], 40)
+        # Provenance: the union carries every PID seen across the run, and
+        # the samples span more than one distinct PID set -- the same
+        # computation run_acceptance uses to set sampled_set_changed.
+        self.assertEqual(sampled_pids_by_role['web'], {907527, 907613, 907999})
+        distinct_pid_sets = {tuple(sorted(s['pids'])) for s in samples}
+        self.assertGreater(len(distinct_pid_sets), 1)
 
 
 if __name__ == '__main__':
