@@ -154,6 +154,16 @@ _Both tasks were single commits each — RED/GREEN were folded into one atomic c
 - `AR-06-02` in `06-SECURITY.md` is code-fixed by this plan; the accepted-risk log entry itself was left unedited (out of this plan's declared file scope) — a future security-audit pass should reconcile it against this SUMMARY the same way other phase risk-log entries are independently re-verified before promotion.
 - No blockers for the phase's remaining acceptance work.
 
+## Self-Check: PASSED
+
+- FOUND: dashboard/beacon/inventory.py
+- FOUND: dashboard/app.py
+- FOUND: tests/test_migrations.py
+- FOUND: tests/test_api_and_auth.py
+- FOUND: commit 155d553
+- FOUND: commit e874fcb
+- FOUND: commit 78f8df1
+
 ---
 *Phase: 06-workload-resilience-pi-acceptance*
 *Completed: 2026-09-01*
