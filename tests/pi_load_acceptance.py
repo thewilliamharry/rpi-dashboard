@@ -578,6 +578,32 @@ def _sample_resources(targets, duration_seconds, samples_by_role, sampled_pids_b
         time.sleep(SAMPLE_INTERVAL_SECONDS)
 
 
+def _resource_unavailable_reason(role, target, sample_count):
+    """Return a named failure reason for a role the resource oracle could not measure.
+
+    Replaces the old ``all(proc is None ...)`` guard, which required BOTH
+    roles to be unresolved before it fired -- so one role resolving
+    silently excused the other. Under container resolution a partial
+    failure is the realistic case, not an edge case, so each role is
+    judged on its own: an unresolved role's own resolution reason is
+    surfaced verbatim, and a role that resolved but produced zero samples
+    (its container could have exited mid-run) gets a reason explaining the
+    absence rather than being summarised as a ``None`` peak that quietly
+    passes. Returns ``None`` only when the role resolved and produced at
+    least one sample -- ``assert_resource_budget`` remains the sole rule
+    for whether that sample is within budget (PROH-OPS-07-01); this
+    function only ever explains *why* there is no sample to judge.
+    """
+    if target.reason is not None:
+        return f'resource oracle unavailable for {role}: container {target.container}: {target.reason}'
+    if sample_count == 0:
+        return (
+            f'resource oracle unavailable for {role}: container {target.container} resolved '
+            f'(root PID {target.root_pid}) but produced zero samples'
+        )
+    return None
+
+
 def run_acceptance(scenario):
     """Run one full load-and-assert pass and return its ``AcceptanceReport``.
 
@@ -703,15 +729,9 @@ def run_acceptance(scenario):
         # samples, gets its own named failure reason. One role resolving
         # must never excuse the other -- the resource criterion covers both
         # the worker and the web tier (PROH-OPS-07-02, PROH-OPS-07-03).
-        if target.reason is not None:
-            report.failure_reasons.append(
-                f'resource oracle unavailable for {role}: container {target.container}: {target.reason}'
-            )
-        elif not samples:
-            report.failure_reasons.append(
-                f'resource oracle unavailable for {role}: container {target.container} resolved '
-                f'(root PID {target.root_pid}) but produced zero samples'
-            )
+        unavailable_reason = _resource_unavailable_reason(role, target, len(samples))
+        if unavailable_reason is not None:
+            report.failure_reasons.append(unavailable_reason)
 
         rss_values = [sample['rss_bytes'] for sample in samples]
         cpu_values = [sample['cpu_percent'] for sample in samples]
