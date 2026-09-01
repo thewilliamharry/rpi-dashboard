@@ -2,6 +2,7 @@ import json
 import multiprocessing
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,12 @@ from pathlib import Path
 
 from dashboard.beacon.config import Settings
 from dashboard.beacon.db import connect_db, prepare_database
-from dashboard.beacon.inventory import InventoryError, classify_schema, collect_inventory
+from dashboard.beacon.inventory import (
+    InventoryError,
+    _readonly_connection,
+    classify_schema,
+    collect_inventory,
+)
 from dashboard.beacon.migrations import (
     MIGRATIONS,
     Migration,
@@ -1527,6 +1533,100 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(output.read_text(encoding='utf-8'))
             self.assertEqual(report['journal_mode'], 'wal')
+
+    def test_non_wal_fixture_still_inspects_through_the_first_attempt(self):
+        """A rollback-journal-mode database needs no -shm mapping, so it must
+        keep succeeding on the plain mode=ro attempt -- the ordering change in
+        WR-01's fix must not alter this already-working path."""
+        report = collect_inventory(FIXTURE_DIR / 'runtime-queues-2026-07.db')
+        self.assertEqual(report['journal_mode'], 'delete')
+        self.assertEqual(report['connection_strategy'], 'mode=ro')
+
+    def test_wal_mode_on_a_writable_directory_never_reports_the_immutable_strategy(self):
+        """Pins the attempt ordering (PROH-OPS-04-03, T-06-21): a WAL database
+        in a directory the process can still write to must never reach the
+        immutable attempt, proving the live, writable upgrade path's
+        connection behavior is unchanged. Which of the two write-capable
+        attempts actually resolves the connection is itself an SQLite-build
+        detail (newer SQLite can serve mode=ro against WAL without -shm write
+        access); only "not immutable" is the safety property this asserts."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'wal-writable.db'
+            copy2(FIXTURE_DIR / 'metadata-events-2026-04.db', source)
+            with sqlite3.connect(source) as conn:
+                self.assertEqual(conn.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+
+            report = collect_inventory(source)
+
+        self.assertEqual(report['journal_mode'], 'wal')
+        self.assertNotIn('immutable', report['connection_strategy'])
+
+    def test_wal_mode_on_a_non_writable_directory_inspects_successfully(self):
+        """AR-06-02: an operator following this phase's own README -- copying a
+        WAL-mode deployment's three files, then locking the copy down -- must
+        get a successful inspection instead of InventoryError. When this
+        environment's SQLite build already serves mode=ro (or query_only)
+        against WAL without -shm write access, the immutable attempt is never
+        reached by a real locked-down directory and this test cannot exercise
+        it; the mocked ordering test below pins that attempt's behavior
+        deterministically."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'wal-locked.db'
+            copy2(FIXTURE_DIR / 'metadata-events-2026-04.db', source)
+            with sqlite3.connect(source) as conn:
+                self.assertEqual(conn.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+
+            original_mode = os.stat(directory).st_mode
+            os.chmod(directory, stat.S_IRUSR | stat.S_IXUSR)
+            try:
+                if os.access(directory, os.W_OK):
+                    self.skipTest(
+                        'cannot make the directory non-writable in this environment '
+                        '(likely running as root)'
+                    )
+                report = collect_inventory(source)
+            finally:
+                os.chmod(directory, original_mode)
+
+        if 'immutable' not in report['connection_strategy']:
+            self.skipTest(
+                "this environment's SQLite build already serves an earlier "
+                'attempt against a WAL database without write access to -shm, '
+                'so a real locked-down directory never reaches the immutable '
+                'attempt here'
+            )
+        # immutable=1 does not consult the -wal file, so it does not report
+        # journal_mode truthfully -- this is the exact caveat the recorded
+        # strategy exists to disclose, not a bug in this assertion.
+        self.assertIn('may omit', report['connection_strategy'])
+
+    def test_the_immutable_attempt_is_reached_only_after_both_writable_attempts_fail(self):
+        """Deterministic ordering pin, independent of the host SQLite build's
+        WAL-without-shared-memory support: with both write-requiring attempts
+        forced to fail, _readonly_connection must still reach the immutable
+        attempt third, succeed, and record a strategy whose value states the
+        uncheckpointed-WAL caveat (PROH-OPS-04-03, T-06-43)."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'probe.db'
+            with sqlite3.connect(target) as conn:
+                conn.execute('CREATE TABLE t(x)')
+                conn.commit()
+            real_connect = sqlite3.connect
+            calls = []
+
+            def fake_connect(*args, **kwargs):
+                calls.append((args, kwargs))
+                if len(calls) <= 2:
+                    raise sqlite3.OperationalError('simulated: write-requiring attempt failed')
+                return real_connect(target)
+
+            with mock.patch('dashboard.beacon.inventory.sqlite3.connect', side_effect=fake_connect):
+                strategy = {}
+                conn = _readonly_connection(target, strategy=strategy)
+            conn.close()
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(strategy['value'], 'immutable')
 
     def test_operator_fixture_matches_report_schema_without_operational_records(self):
         report = json.loads(

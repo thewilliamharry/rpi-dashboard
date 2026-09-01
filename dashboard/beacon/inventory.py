@@ -17,6 +17,21 @@ import sys
 INVENTORY_FORMAT = 'beacon-schema-inventory/v1'
 COUNT_LIMIT = 10_000
 
+# Human-readable description of which _readonly_connection attempt produced a
+# reading, recorded in the report alongside journal_mode. The immutable
+# strategy's description carries its own caveat inline -- ignoring the -wal
+# file means such a reading may omit committed but not-yet-checkpointed WAL
+# transactions -- so an operator meets the disclosure at the point they read
+# the strategy, not only in this module's comments.
+_CONNECTION_STRATEGY_DESCRIPTIONS = {
+    'mode_ro': 'mode=ro',
+    'query_only': 'query_only (opened writable, restricted via PRAGMA query_only=ON)',
+    'immutable': (
+        'mode=ro&immutable=1 -- ignores the -wal file; a reading taken this way '
+        'may omit committed but not-yet-checkpointed WAL transactions'
+    ),
+}
+
 
 class InventoryError(RuntimeError):
     """A safe diagnostic for inputs that cannot be inspected as SQLite."""
@@ -26,34 +41,94 @@ def _quote_identifier(identifier):
     return '"{}"'.format(identifier.replace('"', '""'))
 
 
-def _query_only(conn):
-    """Configure and return the same connection -- never a new binding.
+def _validated(conn):
+    """Force any lazy WAL/``-shm`` initialization onto this attempt's own
+    exception handling, then return the same connection -- never a new
+    binding. Some SQLite builds only attempt the ``-shm`` mapping a WAL
+    database needs at first *statement execution*, not at ``connect()`` time;
+    without this probe such an attempt would appear to succeed here and defer
+    its failure to the caller's first real query, entirely outside every
+    attempt's ``except`` clause below, silently defeating the fallback chain.
+    Closes ``conn`` before re-raising on failure so a probe failure never
+    leaks the connection this attempt opened.
 
     Kept as a pass-through-and-return helper (not an inline assignment in
     ``_readonly_connection``) so the module-boundary connection-ownership
-    gate sees the caller's ``return`` transferring ownership directly,
-    exactly like the ``mode=ro`` URI path immediately above it.
+    gate sees ownership transferring directly through the caller's own
+    ``return``, exactly like the ``mode=ro&immutable=1`` path's bare
+    ``sqlite3.connect(...)`` return does.
     """
-    conn.execute('PRAGMA query_only=ON')
+    try:
+        conn.execute('SELECT 1')
+    except sqlite3.Error:
+        conn.close()
+        raise
     return conn
 
 
-def _readonly_connection(db_path):
+def _query_only(conn):
+    """Configure, validate, and return the same connection -- never a new
+    binding -- so the connection-ownership gate sees ownership transferring
+    directly through this pass-through helper's own return.
+    """
+    conn.execute('PRAGMA query_only=ON')
+    return _validated(conn)
+
+
+def _readonly_connection(db_path, strategy=None):
+    """Establish a read-only connection for inspection, trying progressively
+    more permissive attempts in a fixed order that must not be reordered or
+    shortened (PROH-OPS-04-03): ``mode=ro`` first, then a writable connection
+    restricted by ``PRAGMA query_only=ON``, and only then ``mode=ro&immutable=1``.
+    Reordering the immutable attempt earlier would change which connection the
+    live, writable ``/data`` upgrade path receives.
+
+    When ``strategy`` is a dict, its ``'value'`` key is set to which attempt
+    produced the returned connection, so the caller can record how a given
+    reading was taken.
+    """
     resolved = Path(db_path).expanduser().resolve(strict=False)
     if not resolved.is_file():
         raise InventoryError('unable to inspect SQLite database')
     try:
-        return sqlite3.connect(resolved.as_uri() + '?mode=ro', uri=True)
+        if strategy is not None:
+            strategy['value'] = 'mode_ro'
+        return _validated(sqlite3.connect(resolved.as_uri() + '?mode=ro', uri=True))
     except sqlite3.Error:
         # A mode=ro URI connection cannot initialize the -shm shared-memory
         # file a WAL-mode database needs, so schema inspection of a WAL
-        # database fails through the URI path above. Fall back to a normal
-        # connection with PRAGMA query_only=ON, which forbids writes at the
-        # SQL level while still permitting the -shm mapping WAL requires.
+        # database fails through the URI path above (on some SQLite builds
+        # only once a statement actually executes, which is why the attempt
+        # above is validated rather than merely connected). Fall back to a
+        # normal connection with PRAGMA query_only=ON, which forbids writes
+        # at the SQL level while still permitting the -shm mapping WAL
+        # requires -- but establishing that connection still needs write
+        # access to the source *directory* to map -shm, which a locked-down
+        # archival copy will not have.
         try:
+            if strategy is not None:
+                strategy['value'] = 'query_only'
             return _query_only(sqlite3.connect(resolved))
-        except (OSError, sqlite3.Error) as exc:
-            raise InventoryError('unable to inspect SQLite database') from exc
+        except (OSError, sqlite3.Error):
+            # Both write-requiring attempts above have failed, which confines
+            # this final attempt to media that cannot be hosting a live
+            # deployment. immutable=1 tells SQLite the file will not change,
+            # so it reads the main database file directly and never attempts
+            # to map the -shm sidecar -- exactly why it succeeds here, with no
+            # deferred failure left to validate. Being last bounds the hazard
+            # but does not eliminate it: an archival copy taken from a running
+            # database can carry committed but not-yet-checkpointed
+            # transactions in its -wal file, and immutable=1 ignores that file
+            # entirely. The recorded strategy discloses this caveat rather
+            # than assuming it away.
+            try:
+                if strategy is not None:
+                    strategy['value'] = 'immutable'
+                return sqlite3.connect(
+                    resolved.as_uri() + '?mode=ro&immutable=1', uri=True,
+                )
+            except (OSError, sqlite3.Error) as exc:
+                raise InventoryError('unable to inspect SQLite database') from exc
     except OSError as exc:
         raise InventoryError('unable to inspect SQLite database') from exc
 
@@ -146,7 +221,8 @@ def collect_inventory(db_path):
     path = Path(db_path).expanduser()
     try:
         before = path.stat()
-        conn = _readonly_connection(path)
+        strategy = {}
+        conn = _readonly_connection(path, strategy=strategy)
         try:
             tables = _tables(conn)
             table_names = {table['name'] for table in tables}
@@ -167,6 +243,9 @@ def collect_inventory(db_path):
                     'freelist_count': freelist_count,
                 },
                 'journal_mode': journal_mode,
+                'connection_strategy': _CONNECTION_STRATEGY_DESCRIPTIONS.get(
+                    strategy.get('value'), strategy.get('value'),
+                ),
                 'database_bytes': before.st_size,
                 'wal_bytes': os.path.getsize(str(path) + '-wal') if Path(str(path) + '-wal').is_file() else 0,
             }

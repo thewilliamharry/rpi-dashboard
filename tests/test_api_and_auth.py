@@ -313,6 +313,50 @@ class ApiAndAuthTests(unittest.TestCase):
         self.assertEqual(status[8080]['thumb_error'], 'old fallback')
         self.assertEqual(status[8082]['thumb_source'], 'screenshot')
 
+    def test_thumb_state_precedence_across_the_four_has_thumb_and_preview_status_combinations(self):
+        """WR-02: has_thumb and preview_status are independent facts -- the
+        stored thumbnail's TTL deliberately outlives several missed refresh
+        cycles, so a service can have a currently-servable image while its
+        latest preview request is degraded. thumb_state must describe what
+        the thumbnail route would actually serve, and the degraded signal
+        must survive for services with no servable thumbnail (PROH-OPS-02-05)."""
+        now = int(time.time())
+        # Port 8091: a servable thumbnail exists AND the latest preview
+        # request is degraded -- must report 'ok', not 'degraded'.
+        # Port 8092: no servable thumbnail, latest preview request degraded
+        #   -- must still report 'degraded'.
+        # Port 8093: no servable thumbnail, latest preview request queued
+        #   -- must report 'pending'.
+        # Port 8094: no servable thumbnail, no preview request at all
+        #   -- must report 'empty'.
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for port in (8091, 8092, 8093, 8094):
+                conn.execute(
+                    "INSERT INTO services (port, title, first_seen, last_seen, is_online) "
+                    "VALUES (?,?,?,?,?)",
+                    (port, f'Service {port}', now - 120, now, 1),
+                )
+            conn.execute(
+                "INSERT INTO thumbnails(port, data, mime, captured_ts, source, expires_ts) "
+                "VALUES (8091, ?, ?, ?, 'screenshot', ?)",
+                (b'still-good-bytes', 'image/png', now - 3600, now + 86400),
+            )
+            for port, status in ((8091, 'degraded'), (8092, 'degraded'), (8093, 'queued')):
+                conn.execute(
+                    "INSERT INTO preview_requests(port, requested_ts, deadline_ts, status, revision) "
+                    "VALUES (?,?,?,?,1)",
+                    (port, now - 60, now + 1800, status),
+                )
+            conn.commit()
+            conn.close()
+
+        status = {row['port']: row for row in self.client.get('/api/thumbnail-status').get_json()}
+        self.assertEqual(status[8091]['thumb_state'], 'ok')
+        self.assertEqual(status[8092]['thumb_state'], self.appmod.beacon_queues.PREVIEW_STATUS_DEGRADED)
+        self.assertEqual(status[8093]['thumb_state'], 'pending')
+        self.assertEqual(status[8094]['thumb_state'], 'empty')
+
     def test_scan_status_never_reports_degraded_and_stale_together(self):
         """A-04: an overlapping WORKER_READY_SECONDS must never assert both conditions."""
         # ``load_app`` writes its env into ``os.environ`` and never restores it, so the
