@@ -3089,10 +3089,27 @@ def api_thumbnail_status():
         port = int(row['port'])
         effective_url = _safe_service_url(row['url'], port)
         preview_status = previews_by_port.get(port)
-        if preview_status == beacon_queues.PREVIEW_STATUS_DEGRADED:
-            thumb_state = beacon_queues.PREVIEW_STATUS_DEGRADED
-        elif row['has_thumb']:
+        # Precedence: a servable stored thumbnail (has_thumb) outranks a
+        # degraded latest preview request. has_thumb and preview_status are
+        # independent facts -- has_thumb reflects a stored, unexpired
+        # thumbnail row, while preview_status reflects only the most recent
+        # preview_requests row for that port -- and the thumbnail's TTL
+        # deliberately outlives several missed refresh cycles (see
+        # THUMBNAIL_TTL_DAYS), so a service can have a currently-servable
+        # image while its latest refresh attempt is degraded. Checking
+        # has_thumb first keeps thumb_state describing what a client would
+        # actually receive from the thumbnail route. The degraded signal is
+        # not lost by this precedence: it is still reported whenever no
+        # servable thumbnail exists (PROH-OPS-02-05), and thumb_error/
+        # thumb_attempt_ts/thumb_source -- carried alongside thumb_state in
+        # this same response -- still distinguish "serving a stored image
+        # while the latest refresh is degraded" (thumb_state='ok' with a
+        # non-null thumb_error) from "serving a current image" (thumb_state=
+        # 'ok' with thumb_error=None).
+        if row['has_thumb']:
             thumb_state = 'ok'
+        elif preview_status == beacon_queues.PREVIEW_STATUS_DEGRADED:
+            thumb_state = beacon_queues.PREVIEW_STATUS_DEGRADED
         elif preview_status in ('queued', 'running'):
             thumb_state = 'pending'
         else:
