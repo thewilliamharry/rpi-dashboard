@@ -60,49 +60,50 @@ two worst routes is unbounded and strictly worse than the report shows.
 peak 12.0%; RSS 45.9MB (limit 256MB) and 56.6MB (limit 1GB). Not compute-bound, not memory-bound.
 Requests were blocked, not working.
 
-**Root cause — SQLite overflow-page walks on the `has_thumb` existence check.** Migration 10
-declares `thumbnails(port INTEGER PRIMARY KEY, data BLOB, mime TEXT, captured_ts INTEGER,
-source TEXT, expires_ts INTEGER)` (`migrations.py:604-611`) — `data` holds up to 2 MiB per row
-(`THUMB_MAX_BYTES`) and sits at column 2, while `source` and `expires_ts` are columns 5 and 6.
-SQLite stores a record's columns sequentially and spills large rows into an overflow page chain, so
-reading a column *positioned after* a 2 MiB blob requires traversing that blob's entire chain
-(~500 pages at 4 KiB). The `has_thumb` correlated subquery reads exactly those two post-blob
-columns, once per service row:
+#### Refuted hypothesis — SQLite overflow-page walks (measured false on hardware)
 
-```sql
-EXISTS (SELECT 1 FROM thumbnails t WHERE t.port = s.port AND t.data IS NOT NULL
-        AND t.source='screenshot' AND (t.expires_ts IS NULL OR t.expires_ts > ?))
+The first hypothesis was that the `has_thumb` correlated subquery reads `source`/`expires_ts`,
+which sit *after* the 2 MiB `data` blob in the `thumbnails` record (`migrations.py:604-611`), forcing
+SQLite to traverse the blob's overflow page chain once per service row. Measured on the Pi against
+the live database:
+
+```
+thumbnails: 8 rows, 1.8 MiB total, 0.95 MiB largest
+services: 8 rows
+reads post-blob columns (current): 1 ms (warm)
+header-only, no post-blob read: 0 ms (warm)
 ```
 
-(`t.data IS NOT NULL` is cheap — NULL-ness lives in the record header. `t.source` and
-`t.expires_ts` are what force the walk.) At roughly 85 discovered services that is on the order of
-40,000 overflow-page reads per request, off the Pi's SD card — seconds of pure I/O wait, which is
-exactly the near-zero-CPU multi-second stall observed.
+The store holds 8 rows, not the ~85 the hypothesis assumed, and the exact production query returns
+in 1 ms. **The query is not the bottleneck.** No index change is warranted on this evidence.
 
-**Why the failure distributes the way it does:**
+#### Established facts
 
-- `/api/services` (`app.py:2757`) and `/api/thumbnail-status` (`app.py:3036`) run the subquery
-  themselves.
-- `_legacy_do_discovery` (`app.py:1368`) and `_legacy_do_uptime_check` (`app.py:1519`) run it
-  **inside `_mutation_write_transaction`** — so the worker's J3/J4/J7/J9 passes hold the SQLite
-  write lock for the duration of the walk.
-- `/api/scan-status` contains no such subquery yet still shows p50 7695ms: it is queuing behind
-  those write transactions and behind the process-wide `_db_lock` that serializes all 8 gunicorn
-  threads.
-- `/api/thumbnail/<port>` shows p50 24ms but p95 3046ms — a single-row read is fast; the tail is
-  time spent queued behind the above.
+- `--workers 1 --threads 8` (`dashboard/Dockerfile:27`) — 8 HTTP threads.
+- Every DB-touching route holds the process-wide `_db_lock` (30 sites in `app.py`), so those 8
+  threads are serialized to an effective concurrency of **1**.
+- Every `database_access` call opens a **brand-new** SQLite connection: an `fcntl` `LOCK_SH` lease
+  on the maintenance lock file, `sqlite3.connect`, then three PRAGMAs
+  (`busy_timeout`, `foreign_keys`, `journal_mode=WAL`) — `db.py:85-99`. Nothing is pooled.
+- Observed throughput: ~2718 requests over 600s = **4.53 req/s**, implying a mean serialized
+  service time of ~221 ms per request.
+- `/api/scan-status` does only a handful of tiny reads on an 8-row database (`app.py:3076-3085`)
+  yet shows p50 7695ms. It cannot be slow on its own work — it is queued.
+- `/api/thumbnail/<port>` shows p50 24ms against p95 3046ms for identical work — a spread that
+  indicates scheduling/queueing, not variable work.
+- The `LOCK_SH` lease is shared, so it does not contend with the worker's ordinary access; only
+  `exclusive_database_maintenance` (`LOCK_EX`) would block it, and no migration ran during the load.
 
-**Relationship to the phase's own recorded debt.** `D-DEBT-06-01` (deferred `_db_lock` narrowing)
-and threat `T-06-24` deliberately left `_db_lock` untouched this phase. That decision is not the
-defect, but it is the amplifier: the lock converts one slow reader into a whole-process stall.
-The primary defect is the column-order/overflow interaction above, which is independent of the lock.
+#### Open question — what the ~221 ms per request is actually spent on
 
-Note also that OPS-03 relocated thumbnail blobs out of `services` specifically to get them off the
-hot path. The relocation moved the bytes but the correlated subquery reintroduced the cost on the
-read path, so the intended benefit was not realized.
+Contention is established; the per-request cost that contention multiplies is **not yet
+attributed**. The two candidates are (a) per-request connection setup (flock + connect + three
+PRAGMAs, on SD-card storage) and (b) transferring ~1 MiB thumbnail blobs, which are 8 of the 13
+rotated routes. Both are measurable directly and neither is yet confirmed. Deliberately not
+guessing a third time — the concurrency-1 control run and the connection-cost measurement are
+recorded as the next step.
 
-**Status: hypothesis, not yet measured on hardware.** Derived from schema, query shape, and the
-observed idle-CPU stall signature. Confirmation command is recorded with the gap.
+**Do not plan a fix from this section until the open question is closed.**
 
 ### Carried-forward items for decision (not blocking this UAT)
 
