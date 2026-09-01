@@ -94,16 +94,74 @@ in 1 ms. **The query is not the bottleneck.** No index change is warranted on th
 - The `LOCK_SH` lease is shared, so it does not contend with the worker's ordinary access; only
   `exclusive_database_maintenance` (`LOCK_EX`) would block it, and no migration ran during the load.
 
-#### Open question — what the ~221 ms per request is actually spent on
+#### Confirmed root cause (measured on hardware, concurrency 1)
 
-Contention is established; the per-request cost that contention multiplies is **not yet
-attributed**. The two candidates are (a) per-request connection setup (flock + connect + three
-PRAGMAs, on SD-card storage) and (b) transferring ~1 MiB thumbnail blobs, which are 8 of the 13
-rotated routes. Both are measurable directly and neither is yet confirmed. Deliberately not
-guessing a third time — the concurrency-1 control run and the connection-cost measurement are
-recorded as the next step.
+A control run at `--concurrency 1` removes all queueing, so measured latency is pure per-request
+service time:
 
-**Do not plan a fix from this section until the open question is closed.**
+```
+/api/services          p50 2504.6ms   p95 2523.3ms   max 2529.8ms
+/api/advanced/current  p50   67.8ms
+/api/history           p50   12.3ms
+/api/thumbnail-status  p50    4.8ms
+/api/thumbnail/<port>  p50    3.3ms
+/api/scan-status       p50    3.4ms
+```
+
+**`/api/services` costs ~2.5 seconds of its own work with zero contention.** Every other route is
+single-digit-to-double-digit milliseconds. Both cost candidates from the previous section are
+eliminated by direct measurement: managed connection open+close is **0.8 ms**, and opening plus
+reading the largest (978 KiB) thumbnail blob is **1.8 ms**. Neither connection setup nor blob I/O
+is material.
+
+The distribution is the tell: 2504.6 / 2523.3 / 2529.8 across p50 / p95 / max is a spread of ~1%.
+That is the signature of **fixed-size CPU work**, not I/O, not lock waiting, not variable load.
+
+**The work is an O(buckets x intervals x services) nested loop in pure Python** (`app.py:1199-1211`):
+
+```python
+bucket_seconds = UPTIME_WINDOW_SECONDS / UPTIME_BUCKETS
+for idx in range(UPTIME_BUCKETS):            # 168 buckets
+    ...
+    for begin, end, online in intervals:     # one interval per check row in the 7-day window
+        overlap = max(0, min(end, bucket_end) - max(begin, bucket_start))
+```
+
+`UPTIME_BUCKETS = 168` and `UPTIME_WINDOW_SECONDS = 7 * 86400` (`app.py:86-87`). `intervals` is
+derived per service from `service_checks` over that window; with J3 sampling every 5 minutes and J4
+every minute for down services, that is roughly 2,000-10,000 intervals per service. `api_services`
+calls `_uptime_summary` once per service inside its result loop (`app.py:2795`), so a single request
+performs on the order of **168 x 2,000 x 8 services = ~2.7 million inner iterations** of Python
+arithmetic. On Pi-class hardware that is ~2.5 seconds — matching the measurement.
+
+Secondary, same loop body: `read_service_offline_intervals` (`app.py:2814`) is issued **per service
+inside the loop** — an N+1 the adjacent `read_maintenance_windows_by_port` bulk read (`app.py:2782`)
+was specifically introduced to avoid for maintenance windows. Minor next to the bucket math, but the
+same shape.
+
+**This is not a Phase 06 regression.** `git diff 8c2fc48..HEAD -- dashboard/app.py` touches no
+uptime, bucket, or interval code; the loop last changed in `51a4393`. The defect predates this
+phase. OPS-07 built the harness precisely to surface latent behaviour like this on real hardware,
+and on its first genuine acceptance run it did exactly that.
+
+**Why it presents as a total dashboard stall.** `_db_lock` serializes all 8 gunicorn threads
+(`--workers 1 --threads 8`, `Dockerfile:27`) down to an effective concurrency of 1. One route
+holding the process for 2.5s therefore blocks every other route behind it, which is why
+`/api/scan-status` — 3.4ms of its own work — reported p50 7695ms under load. The deferred
+`_db_lock` narrowing (`D-DEBT-06-01`, threat `T-06-24`) is not the defect but is the amplifier that
+converts one slow endpoint into a whole-deployment outage.
+
+#### Second defect — the harness's resource oracle samples the wrong process
+
+The 600s run reported web CPU `mean 0.01% / peak 1.0%`. That cannot be true of a process spending
+~2.5s of CPU on each of 216 `/api/services` requests (~540s of CPU in a 600s window). The cause is
+`_find_process_by_cmdline(('gunicorn',))` (`tests/pi_load_acceptance.py:383`), which returns the
+**first** matching process — the gunicorn **master**, which is idle — rather than the forked worker
+child that actually serves requests. RSS 45.9MB is consistent with an idle master.
+
+Consequence: `assertions.resources.passed: true` is not evidence. The oracle would have reported a
+pass while the serving process saturated its CPU, which is the exact class of unearned-evidence
+failure `PROH-OPS-07-02` exists to prevent. This needs its own fix independent of the latency defect.
 
 ### Carried-forward items for decision (not blocking this UAT)
 
