@@ -131,6 +131,45 @@ docker compose logs worker | grep -i preview
 docker compose exec worker playwright --version
 ```
 
+### Raspberry Pi-class load acceptance run
+
+`tests/pi_load_acceptance.py` is a standalone, checked-in, repeatable load harness (OPS-07). It
+drives representative concurrent load against the dashboard's own routes while the worker's
+discovery, preview, cleanup, and sampling jobs run in the background, then judges the result using
+evidence the product already produces and already trusts — never a threshold invented for this
+harness.
+
+On the target Pi, with the phase build deployed via `docker compose up -d --build`:
+
+```bash
+python tests/pi_load_acceptance.py --duration 600 --base-url http://127.0.0.1 \
+  --db /data/dashboard.db --output beacon-acceptance.json
+```
+
+A pass means: every essential job (`J1` heartbeat, `J2` metric sampling, `J3`/`J4` uptime checks)
+stays `fresh` or `aging` — never `stale` — by the product's own `freshness_state` classifier; no
+`background_job_health` row reads `failed`; sampled worker and web resident memory stay within the
+`mem_limit` values declared in `docker-compose.yml`; and every exercised route's p95 latency stays
+within its declared budget. The report also records peak and mean CPU percent for both processes as
+observed evidence — no CPU cgroup limit is declared this phase (see `06-DEBT.md` `D-DEBT-06-02`).
+
+The harness also has a short, bounded `--self-test` mode that starts a local Beacon instance and
+needs no Pi and no live deployment:
+
+```bash
+python tests/pi_load_acceptance.py --self-test
+```
+
+A run's `run_kind` in the emitted JSON report is derived from how it was invoked, not from any flag
+the operator sets independently: `--self-test` always reports `smoke`; a run without `--self-test`
+reports `acceptance`. **A `smoke` run is never Pi-class acceptance evidence** — it exists only to
+prove the harness itself works without needing hardware. Only run the harness without `--self-test`
+against the actual target Raspberry Pi; running it against any other host (a laptop, a CI runner, a
+virtualized Docker Desktop stack) and treating that report as acceptance evidence would defeat the
+whole point of an honest `run_kind` label, even though the harness has no way to enforce that
+choice itself — the report carries the host it ran on (`platform.machine()`/`platform.node()`)
+specifically so this can be audited.
+
 ## Development and security gates
 
 Dependencies are declared in `dashboard/pyproject.toml` and frozen in `dashboard/uv.lock`.

@@ -19,6 +19,12 @@ and preview work all run concurrently on their own lane-isolated executors.
 logic proven against synthetic fixtures) and ``ConcurrentAccessTests``
 (concurrent web/worker writers and worker-restart fencing under WAL) for
 OPS-04.
+
+06-06 adds ``PiLoadAcceptanceHarnessTests`` for OPS-07: the Pi-class load
+acceptance harness's (``tests/pi_load_acceptance.py``) three internal
+oracles -- ``parse_compose_memory_limits``, ``assert_cadence``,
+``assert_resource_budget`` -- are exercised directly here so the harness
+stays honest without needing hardware.
 """
 
 import importlib
@@ -49,6 +55,7 @@ from dashboard.beacon.db import (
 from dashboard.beacon.migrations import MIGRATIONS, run_migrations
 from dashboard.beacon.repositories import ThumbnailStoreRepository
 from dashboard.beacon.worker_authority import WorkerAuthority
+from tests import pi_load_acceptance
 from tests.helpers import cleanup_db, load_app
 
 
@@ -927,6 +934,57 @@ class ConcurrentAccessTests(unittest.TestCase):
                 for row in beacon_repositories.read_background_job_health(conn)
             }
         self.assertEqual(health['J6']['state'], 'succeeded')
+
+
+class PiLoadAcceptanceHarnessTests(unittest.TestCase):
+    """OPS-07: the Pi-class load acceptance harness's oracles are the
+    product's own -- proven here without needing hardware. The harness's
+    own CLI paths (--self-test, --help, an unreachable-target run) are
+    exercised directly by 06-06-PLAN.md's <verify> command and
+    06-VALIDATION.md, not duplicated as pytest assertions here.
+    """
+
+    def test_pi_load_acceptance_oracles_are_the_products_own(self):
+        # parse_compose_memory_limits reads the declared budget straight out
+        # of the real docker-compose.yml -- never a duplicated constant.
+        limits = pi_load_acceptance.parse_compose_memory_limits(
+            Path(__file__).parent.parent / 'docker-compose.yml',
+        )
+        self.assertEqual(limits['worker'], 1_073_741_824)
+        self.assertEqual(limits['web'], 268_435_456)
+
+        # assert_cadence delegates the fresh/aging/stale boundary entirely to
+        # freshness_state (PROH-OPS-07-01): a synthetic J1 row aged to
+        # exactly four times its own cadence passes; one aged one second
+        # past that boundary fails.
+        settings = load_settings({})
+        now = int(time.time())
+        j1_cadence_seconds = beacon_diagnosis.callback_schedule_evidence(
+            worker_main._CALLBACKS_BY_ID['J1'], settings,
+        )['cadence_seconds']
+
+        at_boundary = pi_load_acceptance.assert_cadence(
+            {'J1': {'state': 'succeeded', 'last_success_ts': now - 4 * j1_cadence_seconds}},
+            settings, now=now, required_job_ids=('J1',),
+        )
+        self.assertTrue(at_boundary['passed'], at_boundary['failures'])
+
+        past_boundary = pi_load_acceptance.assert_cadence(
+            {'J1': {'state': 'succeeded', 'last_success_ts': now - 4 * j1_cadence_seconds - 1}},
+            settings, now=now, required_job_ids=('J1',),
+        )
+        self.assertFalse(past_boundary['passed'])
+
+        # assert_resource_budget fails for a sampled RSS above the parsed
+        # limit, and passes at or under it.
+        over_budget = pi_load_acceptance.assert_resource_budget(
+            limits['worker'] + 1, limits['worker'], role='worker',
+        )
+        self.assertFalse(over_budget['passed'])
+        within_budget = pi_load_acceptance.assert_resource_budget(
+            limits['worker'], limits['worker'], role='worker',
+        )
+        self.assertTrue(within_budget['passed'])
 
 
 if __name__ == '__main__':
