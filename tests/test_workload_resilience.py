@@ -1235,6 +1235,169 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
             report.failure_reasons,
         )
 
+    # -- 06-07 Task 3: regression coverage for the mis-targeting failure mode --
+    #
+    # Encodes the hardware failure (06-UAT.md "Second defect") as a
+    # permanent regression: an unrelated co-tenant application's process,
+    # sharing a command-line substring with Beacon's own, must never be
+    # selected; the smoke path's current-process fallback must never be
+    # reachable from an acceptance-shaped resolution; a role's sample must
+    # aggregate parent and child rather than the parent alone; and a
+    # mid-run child respawn must be picked up rather than leaving the role
+    # sampling only the surviving master. None of these require docker, a
+    # container, root, or Pi hardware.
+
+    def test_co_tenant_process_is_never_selected_by_acceptance_resolution(self):
+        # The exact scenario 06-UAT.md's "Second defect" presented: an
+        # unrelated application's gunicorn master, ordered first in the
+        # host's process table, sharing the 'gunicorn' substring with
+        # Beacon's own web tier.
+        co_tenant = mock.Mock()
+        co_tenant.info = {
+            'pid': 675687,
+            'cmdline': ['/usr/local/bin/python', '/opt/offline-portal/bin/gunicorn', 'app:create_app()'],
+        }
+
+        def fake_process_iter(*args, **kwargs):
+            yield co_tenant
+
+        current_pid = os.getpid()
+
+        def fake_runner(name, *, runner=None):
+            return [psutil.Process(current_pid)], None
+
+        with mock.patch.object(psutil, 'process_iter', side_effect=fake_process_iter) as mock_iter:
+            with mock.patch.object(
+                pi_load_acceptance, 'resolve_container_process_tree', side_effect=fake_runner,
+            ):
+                targets = pi_load_acceptance._resource_targets(self_test=False)
+
+        # An acceptance-shaped resolution never scans the host process
+        # table at all -- if it ever did, the co-tenant (ordered first)
+        # would be exactly what a substring matcher picked on the Pi.
+        mock_iter.assert_not_called()
+        worker_pids = [p.pid for p in targets['worker'].processes]
+        web_pids = [p.pid for p in targets['web'].processes]
+        self.assertNotIn(675687, worker_pids)
+        self.assertNotIn(675687, web_pids)
+        self.assertTrue(worker_pids)
+        self.assertTrue(web_pids)
+
+    def test_acceptance_resolution_never_yields_the_current_process(self):
+        stub_runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='Error: No such object',
+        ))
+        targets = pi_load_acceptance._resource_targets(self_test=False, runner=stub_runner)
+        current_pid = os.getpid()
+        self.assertNotEqual(targets['worker'].root_pid, current_pid)
+        self.assertNotEqual(targets['web'].root_pid, current_pid)
+        self.assertEqual(targets['worker'].processes, [])
+        self.assertEqual(targets['web'].processes, [])
+        self.assertIsNotNone(targets['worker'].reason)
+        self.assertIsNotNone(targets['web'].reason)
+
+    def test_smoke_resolution_does_return_the_current_process(self):
+        # The companion of the previous test: the fallback exists, but
+        # only ever for self_test=True.
+        targets = pi_load_acceptance._resource_targets(self_test=True)
+        current_pid = os.getpid()
+        self.assertEqual(targets['worker'].root_pid, current_pid)
+        self.assertEqual(targets['web'].root_pid, current_pid)
+        self.assertEqual(targets['worker'].method, 'self_test')
+        self.assertEqual(targets['web'].method, 'self_test')
+
+    def test_sample_tick_aggregates_parent_and_busy_child_not_parent_alone(self):
+        # The exact property that would have exposed the original defect
+        # immediately: the reported figure was an idle master's RSS/CPU,
+        # while the process actually serving requests -- its forked child
+        # -- was busy.
+        idle_master = mock.Mock()
+        idle_master.pid = 907527
+        idle_master.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        idle_master.cpu_percent.return_value = 0.01
+
+        busy_child = mock.Mock()
+        busy_child.pid = 907613
+        busy_child.memory_info.return_value = SimpleNamespace(rss=88_944 * 1024)
+        busy_child.cpu_percent.return_value = 45.6
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[idle_master, busy_child], reason=None,
+        )
+        samples_by_role = {}
+        sampled_pids_by_role = {}
+        with mock.patch.object(
+            pi_load_acceptance, '_live_role_processes', return_value=[idle_master, busy_child],
+        ):
+            pi_load_acceptance._sample_resources_tick(
+                {'web': target}, samples_by_role, sampled_pids_by_role,
+            )
+
+        sample = samples_by_role['web'][0]
+        self.assertEqual(sample['rss_bytes'], 1_000_000 + 88_944 * 1024)
+        self.assertAlmostEqual(sample['cpu_percent'], 45.61)
+        self.assertEqual(set(sample['pids']), {907527, 907613})
+        # The property that matters: the recorded CPU reflects the busy
+        # child, not just the idle master's near-zero figure.
+        self.assertGreater(sample['cpu_percent'], 40)
+
+    def test_mid_run_respawn_is_sampled_and_recorded_as_a_changed_set(self):
+        # W1's failure mode, pinned directly: a gunicorn worker recycles
+        # mid-run. One-shot enumeration would leave the role sampling only
+        # the surviving master -- alive, so Task 2's empty-sample guard
+        # stays silent -- reporting near-zero CPU for a tier under load.
+        root = mock.Mock()
+        root.pid = 907527
+        root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        root.cpu_percent.return_value = 0.0
+
+        old_child = mock.Mock()
+        old_child.pid = 907613
+        old_child.memory_info.return_value = SimpleNamespace(rss=10_000_000)
+        old_child.cpu_percent.return_value = 0.4  # about to be recycled
+
+        new_child = mock.Mock()
+        new_child.pid = 907999
+        new_child.memory_info.return_value = SimpleNamespace(rss=91_000_000)
+        new_child.cpu_percent.return_value = 45.6  # the respawned, busy worker
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[root, old_child], reason=None,
+        )
+        live_sequence = [
+            [root, old_child],
+            [root, old_child],
+            [root, new_child],
+            [root, new_child],
+        ]
+        samples_by_role = {}
+        sampled_pids_by_role = {}
+        with mock.patch.object(
+            pi_load_acceptance, '_live_role_processes', side_effect=live_sequence,
+        ):
+            for _ in range(4):
+                pi_load_acceptance._sample_resources_tick(
+                    {'web': target}, samples_by_role, sampled_pids_by_role,
+                )
+
+        samples = samples_by_role['web']
+        self.assertEqual(len(samples), 4)
+        # Later samples reflect the new child, not the one it replaced.
+        self.assertIn(907999, samples[-1]['pids'])
+        self.assertNotIn(907613, samples[-1]['pids'])
+        # Assert on the sampled values, not just the bookkeeping: the
+        # role's sampled CPU after the respawn is the new child's busy
+        # figure, not the idle master's near-zero one.
+        self.assertGreater(samples[-1]['cpu_percent'], 40)
+        # Provenance: the union carries every PID seen across the run, and
+        # the samples span more than one distinct PID set -- the same
+        # computation run_acceptance uses to set sampled_set_changed.
+        self.assertEqual(sampled_pids_by_role['web'], {907527, 907613, 907999})
+        distinct_pid_sets = {tuple(sorted(s['pids'])) for s in samples}
+        self.assertGreater(len(distinct_pid_sets), 1)
+
 
 if __name__ == '__main__':
     unittest.main()
