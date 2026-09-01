@@ -1197,19 +1197,51 @@ def _legacy_uptime_summary(checks, now):
         uptime = None
 
     bucket_seconds = UPTIME_WINDOW_SECONDS / UPTIME_BUCKETS
-    buckets = []
+    boundaries = []
     for idx in range(UPTIME_BUCKETS):
         bucket_start = start + int(idx * bucket_seconds)
         bucket_end = start + int((idx + 1) * bucket_seconds)
         if idx == UPTIME_BUCKETS - 1:
             bucket_end = int(now)
+        boundaries.append((bucket_start, bucket_end))
+
+    # Sweep instead of rescanning every interval for every bucket. `intervals`
+    # is sorted by start, non-overlapping and contiguous (`cursor` only ever
+    # advances in the loop above), and bucket starts are non-decreasing, so
+    # once an interval's end is at or before the current bucket's start it
+    # can never overlap this bucket or any later one -- `head` may advance
+    # past it permanently. An interval that extends beyond the current
+    # bucket is still visited (from `head` up to `j`) but `head` itself is
+    # not moved past it, because it still contributes to later buckets.
+    #
+    # This is exactly equal to the nested-loop version, not approximately:
+    # every overlap term is the identical integer expression
+    # `max(0, min(end, bucket_end) - max(begin, bucket_start))`, integer
+    # addition is associative, and each bucket accumulates exactly the same
+    # non-zero terms in the same order -- intervals the sweep skips for a
+    # bucket are precisely those whose overlap expression evaluates to zero.
+    # The per-bucket sums are therefore identical integers, so
+    # `round(bucket_online / bucket_observed, 3)` receives identical operands
+    # and the `-1` sentinel triggers on identical conditions. Total work is
+    # proportional to `len(intervals) + UPTIME_BUCKETS`, instead of their
+    # product -- pinned by the differential and scaling guards in
+    # tests/test_services_route_scaling.py.
+    buckets = []
+    head = 0
+    n = len(intervals)
+    for bucket_start, bucket_end in boundaries:
+        while head < n and intervals[head][1] <= bucket_start:
+            head += 1
         bucket_observed = 0
         bucket_online = 0
-        for begin, end, online in intervals:
+        j = head
+        while j < n and intervals[j][0] < bucket_end:
+            begin, end, online = intervals[j]
             overlap = max(0, min(end, bucket_end) - max(begin, bucket_start))
             bucket_observed += overlap
             if online:
                 bucket_online += overlap
+            j += 1
         buckets.append(-1 if bucket_observed == 0 else round(bucket_online / bucket_observed, 3))
     return uptime, buckets
 
