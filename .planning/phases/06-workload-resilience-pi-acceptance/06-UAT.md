@@ -151,17 +151,47 @@ holding the process for 2.5s therefore blocks every other route behind it, which
 `_db_lock` narrowing (`D-DEBT-06-01`, threat `T-06-24`) is not the defect but is the amplifier that
 converts one slow endpoint into a whole-deployment outage.
 
-#### Second defect — the harness's resource oracle samples the wrong process
+#### Second defect — the harness's resource oracle sampled an unrelated application (CONFIRMED)
 
-The 600s run reported web CPU `mean 0.01% / peak 1.0%`. That cannot be true of a process spending
-~2.5s of CPU on each of 216 `/api/services` requests (~540s of CPU in a 600s window). The cause is
-`_find_process_by_cmdline(('gunicorn',))` (`tests/pi_load_acceptance.py:383`), which returns the
-**first** matching process — the gunicorn **master**, which is idle — rather than the forked worker
-child that actually serves requests. RSS 45.9MB is consistent with an idle master.
+The 600s run reported web CPU `mean 0.01% / peak 1.0%` and `peak_rss_bytes: 45924352`. That cannot
+be true of a process spending ~2.5s of CPU on each of 216 `/api/services` requests. `ps` on the Pi
+shows why:
 
-Consequence: `assertions.resources.passed: true` is not evidence. The oracle would have reported a
-pass while the serving process saturated its CPU, which is the exact class of unearned-evidence
-failure `PROH-OPS-07-02` exists to prevent. This needs its own fix independent of the latency defect.
+```
+  PID    PPID %CPU   RSS ARGS
+675687  675662  0.0 44848 /usr/local/bin/python /opt/offline-portal/bin/gunicorn app:create_app()
+675748  675687  0.0 43088 /usr/local/bin/python /opt/offline-portal/bin/gunicorn app:create_app()
+907527  907473  0.0 31744 /app/.venv/bin/python ... --bind 0.0.0.0:8080 ... app:app   <- beacon master
+907613  907527 45.6 88944 /app/.venv/bin/python ... --bind 0.0.0.0:8080 ... app:app   <- beacon worker
+```
+
+`_find_process_by_cmdline(('gunicorn',))` (`tests/pi_load_acceptance.py:383`) substring-matches
+`'gunicorn'` against every process on the host and returns the **first** hit. The first hit is
+PID 675687 — the master of `/opt/offline-portal`, **a different application that merely happens to
+run gunicorn on the same Pi**.
+
+Confirmed numerically, not inferred: the report's `peak_rss_bytes: 45924352` is exactly
+44848 KB, byte-for-byte PID 675687's RSS. Constant across all 600 samples, at 0.01% CPU — an idle,
+unrelated process.
+
+The actual Beacon web worker (PID 907613) was at **45.6% CPU and 86.9 MB RSS**, independently
+corroborating the CPU cost of the uptime-bucket loop diagnosed above.
+
+Consequences:
+
+1. `assertions.resources.passed: true` in the 600s acceptance report is **void** — it asserted
+   against another program. The resource criterion is unverified, not passed.
+2. The failure mode is systemic for this product's own deployment story: Beacon is a dashboard for
+   *other services on the same LAN host*, so a bare `'gunicorn'` substring match is close to
+   guaranteed to mis-target. The same doubt applies to the `'worker.py'` match, which needs the
+   same check.
+3. This is the unearned-evidence class `PROH-OPS-07-02` exists to prevent — the harness reported a
+   pass it had not earned.
+
+Fix direction: resolve the target PIDs from the containers themselves rather than by host-wide
+cmdline substring — e.g. `docker inspect --format '{{.State.Pid}}' beacon-web beacon-worker` and
+sample that PID and its children, or match on cgroup membership. Failing to resolve a container PID
+must be an honest failure, never a silent fallback to some other process.
 
 ### Carried-forward items for decision (not blocking this UAT)
 
