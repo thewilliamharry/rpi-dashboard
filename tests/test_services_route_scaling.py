@@ -12,13 +12,17 @@ fix depends on, so a regression back to either shape fails a test rather than
 waiting for the next hardware run.
 """
 
+import math
 import random
 import time
 import unittest
 from contextlib import contextmanager
 from unittest import mock
 
+import cProfile
+
 from dashboard.beacon import repositories as beacon_repositories
+from tests import services_route_profile
 from tests.helpers import cleanup_db, load_app
 
 
@@ -462,3 +466,112 @@ class ServiceCountQueryGuardTests(unittest.TestCase):
         for svc in one_service_body + eight_service_body:
             self.assertIn('uptime_pct', svc)
             self.assertIn('uptime_buckets', svc)
+
+
+class ServicesRouteProfilerGuardTests(unittest.TestCase):
+    """Guards for tests/services_route_profile.py (06-12, OPS-07 gap closure).
+
+    The profiler instrument must never alter what it measures (the route's
+    output and its query count), and its growth measurement must genuinely
+    discriminate a bucket proportional to stored check count from one that
+    is not -- not merely report the same ratio for every bucket. A small,
+    fast fixture (2 services, 1-versus-4 days) keeps the suite's runtime
+    unchanged; the real 8-service/8-day attribution and growth runs belong
+    to Task 3 of 06-12-PLAN.md, which needs their numbers for
+    06-PROFILE.md. ``repeats=20`` (rather than the shape-gate convention of
+    2) is deliberate here, not a stylistic choice: at 2 repeats, a
+    check-count-independent bucket like maintenance_windows_read costs
+    under 0.02ms per run, close enough to timer-resolution noise that the
+    discrimination assertion below flaked (~1 run in 5, confirmed by direct
+    repetition while writing this test). 20 repeats keeps that bucket's
+    accumulated tottime an order of magnitude further from the noise floor
+    while still completing in low single-digit seconds.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _small_growth_report(self):
+        return services_route_profile.profile_growth(
+            lambda: load_app({}),
+            small_days=1, large_days=4, repeats=20, seed=20260901, services=2,
+        )
+
+    def test_growth_ratios_are_reported_for_every_shared_bucket(self):
+        report = self._small_growth_report()
+        self.assertGreater(report['check_row_ratio'], 1.0)
+        shared_bucket_names = set(report['small_profile']['phases']) & set(report['large_profile']['phases'])
+        self.assertTrue(shared_bucket_names)
+        self.assertEqual(set(report['buckets']), shared_bucket_names)
+        for bucket, data in report['buckets'].items():
+            self.assertTrue(
+                math.isfinite(data['growth_ratio']),
+                f'{bucket} growth_ratio is not finite: {data["growth_ratio"]!r}',
+            )
+
+    def test_a_check_count_independent_bucket_does_not_track_the_check_row_ratio(self):
+        report = self._small_growth_report()
+        # maintenance_windows_read reads a per-port window table untouched by
+        # check volume -- its growth ratio must stay well below the check-row
+        # ratio, proving the measurement discriminates rather than reporting
+        # the same ratio for every bucket.
+        bucket = report['buckets']['maintenance_windows_read']
+        self.assertLess(bucket['growth_ratio'], report['check_row_ratio'] / 2.0)
+
+    def test_profiling_does_not_change_the_route_response(self):
+        services_route_profile.seed_pi_representative_dataset(
+            self.appmod, services=2, days=1, seed=20260901,
+        )
+        client = self.appmod.app.test_client()
+
+        plain_response = client.get('/api/services')
+        self.assertEqual(plain_response.status_code, 200)
+        plain_body = plain_response.get_json()
+
+        profiler = cProfile.Profile()
+        profiler.enable()
+        profiled_response = client.get('/api/services')
+        profiler.disable()
+        self.assertEqual(profiled_response.status_code, 200)
+        profiled_body = profiled_response.get_json()
+
+        self.assertEqual(plain_body, profiled_body)
+
+    def _count_statements(self, *, profiled):
+        appmod = self.appmod
+        real_database_access = appmod.database_access
+        statements = []
+
+        @contextmanager
+        def counting_database_access(settings_or_path):
+            with real_database_access(settings_or_path) as conn:
+                conn.set_trace_callback(lambda sql: statements.append(sql))
+                try:
+                    yield conn
+                finally:
+                    conn.set_trace_callback(None)
+
+        appmod.database_access = counting_database_access
+        try:
+            if profiled:
+                profiler = cProfile.Profile()
+                profiler.enable()
+                response = appmod.app.test_client().get('/api/services')
+                profiler.disable()
+            else:
+                response = appmod.app.test_client().get('/api/services')
+        finally:
+            appmod.database_access = real_database_access
+        self.assertEqual(response.status_code, 200)
+        return len(statements)
+
+    def test_profiling_does_not_change_the_route_query_count(self):
+        services_route_profile.seed_pi_representative_dataset(
+            self.appmod, services=2, days=1, seed=20260901,
+        )
+        plain_count = self._count_statements(profiled=False)
+        profiled_count = self._count_statements(profiled=True)
+        self.assertEqual(plain_count, profiled_count)
