@@ -442,7 +442,7 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: 14 plans — 10/10 executed (6/6 original round, 4 gap-closure plans added 2026-09-01); 4 further gap-closure plans added 2026-09-02, not yet executed
+**Plans**: 14/14 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02). Phase does NOT seal — the third Pi acceptance run still returns `overall_passed: false`; OPS-07 remains Pending.
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -454,10 +454,10 @@ Plans:
 - [x] 06-08-PLAN.md — Remove the ~2.5s per-request uptime bucket rescan from /api/services, output unchanged
 - [x] 06-09-PLAN.md — Close carried-forward review warnings WR-01 (read-only inspection) and WR-02 (thumb_state precedence)
 - [x] 06-10-PLAN.md — Pi acceptance re-run, the _db_lock decision, and the debt record
-- [ ] 06-11-PLAN.md — Fix the acceptance harness's CPU sampling: one psutil.Process per PID for the run's lifetime
-- [ ] 06-12-PLAN.md — Attribute /api/services' residual 289ms per-request cost, with measured growth ratios
-- [ ] 06-13-PLAN.md — The fix-path decision against that profile, the chosen fix, and a pinned gunicorn topology
-- [ ] 06-14-PLAN.md — Third Pi acceptance run (human-executed) and the debt record it establishes
+- [x] 06-11-PLAN.md — Fix the acceptance harness's CPU sampling: one psutil.Process per PID for the run's lifetime
+- [x] 06-12-PLAN.md — Attribute /api/services' residual 289ms per-request cost, with measured growth ratios
+- [x] 06-13-PLAN.md — The fix-path decision against that profile, the chosen fix, and a pinned gunicorn topology
+- [x] 06-14-PLAN.md — Third Pi acceptance run (human-executed) and the debt record it establishes
 
 **Wave 1**
 
