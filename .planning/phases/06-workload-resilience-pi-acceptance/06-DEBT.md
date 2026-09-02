@@ -89,13 +89,57 @@ question — this entry documents the promotion *rule*, not a pending promotion.
 
 ---
 
-### D-DEBT-06-09 — round 3's acceptance failure is measured to be serialization, not yet attributed to a cause
+### D-DEBT-06-09 — round 3's acceptance failure is serialization, attributed to `_db_lock`'s scope
 
 | Field | Value |
 |---|---|
 | **Raised by** | `06-14-PLAN.md` Task 1's real hardware run, `06-ACCEPTANCE-ROUND3.md` |
 | **Status** | **Deferred — awaiting a diagnostic round, chosen by the user over a third inferred fix.** New this round. |
 | **Recorded in the plan** | `06-ACCEPTANCE-ROUND3.md`, `beacon-acceptance-round3.json` |
+
+**ATTRIBUTION ADDED 2026-09-02, after verification and code review.** This entry was filed as
+"measured but not attributed." It is now attributed, with a mechanism that survived falsification.
+The diagnostic round the user chose should therefore **confirm or refute a named mechanism**, not
+search an open field.
+
+**The chain, each link verified against source by the orchestrator:**
+
+1. `api_services` acquires `_db_lock` at `dashboard/app.py:2785` and does not release it until
+   `return jsonify(result)` at line 2940 — **155 lines**, wrapping the entire per-service loop,
+   `_uptime_summary`, and all maintenance-coverage work. Per `06-PROFILE.md`'s own buckets,
+   **82.042%** of that critical section is non-SQL Python held under a process-wide mutex.
+2. Four of the five lock-taking exercised routes confirmed by direct read (`api_services`,
+   `api_scan_status`, `api_thumbnail_status`, `api_history`). `/api/advanced/current` is the sole
+   exception — `dashboard/beacon/diagnosis.py` contains **zero** `_db_lock` references.
+3. `tests/pi_load_acceptance.py:371` places `/api/scan-status` at rotation index **1**, immediately
+   after `/api/services` at index 0, closed-loop, all 8 threads started in lockstep. Every thread
+   reaches scan-status just as its siblings hold the lock taken in services.
+4. **The arithmetic closes it.** scan-status's excess wait, `242.614 − 3.281 = 239.333ms`, is
+   **1.143×** one `/api/services` critical section (209.355ms, measured on the same hardware in the
+   same round's control pass). It also explains the ~13× p50 spread *among lock-taking routes*,
+   which this entry originally left unexplained: degradation tracks **rotation distance behind
+   `/api/services`**, not route cost.
+5. **Falsification survived.** Eight threads can serialize at most ~8× through the GIL alone.
+   **74× was observed.** The GIL is therefore insufficient as an explanation, whatever its
+   contribution.
+
+**Two inferences recorded earlier in this phase do not survive, and are withdrawn here:**
+
+- `D-DEBT-06-01`'s second reopening test — "the unlocked `/api/advanced/current` recovering while
+  the locked routes stay over budget" — **is not diagnostic.** It uses an unlocked, GIL-bound 82ms
+  route as the discriminator for a lock; it cannot fire while any GIL cost exists, regardless of
+  whether `_db_lock` is the dominant serializer. Its failure to fire in round 3 was read as evidence
+  against `_db_lock`. It was not evidence either way.
+- The orchestrator's reading that "165.504% is not a hard pin at 100%, so the GIL hypothesis is
+  weakened" is **unsound**. A CPython process routinely exceeds 100% while GIL-saturated, because
+  GIL-releasing C code (SQLite) runs concurrently on top of it. Both `06-ACCEPTANCE-ROUND3.md` and
+  this file state that mechanism one sentence before drawing the opposite conclusion from it.
+
+**What the diagnostic round should now do.** Instrument `_db_lock` hold and wait time per call site
+under concurrency-8 load and confirm or refute the prediction above: that scan-status's wait is
+dominated by time blocked on a lock held by a concurrent `api_services` call, and that shrinking the
+critical section to cover only SQL — not the 82% Python — collapses the degradation. That is a
+narrower and cheaper round than the open-ended search this entry originally called for.
 
 **What round 3 measured.** The control pass (concurrency 1, 120s) passes cleanly on every route, and
 `/api/services`'s control p50 improved 27.6% over round 2 (289.0ms → 209.355ms), attributable to
