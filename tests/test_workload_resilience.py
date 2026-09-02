@@ -1398,6 +1398,43 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
         distinct_pid_sets = {tuple(sorted(s['pids'])) for s in samples}
         self.assertGreater(len(distinct_pid_sets), 1)
 
+    # -- 06-11: a run-lifetime per-PID process-handle cache, so
+    # cpu_percent(interval=None) has a real baseline instead of the
+    # structural 0.0 produced by re-instantiating psutil.Process on every
+    # tick (D-DEBT-06-06). --
+
+    def test_the_same_process_handle_is_reused_across_sampling_ticks(self):
+        first_root = mock.Mock()
+        first_root.pid = 907527
+        first_root.create_time.return_value = 1000.0
+        first_root.children.return_value = []
+        first_root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        first_root.cpu_percent.return_value = 0.0
+
+        second_root = mock.Mock()
+        second_root.pid = 907527
+        second_root.create_time.return_value = 1000.0
+        second_root.children.return_value = []
+        second_root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        second_root.cpu_percent.return_value = 0.0
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[first_root], reason=None,
+        )
+        with mock.patch.object(
+            pi_load_acceptance.psutil, 'Process', side_effect=[first_root, second_root],
+        ):
+            first_call = pi_load_acceptance._live_role_processes(target)
+            second_call = pi_load_acceptance._live_role_processes(target)
+
+        # The property that matters: the SAME object is handed back for a
+        # stable PID across ticks (object identity, not equality), so
+        # cpu_percent(interval=None) has a real prior-tick baseline to diff
+        # against. Under the pre-fix shape every tick constructs a fresh
+        # psutil.Process, so the two calls never returned the same object.
+        self.assertIs(first_call[0], second_call[0])
+
 
 if __name__ == '__main__':
     unittest.main()
