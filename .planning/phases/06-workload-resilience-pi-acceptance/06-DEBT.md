@@ -52,52 +52,89 @@ rather than a first-time conversion). Attach both reports as phase evidence and 
 
 ---
 
-### D-DEBT-06-06 — acceptance harness reports 0.0 CPU percent for both roles on real hardware
+### D-DEBT-06-08 — OPS-07 not promoted by this round; evidence exists, promotion does not
 
 | Field | Value |
 |---|---|
-| **Raised by** | `06-10-PLAN.md` Task 1, the real Pi acceptance run |
-| **Status** | **Deferred — awaiting a human decision.** New this round; not fixed here. |
-| **Recorded in the plan** | `06-10-SUMMARY.md`, both attached reports (`beacon-control-c1.json`, `beacon-acceptance.json`) |
+| **Raised by** | `06-14-PLAN.md` Task 2, `PROH-OPS-07-08` |
+| **Status** | **Deferred — awaiting independent verification.** New this round. |
+| **Recorded in the plan** | `06-14-PLAN.md`, `06-ACCEPTANCE-ROUND3.md` |
 
-**What was found.** `06-07` corrected the harness's process-resolution oracle to derive `web` and
-`worker` PIDs from the `beacon-web` and `beacon-worker` containers via `docker_container_tree`, rather
-than host-wide command-line matching. On this round's real-hardware run, PID resolution is verifiably
-correct: the operator's independent `docker inspect --format '{{.State.Pid}}' beacon-web beacon-worker`
-returned exactly the PIDs the report sampled (`1745069` for web, `1745076` for worker), `sampled_set_changed`
-is `false` for both roles on both runs, and no sampled PID traces to `/opt/offline-portal` — the unrelated
-process whose figures corrupted the previous round's report. `peak_rss_bytes` / `mean_rss_bytes` are
-plausible and move sensibly between the control and acceptance runs (web: ~106.8MB mean at concurrency 1
-to ~128.0MB mean at concurrency 8; worker essentially flat at ~55.3–55.7MB in both), which is further
-evidence the PIDs are right.
+**What now exists.** The third real Pi acceptance run (`06-ACCEPTANCE-ROUND3.md`,
+`beacon-acceptance-round3.json`, `beacon-control-c1-round3.json`) is the first hardware evidence this
+phase has produced with a working CPU column (`D-DEBT-06-06`, discharged below) and cadence still
+holding (`assertions.cadence.passed: true`). That is real, durable evidence bearing on OPS-07.
 
-Despite that, `peak_cpu_percent` and `mean_cpu_percent` read exactly `0.0` for **both** roles on
-**both** runs — including the 600-second concurrency-8 acceptance run, whose own p50 latencies are in
-the seconds. A deployment serving that load cannot genuinely be spending 0.0% CPU; the figure is not a
-measurement of low CPU use, it is a broken measurement. Because `assertions.resources.passed` in this
-harness asserts only peak RSS against each service's `mem_limit` and carries CPU purely as unasserted
-observed evidence, the acceptance run's resource check still reports `passed: true` — the harness did
-not fail dishonestly here, but the CPU column it prints is not trustworthy and must not be read as
-evidence of anything.
+**What this round deliberately does not do.** It does not promote OPS-07. `.planning/REQUIREMENTS.md`
+line 72's checkbox stays unchecked (`- [ ] **OPS-07**`) and line 155's traceability row stays
+`| OPS-07 | Phase 6 | Pending |`, unedited by this plan (`git diff --quiet -- .planning/REQUIREMENTS.md`
+holds). A gap-closure round that both produces the evidence for a requirement and promotes that same
+requirement is certifying itself — `PROH-OPS-07-08` forbids exactly that.
 
-**Why this is not fixed here.** `06-10`'s scope was to re-run the acceptance harness and record what it
-established, not to modify the harness. This entry exists so the defect is visible to whoever next
-touches `tests/pi_load_acceptance.py`'s resource-sampling code, rather than silently reappearing as a
-false "0% CPU, nothing to worry about" reading in a future report.
+**The project's own precedent.** `.planning/STATE.md` § Key Decisions records: "TEL-06 was deliberately
+NOT promoted in REQUIREMENTS.md by 03-17 — a gap-closure round may not record its own requirement
+complete; only independent re-verification may." Phase 3's `03-11` through `03-14` established the same
+rule the hard way, after `03-VERIFICATION.md` was found to contradict itself between a gap-frontmatter
+"missing" end state and a closing narrative's "capability satisfied" summary — resolved in favour of
+the frontmatter, not the narrative. This entry follows that precedent directly: the acceptance report
+this round produced is exactly the kind of "closing narrative" evidence Phase 3's precedent says must
+not self-certify, however clean the report looks.
 
-**Consequence for `D-DEBT-06-02`.** `D-DEBT-06-02`'s stated revisit trigger — "an acceptance run showing
-sustained CPU percent that starves the host" — has now been attempted against a correctly-targeted PID
-set and still could not be evaluated, because the CPU column itself does not function. This is the
-second consecutive round in which that trigger could not be assessed on real evidence: first because the
-PIDs were wrong, now because the CPU sampling mechanism built on the (now-correct) PIDs returns 0.0
-regardless of load. See `D-DEBT-06-02` below.
+**What closes this entry.** An independent verification round — not this plan, not `06-13`, not the
+operator who ran the hardware checkpoint — reads `06-ACCEPTANCE-ROUND3.md` and the two attached JSON
+reports, confirms the run's `overall_passed`, cadence, resource, and CPU-sampling evidence
+independently, and is the one to check OPS-07's box and update its traceability row. Note that this
+round's `overall_passed` is currently `false` (see `D-DEBT-06-09`), so promotion is not yet even a live
+question — this entry documents the promotion *rule*, not a pending promotion.
 
-**What would need to be true to proceed / close this entry.** Someone investigates why
-`tests/pi_load_acceptance.py`'s CPU sampling (likely a `psutil.Process.cpu_percent()` call with no
-warm-up interval, or a per-sample instantaneous read never given time to integrate between samples)
-returns 0.0 under measured load, fixes the sampling method, and re-runs the acceptance harness on real
-Pi hardware to confirm it now reports a plausible non-zero figure consistent with the observed latency.
-Only then can `D-DEBT-06-02`'s revisit trigger be meaningfully evaluated.
+---
+
+### D-DEBT-06-09 — round 3's acceptance failure is measured to be serialization, not yet attributed to a cause
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-14-PLAN.md` Task 1's real hardware run, `06-ACCEPTANCE-ROUND3.md` |
+| **Status** | **Deferred — awaiting a diagnostic round, chosen by the user over a third inferred fix.** New this round. |
+| **Recorded in the plan** | `06-ACCEPTANCE-ROUND3.md`, `beacon-acceptance-round3.json` |
+
+**What round 3 measured.** The control pass (concurrency 1, 120s) passes cleanly on every route, and
+`/api/services`'s control p50 improved 27.6% over round 2 (289.0ms → 209.355ms), attributable to
+`06-13`'s `reduce-request-cost` fix. Per-request cost is therefore no longer the dominant problem. But
+`/api/scan-status` — a 3.281ms route at concurrency 1 — degrades **74x** to a 242.614ms p50 under
+concurrency 8, while `assertions.resources.summary.web.cpu_sampling.mean_cpu_percent` reads 165.504
+against 400% available on this 4-core Pi 5 (roughly 2.3 cores idle on mean). Eight clients cannot make
+a 3ms computation take 243ms through added computation alone on a host with that much idle capacity;
+the mechanism producing the acceptance-pass failure is **serialization**, not per-request cost.
+
+**What this measurement does not do.** It does not implicate `_db_lock`. `D-DEBT-06-01`'s own second
+named reopening test — the unlocked `/api/advanced/current` route recovering to near its control-pass
+p95 under concurrency 8 while the locked routes (`/api/services`, `/api/scan-status`) stay over budget
+— did **not** fire this round: `/api/advanced/current`'s p95 improved only 13.1% (2742.1ms → 2382.2ms)
+and remains over its own 2000ms budget. An unlocked route degrading 12.6x is not explained by a lock it
+never takes. `_db_lock` is measured to be insufficient to explain the failure (as `D-DEBT-06-01`
+already recorded from round 2), and round 3 adds nothing that newly implicates it either.
+
+It also does not confirm the one-interpreter/GIL hypothesis, though it does not rule it out.
+`mean_cpu_percent` of 165.504% (a single Python process sustaining more than one core's worth of CPU)
+shows real parallelism is occurring — SQLite's C-level driver releases the GIL during I/O and some
+built-in operations — so the classic GIL-saturation signature (a hard pin near 100%, one core fully
+consumed and no more) is not what this run shows. The one-interpreter hypothesis is weakened by this
+reading, not confirmed, and the deployment is still measured to be far from using the machine (roughly
+2.3 of 4 cores idle on mean even at the CPU-bound web role's peak).
+
+**Why this is deferred rather than fixed here.** This is the second and third consecutive rounds
+(`06-10`, `06-14`) in which a plausible single-cause hypothesis was proposed and then not confirmed by
+the next round's hardware evidence — first `_db_lock`, then `/api/services`'s per-request cost. The
+user's explicit choice for the next round is to measure the serialization mechanism directly (thread
+timeline / lock-wait instrumentation under the same concurrency-8 load) rather than propose and ship a
+third inferred fix against an attribution that, twice now, has not survived contact with hardware.
+
+**What would need to be true to close this entry.** A diagnostic round that instruments the deployment
+under concurrency-8 load and identifies, with direct evidence (not inference from aggregate p50/p95
+figures), which specific serialization point — `_db_lock`, gunicorn's `--threads 8`/GIL scheduling,
+SQLite's own busy-timeout/WAL-writer serialization, or another mechanism not yet named — is responsible
+for the measured 74x-on-a-3ms-route degradation. Only then should a fix be proposed and implemented
+against that attribution.
 
 ---
 
@@ -108,7 +145,7 @@ Only then can `D-DEBT-06-02`'s revisit trigger be meaningfully evaluated.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-RESEARCH.md` Open Question 3, `PROJECT.md`'s `AR-03-01` accepted-risk note |
-| **Status** | **Decided — deferred again, on measured hardware evidence, now also on a measured cost attribution.** Re-examined by the user in `06-10-PLAN.md` Task 2 and upheld; re-examined again in `06-13-PLAN.md` Task 1 against `06-PROFILE.md`'s attribution and upheld again. Closed for this phase; revisit only if the condition below occurs. |
+| **Status** | **Decided — deferred a third time, now on a third hardware run whose failure the entry's own reopening test rules out as newly implicating this lock.** Re-examined by the user in `06-10-PLAN.md` Task 2 and upheld; re-examined again in `06-13-PLAN.md` Task 1 against `06-PROFILE.md`'s attribution and upheld again; re-examined against `06-14`'s round-3 hardware run below and upheld a third time. Closed for this phase; revisit only if the condition below occurs. |
 | **Recorded in the plan** | `06-05-PLAN.md` decision D-01, `PROH-OPS-04-02`, `06-10-PLAN.md` Task 2's decision checkpoint |
 
 **What was not done and why.** `_db_lock`'s scope in `dashboard/app.py` remains unchanged at every one
@@ -194,6 +231,11 @@ grounded candidates rather than a restated abstraction:
 - This round's two hardware reports (`beacon-control-c1.json`, `beacon-acceptance.json`), attached as
   phase evidence — the first hardware evidence this entry has ever had, where before there was only an
   argument.
+- `06-14`'s two round-3 hardware reports (`beacon-control-c1-round3.json`, `beacon-acceptance-round3.json`,
+  both recorded in full in `06-ACCEPTANCE-ROUND3.md`) — the entry's own second reopening test evaluated
+  for the first time (did not fire), and the first working CPU reading this entry has ever had to reason
+  about (165.504% mean on the web role, ruling out both "genuinely idle" and "classic GIL hard-pin" as
+  the shape of the contention, without yet attributing it to a specific mechanism).
 
 **What would need to be true to proceed with narrowing, if this is reopened.** Unchanged from the
 original entry: a per-call-site audit of all `_db_lock` uses; a demonstration that read-only routes no
@@ -221,6 +263,39 @@ does not bear on the second reopening condition (the unlocked-route recovery com
 `06-13` changes no topology and takes no `/api/services`/`/api/advanced/current` hardware measurement.
 `_db_lock`'s scope stays exactly as it is; no line touching it changed in `06-13`. `T-06-24`'s closure
 evidence remains valid and `/gsd-secure-phase 06` does not need to re-run.
+
+**`06-14`'s re-examination — the third hardware run, and the entry's own second reopening test
+evaluated for the first time.** `06-14` Task 1 ran the real Pi acceptance harness a third time against
+this round's build (`b8ed60b`, `06-13`'s fix included). Full figures are in `06-ACCEPTANCE-ROUND3.md`.
+The run's `overall_passed` is **still `false`**: `/api/services` (p95 1732.3ms vs. 500ms), `/api/scan-status`
+(p95 656.5ms vs. 500ms), and `/api/advanced/current` (p95 2382.2ms vs. 2000ms) all remain over budget.
+
+**What the chosen fix achieved.** `06-13`'s `reduce-request-cost` fix is confirmed to have reduced
+`/api/services`'s per-request cost on real hardware, not just in profiling: the control-pass p50 fell
+27.6% (289.0ms → 209.355ms) and the acceptance-pass p95 fell 29.7% (2465.9ms → 1732.3ms). It did not
+close the gap under concurrency — `/api/services` is still 3.5x over its own 500ms p95 budget.
+
+**The entry's own second reopening test, evaluated for the first time — and it did NOT fire.** The
+test named above is: the unlocked `/api/advanced/current` route recovering to near its control-pass p95
+under concurrency 8 while the locked routes (`/api/services`, `/api/scan-status`) stay over budget.
+Round 3 shows the opposite of recovery: `/api/advanced/current`'s p95 improved only 13.1% (2742.1ms →
+2382.2ms, round 2 → round 3) and remains over its own 2000ms budget, degrading 12.6x from its own
+82.281ms control p50. A process-wide lock this route never takes cannot produce a 12.6x degradation on
+it. **This test not firing means `_db_lock` is not newly implicated by round 3** — the entry's original
+"not sufficient to explain the failure" finding from round 2 stands, unstrengthened and unweakened by
+this run specifically with respect to the lock question.
+
+**What round 3 measured instead.** The failure mechanism is now measured to be serialization under
+concurrency, not per-request cost: `/api/scan-status`, a 3.281ms route at concurrency 1, degrades 74x to
+242.614ms at concurrency 8, while the web role's `mean_cpu_percent` (165.504 of 400% available, a real
+CPU reading for the first time — see `D-DEBT-06-06` below) shows roughly 2.3 of 4 cores idle on
+average. That combination — a 3ms computation taking 243ms while most of the machine sits idle — cannot
+be explained by added computation; something is serializing requests. Whether that something is
+`_db_lock`, the deployment's `--threads 8` single-interpreter GIL scheduling, SQLite's own
+busy-timeout/WAL-writer serialization, or a mechanism not yet named is **not established by this run**
+— see the new `D-DEBT-06-09` entry, which this round adds specifically to track that open question as
+a diagnostic item rather than leaving it implicit inside this entry. `_db_lock`'s scope stays exactly as
+it is; no line touching it changed in `06-14` (this plan runs a harness and writes documentation only).
 
 **What `06-13` implemented, concretely.** A request-scoped memo in `dashboard/beacon/maintenance.py`
 for `_local_occurrence_epochs` (keyed on `(window, the calendar date now_epoch resolves to, timezone)`
@@ -308,6 +383,21 @@ threads' worth of per-worker headroom is accounted for. This is exactly why `PRO
 `mem_limit` to be re-derived from measurement — not assumed proportional — before any `add-workers`
 branch can ship.
 
+**`06-14` finding: `mem_limit` is declared but not kernel-enforced on the Pi host, which changes what
+this arithmetic is protecting against.** Round 3's `docker compose up --build` emitted, for `migrate`,
+`web` and `worker`: "Your kernel does not support memory limit capabilities or the cgroup is not
+mounted. Limitation discarded." The web role's round-3 peak RSS (124,928,000 B, well inside the
+declared 256m) is genuine and the harness's `assert_resource_budget` still checks it against the value
+parsed out of `docker-compose.yml`, so the pass/fail signal stays meaningful and comparable across
+rounds. But the 256m figure above is a **declared budget the harness checks, not a ceiling the kernel
+enforces on this host**: a container that exceeds it does not get OOM-killed, it gets memory pressure on
+a host that has no cgroup-level backstop. The `mem_limit` arithmetic above (headroom for a second
+worker) is therefore an even tighter constraint in practice than the declared numbers alone suggest —
+there is no kernel-level safety net catching an over-budget worker before it degrades the whole host,
+so `PROH-OPS-04-05`'s measured, not-assumed re-derivation requirement matters more, not less, once a
+second worker is on the table. This is a host/kernel configuration fact, not a `docker-compose.yml`
+defect — the file's declaration is correct and worth keeping even though this kernel cannot enforce it.
+
 ---
 
 ### D-DEBT-06-02 — no cgroup CPU limit is declared in docker-compose.yml
@@ -315,7 +405,7 @@ branch can ship.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-RESEARCH.md` Assumptions Log entry A4 |
-| **Status** | **Decided — not adding a `cpus:` cap this phase.** Closed; revisit only if the trigger below occurs. Its trigger has now been attempted against real hardware twice and could not be evaluated either time — see below. |
+| **Status** | **Decided — not adding a `cpus:` cap this phase.** Closed; revisit only if the trigger below occurs. Its trigger has now been evaluated for the first time, on `06-14`'s round-3 hardware run, and read **NOT TRIGGERED** — see below. |
 | **Recorded in the plan** | `06-06-PLAN.md` Task 2, `06-10-PLAN.md` Task 1 (re-measurement attempt) |
 
 **The decision.** `docker-compose.yml` declares `mem_limit` for every service (`worker: 1g`, `web:
@@ -353,8 +443,32 @@ decision above stands on its original rationale, not on any CPU measurement to d
 CPU measurement has yet existed. A reviewer with a working CPU reading — once `D-DEBT-06-06` is
 resolved — should be the one to actually test the trigger for the first time.
 
-Neither condition has occurred (or could be checked); this is a judgment call about deployment risk, not
-a fact, and a reviewer with either piece of evidence above should overrule it.
+**`06-14`'s evaluation — the trigger tested for the first time on a usable reading, verdict NOT
+TRIGGERED.** `D-DEBT-06-06` is discharged this round (see the Discharged section below):
+`06-11`'s fix produced a genuine, non-zero CPU reading on round 3's real hardware run. The web role's
+`assertions.resources.summary.web.cpu_sampling` reads `all_samples_zero: false`,
+`mean_cpu_percent: 165.504`, `peak_cpu_percent: 233.6`, `nonzero_sample_count: 594`,
+`zero_sample_count: 0` — against 400% available on this 4-core Raspberry Pi 5. The worker role reads
+`mean_cpu_percent: 0.698`, `peak_cpu_percent: 8.9`, `nonzero_sample_count: 309`,
+`zero_sample_count: 285` — genuine idleness driven by the worker's own cadence (J1-J4 poll intervals,
+not continuous work), confirmed real rather than a sampling defect because `nonzero_sample_count` is
+substantial (309) and `all_samples_zero` is `false`; the 285 zero samples are the worker legitimately
+idle between cadence ticks, not a broken measurement.
+
+Reading this against the trigger: "an acceptance run showing sustained CPU percent that starves the
+host." 165.504% mean is sustained CPU use above one core's worth, on a service under a 600s
+concurrency-8 load — but it leaves roughly 2.3 of the Pi's 4 cores idle on average, and the worker role
+barely registers at all. This is not a host being starved; it is a host with substantial spare CPU
+capacity while its acceptance run is failing on latency for other reasons (see `D-DEBT-06-01`'s round-3
+update and the new `D-DEBT-06-09`). **The trigger did NOT fire.** This is a real, load-bearing result —
+not an absence of evidence, but a first-time confirmation, by measurement rather than mere assertion,
+of this entry's original rationale: a `cpus:` cap was not needed for CPU-starvation reasons, and round
+3's evidence is the first data point that actually tests that claim rather than merely repeating it.
+This does not close the question forever (a future co-tenant workload could still justify revisiting,
+per the second named trigger condition, unaffected by this round), but the CPU-starvation trigger
+specifically has now been tested and did not hold.
+
+Full figures: `06-ACCEPTANCE-ROUND3.md`, `beacon-acceptance-round3.json`.
 
 ---
 
@@ -438,4 +552,69 @@ narrowly to "a real hardware run happened and its evidence can be trusted."
 `beacon-acceptance.json` (concurrency 8, 600s acceptance pass), both from `06-10`. As of this writing
 both reports exist only on the Pi host at `~/projects/rpi-dashboard/`; they are not committed to this
 repository (`06-10-PLAN.md`'s `files_modified` covers only this file).
+
+---
+
+### D-DEBT-06-06 — acceptance harness reports 0.0 CPU percent for both roles on real hardware
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-10-PLAN.md` Task 1, the real Pi acceptance run |
+| **Status** | **Discharged.** `06-11`'s fix produced a genuine, non-zero, plausible CPU reading on `06-14`'s round-3 real hardware run. Closed on that run's report. |
+| **Recorded in the plan** | `06-10-SUMMARY.md` (original defect), `06-11-SUMMARY.md` (fix), `06-VERIFICATION.md` (root cause), `06-14-PLAN.md` Task 1 / `06-ACCEPTANCE-ROUND3.md` (closing hardware confirmation) |
+
+**What was found (as originally recorded, for context).** `06-07` corrected the harness's
+process-resolution oracle to derive `web` and `worker` PIDs from the `beacon-web` and `beacon-worker`
+containers via `docker_container_tree`, rather than host-wide command-line matching. PID resolution was
+verifiably correct on the round-2 real-hardware run, yet `peak_cpu_percent` and `mean_cpu_percent` read
+exactly `0.0` for both roles on both the control and acceptance runs — including the 600-second
+concurrency-8 acceptance run, whose own p50 latencies were in the seconds. A deployment serving that
+load cannot genuinely be spending 0.0% CPU; the figure was not a measurement of low CPU use, it was a
+broken measurement.
+
+**Root cause, as `06-VERIFICATION.md` located it.** The harness's per-tick CPU sampling constructed a
+fresh `psutil.Process` object for each sampled PID on every tick. `psutil.Process.cpu_percent(interval=None)`
+requires a prior call on the *same* `Process` object to have a baseline to diff the current CPU-time
+counters against; called on a freshly-constructed object with no prior call, it always returns `0.0` on
+that first (and, because a fresh object was built every tick, *every*) call. The process set was
+correctly derived from the container each tick, but the object identity backing each PID's `cpu_percent`
+baseline was discarded and rebuilt every tick, so the baseline never had a chance to accumulate.
+
+**The fix, as `06-11` landed it.** `_live_role_processes` now holds one `psutil.Process` object per PID
+for the whole run and hands the same object back on every tick (`handle_cache: "per_pid_run_lifetime"`
+in the report), so `cpu_percent(interval=None)` has a genuine prior-tick baseline to diff against on
+every call after the first. The process *set* is still re-derived from the container on every tick, so
+a mid-run gunicorn respawn is still correctly sampled; only the per-PID `Process` object handle is
+cached across ticks, not the set membership. Each role's summary now carries a `cpu_sampling` block
+recording whether its CPU column is a measurement or a structural zero (`all_samples_zero`,
+`nonzero_sample_count`, `zero_sample_count`, `primed_pid_count`, `handle_cache`), so a future reader
+never again has to infer this from raw figures alone.
+
+**The closing hardware confirmation — `06-14`'s round-3 run.** `06-14` Task 1's real Pi acceptance run
+is the first hardware evidence to test `06-11`'s fix. Both roles' `cpu_sampling.all_samples_zero` read
+`false`:
+- **web:** `all_samples_zero: false`, `nonzero_sample_count: 594`, `zero_sample_count: 0`,
+  `primed_pid_count: 2`, `handle_cache: "per_pid_run_lifetime"`. `mean_cpu_percent: 165.504`,
+  `peak_cpu_percent: 233.6`, `mean_rss_bytes: 123,869,521`, `peak_rss_bytes: 124,928,000`,
+  `sample_count: 594`.
+- **worker:** `all_samples_zero: false`, `nonzero_sample_count: 309`, `zero_sample_count: 285`,
+  `primed_pid_count: 1`. `mean_cpu_percent: 0.698`, `peak_cpu_percent: 8.9`,
+  `mean_rss_bytes: 54,876,856`.
+
+Both figures are plausible for their roles: the web role, serving the concurrency-8 HTTP load directly,
+sustains well over one core's worth of CPU (165.504% of 400% available on this 4-core Pi 5); the worker
+role, cadence-driven rather than continuously busy, shows real but modest CPU use with genuine zero
+samples between cadence ticks (`nonzero_sample_count: 309` alongside `zero_sample_count: 285` — a mix
+consistent with intermittent work, not a broken sampler, since `all_samples_zero` is `false` and a
+substantial majority-adjacent fraction of samples are non-zero). This is the first working CPU
+measurement this phase has produced (`PROH-OPS-07-07` satisfied: the column is a genuine measurement,
+not rounded up to a plausible-looking number).
+
+**Consequence for `D-DEBT-06-02`.** With a working CPU reading in hand, `D-DEBT-06-02`'s stated revisit
+trigger ("an acceptance run showing sustained CPU percent that starves the host") was evaluable for the
+first time this phase. See `D-DEBT-06-02` above for the full evaluation; the verdict is **NOT
+TRIGGERED** — 165.504% mean leaves roughly 2.3 of 4 cores idle, which is not a host being starved.
+
+**Evidence attached.** `beacon-control-c1-round3.json`, `beacon-acceptance-round3.json` (from `06-14`),
+both recorded in full in `06-ACCEPTANCE-ROUND3.md`.
 </content>
