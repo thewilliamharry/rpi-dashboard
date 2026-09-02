@@ -442,7 +442,7 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: 10/10 plans executed — 6/6 of the original round executed; 4 gap-closure plans added 2026-09-01
+**Plans**: 14 plans — 10/10 executed (6/6 original round, 4 gap-closure plans added 2026-09-01); 4 further gap-closure plans added 2026-09-02, not yet executed
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -454,6 +454,10 @@ Plans:
 - [x] 06-08-PLAN.md — Remove the ~2.5s per-request uptime bucket rescan from /api/services, output unchanged
 - [x] 06-09-PLAN.md — Close carried-forward review warnings WR-01 (read-only inspection) and WR-02 (thumb_state precedence)
 - [x] 06-10-PLAN.md — Pi acceptance re-run, the _db_lock decision, and the debt record
+- [ ] 06-11-PLAN.md — Fix the acceptance harness's CPU sampling: one psutil.Process per PID for the run's lifetime
+- [ ] 06-12-PLAN.md — Attribute /api/services' residual 289ms per-request cost, with measured growth ratios
+- [ ] 06-13-PLAN.md — The fix-path decision against that profile, the chosen fix, and a pinned gunicorn topology
+- [ ] 06-14-PLAN.md — Third Pi acceptance run (human-executed) and the debt record it establishes
 
 **Wave 1**
 
@@ -505,6 +509,38 @@ decision. These four plans close that gap and carry their own wave numbering.
 *`06-07` precedes every plan whose verification rests on an acceptance report: until the harness
 targets the Beacon containers, no report it emits is evidence. `06-10`'s hard dependencies are
 `06-07` and `06-08`; `06-09` is included so the hardware run validates the final build.*
+
+### Second gap-closure round (added 2026-09-02, waves continue from 6)
+
+`06-10`'s hardware run executed on real Pi hardware and returned `overall_passed: false`
+(`06-VERIFICATION.md`, gap `G-06-1`). Truths 1–4 are verified; truth 5 (OPS-07) failed with three of
+six routes over their declared p95 budgets under concurrency 8, and verification separately
+root-caused the acceptance harness's CPU column as a structural zero that has never measured
+anything. These four plans close the four gaps `06-VERIFICATION.md` records, in evidence order:
+measurement first, then the decision the measurement enables, then the fix, then hardware.
+
+**Wave 7** — parallel; `files_modified` are genuinely disjoint
+
+- `06-11` — Harness CPU-sampling fix: `tests/pi_load_acceptance.py` + `tests/test_workload_resilience.py`
+- `06-12` — `/api/services` cost attribution: new `tests/services_route_profile.py` + `tests/test_services_route_scaling.py` + `06-PROFILE.md`
+
+**Wave 8** *(blocked on Wave 7; contains a blocking one-way-door decision checkpoint)*
+
+- `06-13` — The fix-path decision, the chosen fix, and the pinned gunicorn worker/thread topology
+
+**Wave 9** *(blocked on Wave 8; contains a blocking human checkpoint)*
+
+- `06-14` — Third Pi acceptance run on real hardware, and the debt record it establishes
+
+*This round is the first in this phase where two plans are genuinely parallel: `06-11` writes only
+the acceptance harness and its own test class, while `06-12` writes only a new profiling module, a
+new test class in a different file, and a planning artifact. Neither touches `dashboard/app.py` and
+their `files_modified` do not intersect, so the phase's usual strict sequencing does not apply to
+them. `06-13` must follow both — its decision is made against `06-12`'s profile, and the run that
+judges it needs `06-11`'s CPU fix. `06-14` follows `06-13` because a hardware run against a build
+without the fix measures the defect, not the fix. OPS-07 is deliberately NOT promoted by this round:
+a gap-closure round may not record its own requirement complete (`PROH-OPS-07-08`, following the
+`TEL-06` precedent recorded in `STATE.md`).*
 
 ## Progress
 
