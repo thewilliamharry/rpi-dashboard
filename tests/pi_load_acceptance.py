@@ -182,6 +182,16 @@ class ResourceTarget:
     happen. ``reason`` is ``None`` only when resolution succeeded; a role
     with a reason is never sampled and always fails the run for an
     acceptance-shaped resolution.
+
+    ``handles`` is a run-lifetime cache of ``psutil.Process`` objects keyed
+    by PID, so ``cpu_percent(interval=None)`` -- which diffs against state
+    stored on the specific object it was last called on -- has a real
+    prior-tick baseline instead of the structural ``0.0`` produced by
+    re-instantiating ``psutil.Process`` on every tick (D-DEBT-06-06). This
+    is explicitly a cache of *objects*, never a cache of the process *set*:
+    the set is still re-derived from the container on every tick
+    (PROH-OPS-07-06) -- that distinction is precisely what the previous
+    shape got wrong in the other direction.
     """
 
     role: str
@@ -190,6 +200,7 @@ class ResourceTarget:
     root_pid: object = None  # int once resolved, else None
     processes: list = field(default_factory=list)
     reason: object = None  # str once unresolved, else None
+    handles: dict = field(default_factory=dict)  # PID -> held psutil.Process, run-lifetime
 
 
 def _parse_mem_limit_value(raw):
@@ -495,6 +506,39 @@ def _resource_targets(*, self_test, worker_container='beacon-worker', web_contai
     return targets
 
 
+def _cached_handle(target, discovered):
+    """Return the ``psutil.Process`` object the caller should actually use.
+
+    ``discovered`` is a freshly-enumerated object for this tick. If
+    ``target.handles`` already holds an object for the same PID *and* that
+    cached object is still the same underlying process (``create_time()``
+    matches), the cached object is returned so ``cpu_percent(interval=None)``
+    keeps diffing against the same object's prior-tick state. Otherwise --
+    no cached handle, or a PID recycled onto a different process -- the
+    freshly-discovered object is stored and primed (``cpu_percent`` called
+    once to establish a baseline) instead of inheriting a stale one.
+
+    A newly-inserted handle reading ``0.0`` on the tick that inserted it is
+    ``psutil``'s correct semantics for a process with no prior sample -- a
+    real absence of a baseline, not the structural zero this fixes.
+    """
+    pid = discovered.pid
+    cached = target.handles.get(pid)
+    if cached is not None:
+        try:
+            same_process = cached.create_time() == discovered.create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            same_process = False
+        if same_process:
+            return cached
+    target.handles[pid] = discovered
+    try:
+        discovered.cpu_percent(interval=None)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return discovered
+
+
 def _live_role_processes(target):
     """Return a role's currently-live process set for one sampling tick.
 
@@ -504,6 +548,12 @@ def _live_role_processes(target):
     otherwise leave the role sampling only the surviving master. A root PID
     that has disappeared is a genuine failure for this tick, surfaced as an
     empty process list rather than a raised exception.
+
+    Every freshly-discovered object is mapped through ``_cached_handle`` so
+    the object identity ``cpu_percent(interval=None)`` depends on survives
+    from tick to tick (D-DEBT-06-06), and ``target.handles`` is pruned to
+    exactly the PID set discovered on this tick so the cache is bounded by
+    the live process count rather than by run duration.
     """
     if target.method == 'self_test':
         return list(target.processes)
@@ -511,9 +561,15 @@ def _live_role_processes(target):
         return []
     try:
         root_process = psutil.Process(target.root_pid)
-        return [root_process, *root_process.children(recursive=True)]
+        discovered = [root_process, *root_process.children(recursive=True)]
     except psutil.NoSuchProcess:
         return []
+    live = [_cached_handle(target, proc) for proc in discovered]
+    live_pids = {proc.pid for proc in live}
+    for pid in list(target.handles):
+        if pid not in live_pids:
+            del target.handles[pid]
+    return live
 
 
 def _prime_cpu_percent(targets):
@@ -522,16 +578,26 @@ def _prime_cpu_percent(targets):
     ``psutil``'s first ``cpu_percent(interval=None)`` call on a process is
     meaningless (no prior sample to diff against); priming here means the
     first real tick already has a baseline for every process resolved at
-    run start.
+    run start. Priming resolves its process objects through
+    ``_live_role_processes`` -- the same function every sampling tick uses
+    -- so the priming pass and the sampling ticks now share one set of
+    cached objects rather than two disjoint sets (D-DEBT-06-06).
+
+    The actual ``cpu_percent(interval=None)`` baseline call now happens
+    inside ``_cached_handle`` on a process's first insert into
+    ``target.handles``, triggered as a side effect of calling
+    ``_live_role_processes`` below -- this function no longer calls
+    ``cpu_percent`` a second time itself. Doing so would double-prime every
+    run-start process (one call from ``_cached_handle``'s insert path, one
+    more from this loop), which contradicts the one-call-per-priming
+    contract: "cpu_percent(interval=None) is called exactly once for
+    priming plus exactly once per tick -- never twice per tick, and never
+    re-primed."
     """
     for target in targets.values():
         if target.reason is not None:
             continue
-        for proc in _live_role_processes(target):
-            try:
-                proc.cpu_percent(interval=None)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        _live_role_processes(target)
 
 
 def _sample_resources_tick(targets, samples_by_role, sampled_pids_by_role):
@@ -736,8 +802,12 @@ def run_acceptance(scenario):
         rss_values = [sample['rss_bytes'] for sample in samples]
         cpu_values = [sample['cpu_percent'] for sample in samples]
         peak_rss = max(rss_values, default=None)
+        sample_count = len(samples)
+        zero_sample_count = sum(1 for value in cpu_values if value == 0.0)
+        nonzero_sample_count = len(cpu_values) - zero_sample_count
+        all_samples_zero = nonzero_sample_count == 0 and sample_count > 0
         resource_summary[role] = {
-            'sample_count': len(samples),
+            'sample_count': sample_count,
             'peak_rss_bytes': peak_rss,
             'mean_rss_bytes': (sum(rss_values) / len(rss_values)) if rss_values else None,
             # Peak/mean CPU percent are recorded as observed evidence, not
@@ -746,6 +816,24 @@ def run_acceptance(scenario):
             # silent omission).
             'peak_cpu_percent': max(cpu_values, default=None),
             'mean_cpu_percent': (sum(cpu_values) / len(cpu_values)) if cpu_values else None,
+            # D-DEBT-06-06 provenance: makes an untrue CPU column
+            # self-announcing in the report instead of silently
+            # indistinguishable from a genuinely idle deployment.
+            # `all_samples_zero` being true on an acceptance-shaped run is
+            # the broken-measurement signature D-DEBT-06-06 describes and
+            # must be read as such, never as evidence of a low-CPU
+            # deployment -- but it is deliberately never appended to
+            # failure_reasons and never affects assertions.resources.passed
+            # (PROH-OPS-07-01, D-DEBT-06-02: CPU carries no cap in this
+            # round). The condition is for a human to read at 06-14's
+            # hardware checkpoint, not for the harness to fail on.
+            'cpu_sampling': {
+                'handle_cache': 'per_pid_run_lifetime',
+                'primed_pid_count': len(target.handles),
+                'zero_sample_count': zero_sample_count,
+                'nonzero_sample_count': nonzero_sample_count,
+                'all_samples_zero': all_samples_zero,
+            },
         }
         # assert_resource_budget is unchanged and stays the sole rule for
         # whether a role's peak RSS is within budget (PROH-OPS-07-01):

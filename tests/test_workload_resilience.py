@@ -1398,6 +1398,268 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
         distinct_pid_sets = {tuple(sorted(s['pids'])) for s in samples}
         self.assertGreater(len(distinct_pid_sets), 1)
 
+    # -- 06-11: a run-lifetime per-PID process-handle cache, so
+    # cpu_percent(interval=None) has a real baseline instead of the
+    # structural 0.0 produced by re-instantiating psutil.Process on every
+    # tick (D-DEBT-06-06). --
+
+    def test_the_same_process_handle_is_reused_across_sampling_ticks(self):
+        first_root = mock.Mock()
+        first_root.pid = 907527
+        first_root.create_time.return_value = 1000.0
+        first_root.children.return_value = []
+        first_root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        first_root.cpu_percent.return_value = 0.0
+
+        second_root = mock.Mock()
+        second_root.pid = 907527
+        second_root.create_time.return_value = 1000.0
+        second_root.children.return_value = []
+        second_root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        second_root.cpu_percent.return_value = 0.0
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[first_root], reason=None,
+        )
+        with mock.patch.object(
+            pi_load_acceptance.psutil, 'Process', side_effect=[first_root, second_root],
+        ):
+            first_call = pi_load_acceptance._live_role_processes(target)
+            second_call = pi_load_acceptance._live_role_processes(target)
+
+        # The property that matters: the SAME object is handed back for a
+        # stable PID across ticks (object identity, not equality), so
+        # cpu_percent(interval=None) has a real prior-tick baseline to diff
+        # against. Under the pre-fix shape every tick constructs a fresh
+        # psutil.Process, so the two calls never returned the same object.
+        self.assertIs(first_call[0], second_call[0])
+
+    def test_cpu_percent_is_primed_once_and_read_once_per_tick(self):
+        # One prime call plus three ticks means _live_role_processes is
+        # invoked four times; psutil.Process is patched with a DISTINCT
+        # mock object on every call (mirroring the pre-fix re-instantiation
+        # on every tick) to prove the cache -- not a coincidentally stable
+        # test double -- is what makes one object survive across calls.
+        root_instances = [mock.Mock() for _ in range(4)]
+        child_instances = [mock.Mock() for _ in range(4)]
+        for root_instance, child_instance in zip(root_instances, child_instances):
+            root_instance.pid = 907527
+            root_instance.create_time.return_value = 1000.0
+            root_instance.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+            root_instance.cpu_percent.return_value = 0.0
+            child_instance.pid = 907613
+            child_instance.create_time.return_value = 2000.0
+            child_instance.memory_info.return_value = SimpleNamespace(rss=500_000)
+            child_instance.cpu_percent.return_value = 5.0
+            root_instance.children.return_value = [child_instance]
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[root_instances[0]], reason=None,
+        )
+        samples_by_role = {}
+        sampled_pids_by_role = {}
+        with mock.patch.object(
+            pi_load_acceptance.psutil, 'Process', side_effect=root_instances,
+        ):
+            pi_load_acceptance._prime_cpu_percent({'web': target})
+            for _ in range(3):
+                pi_load_acceptance._sample_resources_tick(
+                    {'web': target}, samples_by_role, sampled_pids_by_role,
+                )
+
+        # One prime plus three ticks -- never re-primed, never doubled per
+        # tick -- read on the SAME held handle despite a fresh object being
+        # discovered on every call. Under the pre-fix shape ResourceTarget
+        # carries no handles cache at all.
+        held_root = target.handles[907527]
+        held_child = target.handles[907613]
+        self.assertEqual(held_root.cpu_percent.call_count, 4)
+        self.assertEqual(held_child.cpu_percent.call_count, 4)
+
+    def test_a_recycled_pid_does_not_inherit_the_previous_process_cpu_baseline(self):
+        first_process = mock.Mock()
+        first_process.pid = 907527
+        first_process.create_time.return_value = 1000.0
+        first_process.children.return_value = []
+        first_process.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        first_process.cpu_percent.return_value = 30.0
+
+        second_process = mock.Mock()
+        second_process.pid = 907527  # recycled PID, different process
+        second_process.create_time.return_value = 2000.0
+        second_process.children.return_value = []
+        second_process.memory_info.return_value = SimpleNamespace(rss=2_000_000)
+        second_process.cpu_percent.return_value = 0.0
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[first_process], reason=None,
+        )
+        with mock.patch.object(
+            pi_load_acceptance.psutil, 'Process', side_effect=[first_process, second_process],
+        ):
+            first_tick = pi_load_acceptance._live_role_processes(target)
+            second_tick = pi_load_acceptance._live_role_processes(target)
+
+        self.assertIsNot(first_tick[0], second_tick[0])
+        self.assertIs(second_tick[0], second_process)
+        self.assertIs(target.handles[907527], second_process)
+        # The replacement was primed exactly once, at insert -- it never
+        # inherits the outgoing process's accumulated baseline.
+        self.assertEqual(second_process.cpu_percent.call_count, 1)
+
+    def test_a_disappeared_child_is_pruned_from_the_handle_cache(self):
+        root = mock.Mock()
+        root.pid = 907527
+        root.create_time.return_value = 1000.0
+        root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        root.cpu_percent.return_value = 0.0
+
+        child = mock.Mock()
+        child.pid = 907613
+        child.create_time.return_value = 2000.0
+        child.memory_info.return_value = SimpleNamespace(rss=500_000)
+        child.cpu_percent.return_value = 5.0
+
+        # Tick 1 discovers root plus child; tick 2 discovers root alone --
+        # the child has exited between ticks.
+        root.children.side_effect = [[child], []]
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[root, child], reason=None,
+        )
+        with mock.patch.object(pi_load_acceptance.psutil, 'Process', return_value=root):
+            pi_load_acceptance._live_role_processes(target)
+            self.assertIn(907613, target.handles)
+            self.assertIn(907527, target.handles)
+
+            pi_load_acceptance._live_role_processes(target)
+
+        self.assertNotIn(907613, target.handles)
+        self.assertIn(907527, target.handles)
+
+    def test_the_handle_cache_never_exceeds_the_live_process_count(self):
+        root = mock.Mock()
+        root.pid = 907527
+        root.create_time.return_value = 1000.0
+        root.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+        root.cpu_percent.return_value = 0.0
+
+        old_child = mock.Mock()
+        old_child.pid = 907613
+        old_child.create_time.return_value = 2000.0
+        old_child.memory_info.return_value = SimpleNamespace(rss=10_000_000)
+        old_child.cpu_percent.return_value = 0.4
+
+        new_child = mock.Mock()
+        new_child.pid = 907999
+        new_child.create_time.return_value = 3000.0
+        new_child.memory_info.return_value = SimpleNamespace(rss=91_000_000)
+        new_child.cpu_percent.return_value = 45.6
+
+        # Four ticks: old child present, present, respawned, present.
+        root.children.side_effect = [[old_child], [old_child], [new_child], [new_child]]
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[root, old_child], reason=None,
+        )
+        expected_live_counts = [2, 2, 2, 2]  # root + exactly one child, every tick
+        with mock.patch.object(pi_load_acceptance.psutil, 'Process', return_value=root):
+            for expected in expected_live_counts:
+                pi_load_acceptance._live_role_processes(target)
+                self.assertEqual(len(target.handles), expected)
+
+    def test_a_busy_child_reaches_the_recorded_role_cpu_after_the_first_tick(self):
+        # One prime call plus two ticks means three fresh root discoveries
+        # (mirroring the pre-fix re-instantiation on every tick); only the
+        # FIRST discovered child ever becomes the held handle, and it is
+        # that single object's cpu_percent that must reach the busy figure
+        # -- the property that matters for D-DEBT-06-06.
+        root_instances = [mock.Mock() for _ in range(3)]
+        child_instances = [mock.Mock() for _ in range(3)]
+        for root_instance, child_instance in zip(root_instances, child_instances):
+            root_instance.pid = 907527
+            root_instance.create_time.return_value = 1000.0
+            root_instance.memory_info.return_value = SimpleNamespace(rss=1_000_000)
+            root_instance.cpu_percent.return_value = 0.0
+            child_instance.pid = 907613
+            child_instance.create_time.return_value = 2000.0
+            child_instance.memory_info.return_value = SimpleNamespace(rss=88_944 * 1024)
+            root_instance.children.return_value = [child_instance]
+        # Only child_instances[0] ever becomes the held handle -- the other
+        # two are discarded by _cached_handle's cache-hit path, so only
+        # this object's cpu_percent is ever actually called.
+        child_instances[0].cpu_percent.side_effect = [0.0, 45.6, 45.6]
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container='beacon-web', method='docker_container_tree',
+            root_pid=907527, processes=[root_instances[0]], reason=None,
+        )
+        samples_by_role = {}
+        sampled_pids_by_role = {}
+        with mock.patch.object(
+            pi_load_acceptance.psutil, 'Process', side_effect=root_instances,
+        ):
+            pi_load_acceptance._prime_cpu_percent({'web': target})
+            pi_load_acceptance._sample_resources_tick(
+                {'web': target}, samples_by_role, sampled_pids_by_role,
+            )
+            pi_load_acceptance._sample_resources_tick(
+                {'web': target}, samples_by_role, sampled_pids_by_role,
+            )
+
+        second_sample = samples_by_role['web'][1]
+        self.assertGreater(second_sample['cpu_percent'], 40)
+
+    # -- 06-11 Task 3: the acceptance report says whether its own CPU
+    # column is trustworthy, without ever turning that provenance into a
+    # threshold (PROH-OPS-07-01, D-DEBT-06-02). --
+
+    def test_the_report_carries_cpu_sampling_provenance_for_every_role(self):
+        report = pi_load_acceptance.run_self_test()
+        summary = report.assertions['resources']['summary']
+        for role in ('worker', 'web'):
+            cpu_sampling = summary[role]['cpu_sampling']
+            self.assertEqual(
+                set(cpu_sampling),
+                {
+                    'handle_cache', 'primed_pid_count', 'zero_sample_count',
+                    'nonzero_sample_count', 'all_samples_zero',
+                },
+            )
+        self.assertEqual(report.run_kind, 'smoke')
+
+    def test_cpu_sampling_provenance_never_changes_the_resource_verdict(self):
+        # A role whose every sample reads exactly 0.0 CPU, but whose peak
+        # RSS is comfortably within budget, must still pass -- CPU carries
+        # no cap (D-DEBT-06-02) and this provenance block must never mint
+        # one (PROH-OPS-07-01). Runs the real run_acceptance path (via
+        # run_self_test) with _live_role_processes forced to an
+        # all-zero-CPU reading, so the verdict computation exercised is
+        # production code, not a hand-rolled duplicate of it.
+        zero_cpu_process = mock.Mock()
+        zero_cpu_process.pid = os.getpid()
+        zero_cpu_process.memory_info.return_value = SimpleNamespace(rss=1_000)
+        zero_cpu_process.cpu_percent.return_value = 0.0
+
+        with mock.patch.object(
+            pi_load_acceptance, '_live_role_processes', return_value=[zero_cpu_process],
+        ):
+            report = pi_load_acceptance.run_self_test()
+
+        resources = report.assertions['resources']
+        self.assertTrue(resources['passed'], resources)
+        for role_summary in resources['summary'].values():
+            self.assertTrue(role_summary['cpu_sampling']['all_samples_zero'])
+        self.assertFalse(
+            any('cpu' in reason.lower() for reason in report.failure_reasons),
+            report.failure_reasons,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
