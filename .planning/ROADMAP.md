@@ -442,7 +442,7 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: 14/14 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02). Phase does NOT seal — the third Pi acceptance run still returns `overall_passed: false`; OPS-07 remains Pending.
+**Plans**: 14/18 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added 2026-09-02). Phase does NOT seal — the third Pi acceptance run still returns `overall_passed: false`; OPS-07 remains Pending.
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -458,6 +458,10 @@ Plans:
 - [x] 06-12-PLAN.md — Attribute /api/services' residual 289ms per-request cost, with measured growth ratios
 - [x] 06-13-PLAN.md — The fix-path decision against that profile, the chosen fix, and a pinned gunicorn topology
 - [x] 06-14-PLAN.md — Third Pi acceptance run (human-executed) and the debt record it establishes
+- [ ] 06-15-PLAN.md — Tracer: instrument `_db_lock`'s wait and hold time per route, readable over HTTP, inert when off
+- [ ] 06-16-PLAN.md — Decompose the critical section (connect/SQL/Python) and each request (on-CPU/lock-wait/off-CPU)
+- [ ] 06-17-PLAN.md — Harness collection around the load window, and a verdict that can say REFUTED
+- [ ] 06-18-PLAN.md — Two instrumented Pi passes, 06-LOCK-DIAGNOSTIC.md, and the fix decision (human-gated)
 
 **Wave 1**
 
@@ -541,6 +545,48 @@ judges it needs `06-11`'s CPU fix. `06-14` follows `06-13` because a hardware ru
 without the fix measures the defect, not the fix. OPS-07 is deliberately NOT promoted by this round:
 a gap-closure round may not record its own requirement complete (`PROH-OPS-07-08`, following the
 `TEL-06` precedent recorded in `STATE.md`).*
+
+### Third gap-closure round — DIAGNOSTIC (added 2026-09-02, waves continue from 9)
+
+`06-14`'s hardware run returned `overall_passed: false` again, but the failure changed shape: the
+concurrency-1 control pass now passes cleanly on every route, so per-request cost is fixed and the
+residual is **concurrency-only**. `06-VERIFICATION.md` attributes the serialization to `_db_lock` —
+`api_services` holds a process-wide mutex across 155 lines of which only 17.958% is SQL — and the
+orchestrator re-verified every link. The user chose a **measurement round over a fourth inferred
+fix**: two prior rounds each proposed a mechanism and were partly wrong. These four plans close
+Truth 5's five `missing:` items in evidence order, and implement **no fix**. Narrowing `_db_lock` is
+a one-way door fenced by `06-CONTEXT.md` D-01, `PROH-OPS-04-02`, `PROH-OPS-04-05` and
+`06-SECURITY.md`'s `T-06-24`; `06-18` puts it to the user as a blocking decision against the
+measurement.
+
+**Wave 10** *(tracer; blocked on Wave 9)*
+
+- `06-15` — `_db_lock` wait/hold instrumentation, end to end: env flag, wrapped lock object,
+  per-route collector, HTTP readout. Proven inert when disabled and mutually exclusive when enabled.
+
+**Wave 11** *(blocked on Wave 10)*
+
+- `06-16` — Hold decomposition (connection setup / SQL / Python) and per-request accounting
+  (on-CPU / lock-wait / other-off-CPU), rehearsed at concurrency 8 against the real app
+
+**Wave 12** *(blocked on Wave 11)*
+
+- `06-17` — Acceptance-harness collection around its own load window, and a CONFIRMED / REFUTED /
+  INCONCLUSIVE verdict whose REFUTED branch is built first and mutation-verified
+
+**Wave 13** *(blocked on Wave 12; contains blocking human checkpoints)*
+
+- `06-18` — Two instrumented Pi passes (control at concurrency 1, acceptance-shaped at 8/600s),
+  `06-LOCK-DIAGNOSTIC.md`, and the blocking fix decision
+
+*Strictly sequential: every plan builds on the previous plan's module. `06-15` and `06-16` both
+write `dashboard/beacon/lockprofile.py` and `tests/test_lock_profile.py`; `06-17` writes the harness
+against `06-16`'s snapshot shape; `06-18` runs what `06-17` rehearsed. The control pass in `06-18`
+is not optional — the GIL contribution is the concurrency-8 excess over the concurrency-1 baseline,
+and one run cannot yield it. OPS-07 is again deliberately NOT promoted (`PROH-OPS-07-08`), and two
+new prohibitions are minted: `PROH-OPS-07-11` (an instrumented run is diagnostic evidence only,
+never OPS-07 evidence) and `PROH-OPS-07-12` (the lock-profile block contributes to no pass/fail
+verdict).*
 
 ## Progress
 
