@@ -578,20 +578,26 @@ def _prime_cpu_percent(targets):
     ``psutil``'s first ``cpu_percent(interval=None)`` call on a process is
     meaningless (no prior sample to diff against); priming here means the
     first real tick already has a baseline for every process resolved at
-    run start. Because priming resolves its process objects through
+    run start. Priming resolves its process objects through
     ``_live_role_processes`` -- the same function every sampling tick uses
-    -- the priming pass and the sampling ticks now share one set of cached
-    objects rather than two disjoint sets, so the priming survives into the
-    ticks instead of being discarded (D-DEBT-06-06).
+    -- so the priming pass and the sampling ticks now share one set of
+    cached objects rather than two disjoint sets (D-DEBT-06-06).
+
+    The actual ``cpu_percent(interval=None)`` baseline call now happens
+    inside ``_cached_handle`` on a process's first insert into
+    ``target.handles``, triggered as a side effect of calling
+    ``_live_role_processes`` below -- this function no longer calls
+    ``cpu_percent`` a second time itself. Doing so would double-prime every
+    run-start process (one call from ``_cached_handle``'s insert path, one
+    more from this loop), which contradicts the one-call-per-priming
+    contract: "cpu_percent(interval=None) is called exactly once for
+    priming plus exactly once per tick -- never twice per tick, and never
+    re-primed."
     """
     for target in targets.values():
         if target.reason is not None:
             continue
-        for proc in _live_role_processes(target):
-            try:
-                proc.cpu_percent(interval=None)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        _live_role_processes(target)
 
 
 def _sample_resources_tick(targets, samples_by_role, sampled_pids_by_role):
