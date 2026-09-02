@@ -154,3 +154,36 @@ None.
 ---
 *Phase: 06-workload-resilience-pi-acceptance*
 *Completed: 2026-09-02*
+
+---
+
+## Correction (appended 2026-09-02, after round 3 verification and code review)
+
+**This plan shipped a Critical correctness regression. It is fixed in `bcad398`; this section
+records it here so the SUMMARY is not read as a clean result.**
+
+Task 2's unconditional row-bound clause — *"`/api/services` must remain bounded in rows read per
+request on whatever path it uses"* — was **defective as written**. The `checks_by_port` query feeds
+both `_uptime_summary` (never bounded, cannot tolerate truncation) and the offline-interval
+reconstruction (always bounded, tolerates it by design). Applying the cap in SQL reached both.
+
+Ordered `port ASC, ts ASC`, the cap sheds each port's newest rows, so a service going offline late
+loses the samples recording it. **A service with 10% real downtime reported 100.0% uptime**, with a
+fully populated 168-hour bar and no truncation signal. The cap is already reached at
+`06-PROFILE.md`'s documented shape, so this was live on the deployed Pi.
+
+This plan implemented the clause correctly — the clause itself was wrong. The guard it added
+(`test_the_route_bounds_checks_by_port_rows_through_the_limit_constant`) asserted the SQL carried a
+`LIMIT` and the route returned `200`, never a resulting value, and so stayed green through the bug.
+That test is now inverted to assert the uptime read carries **no** `LIMIT`, and a new
+mutation-verified test pins the uptime value across a lowered cap.
+
+Found by `gsd-verifier` and `gsd-code-reviewer` independently, with separate reproductions, after
+this plan's own row-bound test passed and the orchestrator confirmed the constraint honored. Full
+analysis in `D-DEBT-06-10`; finding CR-01 in `06-REVIEW-ROUND3.md`.
+
+**What this plan did deliver, and still stands:** the memoization of `_local_occurrence_epochs` and
+`window_from_row` (verified correct by differential testing across 2,000 randomized windows and 5
+timezones), the removal of the duplicate full-window scan, and the measured **27.6% reduction in
+`/api/services` p50 on Pi hardware** (289.0ms → 209.355ms) confirmed by round 3's control pass. The
+fix retains all of it.

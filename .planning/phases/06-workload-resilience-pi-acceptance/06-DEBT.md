@@ -138,6 +138,62 @@ against that attribution.
 
 ---
 
+### D-DEBT-06-10 — a plan clause required bounding a query that must not be bounded
+
+| field | value |
+|---|---|
+| **Filed** | 2026-09-02, after round 3's verification and code review |
+| **Severity** | Critical (fixed); the *process* half remains open |
+| **Found by** | `gsd-verifier` and `gsd-code-reviewer`, independently, with separate reproductions |
+| **Code fix** | `bcad398` — shipped and pushed |
+| **Status** | Code fixed. This entry stays open for the planning-process lesson. |
+
+**What happened.** `06-13-PLAN.md` Task 2 carried an unconditional clause: *"`/api/services` must remain
+bounded in rows read per request on whatever path it uses."* `06-13` satisfied it literally, moving
+`_OFFLINE_INTERVALS_BULK_ROW_LIMIT` onto the surviving `checks_by_port` query when it removed the
+duplicate `service_checks` read.
+
+That query feeds **two consumers with different correctness requirements**:
+
+| consumer | bounded before 06-13? | tolerates truncation? |
+|---|---|---|
+| `checks_by_port` → `_uptime_summary` (`uptime_pct`, 168-hour bar) | **No — never** | **No.** Truncation falsifies it. |
+| `points_by_port` → offline-interval reconstruction | Yes, always | Yes, by design |
+
+Ordered `port ASC, ts ASC`, the cap sheds each port's **newest** rows — so a service going offline late
+loses exactly the samples that record it. Measured: a service with 10% real downtime reported
+**100.0% uptime**, with a fully populated 168-bucket bar and no truncation signal anywhere on the
+response. The reviewer's independent repro found the same mechanism inverted (99.998% → 0.002%).
+Per `06-PROFILE.md` the cap is *already reached* at the documented 8-service/8-day shape, so this was
+live on the deployed Pi, not theoretical.
+
+**Why the clause was defective, not merely mis-implemented.** It treated two reads as one. The bound it
+demanded had never applied to the uptime path; requiring it "on whatever path it uses" mandated
+extending a cap into a computation that cannot survive one. `06-13` implemented the clause correctly.
+
+**Why every gate passed anyway — the part worth keeping.**
+
+- The clause's own guard test (`test_the_route_bounds_checks_by_port_rows_through_the_limit_constant`)
+  asserted the SQL contained a `LIMIT` and the route returned `200`. It never asserted a resulting
+  **value**. It is green in exactly the state that falsifies the metric.
+- The plan checker verified the clause was *present and enforced*, and flagged it as the constraint
+  most likely to be lost in implementation — correctly, but it never questioned the clause's premise.
+- The orchestrator confirmed compliance and reported the constraint "honored," which added confidence
+  without adding scrutiny. Checking that a requirement was met is not checking that the requirement
+  was right.
+
+**The generalizable lesson.** A guard asserting *shape* (SQL text, presence of a clause, a `200`) rather
+than *consequence* (the number the user sees) can be satisfied by the exact defect it was written to
+prevent. When a plan mandates a mechanism, at least one test must assert the mechanism's effect on
+observable output. The replacement tests do: one asserts the uptime read carries **no** `LIMIT`, and a
+second is mutation-verified to fail against the bug (`90.0` vs `100.0`).
+
+**What would need to be true to close this entry.** Round 4's planning explicitly reviews any clause
+mandating a *mechanism* rather than an *outcome*, and confirms each such clause's guard asserts
+observable consequence. Closing it needs a planning round that does that, not another code change.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
