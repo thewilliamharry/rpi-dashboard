@@ -442,7 +442,7 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: 9/10 plans executed — 6/6 of the original round executed; 4 gap-closure plans added 2026-09-01
+**Plans**: 10/10 plans executed — 6/6 of the original round executed; 4 gap-closure plans added 2026-09-01
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -453,7 +453,7 @@ Plans:
 - [x] 06-07-PLAN.md — Harness honesty: resolve resource targets from the Beacon containers, not a host-wide name match
 - [x] 06-08-PLAN.md — Remove the ~2.5s per-request uptime bucket rescan from /api/services, output unchanged
 - [x] 06-09-PLAN.md — Close carried-forward review warnings WR-01 (read-only inspection) and WR-02 (thumb_state precedence)
-- [ ] 06-10-PLAN.md — Pi acceptance re-run, the _db_lock decision, and the debt record
+- [x] 06-10-PLAN.md — Pi acceptance re-run, the _db_lock decision, and the debt record
 
 **Wave 1**
 
@@ -518,4 +518,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
 | 5. Theme-Parity Analytics Experience | 7/7 | Complete    | 2026-08-28 |
-| 6. Workload Resilience & Pi Acceptance | 9/10 | In Progress|  |
+| 6. Workload Resilience & Pi Acceptance | 10/10 | In Progress|  |
