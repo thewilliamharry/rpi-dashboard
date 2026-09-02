@@ -50,6 +50,41 @@ gaps:
       - "A discrete debt entry for the pre-existing _OFFLINE_INTERVALS_BULK_ROW_LIMIT finding in read_service_offline_intervals_by_port (the maintenance_attributed_seconds truncation), which this verification agrees is separable from Phase 6 but which currently has no ID of its own in 06-DEBT.md and can therefore be lost."
 deferred: []
 human_verification: []
+
+---
+
+> ## Orchestrator addendum — 2026-09-02, after this report was written
+>
+> **Not a verifier finding.** Recorded by the orchestrator so a later reader (and the round-4 planner)
+> does not re-plan work that has already landed. The report above is preserved verbatim.
+>
+> **The second failed truth in this report — the `/api/services` uptime regression — is CLOSED.**
+> Fixed in `bcad398`. The `all_checks` query is unbounded again; the 20,000-row cap now applies in
+> Python, after the `ts <= now` filter, replicating exactly what
+> `read_service_offline_intervals_by_port`'s own `LIMIT` shed, so it reaches only the
+> offline-interval reconstruction and never `_uptime_summary`. 06-13's dedup and its measured 27.6%
+> control-pass improvement are retained. The defective guard this report names
+> (`test_the_route_bounds_checks_by_port_rows_through_the_limit_constant`, which asserted SQL shape
+> and a `200`) is **inverted** to assert the uptime read carries no `LIMIT`, and a new
+> mutation-verified test pins the uptime *value* across a lowered cap — it fails `90.0 != 100.0`
+> against the pre-fix code. Root cause and the planning lesson are recorded as `D-DEBT-06-10`.
+>
+> **Two further findings from `06-REVIEW-ROUND3.md` are also fixed** (`631381f`), both
+> mutation-verified: CR-02 (`_window_from_row_cached` keyed on `id(row)` without pinning the
+> referent — reproduced returning the wrong `Window` at iteration 1 of 2000) and CR-03 (`--self-test`
+> skipped CPU priming and reported `primed_pid_count: 0`, the exact signature 06-11 added to flag a
+> broken CPU column).
+>
+> **This report's attribution of the serialization to `_db_lock` is accepted.** Every link was
+> re-verified independently against source, and `D-DEBT-06-09` has been updated from "measured but
+> not attributed" to carry the attribution, the arithmetic, and the withdrawal of the two inferences
+> this report identifies as unsound. Round 4 is therefore scoped to **confirm or refute a named
+> mechanism**, not to search an open field.
+>
+> **Still open, and the whole of round 4's scope:** the five `missing:` items under Truth 5 above.
+> Suite at the time of this addendum: **859 passed, 561 subtests, 0 failed**.
+
+
 ---
 
 # Phase 6: Workload Resilience & Pi Acceptance Verification Report
