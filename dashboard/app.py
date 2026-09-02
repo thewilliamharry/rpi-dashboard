@@ -2804,32 +2804,47 @@ def api_services():
             ports = [s['port'] for s in services]
             placeholders = ','.join('?' * len(ports))
             start_ts = now - CHECK_RETENTION_SECONDS
-            # Bounded to _OFFLINE_INTERVALS_BULK_ROW_LIMIT -- the same
-            # constant read_service_offline_intervals_by_port's own in-window
-            # query used to enforce, before this route stopped calling it a
-            # second time (see the offline-interval reconstruction below).
-            # This is now the route's only read of service_checks rows, so
-            # the row cap that used to live on that second query must live
-            # here instead, bound to the same named constant rather than a
-            # second, drifting literal, or /api/services would lose its
-            # 20,000-row-per-request bound as a side effect of no longer
-            # duplicating the read. Ordered (port ASC, ts ASC) to match
-            # _OFFLINE_INTERVALS_BULK_ROW_LIMIT's own documented at-limit
-            # behavior: if the limit is reached, only the highest-numbered
-            # port(s) lose their newest in-window rows, not every port a
-            # uniform amount.
+            # DELIBERATELY UNBOUNDED. This read feeds two consumers with
+            # different correctness requirements, and only one of them
+            # tolerates truncation:
+            #
+            #   checks_by_port  -> _uptime_summary: uptime_pct and the
+            #       168-hour bucket bar. This has NEVER been bounded, and
+            #       must not be. Dropping rows here does not degrade the
+            #       metric, it falsifies it -- silently, with a fully
+            #       populated bar and no truncation signal. 06-13 briefly
+            #       capped it (a plan clause required "/api/services must
+            #       remain bounded in rows read per request on whatever path
+            #       it uses", which wrongly conflated this read with the one
+            #       below); at LIMIT 32 a port's true 99.998% uptime was
+            #       reported as 0.002%. See D-DEBT-06-10.
+            #   points_by_port -> offline-interval reconstruction. This has
+            #       always been bounded by _OFFLINE_INTERVALS_BULK_ROW_LIMIT
+            #       and tolerates at-limit truncation by design; the cap is
+            #       applied below, not in SQL, so it reaches only this path.
+            #
+            # Ordered (port ASC, ts ASC) so the in-Python cap below sheds
+            # exactly the rows read_service_offline_intervals_by_port's own
+            # `LIMIT` shed. Per-port sequences are identical to the previous
+            # global `ts ASC` ordering, which is all either consumer reads.
             all_checks = conn.execute(
                 f"SELECT ts, port, online FROM service_checks "
                 f"WHERE port IN ({placeholders}) AND ts >= ? "
-                f"ORDER BY port ASC, ts ASC LIMIT ?",
-                (*ports, start_ts, beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT),
+                f"ORDER BY port ASC, ts ASC",
+                (*ports, start_ts),
             ).fetchall()
             points_by_port = defaultdict(list)
+            # Replicates the LIMIT that read_service_offline_intervals_by_port
+            # applies to its own in-window query: same constant, same
+            # (port ASC, ts ASC) order, counted after the `ts <= now` filter
+            # so the admitted set matches that query's `ts <= end_ts` bound.
+            offline_points_budget = beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT
             for row in all_checks:
                 checks_by_port[row['port']].append((row['ts'], row['online']))
                 ts = int(row['ts'])
-                if ts <= now:
+                if ts <= now and offline_points_budget > 0:
                     points_by_port[row['port']].append((ts, 1 if row['online'] else 0))
+                    offline_points_budget -= 1
             # One bulk read for the whole list rather than one per-service window
             # query inside this loop (T-03.1-29) -- every service's coverage
             # derivation below shares this single read.

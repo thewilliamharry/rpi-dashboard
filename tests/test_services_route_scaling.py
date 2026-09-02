@@ -349,7 +349,7 @@ class OfflineIntervalsBulkReadTests(unittest.TestCase):
         # matching the maintenance-window precedent.
         self.assertIsInstance(bulk, dict)
 
-    def test_the_route_bounds_checks_by_port_rows_through_the_limit_constant(self):
+    def test_the_route_does_not_bound_the_uptime_read_with_the_interval_row_cap(self):
         """/api/services must remain bounded in service_checks rows read per
         request on whatever path it uses for offline-interval reconstruction
         (06-13-PLAN.md Task 2's unconditional row-bound requirement).
@@ -406,17 +406,100 @@ class OfflineIntervalsBulkReadTests(unittest.TestCase):
             appmod.database_access = real_database_access
 
         self.assertEqual(response.status_code, 200)
+        # The route must NOT push the offline-interval row cap down into the
+        # checks_by_port SQL. 06-13 did exactly that, to satisfy a plan clause
+        # requiring "/api/services must remain bounded in rows read per request
+        # on whatever path it uses" -- a requirement that wrongly treated the
+        # route's two consumers of these rows as one. The uptime sweep had
+        # never been bounded and must not be (D-DEBT-06-10); only the
+        # offline-interval reconstruction tolerates truncation, and its cap is
+        # now applied in Python, after the rows are read.
+        #
+        # This assertion is deliberately the inverse of the one it replaces.
+        # The original asserted `LIMIT 5` appeared in the checks SQL, which is
+        # green in exactly the state that reports a service with 10% downtime
+        # as 100.0% up.
         checks_statements = [
             sql for sql in statements
-            if 'FROM service_checks' in sql and 'port IN (' in sql and 'LIMIT' in sql
+            if 'FROM service_checks' in sql and 'port IN (' in sql and 'ts >=' in sql
         ]
         self.assertTrue(
             checks_statements,
-            f'expected the checks_by_port query to carry a LIMIT clause: {statements}',
+            f'expected the route to issue a checks_by_port read: {statements}',
         )
-        self.assertTrue(
-            any('LIMIT 5' in sql for sql in checks_statements),
-            f'expected the patched constant (5) to appear in the checks query LIMIT: {checks_statements}',
+        self.assertFalse(
+            [sql for sql in checks_statements if 'LIMIT' in sql],
+            'the checks_by_port query must not carry a LIMIT -- it feeds _uptime_summary, '
+            'which requires every in-window row. Bound the offline-interval reconstruction '
+            f'in Python instead (D-DEBT-06-10): {checks_statements}',
+        )
+
+    def test_uptime_pct_is_not_affected_by_the_offline_interval_row_cap(self):
+        """uptime_pct must be computed from ALL in-window rows, never a
+        truncated subset.
+
+        06-13 applied _OFFLINE_INTERVALS_BULK_ROW_LIMIT to the checks_by_port
+        query, which feeds _uptime_summary. That read had never been bounded.
+        The result was silent falsification rather than graceful degradation:
+        the truncated set keeps each port's EARLIEST rows (ORDER BY port ASC,
+        ts ASC), so a service that goes offline late loses exactly the samples
+        that record it, and reports a confident 100.0% with a fully populated
+        168-hour bar and no truncation signal anywhere on the response.
+        See D-DEBT-06-10.
+
+        The fixture matters: uptime is TIME-WEIGHTED from the first sample to
+        `now`, so dropping trailing rows that carry no state change is a
+        no-op. A first attempt at this test seeded a late-online history and
+        passed against the bug (99.583 both ways) -- it proved nothing. The
+        truncated-away rows MUST contain the transition. Here rows 0-179 are
+        online and 180-199 are offline, so the full read sees ~10% downtime
+        and any capped read sees an unbroken online history.
+        """
+        appmod = self.appmod
+        port = 9811
+        now = int(time.time())
+        span = 6000
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                "VALUES(?,?,?,?,?,?)",
+                (port, 'CapUptime', now - span, now, 0, now - 600),
+            )
+            for i in range(200):
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (now - span + i * 30, port, 0 if i >= 180 else 1),
+                )
+            conn.commit()
+            conn.close()
+
+        def _uptime_for():
+            response = appmod.app.test_client().get('/api/services')
+            self.assertEqual(response.status_code, 200)
+            for entry in response.get_json():
+                if entry['port'] == port:
+                    return entry.get('uptime_pct')
+            self.fail(f'port {port} absent from /api/services')
+
+        full = _uptime_for()
+        with mock.patch.object(beacon_repositories, '_OFFLINE_INTERVALS_BULK_ROW_LIMIT', 5):
+            capped = _uptime_for()
+
+        # Guard the fixture itself: if this ever reaches 100 the history has
+        # stopped exercising truncation and the test below is vacuous.
+        self.assertIsNotNone(full, 'uptime_pct should be computed for a service with checks')
+        self.assertLess(
+            full, 99.0,
+            f'fixture no longer produces observable downtime (full={full}); this test '
+            f'cannot detect truncation without it',
+        )
+        self.assertEqual(
+            full, capped,
+            f'uptime_pct changed when the offline-interval row cap was lowered '
+            f'(full={full}, capped={capped}) -- the cap has reached the uptime path '
+            f'again. It must bound only the offline-interval reconstruction '
+            f'(D-DEBT-06-10).',
         )
 
     def test_attributed_downtime_is_unchanged_through_the_route(self):
