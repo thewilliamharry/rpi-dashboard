@@ -1615,6 +1615,51 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
         second_sample = samples_by_role['web'][1]
         self.assertGreater(second_sample['cpu_percent'], 40)
 
+    # -- 06-11 Task 3: the acceptance report says whether its own CPU
+    # column is trustworthy, without ever turning that provenance into a
+    # threshold (PROH-OPS-07-01, D-DEBT-06-02). --
+
+    def test_the_report_carries_cpu_sampling_provenance_for_every_role(self):
+        report = pi_load_acceptance.run_self_test()
+        summary = report.assertions['resources']['summary']
+        for role in ('worker', 'web'):
+            cpu_sampling = summary[role]['cpu_sampling']
+            self.assertEqual(
+                set(cpu_sampling),
+                {
+                    'handle_cache', 'primed_pid_count', 'zero_sample_count',
+                    'nonzero_sample_count', 'all_samples_zero',
+                },
+            )
+        self.assertEqual(report.run_kind, 'smoke')
+
+    def test_cpu_sampling_provenance_never_changes_the_resource_verdict(self):
+        # A role whose every sample reads exactly 0.0 CPU, but whose peak
+        # RSS is comfortably within budget, must still pass -- CPU carries
+        # no cap (D-DEBT-06-02) and this provenance block must never mint
+        # one (PROH-OPS-07-01). Runs the real run_acceptance path (via
+        # run_self_test) with _live_role_processes forced to an
+        # all-zero-CPU reading, so the verdict computation exercised is
+        # production code, not a hand-rolled duplicate of it.
+        zero_cpu_process = mock.Mock()
+        zero_cpu_process.pid = os.getpid()
+        zero_cpu_process.memory_info.return_value = SimpleNamespace(rss=1_000)
+        zero_cpu_process.cpu_percent.return_value = 0.0
+
+        with mock.patch.object(
+            pi_load_acceptance, '_live_role_processes', return_value=[zero_cpu_process],
+        ):
+            report = pi_load_acceptance.run_self_test()
+
+        resources = report.assertions['resources']
+        self.assertTrue(resources['passed'], resources)
+        for role_summary in resources['summary'].values():
+            self.assertTrue(role_summary['cpu_sampling']['all_samples_zero'])
+        self.assertFalse(
+            any('cpu' in reason.lower() for reason in report.failure_reasons),
+            report.failure_reasons,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

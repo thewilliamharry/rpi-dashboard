@@ -802,8 +802,12 @@ def run_acceptance(scenario):
         rss_values = [sample['rss_bytes'] for sample in samples]
         cpu_values = [sample['cpu_percent'] for sample in samples]
         peak_rss = max(rss_values, default=None)
+        sample_count = len(samples)
+        zero_sample_count = sum(1 for value in cpu_values if value == 0.0)
+        nonzero_sample_count = len(cpu_values) - zero_sample_count
+        all_samples_zero = nonzero_sample_count == 0 and sample_count > 0
         resource_summary[role] = {
-            'sample_count': len(samples),
+            'sample_count': sample_count,
             'peak_rss_bytes': peak_rss,
             'mean_rss_bytes': (sum(rss_values) / len(rss_values)) if rss_values else None,
             # Peak/mean CPU percent are recorded as observed evidence, not
@@ -812,6 +816,24 @@ def run_acceptance(scenario):
             # silent omission).
             'peak_cpu_percent': max(cpu_values, default=None),
             'mean_cpu_percent': (sum(cpu_values) / len(cpu_values)) if cpu_values else None,
+            # D-DEBT-06-06 provenance: makes an untrue CPU column
+            # self-announcing in the report instead of silently
+            # indistinguishable from a genuinely idle deployment.
+            # `all_samples_zero` being true on an acceptance-shaped run is
+            # the broken-measurement signature D-DEBT-06-06 describes and
+            # must be read as such, never as evidence of a low-CPU
+            # deployment -- but it is deliberately never appended to
+            # failure_reasons and never affects assertions.resources.passed
+            # (PROH-OPS-07-01, D-DEBT-06-02: CPU carries no cap in this
+            # round). The condition is for a human to read at 06-14's
+            # hardware checkpoint, not for the harness to fail on.
+            'cpu_sampling': {
+                'handle_cache': 'per_pid_run_lifetime',
+                'primed_pid_count': len(target.handles),
+                'zero_sample_count': zero_sample_count,
+                'nonzero_sample_count': nonzero_sample_count,
+                'all_samples_zero': all_samples_zero,
+            },
         }
         # assert_resource_budget is unchanged and stays the sole rule for
         # whether a role's peak RSS is within budget (PROH-OPS-07-01):
