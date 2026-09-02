@@ -201,6 +201,16 @@ None - no external service configuration required.
 - `06-13` (the sibling plan touching `dashboard/app.py`, `dashboard/Dockerfile`, `docker-compose.yml`) can proceed independently; this plan touched none of those files.
 - No blockers for downstream plans.
 
+## Self-Check: PASSED
+
+- FOUND: tests/pi_load_acceptance.py
+- FOUND: tests/test_workload_resilience.py
+- FOUND: .planning/phases/06-workload-resilience-pi-acceptance/06-11-SUMMARY.md
+- FOUND: commit 6382726 (test: failing regression, Task 1 RED)
+- FOUND: commit 87bb934 (feat: per-PID handle cache, Task 1 GREEN)
+- FOUND: commit 3455434 (test: cache accounting properties + Rule-1 fix, Task 2)
+- FOUND: commit aa354c2 (feat: cpu_sampling provenance, Task 3)
+
 ---
 *Phase: 06-workload-resilience-pi-acceptance*
 *Completed: 2026-09-02*
