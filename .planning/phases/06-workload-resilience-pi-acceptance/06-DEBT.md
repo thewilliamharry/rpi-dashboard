@@ -108,7 +108,7 @@ Only then can `D-DEBT-06-02`'s revisit trigger be meaningfully evaluated.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-RESEARCH.md` Open Question 3, `PROJECT.md`'s `AR-03-01` accepted-risk note |
-| **Status** | **Decided — deferred again, on measured hardware evidence.** Re-examined this round by the user (`06-10-PLAN.md` Task 2) and upheld. Closed for this phase; revisit only if the condition below occurs. |
+| **Status** | **Decided — deferred again, on measured hardware evidence, now also on a measured cost attribution.** Re-examined by the user in `06-10-PLAN.md` Task 2 and upheld; re-examined again in `06-13-PLAN.md` Task 1 against `06-PROFILE.md`'s attribution and upheld again. Closed for this phase; revisit only if the condition below occurs. |
 | **Recorded in the plan** | `06-05-PLAN.md` decision D-01, `PROH-OPS-04-02`, `06-10-PLAN.md` Task 2's decision checkpoint |
 
 **What was not done and why.** `_db_lock`'s scope in `dashboard/app.py` remains unchanged at every one
@@ -204,6 +204,109 @@ exists yet.
 **Explicitly not a bug.** `_db_lock` is correct as it stands today. This is an optimization opportunity,
 not a defect; removing or narrowing it without the audit above would reintroduce the exact race it was
 added to prevent.
+
+**`06-13`'s re-examination — the deferral now also rests on a measured cost attribution, not only on
+the 29x unlocked-route evidence.** `06-12`'s profiler (`tests/services_route_profile.py`) supplied the
+attribution `D-DEBT-06-01` previously argued about: at the profiled 8-service/8-day shape,
+`/api/services`'s residual cost is dominated by two named, measured, in-process Python-side
+sub-computations — `maintenance_coverage` (29.649% share, growth ratio 7.564, *exceeding* the measured
+`check_row_ratio` of 4.249 — the single bucket the profile found growing faster than stored check
+count) and a duplicate full-window `service_checks` scan inside `sql_fetch`/`offline_intervals_read`
+(15.620% + 10.266% share, confirmed 79.1% duplication of the same rows). Both are reducible without
+touching `_db_lock`, `dashboard/Dockerfile`'s topology, or `docker-compose.yml`. Given the user selected
+`reduce-request-cost` at Task 1's checkpoint — attacking the input rather than the lock or the GIL —
+this bears on the entry's first named reopening condition (`/api/services`'s residual cost as the live
+suspect) directly: the residual is now smaller than it was, on measured evidence, not by argument. It
+does not bear on the second reopening condition (the unlocked-route recovery comparison) at all —
+`06-13` changes no topology and takes no `/api/services`/`/api/advanced/current` hardware measurement.
+`_db_lock`'s scope stays exactly as it is; no line touching it changed in `06-13`. `T-06-24`'s closure
+evidence remains valid and `/gsd-secure-phase 06` does not need to re-run.
+
+**What `06-13` implemented, concretely.** A request-scoped memo in `dashboard/beacon/maintenance.py`
+for `_local_occurrence_epochs` (keyed on `(window, the calendar date now_epoch resolves to, timezone)`
+— the exact granularity at which that function's result is provably invariant) and for
+`window_from_row`'s per-call re-parse/re-validate work, both threaded through `coverage()` and
+`attributed_downtime_seconds()` via an optional `cache=` parameter that defaults to `None` (every
+caller outside `/api/services` is unaffected). Measured at the fast growth-shape used by
+`tests/test_services_route_scaling.py`'s `ServicesRouteProfilerGuardTests` (2 services, 1-vs-4 days,
+seed `20260901`, 20 repeats): `maintenance_coverage` fell from small=276.221ms / large=1322.387ms
+(memo disabled, verified by hand) to small≈30ms / large≈133ms (memo enabled, as shipped) — roughly a
+9-10x absolute reduction. Separately, `dashboard/app.py`'s `api_services` no longer calls
+`beacon_repositories.read_service_offline_intervals_by_port` a second time over rows it already fetched
+into `checks_by_port`; a new `beacon_repositories.offline_intervals_from_points_by_port` reconstructs
+offline intervals from those already-fetched points instead, reusing the same
+`_offline_intervals_from_points` helper the removed call used, proven equivalent to the single-port
+oracle by `tests/test_services_route_scaling.py::OfflineIntervalsFromPointsTests`. The `checks_by_port`
+query itself now carries `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` as its `LIMIT` — the same named constant,
+not a second literal — so `/api/services` does not lose its 20,000-row bound as a side effect of no
+longer duplicating the read; proven through the route by a new test patching the constant small and
+asserting the bound holds via `test_client()`.
+
+**Honest limit of this round's evidence.** `06-13`'s guard for `maintenance_coverage` asserts the
+achieved *absolute* cost reduction, not the growth-ratio classification Task 2's plan text named
+(`growth_ratio` below half the measured `check_row_ratio`): that classification was not reached. Call
+*count* into `coverage()`, not per-call cost, still scales with retained days, because it is driven by
+the number of discrete stored-check-derived offline intervals `attributed_downtime_seconds` processes
+one at a time — over a thousand short intervals at the profiled seeded shape, from J3/J4-cadence
+sampling for the one port carrying a window. Reducing that further would mean changing
+`_offline_intervals_from_points`'s interval-merging behavior, which `06-13` did not do: out of this
+round's scope, and risking the byte-identical output guarantee `PROH-OPS-07-05` protects. See
+`06-13-SUMMARY.md`'s Deviations section for the full accounting. Whether this round's cost reduction is
+*sufficient* to close the `OPS-07` responsiveness gap is not established here — that is `06-14`'s
+hardware run to determine. `D-DEBT-06-06` (the broken CPU-percent sampling) is untouched by `06-13` and
+remains open below.
+
+---
+
+### D-DEBT-06-07 — deployment gunicorn concurrency model pinned at the source level
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-VERIFICATION.md` (warning-level anti-pattern on `dashboard/Dockerfile:27`), `06-13-PLAN.md` Task 3 |
+| **Status** | **Decided — pinned by a test, not by convention.** Closed for this phase. |
+| **Recorded in the plan** | `06-13-PLAN.md` Task 3, `tests/test_module_boundaries.py::ModuleBoundaryTests::test_the_deployment_pins_its_gunicorn_concurrency_model` |
+
+**The values in force.** `dashboard/Dockerfile`'s gunicorn `CMD` runs `--workers 1 --threads 8` —
+unchanged by `06-13`, since the user's Task 1 decision (`reduce-request-cost`) touches no deployment
+topology. These two numbers are the deployment's concurrency model: one OS process, one Python
+interpreter, one GIL, eight HTTP-serving threads, and therefore one `_db_lock` instance serializing
+every database-touching route that takes it.
+
+**Why they are now pinned by a test, not merely documented.** Every latency figure this phase's
+evidence rests on — the Pi control-pass and acceptance-pass numbers in `D-DEBT-06-01`, `06-PROFILE.md`'s
+attribution and growth tables, the acceptance-harness runs `06-10` and `06-14` produce — was gathered
+under exactly this topology. `06-VERIFICATION.md` flagged the unpinned `CMD` line as a warning-level
+anti-pattern precisely because nothing prevented a future edit from silently changing the concurrency
+model those numbers describe, without anyone noticing the evidence base had shifted underneath them.
+`tests/test_module_boundaries.py::ModuleBoundaryTests::test_the_deployment_pins_its_gunicorn_concurrency_model`
+parses the `CMD` line's argument list and asserts `--workers == "1"` and `--threads == "8"` at the
+source level, with assertion messages naming `D-DEBT-06-01` and `PROH-OPS-04-05` so a developer who
+trips it is routed to the decision record rather than tempted to update the constant to make the test
+pass. Proven non-tautological by mutation: temporarily changing `--workers` to `"2"` and, separately,
+`--threads` to `"4"` was each observed to fail this test (verified by hand while writing it; both
+mutations reverted, `git diff -- dashboard/Dockerfile` clean afterward).
+
+**What `PROH-OPS-04-05` requires of anyone changing these values.** Raising `--workers` above 1 grants a
+second OS process unserialized concurrent write access to the same SQLite file with no line of
+`_db_lock` changing — the same boundary `06-SECURITY.md`'s `T-06-24` is closed on. That change may not
+ship as an incidental performance tuning: it requires the same cross-process audit `D-DEBT-06-01` names
+for narrowing the lock, a per-call-site `_db_lock` audit, a separate-process concurrent-writer integrity
+test extending `PROH-OPS-04-01`'s guarantee across the process boundary, a `mem_limit` re-derived from
+measured per-worker RSS (see below), and `/gsd-secure-phase 06` re-run because `T-06-24`'s closure
+evidence would be invalidated by construction. Lowering `--threads` is a lower-stakes, git-revertible
+config change (no new database-access boundary), but it still invalidates the comparability of every
+prior acceptance run's numbers, gathered at eight threads — `PROH-OPS-07-10` still requires the
+acceptance harness to be driven at `--concurrency 8` regardless of the deployment's own thread count.
+
+**The `mem_limit` arithmetic constraining any future worker-count increase.** `06-10`'s hardware reports
+measured the `web` service's RSS rising from ~106.8MB mean at concurrency 1 to ~128.0MB mean at
+concurrency 8, for a single worker, against `docker-compose.yml`'s current `mem_limit: 256m` — already
+roughly half-consumed by one worker under load. A second worker would not simply double that figure
+(each worker's own RSS floor includes shared, not-strictly-per-worker cost), but it would push
+measured peak RSS meaningfully closer to, and plausibly past, `mem_limit: 256m` well before eight
+threads' worth of per-worker headroom is accounted for. This is exactly why `PROH-OPS-04-05` requires
+`mem_limit` to be re-derived from measurement — not assumed proportional — before any `add-workers`
+branch can ship.
 
 ---
 

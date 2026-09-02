@@ -123,6 +123,58 @@ class ModuleBoundaryTests(unittest.TestCase):
             'the production image must include the complete Advanced document bundle',
         )
 
+    def test_the_deployment_pins_its_gunicorn_concurrency_model(self):
+        """dashboard/Dockerfile's gunicorn --workers/--threads values are the
+        deployment's concurrency model, load-bearing for every latency number
+        06-workload-resilience-pi-acceptance produced (06-VERIFICATION.md
+        flagged the unpinned CMD line as a warning-level anti-pattern for
+        exactly this reason). The process/thread topology decides whether
+        dashboard/app.py's _db_lock serializes ALL database access (one
+        interpreter, --workers 1) or only SOME of it (several interpreters,
+        each with its own independent _db_lock instance) -- so a change to
+        either number is a change to the database-access boundary
+        06-SECURITY.md's T-06-24 is closed on, and per PROH-OPS-04-05 it must
+        go through the same decision and prerequisites D-DEBT-06-01 names,
+        not through an unremarked edit to this file. If this test fails
+        because you changed --workers or --threads: that is the point --
+        read D-DEBT-06-01 in 06-DEBT.md and PROH-OPS-04-05 in
+        06-13-PLAN.md's frontmatter before changing the constant to make
+        this test pass.
+        """
+        dockerfile = Path('dashboard/Dockerfile').read_text(encoding='utf-8')
+        cmd_lines = [line for line in dockerfile.splitlines() if line.startswith('CMD ')]
+        self.assertEqual(
+            len(cmd_lines), 1,
+            f'expected exactly one CMD line in dashboard/Dockerfile, found {len(cmd_lines)}',
+        )
+        cmd_argv = ast.literal_eval(cmd_lines[0][len('CMD '):].strip())
+
+        def _flag_value(flag):
+            self.assertIn(
+                flag, cmd_argv,
+                f'{flag} missing from the gunicorn CMD -- the deployment concurrency model '
+                f'pinned by D-DEBT-06-01 / PROH-OPS-04-05 has changed shape, not just value',
+            )
+            return cmd_argv[cmd_argv.index(flag) + 1]
+
+        self.assertEqual(
+            _flag_value('--workers'), '1',
+            'dashboard/Dockerfile --workers changed. Raising gunicorn worker count grants a '
+            'second OS process unserialized concurrent write access to the same SQLite file '
+            'with no line of _db_lock changing (PROH-OPS-04-05) -- this requires the decision '
+            'and prerequisites D-DEBT-06-01 names (06-DEBT.md), not an unremarked edit here.',
+        )
+        self.assertEqual(
+            _flag_value('--threads'), '8',
+            'dashboard/Dockerfile --threads changed. The thread count is part of the same '
+            'pinned concurrency model D-DEBT-06-01 (06-DEBT.md) and PROH-OPS-04-05 protect -- '
+            'every latency figure this phase measured was gathered at this value.',
+        )
+        self.assertEqual(
+            cmd_argv[-1], 'app:app',
+            'dashboard/Dockerfile\'s gunicorn CMD must still target app:app',
+        )
+
     def test_sqlite_connection_entrypoints_use_the_managed_database_seam(self):
         app_source = Path('dashboard/app.py').read_text(encoding='utf-8')
         queue_source = Path('dashboard/beacon/queues.py').read_text(encoding='utf-8')

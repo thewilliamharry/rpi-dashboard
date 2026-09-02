@@ -2803,22 +2803,53 @@ def api_services():
         if services:
             ports = [s['port'] for s in services]
             placeholders = ','.join('?' * len(ports))
+            start_ts = now - CHECK_RETENTION_SECONDS
+            # Bounded to _OFFLINE_INTERVALS_BULK_ROW_LIMIT -- the same
+            # constant read_service_offline_intervals_by_port's own in-window
+            # query used to enforce, before this route stopped calling it a
+            # second time (see the offline-interval reconstruction below).
+            # This is now the route's only read of service_checks rows, so
+            # the row cap that used to live on that second query must live
+            # here instead, bound to the same named constant rather than a
+            # second, drifting literal, or /api/services would lose its
+            # 20,000-row-per-request bound as a side effect of no longer
+            # duplicating the read. Ordered (port ASC, ts ASC) to match
+            # _OFFLINE_INTERVALS_BULK_ROW_LIMIT's own documented at-limit
+            # behavior: if the limit is reached, only the highest-numbered
+            # port(s) lose their newest in-window rows, not every port a
+            # uniform amount.
             all_checks = conn.execute(
                 f"SELECT ts, port, online FROM service_checks "
-                f"WHERE port IN ({placeholders}) AND ts >= ? ORDER BY ts ASC",
-                (*ports, now - CHECK_RETENTION_SECONDS),
+                f"WHERE port IN ({placeholders}) AND ts >= ? "
+                f"ORDER BY port ASC, ts ASC LIMIT ?",
+                (*ports, start_ts, beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT),
             ).fetchall()
+            points_by_port = defaultdict(list)
             for row in all_checks:
                 checks_by_port[row['port']].append((row['ts'], row['online']))
+                ts = int(row['ts'])
+                if ts <= now:
+                    points_by_port[row['port']].append((ts, 1 if row['online'] else 0))
             # One bulk read for the whole list rather than one per-service window
             # query inside this loop (T-03.1-29) -- every service's coverage
             # derivation below shares this single read.
             windows_by_port = beacon_repositories.read_maintenance_windows_by_port(conn, ports=ports)
-            # Same shape as the maintenance-window bulk read above: one read
-            # for the whole port list rather than one per-service offline-
-            # interval query inside the loop below (OPS-07 gap closure).
-            offline_intervals_by_port = beacon_repositories.read_service_offline_intervals_by_port(
-                conn, ports=ports, start_ts=now - CHECK_RETENTION_SECONDS, end_ts=now,
+            # Offline intervals are reconstructed from the checks already
+            # fetched above (all_checks / points_by_port) instead of a second
+            # in-window service_checks read (06-PROFILE.md: sql_fetch 15.620%
+            # share, offline_intervals_read 10.266%, both confirmed to be
+            # 79.1% duplicate reads of the same rows at the profiled
+            # 8-service/8-day shape). The boundary-sample query below reads
+            # rows strictly before start_ts -- outside the window all_checks
+            # already covers -- so it remains a genuinely separate,
+            # non-duplicative read, kept exactly as
+            # read_service_offline_intervals_by_port used it.
+            boundary_by_port = beacon_repositories.read_service_offline_interval_boundaries_by_port(
+                conn, ports=ports, start_ts=start_ts,
+            )
+            offline_intervals_by_port = beacon_repositories.offline_intervals_from_points_by_port(
+                ports=ports, boundary_by_port=boundary_by_port, points_by_port=points_by_port,
+                start_ts=start_ts, end_ts=now,
             )
         tls_posture = beacon_repositories.get_runtime_state(conn, 'service_tls_posture', {})
         tls_posture = tls_posture if isinstance(tls_posture, dict) else {}
@@ -2829,6 +2860,15 @@ def api_services():
         previews_by_port = {row['port']: row for row in preview_rows}
 
         result = []
+        # Request-scoped memo for beacon_maintenance's occurrence walk, shared
+        # across every service's coverage()/attributed_downtime_seconds() call
+        # below. The walk is a pure function of (window, epoch, timezone), so
+        # memoizing it changes no output -- only how many times the same walk
+        # is repeated within this one request (06-PROFILE.md:
+        # maintenance_coverage, 29.649% of the route's measured residual
+        # cost, growth ratio 7.564 -- the single bucket the profile found
+        # growing faster than the measured check_row_ratio of 4.249).
+        maintenance_occurrence_cache = {}
         for svc in services:
             checks = checks_by_port.get(svc['port'], [])
             uptime_pct, uptime_buckets = _uptime_summary(checks, now)
@@ -2844,14 +2884,14 @@ def api_services():
             maintenance_until = None
             if not svc['is_online']:
                 covered, grace_until = beacon_maintenance.coverage(
-                    port_windows, now, SETTINGS.timezone,
+                    port_windows, now, SETTINGS.timezone, cache=maintenance_occurrence_cache,
                 )
                 if covered:
                     availability = beacon_diagnosis.MAINTENANCE_AVAILABILITY
                     maintenance_until = grace_until
             offline_intervals = offline_intervals_by_port.get(svc['port'], [])
             maintenance_attributed_seconds = beacon_maintenance.attributed_downtime_seconds(
-                offline_intervals, port_windows, SETTINGS.timezone,
+                offline_intervals, port_windows, SETTINGS.timezone, cache=maintenance_occurrence_cache,
             )
 
             result.append({
