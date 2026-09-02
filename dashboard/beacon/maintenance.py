@@ -129,7 +129,49 @@ def window_from_row(row):
         return None
 
 
-def _local_occurrence_epochs(window, now_epoch, tz):
+def _window_from_row_cached(row, cache):
+    """Same result as ``window_from_row(row)``, memoized in ``cache`` when given.
+
+    ``coverage()`` and ``attributed_downtime_seconds()`` both re-derive a
+    ``Window`` from the same stored row on every one of the (potentially
+    thousands of, per 06-PROFILE.md) calls one ``/api/services`` request
+    makes for a single window -- re-parsing ``weekdays``, re-validating every
+    field, and re-constructing the frozen dataclass each time, even though
+    the row's content never changes within one request. ``cache``, when
+    given, is the same request-scoped dict ``coverage()`` forwards to
+    ``_local_occurrence_epochs``.
+
+    Keyed on ``id(row)`` rather than on the row's content: every caller in
+    this codebase (``api_services``'s ``windows_by_port``, and every other
+    ``coverage()``/``attributed_downtime_seconds()`` call site) passes the
+    same already-fetched row objects on every repeated call within one
+    request or one bounded operation -- they are never rebuilt mid-flight --
+    so identity is a valid, and far cheaper, substitute for a content hash
+    here: it avoids re-copying and re-sorting the row's fields on every one
+    of those thousands of calls just to perform the cache lookup itself,
+    which would otherwise eat into the same saving this cache exists to
+    provide. This is safe specifically because ``cache`` is always a
+    short-lived, single-request-scoped dict (never persisted across
+    requests or across a row object's own lifetime), so there is no window
+    in which a stale id could be reused for a different row's content
+    before this cache is discarded. The key is namespaced (``'window'``,
+    ...) so it cannot collide with ``_local_occurrence_epochs``'s own
+    ``(window, date, tz)`` keys in the same dict. Falls back to the
+    uncached, unmemoized call when ``cache`` is ``None``, matching this
+    function's previous behavior exactly for every caller that does not
+    opt in.
+    """
+    if cache is None:
+        return window_from_row(row)
+    key = ('window', id(row))
+    if key in cache:
+        return cache[key]
+    window = window_from_row(row)
+    cache[key] = window
+    return window
+
+
+def _local_occurrence_epochs(window, now_epoch, tz, cache=None):
     """Yield every UTC epoch at which ``window`` could have started.
 
     Bounded to ``MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS`` calendar days back
@@ -137,8 +179,48 @@ def _local_occurrence_epochs(window, now_epoch, tz):
     local wall time does not exist (a spring-forward gap) is skipped; a
     candidate whose local wall time is ambiguous (a fall-back repeat) is
     yielded twice, once for each real instant.
+
+    This function's result depends on ``now_epoch`` **only** through
+    ``now_local.date()`` -- the local calendar date ``now_epoch`` falls on in
+    ``tz`` -- never through the finer time-of-day, since every candidate date
+    below is derived by subtracting whole-day offsets from that date and
+    every occurrence check inside a date is independent of what specific
+    instant within "now"'s day triggered the walk. So this function is pure
+    per ``(window, that date, tz)``. ``cache``, when given, is a plain
+    ``dict`` the caller owns the lifetime of (e.g. one dict per
+    ``/api/services`` request); a repeat call whose ``now_epoch`` falls on an
+    already-seen ``(window, date, tz)`` returns the already-computed list
+    instead of re-walking ``MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS + 1``
+    calendar days of fold-aware ``datetime`` construction. This is the
+    memoization granularity that actually collapses the redundancy
+    (06-PROFILE.md: ``maintenance_coverage``, 29.649% of `/api/services`'s
+    measured residual cost, ~5,997 calls per request at the profiled
+    8-service/8-day shape -- many with different exact ``now_epoch`` values
+    that land on the same handful of calendar days per window -- growth
+    ratio 7.564, exceeding the measured check-row ratio of 4.249). Keying on
+    the exact epoch instead of the date it resolves to would still recompute
+    on almost every call, since callers rarely pass the identical epoch
+    twice. ``cache=None`` (the default) preserves the previous unmemoized
+    behavior exactly, for every caller that does not opt in.
     """
+    # The walk itself stays inline in this same function (rather than a
+    # separate helper) deliberately: tests/services_route_profile.py's
+    # PROFILE_PHASES maps the 'maintenance_coverage' bucket to this
+    # function's own name, and cProfile attributes self-time per stack
+    # frame -- splitting the walk into a second, differently-named function
+    # would silently move its cost into the profiler's 'other' bucket
+    # instead of the bucket it is actually measuring.
     now_local = datetime.fromtimestamp(now_epoch, tz=tz)
+
+    cache_key = None
+    if cache is not None:
+        cache_key = (window, now_local.date(), getattr(tz, 'key', str(tz)))
+        cached = cache.get(cache_key)
+        if cached is not None:
+            yield from cached
+            return
+
+    occurrences = []
     for day_offset in range(MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS + 1):
         candidate_date = (now_local - timedelta(days=day_offset)).date()
         if candidate_date.isoweekday() not in window.weekdays:
@@ -163,10 +245,14 @@ def _local_occurrence_epochs(window, now_epoch, tz):
                 # yield it once.
                 continue
             seen_epochs.add(candidate_epoch)
-            yield candidate_epoch
+            occurrences.append(candidate_epoch)
+
+    if cache is not None:
+        cache[cache_key] = occurrences
+    yield from occurrences
 
 
-def coverage(windows, now_epoch, tz_name):
+def coverage(windows, now_epoch, tz_name, *, cache=None):
     """Return ``(covered, grace_until_epoch)`` for a set of stored window rows.
 
     ``windows`` is a sequence of row-like mappings (as returned by
@@ -177,14 +263,19 @@ def coverage(windows, now_epoch, tz_name):
     period: a window is covering from its start through end+grace. Where
     several windows cover the same instant, the longest grace end wins
     (D-05).
+
+    ``cache``, when given, is forwarded to ``_local_occurrence_epochs`` and
+    to ``_window_from_row_cached`` -- see those functions' docstrings.
+    ``cache=None`` (the default) preserves this function's previous behavior
+    exactly.
     """
     tz = resolve_timezone(tz_name)
     covering_grace_ends = []
     for row in windows:
-        window = window_from_row(row)
+        window = _window_from_row_cached(row, cache)
         if window is None or not window.enabled:
             continue
-        for start_epoch in _local_occurrence_epochs(window, now_epoch, tz):
+        for start_epoch in _local_occurrence_epochs(window, now_epoch, tz, cache=cache):
             raw_end = start_epoch + window.duration_minutes * 60
             grace_end = raw_end + window.grace_minutes * 60
             if start_epoch <= now_epoch < grace_end:
@@ -407,7 +498,7 @@ def _anchor_step_budget(interval_start, interval_end):
     return span // step_seconds + 2
 
 
-def _covering_boundaries(window, interval_start, interval_end, tz):
+def _covering_boundaries(window, interval_start, interval_end, tz, *, cache=None):
     """Yield every start/grace-end epoch of ``window`` that could fall inside
     ``[interval_start, interval_end)``, discovered by stepping the boundary
     search anchor backward in ``MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS``-sized
@@ -423,6 +514,10 @@ def _covering_boundaries(window, interval_start, interval_end, tz):
     returns normally in that case rather than raising, since its caller,
     ``attributed_downtime_seconds``, returns an integer to callers that
     must never see a new exception type on a long retention setting.
+
+    ``cache``, when given, is forwarded to ``_local_occurrence_epochs`` --
+    see that function's docstring. ``cache=None`` (the default) preserves
+    this function's previous behavior exactly.
     """
     seen = set()
     anchor = interval_end
@@ -441,7 +536,7 @@ def _covering_boundaries(window, interval_start, interval_end, tz):
             _ATTRIBUTION_MAX_ANCHOR_STEPS, requested_days, covered_days,
         )
     while anchor >= interval_start - 86400 and steps < max_steps:
-        for start_epoch in _local_occurrence_epochs(window, anchor, tz):
+        for start_epoch in _local_occurrence_epochs(window, anchor, tz, cache=cache):
             grace_end = start_epoch + (window.duration_minutes + window.grace_minutes) * 60
             if grace_end <= interval_start or start_epoch >= interval_end:
                 continue
@@ -454,7 +549,7 @@ def _covering_boundaries(window, interval_start, interval_end, tz):
         steps += 1
 
 
-def attributed_downtime_seconds(intervals, windows, tz_name):
+def attributed_downtime_seconds(intervals, windows, tz_name, *, cache=None):
     """Return whole seconds of ``intervals`` that fell inside window coverage.
 
     ``intervals`` is a sequence of half-open ``(start_epoch, end_epoch)``
@@ -473,6 +568,15 @@ def attributed_downtime_seconds(intervals, windows, tz_name):
     by ``window_from_row`` during boundary discovery, exactly as ``coverage()``
     drops it internally, and so contributes no boundaries and no coverage.
     Returns the integer zero, never ``None``, when nothing is attributable.
+
+    ``cache``, when given, is a plain ``dict`` forwarded to every
+    ``_local_occurrence_epochs`` call this function makes (directly through
+    ``_covering_boundaries`` and indirectly through the per-segment
+    ``coverage()`` calls below), and to ``_window_from_row_cached`` for the
+    per-window, per-interval ``window_from_row`` lookup immediately below --
+    see those functions' docstrings for what they memoize and why.
+    ``cache=None`` (the default) preserves this function's previous behavior
+    exactly.
     """
     tz = resolve_timezone(tz_name)
     total = 0
@@ -483,17 +587,19 @@ def attributed_downtime_seconds(intervals, windows, tz_name):
             continue
         boundaries = {interval_start, interval_end}
         for row in windows:
-            window = window_from_row(row)
+            window = _window_from_row_cached(row, cache)
             if window is None or not window.enabled:
                 continue
-            for start_epoch, grace_end in _covering_boundaries(window, interval_start, interval_end, tz):
+            for start_epoch, grace_end in _covering_boundaries(
+                window, interval_start, interval_end, tz, cache=cache,
+            ):
                 if interval_start < start_epoch < interval_end:
                     boundaries.add(start_epoch)
                 if interval_start < grace_end < interval_end:
                     boundaries.add(grace_end)
         ordered = sorted(boundaries)
         for segment_start, segment_end in zip(ordered, ordered[1:]):
-            covered, _grace_until = coverage(windows, segment_start, tz_name)
+            covered, _grace_until = coverage(windows, segment_start, tz_name, cache=cache)
             if covered:
                 total += segment_end - segment_start
     return total

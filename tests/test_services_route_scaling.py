@@ -349,6 +349,76 @@ class OfflineIntervalsBulkReadTests(unittest.TestCase):
         # matching the maintenance-window precedent.
         self.assertIsInstance(bulk, dict)
 
+    def test_the_route_bounds_checks_by_port_rows_through_the_limit_constant(self):
+        """/api/services must remain bounded in service_checks rows read per
+        request on whatever path it uses for offline-interval reconstruction
+        (06-13-PLAN.md Task 2's unconditional row-bound requirement).
+
+        06-13 removed the route's call to read_service_offline_intervals_by_port
+        (06-PROFILE.md: sql_fetch 15.620% share, offline_intervals_read
+        10.266% share, both confirmed 79.1% duplicate reads of the same
+        service_checks rows at the profiled 8-service/8-day shape) and
+        reconstructs offline intervals from the checks_by_port query
+        api_services already issues for the uptime sweep instead. That query
+        therefore now carries _OFFLINE_INTERVALS_BULK_ROW_LIMIT's own LIMIT
+        -- bound to the same named constant, not a second, drifting literal
+        -- so the 20,000-row cap does not silently disappear as a side
+        effect of no longer duplicating the read. Proven through the route
+        itself (test_client().get), not at the repository layer, because
+        that is the layer that would actually lose the bound if a future
+        change reintroduced an unbounded query here.
+        """
+        appmod = self.appmod
+        port = 9897
+        now = int(time.time())
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                "VALUES(?,?,?,?,?,?)",
+                (port, 'Bound', now - 3600, now, 1, now - 60),
+            )
+            for i in range(20):
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (now - 3600 + i * 10, port, i % 2),
+                )
+            conn.commit()
+            conn.close()
+
+        statements = []
+        real_database_access = appmod.database_access
+
+        @contextmanager
+        def counting_database_access(settings_or_path):
+            with real_database_access(settings_or_path) as conn:
+                conn.set_trace_callback(lambda sql: statements.append(sql))
+                try:
+                    yield conn
+                finally:
+                    conn.set_trace_callback(None)
+
+        appmod.database_access = counting_database_access
+        try:
+            with mock.patch.object(beacon_repositories, '_OFFLINE_INTERVALS_BULK_ROW_LIMIT', 5):
+                response = appmod.app.test_client().get('/api/services')
+        finally:
+            appmod.database_access = real_database_access
+
+        self.assertEqual(response.status_code, 200)
+        checks_statements = [
+            sql for sql in statements
+            if 'FROM service_checks' in sql and 'port IN (' in sql and 'LIMIT' in sql
+        ]
+        self.assertTrue(
+            checks_statements,
+            f'expected the checks_by_port query to carry a LIMIT clause: {statements}',
+        )
+        self.assertTrue(
+            any('LIMIT 5' in sql for sql in checks_statements),
+            f'expected the patched constant (5) to appear in the checks query LIMIT: {checks_statements}',
+        )
+
     def test_attributed_downtime_is_unchanged_through_the_route(self):
         # /api/services must return the same maintenance-attributed downtime
         # values as before for every service -- exercised end-to-end here
@@ -376,6 +446,109 @@ class OfflineIntervalsBulkReadTests(unittest.TestCase):
         matching = [svc for svc in body if svc['port'] == port]
         self.assertEqual(len(matching), 1)
         self.assertIn('maintenance_attributed_seconds', matching[0])
+
+
+class OfflineIntervalsFromPointsTests(unittest.TestCase):
+    """offline_intervals_from_points_by_port (06-13, OPS-07 gap closure) must
+    match the single-port oracle exactly when fed the same already-fetched
+    points a caller like api_services holds, proving the route's new
+    reconstruction path -- built to replace the duplicate
+    read_service_offline_intervals_by_port call this same file's
+    OfflineIntervalsBulkReadTests guards -- cannot drift from what that
+    removed call used to guarantee. read_service_offline_intervals_by_port
+    itself is untouched and still used by its other caller; this class pins
+    the new caller-supplied-points path specifically.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_check(self, port, ts, online):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                (ts, port, int(online)),
+            )
+            conn.commit()
+            conn.close()
+
+    def _single(self, port, start_ts, end_ts):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            intervals = beacon_repositories.read_service_offline_intervals(
+                conn, port, start_ts=start_ts, end_ts=end_ts,
+            )
+            conn.close()
+        return intervals
+
+    def test_reconstruction_from_already_fetched_points_matches_the_single_port_oracle(self):
+        base = 1_700_000_000
+        start_ts, end_ts = base, base + 100_000
+
+        port_no_checks = 9821
+        port_boundary_only = 9822
+        self._insert_check(port_boundary_only, start_ts - 500, 0)
+        port_straddles_the_window_boundary = 9823
+        self._insert_check(port_straddles_the_window_boundary, start_ts - 200, 0)
+        self._insert_check(port_straddles_the_window_boundary, start_ts + 400, 1)
+        port_multi_transition = 9824
+        self._insert_check(port_multi_transition, start_ts - 50, 1)
+        self._insert_check(port_multi_transition, start_ts + 100, 0)
+        self._insert_check(port_multi_transition, start_ts + 5000, 1)
+        self._insert_check(port_multi_transition, start_ts + 9000, 0)
+        port_online_throughout = 9825
+        self._insert_check(port_online_throughout, start_ts - 100, 1)
+        self._insert_check(port_online_throughout, start_ts + 500, 1)
+
+        ports = [
+            port_no_checks, port_boundary_only, port_straddles_the_window_boundary,
+            port_multi_transition, port_online_throughout,
+        ]
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            boundary_by_port = beacon_repositories.read_service_offline_interval_boundaries_by_port(
+                conn, ports=ports, start_ts=start_ts,
+            )
+            # Mimic api_services's own checks_by_port construction exactly:
+            # the in-window rows the route already fetches for the uptime
+            # sweep, not a second, separately-shaped query.
+            placeholders = ','.join('?' * len(ports))
+            rows = conn.execute(
+                f"SELECT port, ts, online FROM service_checks "
+                f"WHERE port IN ({placeholders}) AND ts >= ? AND ts <= ? "
+                f"ORDER BY port ASC, ts ASC",
+                (*ports, start_ts, end_ts),
+            ).fetchall()
+            conn.close()
+        points_by_port = {}
+        for row in rows:
+            points_by_port.setdefault(row['port'], []).append(
+                (int(row['ts']), 1 if int(row['online']) else 0),
+            )
+
+        reconstructed = beacon_repositories.offline_intervals_from_points_by_port(
+            ports=ports, boundary_by_port=boundary_by_port, points_by_port=points_by_port,
+            start_ts=start_ts, end_ts=end_ts,
+        )
+        for port in ports:
+            self.assertEqual(
+                reconstructed.get(port, []), self._single(port, start_ts, end_ts),
+                f'port {port} reconstruction from points diverged from the single-port oracle',
+            )
+
+    def test_a_port_with_no_offline_intervals_is_absent_not_empty(self):
+        port = 9826
+        base = 1_700_000_000
+        self._insert_check(port, base - 100, 1)
+        reconstructed = beacon_repositories.offline_intervals_from_points_by_port(
+            ports=[port], boundary_by_port={port: 1}, points_by_port={}, start_ts=base, end_ts=base + 1000,
+        )
+        self.assertNotIn(port, reconstructed)
 
 
 class ServiceCountQueryGuardTests(unittest.TestCase):
@@ -575,3 +748,60 @@ class ServicesRouteProfilerGuardTests(unittest.TestCase):
         plain_count = self._count_statements(profiled=False)
         profiled_count = self._count_statements(profiled=True)
         self.assertEqual(plain_count, profiled_count)
+
+    def test_maintenance_coverage_cost_is_no_longer_dominated_by_unmemoized_occurrence_walks(self):
+        """06-PROFILE.md named maintenance_coverage as effectively tied with
+        uptime_sweep for the single largest bucket (29.649% share of
+        /api/services's measured residual cost) and the only bucket whose
+        growth ratio (7.564) *exceeded* the measured check_row_ratio
+        (4.249) -- driven by ~5,997 uncached beacon_maintenance.coverage()
+        calls per request at that shape, each re-walking
+        MAINTENANCE_OCCURRENCE_LOOKBACK_DAYS + 1 calendar days of fold-aware
+        datetime construction, with no memoization across the thousands of
+        calls one request makes for the same window.
+
+        06-13 added a request-scoped memo (keyed on (window, the calendar
+        date `now_epoch` resolves to, timezone) -- the exact granularity at
+        which _local_occurrence_epochs's result is provably invariant, not
+        an approximation -- plus a request-scoped cache for the
+        per-call window_from_row() re-parse/re-validate work coverage() and
+        attributed_downtime_seconds() both repeat on every call). This
+        collapses the absolute cost dramatically: at this class's fast shape
+        (2 services, 1-vs-4 days, seed 20260901, 20 repeats), directly
+        disabling both call sites' `cache=` argument in dashboard/app.py and
+        re-running this exact profile (verified by hand while writing this
+        test, recorded in 06-13-SUMMARY.md) measured maintenance_coverage at
+        small=276.221ms / large=1322.387ms; with the memo wired through
+        /api/services as shipped, the same shape measures roughly
+        small=30ms / large=133ms -- close to a 9-10x absolute reduction.
+
+        This guard asserts that absolute reduction directly, with a wide
+        margin above the shipped measurement and a wide margin below the
+        unmemoized measurement, rather than the profiler's own
+        growth-ratio classification: growth_ratio stays
+        "proportional_to_check_count" even after this fix, because CALL
+        COUNT into coverage() -- not per-call cost -- still scales with
+        retained days. That count is driven by the number of discrete
+        stored-check-derived offline intervals attributed_downtime_seconds
+        must process one at a time (06-PROFILE.md's seeded shape produces
+        over a thousand short intervals from J3/J4-cadence sampling for the
+        one port carrying a window); collapsing that further would mean
+        changing _offline_intervals_from_points's interval-merging
+        behavior, which is out of this round's scope and risks the
+        byte-identical output guarantee PROH-OPS-07-05 protects. See
+        06-13-SUMMARY.md's Deviations section for the full accounting of
+        why this guard measures absolute cost rather than the ratio Task
+        2's plan text named.
+        """
+        report = self._small_growth_report()
+        bucket = report['buckets']['maintenance_coverage']
+        self.assertLess(
+            bucket['small_tottime_ms'], 100.0,
+            f"maintenance_coverage's small-shape cost regressed toward the unmemoized "
+            f"baseline (276.221ms): {bucket}",
+        )
+        self.assertLess(
+            bucket['large_tottime_ms'], 400.0,
+            f"maintenance_coverage's large-shape cost regressed toward the unmemoized "
+            f"baseline (1322.387ms): {bucket}",
+        )

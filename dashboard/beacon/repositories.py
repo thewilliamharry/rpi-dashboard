@@ -1105,24 +1105,87 @@ def read_service_offline_intervals(conn, port, *, start_ts, end_ts):
 _OFFLINE_INTERVALS_BULK_ROW_LIMIT = 20000
 
 
-def read_service_offline_intervals_by_port(conn, *, ports, start_ts, end_ts):
-    """Return each requested port's half-open offline intervals, grouped by port.
+def read_service_offline_interval_boundaries_by_port(conn, *, ports, start_ts):
+    """Return each requested port's pre-window boundary sample, grouped by port.
 
-    One query resolving every port's boundary sample and one query covering
-    every port's in-window rows, instead of two queries per port. Both
-    reconstruct through the shared ``_offline_intervals_from_points`` helper
-    ``read_service_offline_intervals`` also uses, so the two readers cannot
-    drift apart.
+    Extracted from ``read_service_offline_intervals_by_port`` so a caller
+    that already holds its own in-window ``service_checks`` rows (e.g.
+    ``api_services``'s own ``checks_by_port``, fetched once for the uptime
+    sweep) can reconstruct offline intervals through
+    ``offline_intervals_from_points_by_port`` without a second, duplicate
+    in-window read. This boundary query itself reads rows strictly before
+    ``start_ts`` -- outside any window a caller's own in-window read already
+    covers -- so it is never duplicative on its own.
 
     ``service_checks`` carries ``PRIMARY KEY (ts, port)``, so at most one row
     can exist for a given (port, ts) pair -- the boundary-tie ambiguity a
     bare ``ORDER BY ts DESC LIMIT 1`` could in principle face is
-    schema-impossible for a single port. The boundary query below still
-    resolves each port's boundary deterministically, per port, with a
-    ``ROW_NUMBER() OVER (PARTITION BY port ORDER BY ts DESC)`` window
-    function, so the bulk result for any one port equals that port's
-    single-port read regardless of how many other ports are requested
-    alongside it.
+    schema-impossible for a single port. The query below still resolves each
+    port's boundary deterministically, per port, with a ``ROW_NUMBER() OVER
+    (PARTITION BY port ORDER BY ts DESC)`` window function, so the bulk
+    result for any one port equals that port's single-port boundary
+    regardless of how many other ports are requested alongside it.
+
+    A port with no sample strictly before ``start_ts`` is absent from the
+    returned mapping. An empty port list returns an empty mapping without
+    issuing a query.
+    """
+    ports = list(ports)
+    if not ports:
+        return {}
+    start_ts = int(start_ts)
+    placeholders = ','.join('?' * len(ports))
+
+    boundary_rows = conn.execute(
+        f"SELECT port, ts, online FROM ("
+        f"  SELECT port, ts, online, "
+        f"    ROW_NUMBER() OVER (PARTITION BY port ORDER BY ts DESC) AS rn "
+        f"  FROM service_checks WHERE port IN ({placeholders}) AND ts < ?"
+        f") WHERE rn = 1",
+        (*ports, start_ts),
+    ).fetchall()
+    return {row['port']: (1 if int(row['online']) else 0) for row in boundary_rows}
+
+
+def offline_intervals_from_points_by_port(*, ports, boundary_by_port, points_by_port, start_ts, end_ts):
+    """Reconstruct each port's half-open offline intervals from already-fetched points.
+
+    Pure -- issues no query of its own. Reconstructs through the same
+    ``_offline_intervals_from_points`` helper ``read_service_offline_intervals``
+    and ``read_service_offline_intervals_by_port`` use, so this reconstruction
+    cannot drift from either of those readers. ``boundary_by_port`` is the
+    output of ``read_service_offline_interval_boundaries_by_port``.
+    ``points_by_port`` is the caller's own already-materialized ``(ts,
+    online)`` pairs per port, sorted ascending by ``ts`` within each port,
+    already restricted to ``[start_ts, end_ts]`` -- reconstructing this
+    function's caller is responsible for that restriction and for keeping
+    its own read of those rows bounded; this function does not re-derive or
+    re-check either property.
+
+    A port with no offline intervals is absent from the returned mapping,
+    matching ``read_service_offline_intervals_by_port``.
+    """
+    start_ts = int(start_ts)
+    end_ts = int(end_ts)
+    result = {}
+    for port in ports:
+        intervals = _offline_intervals_from_points(
+            boundary_by_port.get(port), points_by_port.get(port, []), start_ts, end_ts,
+        )
+        if intervals:
+            result[port] = intervals
+    return result
+
+
+def read_service_offline_intervals_by_port(conn, *, ports, start_ts, end_ts):
+    """Return each requested port's half-open offline intervals, grouped by port.
+
+    One query resolving every port's boundary sample
+    (``read_service_offline_interval_boundaries_by_port``) and one query
+    covering every port's in-window rows, instead of two queries per port.
+    Both reconstruct through the shared ``_offline_intervals_from_points``
+    helper ``read_service_offline_intervals`` also uses, so the readers
+    cannot drift apart.
 
     Bounded by ``_OFFLINE_INTERVALS_BULK_ROW_LIMIT``. A port with no offline
     intervals is absent from the returned mapping, matching
@@ -1136,15 +1199,9 @@ def read_service_offline_intervals_by_port(conn, *, ports, start_ts, end_ts):
     end_ts = int(end_ts)
     placeholders = ','.join('?' * len(ports))
 
-    boundary_rows = conn.execute(
-        f"SELECT port, ts, online FROM ("
-        f"  SELECT port, ts, online, "
-        f"    ROW_NUMBER() OVER (PARTITION BY port ORDER BY ts DESC) AS rn "
-        f"  FROM service_checks WHERE port IN ({placeholders}) AND ts < ?"
-        f") WHERE rn = 1",
-        (*ports, start_ts),
-    ).fetchall()
-    boundary_by_port = {row['port']: (1 if int(row['online']) else 0) for row in boundary_rows}
+    boundary_by_port = read_service_offline_interval_boundaries_by_port(
+        conn, ports=ports, start_ts=start_ts,
+    )
 
     in_window_rows = conn.execute(
         f"SELECT port, ts, online FROM service_checks "
@@ -1158,14 +1215,13 @@ def read_service_offline_intervals_by_port(conn, *, ports, start_ts, end_ts):
             (int(row['ts']), 1 if int(row['online']) else 0),
         )
 
-    result = {}
-    for port in set(boundary_by_port) | set(points_by_port):
-        intervals = _offline_intervals_from_points(
-            boundary_by_port.get(port), points_by_port.get(port, []), start_ts, end_ts,
-        )
-        if intervals:
-            result[port] = intervals
-    return result
+    return offline_intervals_from_points_by_port(
+        ports=set(boundary_by_port) | set(points_by_port),
+        boundary_by_port=boundary_by_port,
+        points_by_port=points_by_port,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
 
 
 def get_runtime_state(conn, key, default=None):
