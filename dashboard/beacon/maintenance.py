@@ -164,10 +164,27 @@ def _window_from_row_cached(row, cache):
     if cache is None:
         return window_from_row(row)
     key = ('window', id(row))
-    if key in cache:
-        return cache[key]
+    cached = cache.get(key)
+    if cached is not None:
+        # The stored value pins the row object it was keyed on (see below),
+        # so a hit here is guaranteed to be for THIS row, not a different
+        # object that inherited its id.
+        return cached[1]
     window = window_from_row(row)
-    cache[key] = window
+    # Store (row, window), not window alone. `id()` is only unique among
+    # LIVE objects: CPython reuses the address of a freed object, so a
+    # cache holding no reference to `row` can hand back another row's
+    # Window if the original is garbage-collected and a new row lands on
+    # the same address. Demonstrated at 1998/2000 wrong returns with
+    # short-lived rows (06-REVIEW-ROUND3.md CR-02). Today's callers all
+    # keep their rows alive for the cache's lifetime, so this was not
+    # reachable in production -- but that safety lived only in prose, one
+    # `cache=` call site away from being wrong, and diagnosis.py is the
+    # obvious next such site. Keeping the row in the value makes the
+    # invariant structural: while the entry exists, so does its key's
+    # referent, so the id cannot be reused. Costs one tuple per distinct
+    # window per request.
+    cache[key] = (row, window)
     return window
 
 

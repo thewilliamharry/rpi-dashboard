@@ -2604,5 +2604,61 @@ class ClockIsolationTests(unittest.TestCase):
         )
 
 
+class WindowRowCacheIdentityTests(unittest.TestCase):
+    """The (row -> Window) memo must not confuse two rows sharing an id.
+
+    `_window_from_row_cached` keys on `id(row)`. `id()` is unique only among
+    LIVE objects -- CPython reuses a freed object's address -- so a cache
+    that stores the Window alone, holding no reference to the row it was
+    keyed on, can return a DIFFERENT row's Window after the original is
+    garbage-collected and a new row lands on the same address.
+
+    06-REVIEW-ROUND3.md CR-02 demonstrated this at 1998/2000 wrong returns
+    with short-lived rows. It was not reachable from api_services, whose
+    windows_by_port keeps every row alive -- but that safety was prose-only,
+    one `cache=` call site away from being false, and diagnosis.py is the
+    obvious next such site. The fix stores (row, window), pinning the
+    referent so the id cannot be recycled while the entry lives.
+    """
+
+    def test_a_recycled_row_id_does_not_return_a_previous_rows_window(self):
+        cache = {}
+        # Build and drop rows in a loop so CPython reuses addresses. Each
+        # row carries a distinct start_minute, so any id reuse returning a
+        # stale Window is directly observable.
+        for i in range(2000):
+            row = _window_row(id=i, start_minute=i % 1440)
+            window = beacon_maintenance._window_from_row_cached(row, cache)
+            self.assertEqual(
+                window.start_minute, row['start_minute'],
+                f'iteration {i}: cache returned a Window for a different row '
+                f'(got start_minute={window.start_minute}, expected '
+                f'{row["start_minute"]}) -- id() was recycled and the cache '
+                f'did not pin its referent (CR-02)',
+            )
+            self.assertEqual(window.id, row['id'])
+            del row
+
+    def test_the_cache_pins_the_row_it_keyed_on(self):
+        # Structural guard for the invariant the test above exercises
+        # behaviourally: the stored value must keep the row reachable.
+        cache = {}
+        row = _window_row(id=4242, start_minute=120)
+        beacon_maintenance._window_from_row_cached(row, cache)
+        entry = cache[('window', id(row))]
+        self.assertIsInstance(
+            entry, tuple,
+            "cache value must be (row, window) so the key's referent stays alive",
+        )
+        self.assertIs(entry[0], row, 'cache must pin the exact row object it keyed on')
+
+    def test_cache_none_matches_the_uncached_call(self):
+        row = _window_row(id=7, start_minute=300)
+        self.assertEqual(
+            beacon_maintenance._window_from_row_cached(row, None),
+            beacon_maintenance.window_from_row(row),
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

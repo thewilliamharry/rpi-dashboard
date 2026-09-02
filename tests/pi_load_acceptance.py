@@ -556,7 +556,16 @@ def _live_role_processes(target):
     the live process count rather than by run duration.
     """
     if target.method == 'self_test':
-        return list(target.processes)
+        # Route self-test processes through _cached_handle too. This branch
+        # used to return before reaching it, so --self-test got no priming
+        # at all and reported primed_pid_count: 0 -- which is precisely the
+        # signature the cpu_sampling provenance block was added to flag as a
+        # BROKEN CPU column (06-REVIEW-ROUND3.md CR-03). A diagnostic that
+        # reports its own failure signature in a healthy mode is worse than
+        # no diagnostic. Self-test targets are a fixed, already-enumerated
+        # set, so caching is a no-op for identity here; what matters is that
+        # priming and the accounting both happen.
+        return [_cached_handle(target, process) for process in target.processes]
     if target.root_pid is None:
         return []
     try:

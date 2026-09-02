@@ -1435,6 +1435,44 @@ class PiLoadAcceptanceHarnessTests(unittest.TestCase):
         # psutil.Process, so the two calls never returned the same object.
         self.assertIs(first_call[0], second_call[0])
 
+    def test_self_test_targets_are_primed_like_live_ones(self):
+        """--self-test must prime its CPU handles too.
+
+        _live_role_processes returned `list(target.processes)` for
+        self_test BEFORE reaching _cached_handle, so _prime_cpu_percent --
+        which primes by calling _live_role_processes -- did nothing at all
+        in self-test mode. The run then reported primed_pid_count: 0, which
+        is exactly the signature the cpu_sampling provenance block was
+        added to flag as a BROKEN CPU column (06-REVIEW-ROUND3.md CR-03).
+        A diagnostic emitting its own failure signature in a healthy mode
+        is worse than no diagnostic.
+        """
+        process = mock.Mock()
+        process.pid = 4242
+        process.create_time.return_value = 1000.0
+        process.cpu_percent.return_value = 0.0
+        process.memory_info.return_value = SimpleNamespace(rss=1024)
+        process.children.return_value = []
+
+        target = pi_load_acceptance.ResourceTarget(
+            role='web', container=None, method='self_test', root_pid=None,
+            processes=[process], reason=None,
+        )
+        targets = {'web': target}
+
+        pi_load_acceptance._prime_cpu_percent(targets)
+
+        self.assertEqual(
+            process.cpu_percent.call_count, 1,
+            'a self_test target must be primed exactly once, like a live one',
+        )
+        self.assertIn(
+            process.pid, target.handles,
+            'a self_test target must be registered in the handle cache so '
+            'primed_pid_count reflects it (CR-03)',
+        )
+        self.assertIs(target.handles[process.pid], process)
+
     def test_cpu_percent_is_primed_once_and_read_once_per_tick(self):
         # One prime call plus three ticks means _live_role_processes is
         # invoked four times; psutil.Process is patched with a DISTINCT
