@@ -621,47 +621,38 @@ class HeldRegionCompositionTests(_InstrumentedLockTestCase):
         route = snap['routes']['/api/services']
         python_share = route['python_ns_total'] / route['hold_ns_total']
 
-        # Measure the SAME-RUN reference: the moved work executed inside a
-        # synthetic held region, over the same seeded data. Direction B
-        # asserts this is high in its own right; here it is the comparator.
-        appmod = self.appmod
-        now = int(time.time())
-        from dashboard.beacon.db import connect_db
-        conn = connect_db(self.db_path)
-        try:
-            def moved_work():
-                conn.execute('SELECT 1').fetchall()
-                appmod._uptime_summary(self.checks_by_port[self.offline_port], now)
-                appmod.beacon_maintenance.attributed_downtime_seconds(
-                    self.offline_intervals, self.windows, appmod.SETTINGS.timezone,
-                )
-            self._run_in_held_region('reference-unnarrowed-06-21', moved_work)
-        finally:
-            conn.close()
-        reference = lockprofile.snapshot()['routes']['reference-unnarrowed-06-21']
-        reference_share = reference['python_ns_total'] / reference['hold_ns_total']
-
-        # RELATIONAL, not absolute. An absolute ceiling here is not
-        # load-invariant: Python time inflates against C-level sqlite3 under
-        # whole-suite CPU contention, so this share measured 0.18-0.32 in
-        # isolation but 0.5792 and 0.6239 on two full-suite runs, failing a
-        # 0.5 ceiling for reasons unrelated to where the work lives
-        # (D-DEBT-06-13, and the D-DEBT-06-14 lesson about absolutes tied to
-        # conditions that change). Both arms inflate together under load, so
-        # their ratio does not. The absolute ceiling is retained only as a
-        # loose sanity bound.
-        self.assertLess(
-            python_share, reference_share * 0.6,
-            f"/api/services' held-region Python share measured {python_share:.4f}, not "
-            f'materially below the {reference_share:.4f} the SAME moved work produces '
-            'inside a held region in this same run -- a computation moved back inside '
-            'the critical section (D-DEBT-06-01, PROH-OPS-04-06). '
-            'Developer-machine evidence (PROH-OPS-07-09), not Pi evidence.',
-        )
+        # LOAD-SENSITIVE MEASUREMENT, bounded loosely on purpose. Read this
+        # before tightening it.
+        #
+        # This share is not load-invariant: Python time inflates against
+        # C-level sqlite3 under whole-suite CPU contention. Measured 0.18-0.35
+        # in isolation, 0.5792 / 0.6239 / 0.6062 on full-suite runs.
+        #
+        # An earlier fix (06-21) tried to cancel that by comparing against the
+        # SAME moved work inside a synthetic held region, on the theory that
+        # both arms inflate together. That reasoning was WRONG and is recorded
+        # here so it is not retried: the reference measures 0.9999 -- it is
+        # saturated and cannot inflate, so `share < reference * 0.6` is just
+        # `share < 0.5999`, a disguised absolute. Relational in form, constant
+        # in fact. That is the same defect class this phase has now found six
+        # times (D-DEBT-06-10, D-DEBT-06-14), introduced while fixing it.
+        #
+        # The load-INVARIANT guarantee that the moved computations live
+        # outside the critical section is structural and already proven
+        # deterministically, twice:
+        #   LockScopePreservationTests::test_api_services_lock_scope_is_database_reads_only
+        #   LockScopeInvariantTests::test_no_database_access_escapes_the_db_lock
+        # Both are mutation-verified. THIS test is a corroborating
+        # measurement, not the guarantee. It is bounded where it survives
+        # load; do not tighten it toward the isolated value and reintroduce a
+        # threshold that fails for reasons unrelated to where the work lives.
         self.assertLess(
             python_share, self.PYTHON_SHARE_CEILING_SANITY,
             f"/api/services' held-region Python share measured {python_share:.4f}, above "
-            f'even the loose {self.PYTHON_SHARE_CEILING_SANITY} sanity bound.',
+            f'the {self.PYTHON_SHARE_CEILING_SANITY} bound this measurement is held to. '
+            'The structural guarantee is the AST scope pin and the no-escape invariant; '
+            'check those first (D-DEBT-06-01, PROH-OPS-04-06). '
+            'Developer-machine evidence (PROH-OPS-07-09), not Pi evidence.',
         )
         self.assertEqual(
             snap['clamped_python_count'], 0,
