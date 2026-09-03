@@ -537,6 +537,9 @@ class HeldRegionCompositionTests(_InstrumentedLockTestCase):
     # rather than the Pi figure the mechanism is modeled on. Developer-
     # machine evidence only (PROH-OPS-07-09).
     PYTHON_SHARE_CEILING = 0.5
+    # Loose sanity bound only; the load-invariant check is the same-run
+    # ratio against the unnarrowed reference. See the direction-A test.
+    PYTHON_SHARE_CEILING_SANITY = 0.85
 
     def _run_in_held_region(self, route_label, work_fn):
         """Copied from `HoldDecompositionTests`' idiom exactly (06-16 Task
@@ -617,12 +620,48 @@ class HeldRegionCompositionTests(_InstrumentedLockTestCase):
         snap = lockprofile.snapshot()
         route = snap['routes']['/api/services']
         python_share = route['python_ns_total'] / route['hold_ns_total']
+
+        # Measure the SAME-RUN reference: the moved work executed inside a
+        # synthetic held region, over the same seeded data. Direction B
+        # asserts this is high in its own right; here it is the comparator.
+        appmod = self.appmod
+        now = int(time.time())
+        from dashboard.beacon.db import connect_db
+        conn = connect_db(self.db_path)
+        try:
+            def moved_work():
+                conn.execute('SELECT 1').fetchall()
+                appmod._uptime_summary(self.checks_by_port[self.offline_port], now)
+                appmod.beacon_maintenance.attributed_downtime_seconds(
+                    self.offline_intervals, self.windows, appmod.SETTINGS.timezone,
+                )
+            self._run_in_held_region('reference-unnarrowed-06-21', moved_work)
+        finally:
+            conn.close()
+        reference = lockprofile.snapshot()['routes']['reference-unnarrowed-06-21']
+        reference_share = reference['python_ns_total'] / reference['hold_ns_total']
+
+        # RELATIONAL, not absolute. An absolute ceiling here is not
+        # load-invariant: Python time inflates against C-level sqlite3 under
+        # whole-suite CPU contention, so this share measured 0.18-0.32 in
+        # isolation but 0.5792 and 0.6239 on two full-suite runs, failing a
+        # 0.5 ceiling for reasons unrelated to where the work lives
+        # (D-DEBT-06-13, and the D-DEBT-06-14 lesson about absolutes tied to
+        # conditions that change). Both arms inflate together under load, so
+        # their ratio does not. The absolute ceiling is retained only as a
+        # loose sanity bound.
         self.assertLess(
-            python_share, self.PYTHON_SHARE_CEILING,
-            f"/api/services' held-region Python share measured {python_share:.4f} -- "
-            f'a share at or above {self.PYTHON_SHARE_CEILING} means a computation moved '
-            'back inside the critical section (D-DEBT-06-01, PROH-OPS-04-06). '
+            python_share, reference_share * 0.6,
+            f"/api/services' held-region Python share measured {python_share:.4f}, not "
+            f'materially below the {reference_share:.4f} the SAME moved work produces '
+            'inside a held region in this same run -- a computation moved back inside '
+            'the critical section (D-DEBT-06-01, PROH-OPS-04-06). '
             'Developer-machine evidence (PROH-OPS-07-09), not Pi evidence.',
+        )
+        self.assertLess(
+            python_share, self.PYTHON_SHARE_CEILING_SANITY,
+            f"/api/services' held-region Python share measured {python_share:.4f}, above "
+            f'even the loose {self.PYTHON_SHARE_CEILING_SANITY} sanity bound.',
         )
         self.assertEqual(
             snap['clamped_python_count'], 0,
