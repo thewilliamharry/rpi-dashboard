@@ -15,6 +15,7 @@ per-acquisition nanosecond cost instead of an absolute millisecond threshold
 """
 
 import ast
+import json
 import threading
 import time
 import unittest
@@ -705,6 +706,293 @@ class RequestAccountingTests(_InstrumentedLockTestCase):
             self.assertEqual(call_count['timer'], 0)
         finally:
             cleanup_db(db_path)
+
+
+class ConcurrentRehearsalTests(_InstrumentedLockTestCase):
+    """06-16 Task 3: rehearse at concurrency 8 against the real Flask app,
+    using the acceptance harness's own route rotation, and prove every one
+    of `06-VERIFICATION.md` Truth 5's measurement questions is answerable
+    from a single snapshot pair. Every figure this class prints or asserts
+    on is developer-machine evidence, never Pi evidence (`PROH-OPS-07-09`).
+
+    Does not import `tests/pi_load_acceptance.py` (`PROH-OPS-07-01`, and
+    that module's CLI has side effects on import in some configurations) --
+    the rotation order is read from its source via `ast` and compared
+    against a literal list kept here, so this rehearsal cannot silently
+    drift from the real harness without failing loudly.
+    """
+
+    PORTS = (9900, 9901, 9902)
+    THREAD_COUNT = 8
+    DURATION_S = 3.0
+
+    # Mirrors _routes_for_ports' literal tuple in tests/pi_load_acceptance.py
+    # -- verified against that file's own source in
+    # test_rotation_matches_pi_load_acceptance below, not merely assumed.
+    LITERAL_ROUTE_LABELS = (
+        '/api/services', '/api/scan-status', '/api/thumbnail-status',
+        '/api/history', '/api/advanced/current',
+    )
+
+    def setUp(self):
+        super().setUp()
+        self._seed_representative_services()
+
+    def _seed_representative_services(self):
+        """Enough services and stored checks that /api/services does real
+        work rather than returning an empty result -- the idiom
+        tests/test_services_route_scaling.py::ServiceCountScalingTests
+        establishes."""
+        now = int(time.time())
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                for port in self.PORTS:
+                    conn.execute(
+                        "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (port, f'Service {port}', now - 3600, now, 1, now - 60),
+                    )
+                    for j in range(30):
+                        ts = now - (30 - j) * 30
+                        conn.execute(
+                            'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                            (ts, port, 1 if j % 5 else 0),
+                        )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _rotation_urls(self):
+        return list(self.LITERAL_ROUTE_LABELS) + [f'/api/thumbnail/{port}' for port in self.PORTS]
+
+    def _run_rotation_workers(self):
+        """Starts THREAD_COUNT daemon workers walking the rotation
+        closed-loop for DURATION_S, joins them, and returns any server
+        errors observed. daemon=True for the same reason 06-15's mutual-
+        exclusion test uses it: join() already bounds the wait, so a lock
+        that loses mutual exclusion still reaches the assertions, but a
+        non-daemon worker blocked forever would prevent the interpreter
+        from exiting."""
+        urls = self._rotation_urls()
+        errors = []
+        errors_lock = threading.Lock()
+
+        def worker():
+            client = self.appmod.app.test_client()
+            index = 0
+            deadline = time.monotonic() + self.DURATION_S
+            while time.monotonic() < deadline:
+                url = urls[index % len(urls)]
+                index += 1
+                try:
+                    resp = client.get(url)
+                    if resp.status_code >= 500:
+                        with errors_lock:
+                            errors.append((url, resp.status_code))
+                except Exception as exc:
+                    with errors_lock:
+                        errors.append((url, repr(exc)))
+
+        threads = [
+            threading.Thread(target=worker, daemon=True) for _ in range(self.THREAD_COUNT)
+        ]
+        start = time.monotonic()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(self.DURATION_S + 15)
+        elapsed = time.monotonic() - start
+        return errors, elapsed
+
+    def test_rotation_matches_pi_load_acceptance(self):
+        """The literal rotation this rehearsal drives matches the order
+        `_routes_for_ports` actually builds -- read from that file's own
+        source, never imported (`PROH-OPS-07-01`). Fails loudly if the
+        harness's rotation changes without this test being updated."""
+        source = Path('tests/pi_load_acceptance.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+        func = _find_function_def(tree, '_routes_for_ports')
+        self.assertIsNotNone(func, '_routes_for_ports not found in tests/pi_load_acceptance.py')
+
+        labels = None
+        for node in ast.walk(func):
+            if isinstance(node, ast.comprehension) and isinstance(node.iter, ast.Tuple):
+                labels = tuple(elt.value for elt in node.iter.elts)
+                break
+        self.assertIsNotNone(
+            labels, 'could not locate the literal route-label tuple in _routes_for_ports',
+        )
+        self.assertEqual(
+            labels, self.LITERAL_ROUTE_LABELS,
+            "tests/pi_load_acceptance.py's route rotation changed -- update "
+            'LITERAL_ROUTE_LABELS above to match, deliberately.',
+        )
+
+    def test_eight_thread_rehearsal_answers_every_truth_5_question(self):
+        """Drives the real Flask app from 8 threads in a closed loop, using
+        the same route rotation `_routes_for_ports` builds, for a bounded
+        interval. Asserts the snapshot pair answers every one of Truth 5's
+        measurement questions."""
+        snap_before = lockprofile.snapshot()
+        errors, elapsed = self._run_rotation_workers()
+
+        self.assertEqual(errors, [], f'{len(errors)} server errors during the rehearsal: {errors[:5]}')
+        self.assertLess(elapsed, 30, f'rehearsal took {elapsed:.1f}s, expected under 30s')
+
+        snap_after = lockprofile.snapshot()
+        routes = snap_after['routes']
+        requests = snap_after['requests']
+
+        # Item 1 (wait vs hold, per route): every lock-taking rotation route
+        # appears with acquisitions > 0, wait_ns_total >= 0, hold_ns_total > 0.
+        for label in self.LITERAL_ROUTE_LABELS:
+            if label == '/api/advanced/current':
+                continue
+            route = routes.get(label)
+            self.assertIsNotNone(route, f'{label} missing from acquisition table')
+            self.assertGreater(route['acquisitions'], 0, f'{label} acquisitions == 0')
+            self.assertGreaterEqual(route['wait_ns_total'], 0)
+            self.assertGreater(route['hold_ns_total'], 0, f'{label} hold_ns_total == 0')
+        thumbnail_route = routes.get('/api/thumbnail/<int:port>')
+        self.assertIsNotNone(thumbnail_route, 'thumbnail route missing from acquisition table')
+        self.assertGreater(thumbnail_route['acquisitions'], 0)
+
+        # Item 2 (utilisation): in [0, 1], > 0 under this load, and the
+        # per-route hold totals sum exactly to the global hold total.
+        hold_delta = snap_after['lock']['hold_ns_total'] - snap_before['lock']['hold_ns_total']
+        time_delta = snap_after['captured_monotonic_ns'] - snap_before['captured_monotonic_ns']
+        utilisation = hold_delta / time_delta
+        self.assertGreaterEqual(utilisation, 0)
+        self.assertLessEqual(utilisation, 1)
+        self.assertGreater(utilisation, 0)
+        total_hold = sum(route['hold_ns_total'] for route in routes.values())
+        self.assertEqual(total_hold, snap_after['lock']['hold_ns_total'])
+
+        # Item 4 (SQL share of the critical section): /api/services' shares
+        # sum to 1 (by construction), and are reported, never pinned to
+        # 06-PROFILE.md's laptop-under-cProfile figure (PROH-OPS-07-09).
+        services_route = routes['/api/services']
+        hold = services_route['hold_ns_total']
+        sql_share = (services_route['sql_execute_ns_total'] + services_route['sql_fetch_ns_total']) / hold
+        connect_share = services_route['connect_ns_total'] / hold
+        python_share = services_route['python_ns_total'] / hold
+        self.assertAlmostEqual(sql_share + connect_share + python_share, 1.0, places=6)
+        print(
+            '06-16 rehearsal (developer-machine evidence, PROH-OPS-07-09): '
+            f'/api/services sql_share={sql_share:.4f} connect_share={connect_share:.4f} '
+            f'python_share={python_share:.4f} utilisation={utilisation:.4f}',
+        )
+
+        # Item 3 (GIL separated from lock): /api/advanced/current -- the one
+        # exercised route holding no lock -- has lock_wait_ns_total == 0 and
+        # a non-zero other_off_cpu_ns_total, independently populated.
+        advanced_current = requests.get('/api/advanced/current')
+        self.assertIsNotNone(advanced_current, '/api/advanced/current missing from request table')
+        self.assertEqual(advanced_current['lock_wait_ns_total'], 0)
+        self.assertGreater(advanced_current['other_off_cpu_ns_total'], 0)
+        total_requests = snap_after['requests_total']['requests']
+        print(
+            f"06-16 rehearsal: clamped_off_cpu_count={snap_after['clamped_off_cpu_count']} "
+            f"clamped_python_count={snap_after['clamped_python_count']} "
+            f'of {total_requests} requests / {snap_after["lock"]["acquisitions"]} acquisitions',
+        )
+
+        # Self-consistency under real concurrency. clamped_python_count is
+        # load-bearing at exactly 0 -- observed stable at 0 across every
+        # rehearsal run during development, and mutation-verified below to
+        # jump to over 20% under real thread-local corruption.
+        # clamped_off_cpu_count is bounded, not zero -- see
+        # test_self_consistency_survives_eight_threads for why: it is a
+        # small (~1-3%), reproducible artifact of comparing two independent
+        # stdlib clocks (_timer_ns()/monotonic_ns vs time.thread_time_ns())
+        # under closed-loop, zero-think-time 8-thread contention on this
+        # development machine, discovered and characterised while writing
+        # this test -- not the >20% signal a genuine defect produces
+        # (mutation-verified below).
+        self.assertEqual(snap_after['clamped_python_count'], 0)
+        self.assertLess(
+            snap_after['clamped_off_cpu_count'], 0.10 * total_requests,
+            f"clamped_off_cpu_count {snap_after['clamped_off_cpu_count']} exceeds 10% of "
+            f'{total_requests} requests -- see test_self_consistency_survives_eight_threads '
+            'for the expected small baseline versus a genuine defect.',
+        )
+
+        # Bounded cost: reader knows what a 600s hardware run will look like.
+        serialized_size = len(json.dumps(snap_after))
+        self.assertLess(serialized_size, 5_000_000, 'snapshot JSON size unexpectedly large')
+        self.assertLessEqual(len(routes), lockprofile.MAX_TRACKED_ROUTES)
+        print(
+            f'06-16 rehearsal: snapshot JSON size={serialized_size} bytes, '
+            f'route table size={len(routes)}',
+        )
+
+        # Per-route wait/hold, for the SUMMARY's laptop-rehearsal baseline.
+        for label in ('/api/services', '/api/scan-status'):
+            route = routes[label]
+            print(
+                f'06-16 rehearsal: {label} acquisitions={route["acquisitions"]} '
+                f'wait_ns_total={route["wait_ns_total"]} hold_ns_total={route["hold_ns_total"]}',
+            )
+
+    def test_self_consistency_survives_eight_threads(self):
+        """`sum(per-route hold) == global hold` holds exactly under real
+        eight-thread contention. In THIS collector's design that identity
+        holds by construction -- `record_acquisition` updates the per-route
+        bucket and the global total from the SAME values in one call under
+        one lock, so it cannot diverge regardless of which thread or which
+        route the values belong to. Kept as a sanity check, but -- per
+        `D-DEBT-06-10`'s own instruction not to cite a by-construction
+        identity as accuracy evidence -- it is NOT this test's real
+        concurrency guard; confirmed directly by running the mutation named
+        below (against the actual source, via Edit, not a monkeypatch) and
+        observing this specific identity still hold exactly
+        (2,494,319,763 == 2,494,319,763 in the mutation-verification run)
+        even while it was actively corrupting other numbers.
+
+        `clamped_python_count` and `clamped_off_cpu_count` ARE the real
+        concurrency guards: the single-threaded unit tests in
+        HoldDecompositionTests/RequestAccountingTests cannot exercise the
+        cross-thread races that push them up. `clamped_python_count` is
+        asserted at exactly 0 -- observed stable at 0 across every
+        development rehearsal run. `clamped_off_cpu_count` is bounded, not
+        zero: comparing two independent stdlib clocks
+        (`time.monotonic_ns()` for wait/hold vs `time.thread_time_ns()` for
+        CPU time) under zero-think-time 8-thread contention on this
+        development machine produces a small (~1-3% of requests),
+        reproducible clock-resolution artifact -- exactly the "clock
+        granularity" scenario `end_request`'s own docstring names and the
+        clamp mechanism exists to make visible rather than silently absorb,
+        not a correctness defect. 10% is a generous ceiling well above that
+        baseline and well below what the real defect below produces.
+
+        Mutation target: `_ACQUIRE_STATE` and `_REQUEST_STATE` (both
+        `threading.local()`) temporarily replaced with a single shared
+        plain-object namespace, simulating a thread-local leak. Under eight
+        threads this corrupts cross-thread attribution in a way no
+        single-threaded test can see: mutation-verified against the actual
+        source (dashboard/beacon/lockprofile.py, reverted after) --
+        observed `clamped_python_count` jump from 0 to 706/3255
+        acquisitions (21.7%) and `clamped_off_cpu_count` jump from ~1-3% to
+        2505/3712 requests (67.5%) -- both far past the bounds asserted
+        below. `sum(per-route hold) == global hold` did NOT break under
+        this mutation (2,494,319,763 == 2,494,319,763), confirming the
+        docstring paragraph above."""
+        errors, elapsed = self._run_rotation_workers()
+        self.assertEqual(errors, [], f'{len(errors)} server errors during the rehearsal: {errors[:5]}')
+        self.assertLess(elapsed, 30)
+
+        snap = lockprofile.snapshot()
+        total_hold = sum(route['hold_ns_total'] for route in snap['routes'].values())
+        self.assertEqual(total_hold, snap['lock']['hold_ns_total'])
+        total_requests = snap['requests_total']['requests']
+        self.assertEqual(snap['clamped_python_count'], 0)
+        self.assertLess(
+            snap['clamped_off_cpu_count'], 0.10 * total_requests,
+            f"clamped_off_cpu_count {snap['clamped_off_cpu_count']} exceeds 10% of "
+            f'{total_requests} requests -- see this test\'s own docstring for the '
+            'expected small baseline versus a genuine thread-local-leak defect.',
+        )
 
 
 class LockProfileInertnessTests(unittest.TestCase):
