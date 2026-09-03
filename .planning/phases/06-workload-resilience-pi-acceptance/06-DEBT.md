@@ -463,7 +463,7 @@ harness must fix the underlying defect first, not merely repeat this round's avo
 | Field | Value |
 |---|---|
 | **Raised by** | `06-LOCK-DIAGNOSTIC.md`'s Verdict section, `06-18-PLAN.md` Task 1 |
-| **Status** | **Deferred — a diagnostic-harness change for round 5's predictions, not a code fix.** New this round. |
+| **Status** | **Closed 2026-09-03 — `06-19-PLAN.md` Task 3.** `services_median_hold_in_band` is replaced by `services_min_hold_over_scan_status_hold_ratio` (floor `20.0`), a same-run ratio between two quantities measured in one run. Round 4's own measured figures (596,245,129ns / 2,531,729ns = 235.5) are replayed through the renamed `services_hold_dominates_scan_status_hold` check and HOLD, comfortably above the floor — `tests/test_lock_profile.py::LockAttributionVerdictTests::test_round_4_measured_hold_figures_hold_against_the_renamed_ratio_check`. |
 | **Recorded in the plan** | `06-LOCK-DIAGNOSTIC.md` §§1–2 and Verdict, `tests/pi_load_acceptance.py`'s `LOCK_ATTRIBUTION_PREDICTIONS` |
 
 **What was observed.** Round 4's hardware run carried two predictions over the same underlying
@@ -505,6 +505,18 @@ a change to `_db_lock` or any production code path.
 re-runs the diagnostic harness) either replaces `services_median_hold_in_band` with a relational
 form, or documents why an absolute band is retained and how it is rescaled against the run's own
 measured dataset growth before being evaluated.
+
+**Closed 2026-09-03 — `06-19-PLAN.md` Task 3.** `LOCK_ATTRIBUTION_PREDICTIONS` no longer carries
+`services_min_median_hold_ns` / `services_max_median_hold_ns`; both are gone by full key-set
+equality (`tests/test_lock_profile.py::LockAttributionVerdictTests::
+test_predictions_match_the_verification_reports_own_stated_figures`), not by an absence check that
+could pass on a typo. The replacement, `services_min_hold_over_scan_status_hold_ratio` (`20.0`),
+is a ratio of two quantities measured in the same run, so it is dataset-size-invariant by
+construction. `evaluate_lock_attribution`'s renamed `services_hold_dominates_scan_status_hold`
+check, replayed against round 4's own measured figures (596,245,129ns / 2,531,729ns = 235.5), HOLDS
+comfortably above the floor — the same measured reality that failed the retired absolute band now
+passes cleanly, demonstrating the retired band's failure was a property of the band, not of the
+data.
 
 ---
 

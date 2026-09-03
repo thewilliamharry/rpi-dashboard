@@ -737,10 +737,24 @@ LOCK_ATTRIBUTION_PREDICTIONS = {
     # ~1469.1ns per-acquisition cost (06-15-SUMMARY.md) while staying far
     # below /api/services' predicted 200-500ms hold.
     'scan_status_max_median_hold_ns': 5_000_000,
-    # Same item: "/api/services will show ~200-500ms hold" -- the band
-    # /api/services' own median hold must fall in.
-    'services_min_median_hold_ns': 200_000_000,
-    'services_max_median_hold_ns': 500_000_000,
+    # Same item, RETIRED FORM (D-DEBT-06-14): "/api/services will show
+    # ~200-500ms hold" was originally an absolute band
+    # (services_min_median_hold_ns / services_max_median_hold_ns,
+    # [200_000_000, 500_000_000]) calibrated to round 3's 25,278-row
+    # dataset. Round 4's hardware run measured /api/services' hold at
+    # 596,245,129ns (596.245ms) against a Pi holding 56,828 rows (2.24x
+    # that dataset) -- the band failed on the HIGH side purely because the
+    # deployment's data volume had grown since the band was set, not
+    # because the attribution was wrong (06-LOCK-DIAGNOSTIC.md's Verdict
+    # section). services_min_hold_over_scan_status_hold_ratio replaces it:
+    # both terms (/api/services' hold, /api/scan-status' hold) are
+    # measured in the SAME run, so the ratio is dataset-size-invariant by
+    # construction -- /api/services' hold scales with stored check count
+    # while /api/scan-status' does not, so growth moves the measured ratio
+    # AWAY from the floor, never through it. Calibrated against round 4's
+    # own measured figures: 596.245ms / 2.532ms = 235.5, comfortably above
+    # the 20.0 floor.
+    'services_min_hold_over_scan_status_hold_ratio': 20.0,
     # Same item: "and a wait that grows with the number of siblings queued
     # ahead of it". 06-DEBT.md D-DEBT-06-09's arithmetic
     # (242.614 - 3.281 = 239.333ms is 1.143x one /api/services critical
@@ -1142,13 +1156,31 @@ def evaluate_lock_attribution(summary):
         'held': scan_status_hold_median <= scan_status_max_hold,
     })
 
-    services_min_hold = LOCK_ATTRIBUTION_PREDICTIONS['services_min_median_hold_ns']
-    services_max_hold = LOCK_ATTRIBUTION_PREDICTIONS['services_max_median_hold_ns']
+    # D-DEBT-06-14: services_hold_dominates_scan_status_hold replaces the
+    # retired absolute band (services_median_hold_in_band). Both terms are
+    # measured in this same run, so the ratio is dataset-size-invariant --
+    # see the comment on services_min_hold_over_scan_status_hold_ratio
+    # above for the full rationale and round-4 figures (596.245ms /
+    # 2.532ms = 235.5 against the 20.0 floor). A zero scan-status hold
+    # (division-by-zero risk) is a precondition failure, never a division
+    # error -- an unmeasurable ratio must read as INCONCLUSIVE, not as a
+    # crash or a fabricated held/not-held verdict.
+    if scan_status_hold_median <= 0:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                f'scan_status_hold_median is {scan_status_hold_median} -- cannot compute '
+                'services_hold_dominates_scan_status_hold without dividing by zero.'
+            ),
+            'checks': checks,
+        }
+    services_hold_ratio = services_hold_median / scan_status_hold_median
+    services_min_ratio = LOCK_ATTRIBUTION_PREDICTIONS['services_min_hold_over_scan_status_hold_ratio']
     checks.append({
-        'name': 'services_median_hold_in_band',
-        'threshold': [services_min_hold, services_max_hold],
-        'measured': services_hold_median,
-        'held': services_min_hold <= services_hold_median <= services_max_hold,
+        'name': 'services_hold_dominates_scan_status_hold',
+        'threshold': services_min_ratio,
+        'measured': services_hold_ratio,
+        'held': services_hold_ratio >= services_min_ratio,
     })
 
     wait_fraction = scan_status_wait_median / services_hold_median if services_hold_median else 0
@@ -1176,6 +1208,202 @@ def evaluate_lock_attribution(summary):
                 'every prediction held: /api/scan-status holds the lock only briefly and waits '
                 "behind /api/services' critical section, /api/services' hold sits in the "
                 'predicted band, and utilisation is above the superlinear threshold.'
+            ),
+            'checks': checks,
+        }
+    failed_names = ', '.join(
+        f"{check['name']} (measured {check['measured']}, threshold {check['threshold']})"
+        for check in checks if not check['held']
+    )
+    return {
+        'verdict': 'INCONCLUSIVE',
+        'reason': (
+            f'the refutation condition did not hold, but not every confirmation prediction did '
+            f'either: {failed_names}.'
+        ),
+        'checks': checks,
+    }
+
+
+# 06-19: the fix's own falsifiable prediction, written BEFORE the fix
+# (06-20) and BEFORE any hardware measurement (06-21), per D-DEBT-06-09's
+# lesson that a round arriving with no prior prediction can only confirm.
+# Calibrated against round 4's measured /api/services figures
+# (06-LOCK-DIAGNOSTIC.md sec4): held-region split under load .002 connect /
+# .748 sql / .250 python. A successful narrowing should push the python
+# share toward (near) zero and the sql share toward (near) the full held
+# region. Every entry here is a share of the route's OWN hold, never a
+# duration -- dimensionless by construction, so a dataset twice the size
+# produces the same share if the fix worked (mirrors the same
+# D-DEBT-06-14 lesson LOCK_ATTRIBUTION_PREDICTIONS above now follows).
+NARROWING_OUTCOME_PREDICTIONS = {
+    # CONFIRMED requires the post-fix python_share to sit at or below this
+    # -- round 4 measured 25.0% Python under load; a narrowing that
+    # actually moved the Python work out of the critical section should
+    # land well under that, not merely a modest improvement on it.
+    'services_max_python_share_of_hold': 0.10,
+    # REFUTED fires when the post-fix python_share is still at or above
+    # this -- i.e. the Python work provably did not leave the critical
+    # section. Set below round 4's measured 25.0% baseline so a narrowing
+    # that achieved nothing measurable is caught, not read as a partial win.
+    'services_refutation_python_share_of_hold': 0.20,
+    # CONFIRMED also requires the post-fix sql_share to sit at or above
+    # this -- round 4 measured 74.8% SQL under load; a narrowing that
+    # actually isolated the SQL-only work should push this share higher
+    # still, toward the full held region.
+    'services_min_sql_share_of_hold': 0.85,
+    # CONFIRMED also requires post-fix utilisation to sit below this --
+    # the same 0.85 superlinear threshold LOCK_ATTRIBUTION_PREDICTIONS uses
+    # (06-17), reused rather than restated. D-DEBT-06-15's own arithmetic
+    # estimates the achievable post-fix utilisation at 0.745-0.82,
+    # comfortably under this if the fix works as sized.
+    'max_utilisation_after_narrowing': 0.85,
+    # Reused, never restated -- the same minimum-acquisitions-for-a-median
+    # floor LOCK_ATTRIBUTION_PREDICTIONS uses.
+    'min_acquisitions_for_median': LOCK_ATTRIBUTION_PREDICTIONS['min_acquisitions_for_median'],
+}
+
+
+def evaluate_narrowing_outcome(summary):
+    """Three-valued verdict -- CONFIRMED, REFUTED, or INCONCLUSIVE -- on
+    whether 06-20's narrowing achieved its predicted effect: moving
+    /api/services' Python-side work out of the critical section. Written
+    BEFORE the fix and BEFORE any hardware measurement, so 06-21 can only
+    confirm or refute it, never fit it after the fact. Pure function of
+    ``summary`` -- reads no module-level mutable state; called twice with
+    the same input it returns equal output.
+
+    Same precondition-first, refutation-before-confirmation ordering as
+    ``evaluate_lock_attribution``, for the same reason (D-DEBT-06-09,
+    D-DEBT-06-10): a function that checks its hypothesis before ruling out
+    an inconclusive or contradicted run is the shape that produced two
+    wrong verdicts this phase.
+
+    D-DEBT-06-10's own lesson, applied directly: ``python_share`` is a
+    DERIVED remainder (``hold - connect - sql_execute - sql_fetch``), not a
+    directly measured quantity. 06-16's own mutation proved the summing
+    identity survives a thread-local leak that pushed
+    ``clamped_python_count`` to 706/3255 -- so the remainder can be
+    arithmetically consistent and still be garbage. ``clamped_python_count``
+    is the mutation-verified signal that the remainder is trustworthy; a
+    non-zero count makes this verdict INCONCLUSIVE, never CONFIRMED,
+    regardless of what the derived shares say.
+    """
+    checks = []
+
+    if summary.get('collected') is False:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': 'collected is False -- no measurement was taken this window.',
+            'checks': checks,
+        }
+
+    if summary.get('route_overflow') or summary.get('request_route_overflow'):
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                'route_overflow or request_route_overflow is set -- the per-route table lost '
+                'data and the measurement cannot be trusted.'
+            ),
+            'checks': checks,
+        }
+
+    routes = summary.get('routes', {})
+    services_route = routes.get('/api/services')
+    if services_route is None:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': "missing measurement: routes['/api/services'] not present in this window.",
+            'checks': checks,
+        }
+
+    min_acquisitions = NARROWING_OUTCOME_PREDICTIONS['min_acquisitions_for_median']
+    if services_route['acquisitions'] < min_acquisitions:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                f"too few acquisitions to read a share: /api/services="
+                f"{services_route['acquisitions']} (need >= {min_acquisitions})."
+            ),
+            'checks': checks,
+        }
+
+    clamped_python_count = summary.get('clamped_python_count', 0)
+    if clamped_python_count:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                f'clamped_python_count is {clamped_python_count} -- the derived python_share '
+                'remainder went negative at least once this window and cannot be trusted '
+                '(D-DEBT-06-10).'
+            ),
+            'checks': checks,
+        }
+
+    python_share = services_route.get('python_share')
+    sql_share = services_route.get('sql_share')
+    if python_share is None or sql_share is None:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                "routes['/api/services'] carries no hold this window, so python_share/sql_share "
+                'are undefined.'
+            ),
+            'checks': checks,
+        }
+
+    refutation_threshold = NARROWING_OUTCOME_PREDICTIONS['services_refutation_python_share_of_hold']
+    checks.append({
+        'name': 'services_python_share_below_refutation_threshold',
+        'threshold': refutation_threshold,
+        'measured': python_share,
+        'held': python_share < refutation_threshold,
+    })
+    if python_share >= refutation_threshold:
+        return {
+            'verdict': 'REFUTED',
+            'reason': (
+                f"/api/services' python_share is {python_share:.4f}, at or above the "
+                f'{refutation_threshold} refutation threshold -- the narrowing did not move the '
+                'Python-side work out of the critical section.'
+            ),
+            'checks': checks,
+        }
+
+    # Confirmation conditions -- only reached when the refutation condition
+    # above did not hold.
+    max_python_share = NARROWING_OUTCOME_PREDICTIONS['services_max_python_share_of_hold']
+    checks.append({
+        'name': 'services_python_share_at_or_below_confirmation_threshold',
+        'threshold': max_python_share,
+        'measured': python_share,
+        'held': python_share <= max_python_share,
+    })
+
+    min_sql_share = NARROWING_OUTCOME_PREDICTIONS['services_min_sql_share_of_hold']
+    checks.append({
+        'name': 'services_sql_share_at_or_above_confirmation_threshold',
+        'threshold': min_sql_share,
+        'measured': sql_share,
+        'held': sql_share >= min_sql_share,
+    })
+
+    utilisation = summary.get('utilisation')
+    max_utilisation = NARROWING_OUTCOME_PREDICTIONS['max_utilisation_after_narrowing']
+    checks.append({
+        'name': 'utilisation_below_max_after_narrowing',
+        'threshold': max_utilisation,
+        'measured': utilisation,
+        'held': utilisation is not None and utilisation < max_utilisation,
+    })
+
+    if all(check['held'] for check in checks):
+        return {
+            'verdict': 'CONFIRMED',
+            'reason': (
+                "every prediction held: /api/services' python_share sits at or below the "
+                'confirmation threshold, its sql_share sits at or above its own threshold, and '
+                'utilisation is below the post-narrowing superlinear threshold.'
             ),
             'checks': checks,
         }
@@ -1245,6 +1473,14 @@ def _collect_lock_profile(scenario, before_snapshot, before_failure_reason):
     # evidence just because overall_passed happens to be true.
     summary['instrumented'] = True
     summary['attribution'] = evaluate_lock_attribution(summary)
+    # PROH-OPS-07-13 (06-19): the narrowing-outcome verdict is recorded
+    # alongside attribution under this diagnostic block only. It is never
+    # read by assert_response_times, assert_resource_budget, assert_cadence,
+    # failure_reasons, or overall_passed -- see
+    # test_structural_arm_lock_profile_never_feeds_the_verdict and
+    # NarrowingOutcomeVerdictTests' own structural test in
+    # tests/test_lock_profile.py.
+    summary['narrowing_outcome'] = evaluate_narrowing_outcome(summary)
     return summary
 
 

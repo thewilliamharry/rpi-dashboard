@@ -2263,13 +2263,29 @@ class LockAttributionVerdictTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'INCONCLUSIVE')
 
     def test_predictions_match_the_verification_reports_own_stated_figures(self):
-        """06-VERIFICATION.md Truth 5's `missing:` items state these two
-        figures literally: "~200-500ms hold" for /api/services, and the
-        "~0.85" utilisation threshold. A later edit that quietly loosens
-        either fails this test (T-06-89)."""
+        """06-VERIFICATION.md Truth 5's `missing:` items originally stated
+        "~200-500ms hold" for /api/services as an absolute band; D-DEBT-06-14
+        retired that band (it failed under dataset growth) in favour of
+        `services_min_hold_over_scan_status_hold_ratio`, a same-run ratio
+        calibrated to round 4's own measured figures (596.245ms / 2.532ms =
+        235.5 against the 20.0 floor). The "~0.85" utilisation threshold is
+        unchanged. Asserted by full key-set equality, deliberately -- an
+        absence check for the two retired keys could pass on a typo; a
+        key-set mismatch cannot."""
         predictions = harness.LOCK_ATTRIBUTION_PREDICTIONS
-        self.assertEqual(predictions['services_min_median_hold_ns'], 200_000_000)
-        self.assertEqual(predictions['services_max_median_hold_ns'], 500_000_000)
+        self.assertEqual(
+            set(predictions.keys()),
+            {
+                'scan_status_max_median_hold_ns',
+                'services_min_hold_over_scan_status_hold_ratio',
+                'scan_status_min_wait_over_services_hold_fraction',
+                'utilisation_superlinear_threshold',
+                'min_acquisitions_for_median',
+                'min_lock_wait_share_of_wall_for_confirmation',
+                'scan_status_slow_wall_threshold_ns',
+            },
+        )
+        self.assertEqual(predictions['services_min_hold_over_scan_status_hold_ratio'], 20.0)
         self.assertEqual(predictions['utilisation_superlinear_threshold'], 0.85)
 
     def test_evaluate_lock_attribution_is_pure_and_deterministic(self):
@@ -2277,6 +2293,212 @@ class LockAttributionVerdictTests(unittest.TestCase):
         result1 = harness.evaluate_lock_attribution(world)
         result2 = harness.evaluate_lock_attribution(world)
         self.assertEqual(result1, result2)
+
+    def test_round_4_measured_hold_figures_hold_against_the_renamed_ratio_check(self):
+        """06-19/D-DEBT-06-14: round 4's own measured hold figures --
+        596,245,129ns for /api/services, 2,531,729ns for /api/scan-status
+        (06-LOCK-DIAGNOSTIC.md) -- replayed through the renamed
+        `services_hold_dominates_scan_status_hold` check must still HOLD.
+        This is the demonstration that the retired band's failure was a
+        property of the band, not of the data: the same measured reality
+        that failed the absolute band (596.2ms outside [200ms, 500ms])
+        passes the same-run ratio comfortably."""
+        world = {
+            'utilisation': 0.9,
+            'route_overflow': False,
+            'request_route_overflow': False,
+            'routes': {
+                '/api/services': {'acquisitions': 882, 'hold_ns_total': 882 * 596_245_129},
+                '/api/scan-status': {
+                    'acquisitions': 880,
+                    'hold_ns_total': 880 * 2_531_729,
+                    'wait_ns_total': 880 * 2_531_729,
+                },
+            },
+            'requests': {
+                '/api/scan-status': {
+                    'requests': 880,
+                    'wall_ns_total': 880 * 272_392_500,
+                    'lock_wait_ns_total': 880 * 269_736_400,
+                },
+            },
+        }
+        result = harness.evaluate_lock_attribution(world)
+        ratio_check = next(
+            check for check in result['checks']
+            if check['name'] == 'services_hold_dominates_scan_status_hold'
+        )
+        self.assertTrue(ratio_check['held'], ratio_check)
+        self.assertGreater(ratio_check['measured'], ratio_check['threshold'])
+        self.assertAlmostEqual(ratio_check['measured'], 235.5, delta=0.1)
+
+
+def _confirmed_narrowing_world():
+    """The world in which 06-20's narrowing achieved its predicted effect:
+    `/api/services`' held region is almost entirely SQL, `python_share`
+    well under the confirmation threshold, and utilisation below the
+    post-narrowing superlinear threshold."""
+    return {
+        'collected': True,
+        'route_overflow': False,
+        'request_route_overflow': False,
+        'utilisation': 0.5,
+        'clamped_python_count': 0,
+        'routes': {
+            '/api/services': {
+                'acquisitions': 500,
+                'python_share': 0.05,
+                'sql_share': 0.93,
+            },
+        },
+    }
+
+
+def _refuted_narrowing_world():
+    """`python_share` still at the pre-fix baseline (round 4 measured
+    25.0%) -- the Python work provably did not leave the critical
+    section."""
+    return {
+        'collected': True,
+        'route_overflow': False,
+        'request_route_overflow': False,
+        'utilisation': 0.5,
+        'clamped_python_count': 0,
+        'routes': {
+            '/api/services': {
+                'acquisitions': 500,
+                'python_share': 0.25,
+                'sql_share': 0.75,
+            },
+        },
+    }
+
+
+class NarrowingOutcomeVerdictTests(unittest.TestCase):
+    """06-19 Task 3: `evaluate_narrowing_outcome` reaches all three
+    verdicts, proven from literal, reviewable synthetic summaries, and its
+    verdict never contributes to the run's actual pass/fail oracle
+    (`PROH-OPS-07-13`)."""
+
+    def test_confirmed_world_yields_confirmed(self):
+        result = harness.evaluate_narrowing_outcome(_confirmed_narrowing_world())
+        self.assertEqual(result['verdict'], 'CONFIRMED')
+        self.assertTrue(result['checks'])
+        for check in result['checks']:
+            self.assertTrue(check['held'], check)
+            self.assertIn('measured', check)
+
+    def test_refuted_world_yields_refuted(self):
+        """The test this round exists for: if this cannot be made to pass,
+        the verdict logic cannot refute and the prediction is worthless."""
+        result = harness.evaluate_narrowing_outcome(_refuted_narrowing_world())
+        self.assertEqual(result['verdict'], 'REFUTED')
+        self.assertIn('did not move', result['reason'])
+        self.assertTrue(any(not check['held'] for check in result['checks']))
+
+    def test_missing_route_yields_inconclusive(self):
+        result = harness.evaluate_narrowing_outcome({
+            'collected': True, 'route_overflow': False, 'request_route_overflow': False,
+            'routes': {},
+        })
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertIn("routes['/api/services']", result['reason'])
+
+    def test_under_sampled_route_yields_inconclusive_never_refuted(self):
+        world = _confirmed_narrowing_world()
+        world['routes']['/api/services']['acquisitions'] = 5
+        result = harness.evaluate_narrowing_outcome(world)
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertIn('too few acquisitions', result['reason'])
+
+    def test_nonzero_clamped_python_count_yields_inconclusive_never_confirmed(self):
+        """D-DEBT-06-10: a suspect measurement -- the derived python_share
+        remainder went negative at least once -- must never read as
+        success, however good the shares themselves look."""
+        world = _confirmed_narrowing_world()
+        world['clamped_python_count'] = 3
+        result = harness.evaluate_narrowing_outcome(world)
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertIn('clamped_python_count', result['reason'])
+
+    def test_collected_false_yields_inconclusive(self):
+        result = harness.evaluate_narrowing_outcome({'collected': False})
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+
+    def test_evaluate_narrowing_outcome_is_pure_and_deterministic(self):
+        world = _confirmed_narrowing_world()
+        result1 = harness.evaluate_narrowing_outcome(world)
+        result2 = harness.evaluate_narrowing_outcome(world)
+        self.assertEqual(result1, result2)
+
+    def test_structural_arm_narrowing_outcome_never_feeds_the_verdict(self):
+        """`PROH-OPS-07-13`, the same shape
+        `test_structural_arm_lock_profile_never_feeds_the_verdict` uses: no
+        expression contributing to `report.overall_passed` or
+        `report.failure_reasons` anywhere in `tests/pi_load_acceptance.py`
+        references `narrowing_outcome` -- proven by `ast`, not by two runs
+        happening to agree."""
+        source = Path('tests/pi_load_acceptance.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+
+        def references_narrowing_outcome(node):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and 'narrowing_outcome' in sub.id:
+                    return True
+                if isinstance(sub, ast.Attribute) and 'narrowing_outcome' in sub.attr:
+                    return True
+            return False
+
+        offending = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute) and target.attr == 'overall_passed':
+                        if references_narrowing_outcome(node.value):
+                            offending.append(('overall_passed assignment', node.lineno))
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute) and func.attr in ('append', 'extend')
+                    and isinstance(func.value, ast.Attribute) and func.value.attr == 'failure_reasons'
+                ):
+                    if any(references_narrowing_outcome(arg) for arg in node.args):
+                        offending.append(('failure_reasons mutation', node.lineno))
+
+        self.assertEqual(
+            offending, [],
+            f'narrowing_outcome leaked into a verdict-affecting expression: {offending} '
+            '(PROH-OPS-07-13).',
+        )
+
+    def test_forced_refuted_narrowing_verdict_matches_the_same_run_without_the_block(self):
+        """The behavioral half of `PROH-OPS-07-13`, mirroring
+        `test_disabled_endpoint_matches_the_same_run_without_collection`'s
+        shape: forcing `evaluate_narrowing_outcome` to return REFUTED for a
+        genuinely live run must not move `overall_passed` or
+        `failure_reasons` relative to the same run without the diagnostic
+        block requested at all."""
+        with _live_beacon_server(enable_lock_profile=True) as (appmod, db_path, base_url):
+            scenario_without = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+            )
+            report_without = harness.run_acceptance(scenario_without)
+
+            scenario_with = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+                collect_lock_profile=True,
+            )
+            forced_refuted = {
+                'verdict': 'REFUTED', 'reason': 'forced for PROH-OPS-07-13 structural proof',
+                'checks': [],
+            }
+            with mock.patch.object(harness, 'evaluate_narrowing_outcome', return_value=forced_refuted):
+                report_with = harness.run_acceptance(scenario_with)
+
+        self.assertEqual(report_with.overall_passed, report_without.overall_passed)
+        self.assertEqual(report_with.failure_reasons, report_without.failure_reasons)
+        self.assertTrue(report_with.lock_profile.get('collected'))
+        self.assertEqual(report_with.lock_profile['narrowing_outcome']['verdict'], 'REFUTED')
 
 
 def _run_self_test_reliably(**kwargs):
