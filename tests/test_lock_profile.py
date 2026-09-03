@@ -214,6 +214,267 @@ class LockInstrumentationTests(_InstrumentedLockTestCase):
         self.assertAlmostEqual(utilisation, HOLD_FRACTION, delta=0.05)
 
 
+class HoldDecompositionTests(_InstrumentedLockTestCase):
+    """06-16 Task 1: decompose the held critical section into connection
+    setup, SQL and Python. Every millisecond and every share this class
+    produces is developer-machine evidence, never Pi evidence
+    (`PROH-OPS-07-09`)."""
+
+    def _run_in_held_region(self, route_label, work_fn):
+        lockprofile.begin_request(route_label)
+        try:
+            with self.appmod._db_lock:
+                work_fn()
+        finally:
+            lockprofile.end_request()
+
+    def test_two_directional_sql_share_of_the_held_region(self):
+        """A critical section dominated by a known, deliberately slow SQL
+        statement reports a SQL share within 0.15 of the known share; a
+        section dominated by Python reports a share below 0.15. Both
+        directions -- the instrument measures, it does not merely
+        partition."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            SLOW_S = 0.05
+            conn.create_function('slow_step_06_16', 0, lambda: (time.sleep(SLOW_S), 1)[1])
+
+            self._run_in_held_region(
+                'sql-dominated-06-16',
+                lambda: conn.execute('SELECT slow_step_06_16()').fetchall(),
+            )
+
+            PY_S = 0.05
+
+            def python_heavy():
+                conn.execute('SELECT 1').fetchall()
+                time.sleep(PY_S)
+
+            self._run_in_held_region('python-dominated-06-16', python_heavy)
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        sql_route = snap['routes']['sql-dominated-06-16']
+        sql_hold = sql_route['hold_ns_total']
+        sql_share = (
+            sql_route['sql_execute_ns_total'] + sql_route['sql_fetch_ns_total']
+        ) / sql_hold
+        self.assertGreaterEqual(
+            sql_share, 0.85,
+            f'SQL-dominated section reported SQL share {sql_share:.3f}, expected '
+            'within 0.15 of the known ~1.0 share -- the instrument is not '
+            'tracking SQL time in the direction it should.',
+        )
+
+        py_route = snap['routes']['python-dominated-06-16']
+        py_hold = py_route['hold_ns_total']
+        py_share = (
+            py_route['sql_execute_ns_total'] + py_route['sql_fetch_ns_total']
+        ) / py_hold
+        self.assertLess(
+            py_share, 0.15,
+            f'Python-dominated section reported SQL share {py_share:.3f}, '
+            'expected below 0.15 -- the instrument is not tracking Python time '
+            'in the direction it should.',
+        )
+
+    def test_fetchall_on_managed_connection_records_nonzero_fetch(self):
+        """Guard for the CPython `Connection.execute` routes-through-`self.
+        cursor()` assumption (`D-DEBT-06-10`): if `ManagedConnection.cursor`
+        is not overridden, fetch time silently lands in the Python bucket
+        instead of here, and this assertion catches it."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            conn.execute('CREATE TABLE _t_06_16_fetch(v INTEGER)')
+            conn.executemany(
+                'INSERT INTO _t_06_16_fetch(v) VALUES (?)', [(i,) for i in range(2000)],
+            )
+            conn.commit()
+
+            rows = {}
+
+            def work():
+                rows['result'] = conn.execute('SELECT v FROM _t_06_16_fetch').fetchall()
+
+            self._run_in_held_region('fetch-guard-06-16', work)
+            self.assertEqual(len(rows['result']), 2000)
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        self.assertGreater(snap['routes']['fetch-guard-06-16']['sql_fetch_ns_total'], 0)
+
+    def test_identity_holds_by_construction_reported_for_readability(self):
+        """Not a guard -- python_ns_total is defined as the remainder, so
+        this identity cannot fail. Reported for readability only, never
+        cited as accuracy evidence (`D-DEBT-06-10`)."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            def work():
+                conn.execute('SELECT 1').fetchall()
+                time.sleep(0.01)
+
+            self._run_in_held_region('identity-06-16', work)
+        finally:
+            conn.close()
+
+        route = lockprofile.snapshot()['routes']['identity-06-16']
+        self.assertEqual(
+            route['connect_ns_total'] + route['sql_execute_ns_total']
+            + route['sql_fetch_ns_total'] + route['python_ns_total'],
+            route['hold_ns_total'],
+        )
+
+    def test_clamped_python_count_is_zero_across_the_workload(self):
+        """Load-bearing: the derived Python remainder never goes negative
+        across a representative mixed workload -- no measurement error is
+        silently absorbed into it. Mutation target: double-counting
+        `record_connect`."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            conn.execute('CREATE TABLE _t_06_16_clamp(v INTEGER)')
+            conn.executemany(
+                'INSERT INTO _t_06_16_clamp(v) VALUES (?)', [(i,) for i in range(500)],
+            )
+            conn.commit()
+            for i in range(20):
+                label = f'clamp-workload-06-16-{i % 3}'
+
+                def work():
+                    conn.execute('SELECT v FROM _t_06_16_clamp').fetchall()
+
+                self._run_in_held_region(label, work)
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        self.assertEqual(snap['clamped_python_count'], 0)
+
+    def test_connection_setup_measured_and_lease_isolated_under_contention(self):
+        """Connection setup (`connect_ns_total`) is non-zero, and its
+        `flock` lease portion (`lease_ns_total`) rises under artificial
+        maintenance-lease contention while the rest of connect setup does
+        not rise materially in the same comparison."""
+        import fcntl
+        import threading as _threading
+
+        from dashboard.beacon.db import connect_db, maintenance_lock_path
+
+        baseline = {}
+
+        def baseline_connect():
+            baseline['conn'] = connect_db(self.db_path)
+
+        self._run_in_held_region('connect-baseline-06-16', baseline_connect)
+        baseline['conn'].close()
+
+        baseline_route = lockprofile.snapshot()['routes']['connect-baseline-06-16']
+        self.assertGreater(baseline_route['connect_ns_total'], 0)
+
+        lock_path = maintenance_lock_path(self.db_path)
+        contend_handle = lock_path.open('a+')
+        fcntl.flock(contend_handle.fileno(), fcntl.LOCK_EX)
+        CONTEND_S = 0.15
+        release_at = time.monotonic() + CONTEND_S
+
+        def releaser():
+            remaining = release_at - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            fcntl.flock(contend_handle.fileno(), fcntl.LOCK_UN)
+            contend_handle.close()
+
+        releaser_thread = _threading.Thread(target=releaser, daemon=True)
+        releaser_thread.start()
+
+        contended = {}
+
+        def contended_connect():
+            contended['conn'] = connect_db(self.db_path)
+
+        self._run_in_held_region('connect-contended-06-16', contended_connect)
+        releaser_thread.join(5)
+        contended['conn'].close()
+
+        contended_route = lockprofile.snapshot()['routes']['connect-contended-06-16']
+        self.assertGreater(
+            contended_route['lease_ns_total'], baseline_route['lease_ns_total'],
+            'lease_ns_total did not rise under artificial maintenance-lease '
+            'contention -- the lease portion is not being isolated.',
+        )
+        baseline_nonlease = baseline_route['connect_ns_total'] - baseline_route['lease_ns_total']
+        contended_nonlease = contended_route['connect_ns_total'] - contended_route['lease_ns_total']
+        self.assertLess(
+            contended_nonlease, baseline_nonlease * 5 + 20_000_000,
+            f'non-lease connect cost rose from {baseline_nonlease}ns to '
+            f'{contended_nonlease}ns under lease contention -- the lease is not '
+            'isolated from the rest of connection setup.',
+        )
+
+    def test_sql_outside_any_held_region_lands_in_its_own_bucket(self):
+        """SQL performed OUTSIDE any held region is attributed to
+        `sql_outside_lock_ns` and touches no route's held-SQL share."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            conn.execute('SELECT 1').fetchall()
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        self.assertGreater(snap['sql_outside_lock_ns'], 0)
+        self.assertEqual(snap['routes'], {})
+
+    def test_disabled_profile_never_touches_record_sql_or_record_connect(self):
+        """With the profile disabled, counting stubs over `record_sql` and
+        `record_connect` register exactly 0 calls across 50 queries and 10
+        connections, and `ManagedConnection` returns ordinary results."""
+        appmod, db_path = load_app()
+        try:
+            self.assertFalse(appmod.ENABLE_LOCK_PROFILE)
+            from dashboard.beacon.db import connect_db
+
+            call_count = {'sql': 0, 'connect': 0}
+            original_record_sql = lockprofile.record_sql
+            original_record_connect = lockprofile.record_connect
+
+            def counting_record_sql(kind, elapsed_ns):
+                call_count['sql'] += 1
+                return original_record_sql(kind, elapsed_ns)
+
+            def counting_record_connect(total_ns, lease_ns):
+                call_count['connect'] += 1
+                return original_record_connect(total_ns, lease_ns)
+
+            with mock.patch.object(lockprofile, 'record_sql', counting_record_sql), \
+                 mock.patch.object(lockprofile, 'record_connect', counting_record_connect):
+                conn = connect_db(db_path)
+                try:
+                    for _ in range(50):
+                        result = conn.execute('SELECT 1').fetchall()
+                        self.assertEqual(result, [(1,)])
+                finally:
+                    conn.close()
+                for _ in range(9):
+                    extra_conn = connect_db(db_path)
+                    extra_conn.close()
+
+            self.assertEqual(call_count['sql'], 0)
+            self.assertEqual(call_count['connect'], 0)
+        finally:
+            cleanup_db(db_path)
+
+
 class LockProfileInertnessTests(unittest.TestCase):
     """Turning the diagnostic off returns the deployment to a state
     indistinguishable from today's, and turning it on costs a bounded,
