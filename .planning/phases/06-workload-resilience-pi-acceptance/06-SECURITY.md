@@ -69,6 +69,7 @@ mode was not required).
 | T-06-101 | Tampering | a computation quietly moved back inside the critical section, undoing `06-20`'s narrowing without changing output | high | mitigate | `HeldRegionCompositionTests::test_services_held_region_is_sql_dominated_after_narrowing` (measured composition guard) and `LockScopePreservationTests::test_api_services_lock_scope_is_database_reads_only` (AST pin) — both fail on the same mutation, one asserting a consequence, the other a shape (`06-20`) | closed |
 | T-06-102 | Information Disclosure | a `sqlite3.Row` field read after its connection closed, yielding a partial or wrong value | high | mitigate | Every result consumed outside `api_services`' `_db_lock` block is materialized into a plain dict inside it (`services`, `all_checks`, `preview_rows`); `06-19` Task 2's recorded `sqlite3.ProgrammingError` mutation is the evidence the hazard is real, not hypothetical (`06-20`) | closed |
 | T-06-103 | Repudiation | `/api/services`' output changing under a scope-only edit while every gate stays green — the `D-DEBT-06-10` `CR-01` shape | critical | mitigate | `ApiServicesOutputEquivalenceTests::test_narrowed_route_reproduces_the_pre_narrowing_response_bytes` — three golden fixtures (maintenance-path, over-cap, empty-services) captured from unmodified pre-narrowing code, byte-equality re-checked after; `PROH-OPS-07-05` (`06-20`) | closed |
+| T-06-112 | Tampering | `/api/advanced/current`'s payload changing under a cost or topology change while every gate stays green | critical | mitigate | `PROH-OPS-07-14` (minted `06-22`) and `AdvancedCurrentCostTests::test_payload_is_unchanged_by_the_round_5_remedy` — golden captured from the pre-remedy code (`tests/fixtures/advanced_current_pre_remedy_golden.json`), byte-equality checked after the T-C memo shipped, mutation-verified sensitive to a dropped composed field (`06-22`) | closed |
 | T-06-25 | Spoofing | a dead worker epoch writing a terminal outcome | high | mitigate | `_assert_current_worker_owner` fencing (`queues.py:181-204`) raising `LeaseLost`, plus `recover_queues_for_worker`; asserted by the restart test | closed |
 | T-06-26 | Repudiation | a smoke run passed off as hardware acceptance evidence | high | mitigate | `run_kind = 'smoke' if scenario.self_test else 'acceptance'` derived from the invocation (`tests/pi_load_acceptance.py:420`); the report always carries `platform.machine()` and `platform.node()` (`:423-424`) | closed |
 | T-06-27 | Tampering | thresholds tuned to make a run pass | high | mitigate | The cadence oracle delegates to the product's own `freshness_state`; `test_pi_load_acceptance_oracles_are_the_products_own` (`test_workload_resilience.py:947`) locks the oracles to product code | closed |
@@ -137,6 +138,25 @@ substitute for it. Scheduled in `06-24`, per this plan's own sequencing and `D-D
 above, including the three new ones, has a `closed` disposition — but the phase-level
 `status: verified` / Sign-Off below describes the `2026-09-01` audit, not a re-run against this
 narrowing; `06-24`'s re-run is what makes that frontmatter current again.
+
+---
+
+### 06-22 — T-C (the occurrence memo) shipped for `/api/advanced/current`; `PROH-OPS-04-05` NOT engaged
+
+`06-22-PLAN.md` Task 1's blocking `checkpoint:decision` resolved **T-C** (`t-c-reduce-cost`) as the
+remedy for `/api/advanced/current`'s measured budget failure — a request-scoped occurrence-walk memo
+threaded through `dashboard/beacon/diagnosis.py`'s `get_current_diagnosis`, mirroring `06-13`'s
+identical `/api/services` fix. **`PROH-OPS-04-05` is explicitly NOT engaged by this branch**, stated
+here rather than left ambiguous: that prohibition gates a second OS process gaining unserialized
+concurrent write access to the shared SQLite file (the `t-a-add-workers` branch this plan's Task 1
+held in reserve but did not select). T-C changes no deployment topology, opens no new
+database-access boundary, and touches neither `dashboard/Dockerfile` nor `docker-compose.yml` — `git
+diff --quiet` holds for both. `T-06-24`'s closure evidence is therefore untouched by this plan; no
+re-audit trigger fires.
+
+New threat `T-06-112` (Tampering — the payload changing under this cost change) is added to the
+register above, closed on `PROH-OPS-07-14` (minted this plan) and the mutation-verified
+payload-equivalence guard. `threats_open` stays `0`.
 
 ---
 

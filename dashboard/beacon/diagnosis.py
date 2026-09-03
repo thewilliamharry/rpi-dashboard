@@ -216,7 +216,7 @@ def _safe_pinned_order(value, fallback):
     return fallback
 
 
-def _maintenance_disclosure(windows, now, tz_name):
+def _maintenance_disclosure(windows, now, tz_name, cache=None):
     """Resolve D-06's maintenance evidence block for one port's windows.
 
     Always returns a dict -- never omitted, never blank. Coverage is decided
@@ -228,8 +228,14 @@ def _maintenance_disclosure(windows, now, tz_name):
     (longest-grace-wins, D-05) result -- this never re-implements the
     interval rule, it only asks the one function that already owns it, once
     per window.
+
+    ``cache``, when given, is the same request-scoped dict
+    ``get_current_diagnosis`` forwards to ``maintenance.attributed_downtime_seconds``
+    -- see that function's and ``maintenance.coverage``'s own docstrings for
+    what it memoizes. ``cache=None`` (the default) preserves this function's
+    previous behavior exactly, for every caller that does not opt in.
     """
-    covered, covered_until_ts = maintenance.coverage(windows, now, tz_name)
+    covered, covered_until_ts = maintenance.coverage(windows, now, tz_name, cache=cache)
     if not covered:
         return {'active': False, 'window': None, 'covered_until_ts': None}
     disclosed_window = None
@@ -237,7 +243,7 @@ def _maintenance_disclosure(windows, now, tz_name):
         window = maintenance.window_from_row(row)
         if window is None or not window.enabled:
             continue
-        window_covered, window_grace_until = maintenance.coverage([row], now, tz_name)
+        window_covered, window_grace_until = maintenance.coverage([row], now, tz_name, cache=cache)
         if window_covered and window_grace_until == covered_until_ts:
             disclosed_window = window
             break
@@ -258,7 +264,7 @@ def _maintenance_disclosure(windows, now, tz_name):
 
 def compose_service_diagnosis(
     rows, *, now, windows_by_port=None, tz_name='UTC', attribution_by_port=None,
-    period_seconds=0,
+    period_seconds=0, cache=None,
 ):
     """Project current service evidence without conflating TLS or freshness with availability.
 
@@ -272,6 +278,10 @@ def compose_service_diagnosis(
     the TRUE offline/online state before any reclassification, so a
     maintenance-derived service is still measured against the 60-second
     down-only cadence its stored offline state actually earns.
+
+    ``cache``, when given, is forwarded to ``_maintenance_disclosure`` for
+    every row -- see that function's docstring. ``cache=None`` (the default)
+    preserves this function's previous behavior exactly.
     """
     windows_by_port = windows_by_port or {}
     attribution_by_port = attribution_by_port or {}
@@ -309,7 +319,9 @@ def compose_service_diagnosis(
             'last_error': row.get('probe_error_class') or row.get('last_error'),
         }
 
-        maintenance_state = _maintenance_disclosure(windows_by_port.get(port, []), now, tz_name)
+        maintenance_state = _maintenance_disclosure(
+            windows_by_port.get(port, []), now, tz_name, cache=cache,
+        )
         if availability == 'offline' and maintenance_state['active']:
             service['availability'] = MAINTENANCE_AVAILABILITY
         service['maintenance'] = maintenance_state
@@ -643,6 +655,15 @@ def get_current_diagnosis(db_path, settings, now):
     # alongside the uptime computation, never inside it (D-09, Pitfall 5).
     period_seconds = settings.expire_days * 86400
     start_ts = now - period_seconds
+    # Request-scoped memo for beacon_maintenance's occurrence walk, mirroring
+    # api_services's own maintenance_occurrence_cache (06-13). The walk is a
+    # pure function of (window, epoch, timezone) -- see
+    # maintenance._local_occurrence_epochs's own docstring -- so memoizing it
+    # changes no output, only how many times the same walk is repeated across
+    # this one request's per-port attribution and disclosure calls below
+    # (D-DEBT-06-15, 06-22-PLAN.md t-c-reduce-cost; PROH-OPS-07-14 binds the
+    # payload unchanged).
+    maintenance_occurrence_cache = {}
     with read_transaction(db_path) as conn:
         row = read_current_host(conn)
         host = _host_payload(row, cadence_seconds, now)
@@ -654,12 +675,14 @@ def get_current_diagnosis(db_path, settings, now):
                 read_service_offline_intervals(conn, port, start_ts=start_ts, end_ts=now),
                 windows_by_port.get(port, []),
                 settings.timezone,
+                cache=maintenance_occurrence_cache,
             )
             for port in ports
         }
         services = compose_service_diagnosis(
             service_rows, now=now, windows_by_port=windows_by_port, tz_name=settings.timezone,
             attribution_by_port=attribution_by_port, period_seconds=period_seconds,
+            cache=maintenance_occurrence_cache,
         )
         pipeline = compose_pipeline_diagnosis(read_pipeline_evidence(conn, now=now), settings, now=now)
     attach_service_collection_gaps(services, pipeline)

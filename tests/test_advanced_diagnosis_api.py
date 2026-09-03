@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from dashboard.beacon import migrations, previews, queues, repositories, worker_main
+from dashboard.beacon import maintenance, migrations, previews, queues, repositories, worker_main
 from dashboard.beacon.worker_authority import WorkerAuthority
 from tests.helpers import cleanup_db, load_app
 
@@ -3101,6 +3101,161 @@ class MaintenanceExceptionTests(_MaintenanceDiagnosisFixture):
         source = inspect.getsource(self.appmod.beacon_diagnosis.compose_active_exceptions)
         self.assertNotIn('MAINTENANCE_AVAILABILITY', source)
         self.assertNotIn('maintenance', source.lower())
+
+
+class AdvancedCurrentCostTests(_MaintenanceDiagnosisFixture):
+    """06-22 T-C: `/api/advanced/current`'s cost is reduced by a request-scoped
+    occurrence memo mirroring 06-13's `/api/services` fix (`D-DEBT-06-15`,
+    `06-LOCK-DIAGNOSTIC-R5A.md` section 4 -- this route's own off-CPU time
+    nearly doubled in round 5's loaded pass). `PROH-OPS-07-14` (minted here)
+    requires the payload to stay byte-identical for the same input on any
+    cost or topology change to this route; the two guards below are its
+    falsifier (a golden captured from the pre-memo code) and the memo's own
+    mechanism guard (a relational, mutation-verified walk count).
+    """
+
+    GOLDEN_PATH = Path(__file__).resolve().parent / 'fixtures' / 'advanced_current_pre_remedy_golden.json'
+
+    def test_payload_is_unchanged_by_the_round_5_remedy(self):
+        """PROH-OPS-07-14: `get_current_diagnosis`'s payload is byte-identical
+        across the T-C memo, proven against a golden captured from the code
+        as it stood immediately before this plan's production edit (commit
+        this test's own docstring names in the SUMMARY), under a frozen
+        clock and a seeded maintenance-path dataset: one online service
+        (port 20001), one offline service covered by an enabled window with
+        nonzero `maintenance_attributed_seconds` (port 20002, 5400 covered
+        seconds), and one offline service with no window and real,
+        unattributed downtime (port 20003) -- the same three-way shape
+        `06-20`'s own golden fixture used for `/api/services`. Mutation
+        (recorded in the SUMMARY, not automated here): dropping one composed
+        field from `get_current_diagnosis`'s returned dict is observed to
+        FAIL this test.
+        """
+        now = _epoch(2026, 1, 5, 4, 0, 0)  # Monday, inside the seeded window
+        self._seed_service(20001, online=1, state_since=now - 900)
+        self._seed_service(20002, online=0, state_since=now - 5400, last_error='ConnectionRefused')
+        self._write_window(
+            20002, start_minute=120, duration_minutes=180, weekdays=(1,), grace_minutes=10, now=now,
+        )
+        self._seed_service(20003, online=0, state_since=now - 5400, last_error='ConnectionRefused')
+        self._freeze_clock(now)
+
+        diagnosis = self.appmod.beacon_diagnosis
+        payload = diagnosis.get_current_diagnosis(self.db_path, self.appmod.SETTINGS, now)
+        serialized = json.dumps(payload, sort_keys=True, indent=2) + '\n'
+
+        golden = self.GOLDEN_PATH.read_text(encoding='utf-8')
+        self.assertEqual(
+            serialized, golden,
+            'get_current_diagnosis payload diverged from the pre-remedy golden -- '
+            'PROH-OPS-07-14 forbids a cost or topology change to /api/advanced/current '
+            'from moving its output (D-DEBT-06-10 is this shape at CR-01).',
+        )
+
+    def test_occurrence_walks_do_not_scale_with_port_count(self):
+        """The memo collapses N ports' shared-window occurrence walks to a
+        count bounded by the number of distinct (window, local date, tz)
+        triples actually computed, not by the port count -- the exact
+        mechanism `06-13` proved for `/api/services`, now threaded through
+        `get_current_diagnosis`.
+
+        Every port in both arms is given the identical literal maintenance
+        window row (same `id`/`port`/schedule fields, forwarded through a
+        patched `read_maintenance_windows_by_port`) and the identical fixed
+        offline interval (forwarded through a patched
+        `read_service_offline_intervals`), both pinned to one calendar-date
+        span under an explicitly pinned UTC clock, stated here so a later
+        reader does not have to re-derive it: interval
+        2026-01-05T02:30:00Z through 2026-01-05T04:00:00Z (both instants
+        fall on the same Monday, 2026-01-05, in UTC -- the timezone this
+        fixture pins explicitly rather than inheriting `SETTINGS.timezone`).
+        A shared window alone would not be sufficient here (per
+        `_local_occurrence_epochs`'s `(window, date, tz)` cache key) if the
+        two arms' offline intervals touched different local dates; pinning
+        both arms to the identical interval removes that confound.
+
+        The counting shim below counts a `_local_occurrence_epochs` call as
+        a genuine walk only when the caller's own cache does not already
+        hold the `(window, date, tz)` key it is about to compute -- a naive
+        count of every *call* (hit or miss) would scale with port count
+        regardless of caching, since callers always call
+        `_local_occurrence_epochs` at least once per port; `06-13-SUMMARY.md`
+        recorded exactly this for `/api/services`. This distinction is what
+        makes the assertion below discriminate the `cache=` threading from
+        the number of ports, per this plan's own read_first section.
+        """
+        appmod, db_path = load_app({'METRIC_SAMPLE_SECONDS': '5'})
+        try:
+            now = _epoch(2026, 1, 5, 4, 0, 0)
+            interval_start = _epoch(2026, 1, 5, 2, 30, 0)
+            interval = (interval_start, now)
+            window_row = {
+                'id': 1, 'port': 30000, 'start_minute': 120, 'duration_minutes': 180,
+                'weekdays': '1', 'grace_minutes': 10, 'enabled': 1,
+            }
+
+            def seed_ports(base, count):
+                with appmod._db_lock:
+                    conn = appmod.get_db()
+                    for i in range(count):
+                        port = base + i
+                        conn.execute(
+                            'INSERT INTO services('
+                            'port,title,first_seen,last_seen,is_online,last_latency_ms,'
+                            'last_error,state_since,overrun_raised_ts'
+                            ') VALUES(?,?,?,?,?,?,?,?,?)',
+                            (
+                                port, f'Service {port}', now - 6000, now, 0, None,
+                                'ConnectionRefused', interval_start, None,
+                            ),
+                        )
+                        conn.execute(
+                            'INSERT INTO service_meta('
+                            'port,display_name,url,critical,pinned_order,tags,healthy_statuses'
+                            ') VALUES(?,?,?,?,?,?,?)',
+                            (port, f'Service {port}', f'http://127.0.0.1:{port}', 0, port, '', '200-399'),
+                        )
+                    conn.commit()
+                    conn.close()
+                return [base + i for i in range(count)]
+
+            def measure(base, port_count):
+                ports = seed_ports(base, port_count)
+                walk_count = {'value': 0}
+                original_walk = maintenance._local_occurrence_epochs
+
+                def counting_wrapper(window, now_epoch, tz, cache=None):
+                    tz_key = getattr(tz, 'key', str(tz))
+                    now_local = datetime.fromtimestamp(now_epoch, tz=tz)
+                    key = (window, now_local.date(), tz_key)
+                    if cache is None or key not in cache:
+                        walk_count['value'] += 1
+                    return original_walk(window, now_epoch, tz, cache=cache)
+
+                with mock.patch.object(
+                    maintenance, '_local_occurrence_epochs', counting_wrapper,
+                ), mock.patch.object(
+                    appmod.beacon_diagnosis, 'read_maintenance_windows_by_port',
+                    side_effect=lambda conn, *, ports: {port: [window_row] for port in ports},
+                ), mock.patch.object(
+                    appmod.beacon_diagnosis, 'read_service_offline_intervals',
+                    side_effect=lambda conn, port, *, start_ts, end_ts: [interval],
+                ):
+                    appmod.beacon_diagnosis.get_current_diagnosis(db_path, appmod.SETTINGS, now)
+                return walk_count['value']
+
+            count_n = measure(30100, 4)
+            count_2n = measure(30200, 8)
+        finally:
+            cleanup_db(db_path)
+
+        self.assertGreater(count_n, 0, 'the fixture must exercise at least one genuine walk')
+        self.assertEqual(
+            count_n, count_2n,
+            f'D-DEBT-06-15/06-13 precedent: get_current_diagnosis\'s occurrence walk count '
+            f'must not scale with port count once the request-scoped memo is threaded through -- '
+            f'measured {count_n} walks at 4 ports vs {count_2n} walks at 8 ports.',
+        )
 
 
 class SnapshotVersionTests(unittest.TestCase):
