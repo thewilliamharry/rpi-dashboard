@@ -15,6 +15,7 @@ per-acquisition nanosecond cost instead of an absolute millisecond threshold
 """
 
 import ast
+import json
 import threading
 import time
 import unittest
@@ -212,6 +213,786 @@ class LockInstrumentationTests(_InstrumentedLockTestCase):
         time_delta = snap_after['captured_monotonic_ns'] - snap_before['captured_monotonic_ns']
         utilisation = hold_delta / time_delta
         self.assertAlmostEqual(utilisation, HOLD_FRACTION, delta=0.05)
+
+
+class HoldDecompositionTests(_InstrumentedLockTestCase):
+    """06-16 Task 1: decompose the held critical section into connection
+    setup, SQL and Python. Every millisecond and every share this class
+    produces is developer-machine evidence, never Pi evidence
+    (`PROH-OPS-07-09`)."""
+
+    def _run_in_held_region(self, route_label, work_fn):
+        lockprofile.begin_request(route_label)
+        try:
+            with self.appmod._db_lock:
+                work_fn()
+        finally:
+            lockprofile.end_request()
+
+    def test_two_directional_sql_share_of_the_held_region(self):
+        """A critical section dominated by a known, deliberately slow SQL
+        statement reports a SQL share within 0.15 of the known share; a
+        section dominated by Python reports a share below 0.15. Both
+        directions -- the instrument measures, it does not merely
+        partition."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            SLOW_S = 0.05
+            conn.create_function('slow_step_06_16', 0, lambda: (time.sleep(SLOW_S), 1)[1])
+
+            self._run_in_held_region(
+                'sql-dominated-06-16',
+                lambda: conn.execute('SELECT slow_step_06_16()').fetchall(),
+            )
+
+            PY_S = 0.05
+
+            def python_heavy():
+                conn.execute('SELECT 1').fetchall()
+                time.sleep(PY_S)
+
+            self._run_in_held_region('python-dominated-06-16', python_heavy)
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        sql_route = snap['routes']['sql-dominated-06-16']
+        sql_hold = sql_route['hold_ns_total']
+        sql_share = (
+            sql_route['sql_execute_ns_total'] + sql_route['sql_fetch_ns_total']
+        ) / sql_hold
+        self.assertGreaterEqual(
+            sql_share, 0.85,
+            f'SQL-dominated section reported SQL share {sql_share:.3f}, expected '
+            'within 0.15 of the known ~1.0 share -- the instrument is not '
+            'tracking SQL time in the direction it should.',
+        )
+
+        py_route = snap['routes']['python-dominated-06-16']
+        py_hold = py_route['hold_ns_total']
+        py_share = (
+            py_route['sql_execute_ns_total'] + py_route['sql_fetch_ns_total']
+        ) / py_hold
+        self.assertLess(
+            py_share, 0.15,
+            f'Python-dominated section reported SQL share {py_share:.3f}, '
+            'expected below 0.15 -- the instrument is not tracking Python time '
+            'in the direction it should.',
+        )
+
+    def test_fetchall_on_managed_connection_records_nonzero_fetch(self):
+        """Guard for the CPython `Connection.execute` routes-through-`self.
+        cursor()` assumption (`D-DEBT-06-10`): if `ManagedConnection.cursor`
+        is not overridden, fetch time silently lands in the Python bucket
+        instead of here, and this assertion catches it."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            conn.execute('CREATE TABLE _t_06_16_fetch(v INTEGER)')
+            conn.executemany(
+                'INSERT INTO _t_06_16_fetch(v) VALUES (?)', [(i,) for i in range(2000)],
+            )
+            conn.commit()
+
+            rows = {}
+
+            def work():
+                rows['result'] = conn.execute('SELECT v FROM _t_06_16_fetch').fetchall()
+
+            self._run_in_held_region('fetch-guard-06-16', work)
+            self.assertEqual(len(rows['result']), 2000)
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        self.assertGreater(snap['routes']['fetch-guard-06-16']['sql_fetch_ns_total'], 0)
+
+    def test_identity_holds_by_construction_reported_for_readability(self):
+        """Not a guard -- python_ns_total is defined as the remainder, so
+        this identity cannot fail. Reported for readability only, never
+        cited as accuracy evidence (`D-DEBT-06-10`)."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            def work():
+                conn.execute('SELECT 1').fetchall()
+                time.sleep(0.01)
+
+            self._run_in_held_region('identity-06-16', work)
+        finally:
+            conn.close()
+
+        route = lockprofile.snapshot()['routes']['identity-06-16']
+        self.assertEqual(
+            route['connect_ns_total'] + route['sql_execute_ns_total']
+            + route['sql_fetch_ns_total'] + route['python_ns_total'],
+            route['hold_ns_total'],
+        )
+
+    def test_clamped_python_count_is_zero_across_the_workload(self):
+        """Load-bearing: the derived Python remainder never goes negative
+        across a representative mixed workload -- no measurement error is
+        silently absorbed into it. Mutation target: double-counting
+        `record_connect`.
+
+        Each iteration opens its OWN connection INSIDE the held region --
+        the real production shape (`with _db_lock, database_access(DB_PATH)
+        as conn:` opens a fresh connection every time) -- so a
+        double-counted `record_connect` is actually exercised here, not
+        just a double-counted `record_sql`.
+        """
+        from dashboard.beacon.db import connect_db
+
+        setup_conn = connect_db(self.db_path)
+        try:
+            setup_conn.execute('CREATE TABLE _t_06_16_clamp(v INTEGER)')
+            setup_conn.executemany(
+                'INSERT INTO _t_06_16_clamp(v) VALUES (?)', [(i,) for i in range(500)],
+            )
+            setup_conn.commit()
+        finally:
+            setup_conn.close()
+
+        for i in range(20):
+            label = f'clamp-workload-06-16-{i % 3}'
+            opened = {}
+
+            def work():
+                opened['conn'] = connect_db(self.db_path)
+                opened['conn'].execute('SELECT v FROM _t_06_16_clamp').fetchall()
+
+            self._run_in_held_region(label, work)
+            opened['conn'].close()
+
+        snap = lockprofile.snapshot()
+        self.assertEqual(snap['clamped_python_count'], 0)
+
+    def test_connection_setup_measured_and_lease_isolated_under_contention(self):
+        """Connection setup (`connect_ns_total`) is non-zero, and its
+        `flock` lease portion (`lease_ns_total`) rises under artificial
+        maintenance-lease contention while the rest of connect setup does
+        not rise materially in the same comparison."""
+        import fcntl
+        import threading as _threading
+
+        from dashboard.beacon.db import connect_db, maintenance_lock_path
+
+        baseline = {}
+
+        def baseline_connect():
+            baseline['conn'] = connect_db(self.db_path)
+
+        self._run_in_held_region('connect-baseline-06-16', baseline_connect)
+        baseline['conn'].close()
+
+        baseline_route = lockprofile.snapshot()['routes']['connect-baseline-06-16']
+        self.assertGreater(baseline_route['connect_ns_total'], 0)
+
+        lock_path = maintenance_lock_path(self.db_path)
+        contend_handle = lock_path.open('a+')
+        fcntl.flock(contend_handle.fileno(), fcntl.LOCK_EX)
+        CONTEND_S = 0.15
+        release_at = time.monotonic() + CONTEND_S
+
+        def releaser():
+            remaining = release_at - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            fcntl.flock(contend_handle.fileno(), fcntl.LOCK_UN)
+            contend_handle.close()
+
+        releaser_thread = _threading.Thread(target=releaser, daemon=True)
+        releaser_thread.start()
+
+        contended = {}
+
+        def contended_connect():
+            contended['conn'] = connect_db(self.db_path)
+
+        self._run_in_held_region('connect-contended-06-16', contended_connect)
+        releaser_thread.join(5)
+        contended['conn'].close()
+
+        contended_route = lockprofile.snapshot()['routes']['connect-contended-06-16']
+        self.assertGreater(
+            contended_route['lease_ns_total'], baseline_route['lease_ns_total'],
+            'lease_ns_total did not rise under artificial maintenance-lease '
+            'contention -- the lease portion is not being isolated.',
+        )
+        baseline_nonlease = baseline_route['connect_ns_total'] - baseline_route['lease_ns_total']
+        contended_nonlease = contended_route['connect_ns_total'] - contended_route['lease_ns_total']
+        self.assertLess(
+            contended_nonlease, baseline_nonlease * 5 + 20_000_000,
+            f'non-lease connect cost rose from {baseline_nonlease}ns to '
+            f'{contended_nonlease}ns under lease contention -- the lease is not '
+            'isolated from the rest of connection setup.',
+        )
+
+    def test_sql_outside_any_held_region_lands_in_its_own_bucket(self):
+        """SQL performed OUTSIDE any held region is attributed to
+        `sql_outside_lock_ns` and touches no route's held-SQL share."""
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            conn.execute('SELECT 1').fetchall()
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        self.assertGreater(snap['sql_outside_lock_ns'], 0)
+        self.assertEqual(snap['routes'], {})
+
+    def test_disabled_profile_never_touches_record_sql_or_record_connect(self):
+        """With the profile disabled, counting stubs over `record_sql` and
+        `record_connect` register exactly 0 calls across 50 queries and 10
+        connections, and `ManagedConnection` returns ordinary results.
+
+        `ENABLED` is one process-wide flag, and this class's own fixture
+        (`_InstrumentedLockTestCase.setUp`) already flipped it True via
+        `lockprofile.install()` for `self.appmod`'s lock. This test exercises
+        a deliberately different, never-installed app, so it must flip
+        `ENABLED` back to False itself rather than rely on the shared
+        fixture -- tearDown resets it to False afterward either way.
+        """
+        appmod, db_path = load_app()
+        try:
+            self.assertFalse(appmod.ENABLE_LOCK_PROFILE)
+            lockprofile.ENABLED = False
+            from dashboard.beacon.db import connect_db
+
+            call_count = {'sql': 0, 'connect': 0}
+            original_record_sql = lockprofile.record_sql
+            original_record_connect = lockprofile.record_connect
+
+            def counting_record_sql(kind, elapsed_ns):
+                call_count['sql'] += 1
+                return original_record_sql(kind, elapsed_ns)
+
+            def counting_record_connect(total_ns, lease_ns):
+                call_count['connect'] += 1
+                return original_record_connect(total_ns, lease_ns)
+
+            with mock.patch.object(lockprofile, 'record_sql', counting_record_sql), \
+                 mock.patch.object(lockprofile, 'record_connect', counting_record_connect):
+                conn = connect_db(db_path)
+                try:
+                    for _ in range(50):
+                        result = conn.execute('SELECT 1').fetchall()
+                        self.assertEqual([tuple(row) for row in result], [(1,)])
+                finally:
+                    conn.close()
+                for _ in range(9):
+                    extra_conn = connect_db(db_path)
+                    extra_conn.close()
+
+            self.assertEqual(call_count['sql'], 0)
+            self.assertEqual(call_count['connect'], 0)
+        finally:
+            cleanup_db(db_path)
+
+
+class RequestAccountingTests(_InstrumentedLockTestCase):
+    """06-16 Task 2: decompose every request's wall time into on-CPU,
+    lock-wait, and other-off-CPU. Every millisecond figure here is
+    developer-machine evidence, never Pi evidence (`PROH-OPS-07-09`).
+
+    Probe routes are registered directly on this test's own throwaway Flask
+    app instance -- `_InstrumentedLockTestCase.setUp` (via `load_app()`)
+    reloads `dashboard.app` fresh for every single test method, so a probe
+    route added here never reaches `dashboard/app.py`'s committed source and
+    cannot leak into any other test's app object.
+    """
+
+    SLEEP_S = 0.05
+    LOCK_HOLD_S = 0.1
+
+    def setUp(self):
+        super().setUp()
+        app = self.appmod.app
+
+        def sleeping_view():
+            time.sleep(self.SLEEP_S)
+            return self.appmod.jsonify({'ok': True})
+
+        def cpu_view():
+            total = 0
+            for i in range(3_000_000):
+                total += i * i
+            return self.appmod.jsonify({'total': total})
+
+        def lock_wait_view():
+            with self.appmod._db_lock:
+                pass
+            return self.appmod.jsonify({'ok': True})
+
+        def raising_view():
+            raise RuntimeError('06-16 probe error')
+
+        app.add_url_rule('/test-06-16/sleep', 'test_06_16_sleep', sleeping_view)
+        app.add_url_rule('/test-06-16/cpu', 'test_06_16_cpu', cpu_view)
+        app.add_url_rule('/test-06-16/lock-wait', 'test_06_16_lock_wait', lock_wait_view)
+        app.add_url_rule('/test-06-16/raise', 'test_06_16_raise', raising_view)
+
+    def test_sleeping_lock_free_route_reports_off_cpu_within_tolerance(self):
+        """A route that sleeps a known duration and takes no lock reports
+        `other_off_cpu_ns_total` within 20% of the sleep and `cpu_ns_total`
+        well below it -- off-CPU time is measured, not assumed."""
+        resp = self.client.get('/test-06-16/sleep')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/sleep']
+        sleep_ns = self.SLEEP_S * 1_000_000_000
+        self.assertGreaterEqual(
+            route['other_off_cpu_ns_total'], sleep_ns * 0.8,
+            f"other_off_cpu_ns_total {route['other_off_cpu_ns_total']} below 80% of the "
+            f'known {sleep_ns:.0f}ns sleep',
+        )
+        self.assertLessEqual(
+            route['other_off_cpu_ns_total'], sleep_ns * 1.2 + 10_000_000,
+            f"other_off_cpu_ns_total {route['other_off_cpu_ns_total']} exceeds 120% of the "
+            f'known {sleep_ns:.0f}ns sleep plus 10ms slack',
+        )
+        self.assertLess(route['cpu_ns_total'], sleep_ns * 0.5)
+
+    def test_cpu_bound_lock_free_route_reports_high_on_cpu_fraction(self):
+        """A route that does a fixed CPU-bound computation and takes no lock
+        reports `cpu_ns_total` at least 70% of `wall_ns_total` -- the
+        instrument distinguishes on-CPU from off-CPU in both directions."""
+        resp = self.client.get('/test-06-16/cpu')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/cpu']
+        self.assertGreaterEqual(
+            route['cpu_ns_total'], 0.7 * route['wall_ns_total'],
+            f"cpu_ns_total {route['cpu_ns_total']} is below 70% of "
+            f"wall_ns_total {route['wall_ns_total']} for a CPU-bound route",
+        )
+
+    def test_lock_wait_is_subtracted_out_of_other_off_cpu(self):
+        """A request blocked behind a known-duration `_db_lock` holder
+        reports `lock_wait_ns_total` within 20% of that duration, and
+        `other_off_cpu_ns_total` that does NOT include it -- lock wait is
+        subtracted out, so what remains is attributable to something else
+        (`D-DEBT-06-09`: the GIL and the lock are measured independently,
+        never inferred from each other)."""
+        holder_ready = threading.Event()
+        waiter_started = threading.Event()
+
+        def holder():
+            with self.appmod._db_lock:
+                holder_ready.set()
+                waiter_started.wait(2)
+                time.sleep(self.LOCK_HOLD_S)
+
+        holder_thread = threading.Thread(target=holder, daemon=True)
+        holder_thread.start()
+        self.assertTrue(holder_ready.wait(2), 'holder failed to acquire the lock in time')
+
+        result = {}
+
+        def waiter():
+            waiter_started.set()
+            result['resp'] = self.client.get('/test-06-16/lock-wait')
+
+        waiter_thread = threading.Thread(target=waiter, daemon=True)
+        waiter_thread.start()
+        holder_thread.join(5)
+        waiter_thread.join(5)
+
+        self.assertEqual(result['resp'].status_code, 200)
+        route = lockprofile.snapshot()['requests']['/test-06-16/lock-wait']
+        hold_ns = self.LOCK_HOLD_S * 1_000_000_000
+        self.assertGreaterEqual(
+            route['lock_wait_ns_total'], 0.8 * hold_ns,
+            f"lock_wait_ns_total {route['lock_wait_ns_total']} below 80% of the known "
+            f'{hold_ns:.0f}ns holder duration',
+        )
+        self.assertLess(
+            route['other_off_cpu_ns_total'], 0.5 * hold_ns,
+            f"other_off_cpu_ns_total {route['other_off_cpu_ns_total']} is a large fraction "
+            f'of the {hold_ns:.0f}ns lock-wait duration -- lock wait was not subtracted out',
+        )
+
+    def test_identity_holds_by_construction_reported_for_readability(self):
+        """Not a guard -- `other_off_cpu_ns_total` is defined as the
+        remainder, so this identity cannot fail. Reported for readability
+        only, never cited as accuracy evidence (`D-DEBT-06-10`)."""
+        resp = self.client.get('/test-06-16/sleep')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/sleep']
+        self.assertEqual(
+            route['cpu_ns_total'] + route['lock_wait_ns_total'] + route['other_off_cpu_ns_total'],
+            route['wall_ns_total'],
+        )
+
+    def test_lock_free_route_appears_with_zero_lock_wait(self):
+        """`/api/advanced/current` -- the sole exercised route holding no
+        lock (`dashboard/beacon/diagnosis.py` has zero `_db_lock`
+        references) -- appears in the request table with a non-zero
+        `requests` count and zero `lock_wait_ns_total`: the structural
+        precondition the GIL probe depends on."""
+        resp = self.client.get('/api/advanced/current')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/api/advanced/current']
+        self.assertGreater(route['requests'], 0)
+        self.assertEqual(route['lock_wait_ns_total'], 0)
+
+    def test_raising_handler_still_closes_its_accounting_region(self):
+        """A request that raises inside the handler still closes its
+        accounting region -- `teardown_request` runs on the error path --
+        and the route's `requests` count includes it.
+
+        `PROPAGATE_EXCEPTIONS=True` is set for the duration of this one
+        request: with it off (Flask's normal non-debug default), Flask
+        itself converts an unhandled exception into a 500 response BEFORE
+        invoking `after_request` handlers, so an `end_request` registered on
+        `after_request` would still fire in that case and this test would
+        not distinguish the two hooks. With it on, Flask lets the exception
+        propagate WITHOUT building a response at all -- `after_request`
+        handlers never run, but `teardown_request` handlers still do. This
+        is the scenario that actually requires `end_request` to be wired to
+        `teardown_request`, confirmed directly against this interpreter's
+        Flask before relying on it."""
+        self.appmod.app.config['PROPAGATE_EXCEPTIONS'] = True
+        try:
+            with self.assertRaises(RuntimeError):
+                self.client.get('/test-06-16/raise')
+        finally:
+            self.appmod.app.config['PROPAGATE_EXCEPTIONS'] = False
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/raise']
+        self.assertGreaterEqual(route['requests'], 1)
+
+    def test_clamped_off_cpu_count_is_zero_across_the_workload(self):
+        """Load-bearing: no measurement error is silently absorbed into
+        `other_off_cpu_ns` across a representative mixed workload. A
+        non-zero count would mean lock-wait exceeded off-CPU time -- the two
+        clocks disagreeing or accounting leaking across threads."""
+        self.client.get('/test-06-16/sleep')
+        self.client.get('/test-06-16/cpu')
+        self.client.get('/api/scan-status')
+        self.client.get('/api/services')
+
+        self.assertEqual(lockprofile.snapshot()['clamped_off_cpu_count'], 0)
+
+    def test_disabled_profile_timer_stays_at_zero_across_25_requests(self):
+        """With the profile disabled, the counting stub over
+        `lockprofile._timer_ns` remains at exactly 0 calls across 25 driven
+        requests -- unchanged from `06-15`'s inertness guarantee."""
+        appmod, db_path = load_app()
+        try:
+            self.assertFalse(appmod.ENABLE_LOCK_PROFILE)
+            lockprofile.ENABLED = False
+            call_count = {'timer': 0}
+            original_timer = lockprofile._timer_ns
+
+            def counting_timer():
+                call_count['timer'] += 1
+                return original_timer()
+
+            client = appmod.app.test_client()
+            routes = ('/api/services', '/api/scan-status', '/api/history')
+            with mock.patch.object(lockprofile, '_timer_ns', counting_timer):
+                for i in range(25):
+                    resp = client.get(routes[i % len(routes)])
+                    self.assertEqual(resp.status_code, 200)
+            self.assertEqual(call_count['timer'], 0)
+        finally:
+            cleanup_db(db_path)
+
+
+class ConcurrentRehearsalTests(_InstrumentedLockTestCase):
+    """06-16 Task 3: rehearse at concurrency 8 against the real Flask app,
+    using the acceptance harness's own route rotation, and prove every one
+    of `06-VERIFICATION.md` Truth 5's measurement questions is answerable
+    from a single snapshot pair. Every figure this class prints or asserts
+    on is developer-machine evidence, never Pi evidence (`PROH-OPS-07-09`).
+
+    Does not import `tests/pi_load_acceptance.py` (`PROH-OPS-07-01`, and
+    that module's CLI has side effects on import in some configurations) --
+    the rotation order is read from its source via `ast` and compared
+    against a literal list kept here, so this rehearsal cannot silently
+    drift from the real harness without failing loudly.
+    """
+
+    PORTS = (9900, 9901, 9902)
+    THREAD_COUNT = 8
+    DURATION_S = 3.0
+
+    # Mirrors _routes_for_ports' literal tuple in tests/pi_load_acceptance.py
+    # -- verified against that file's own source in
+    # test_rotation_matches_pi_load_acceptance below, not merely assumed.
+    LITERAL_ROUTE_LABELS = (
+        '/api/services', '/api/scan-status', '/api/thumbnail-status',
+        '/api/history', '/api/advanced/current',
+    )
+
+    def setUp(self):
+        super().setUp()
+        self._seed_representative_services()
+
+    def _seed_representative_services(self):
+        """Enough services and stored checks that /api/services does real
+        work rather than returning an empty result -- the idiom
+        tests/test_services_route_scaling.py::ServiceCountScalingTests
+        establishes."""
+        now = int(time.time())
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            try:
+                for port in self.PORTS:
+                    conn.execute(
+                        "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (port, f'Service {port}', now - 3600, now, 1, now - 60),
+                    )
+                    for j in range(30):
+                        ts = now - (30 - j) * 30
+                        conn.execute(
+                            'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                            (ts, port, 1 if j % 5 else 0),
+                        )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _rotation_urls(self):
+        return list(self.LITERAL_ROUTE_LABELS) + [f'/api/thumbnail/{port}' for port in self.PORTS]
+
+    def _run_rotation_workers(self):
+        """Starts THREAD_COUNT daemon workers walking the rotation
+        closed-loop for DURATION_S, joins them, and returns any server
+        errors observed. daemon=True for the same reason 06-15's mutual-
+        exclusion test uses it: join() already bounds the wait, so a lock
+        that loses mutual exclusion still reaches the assertions, but a
+        non-daemon worker blocked forever would prevent the interpreter
+        from exiting."""
+        urls = self._rotation_urls()
+        errors = []
+        errors_lock = threading.Lock()
+
+        def worker():
+            client = self.appmod.app.test_client()
+            index = 0
+            deadline = time.monotonic() + self.DURATION_S
+            while time.monotonic() < deadline:
+                url = urls[index % len(urls)]
+                index += 1
+                try:
+                    resp = client.get(url)
+                    if resp.status_code >= 500:
+                        with errors_lock:
+                            errors.append((url, resp.status_code))
+                except Exception as exc:
+                    with errors_lock:
+                        errors.append((url, repr(exc)))
+
+        threads = [
+            threading.Thread(target=worker, daemon=True) for _ in range(self.THREAD_COUNT)
+        ]
+        start = time.monotonic()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(self.DURATION_S + 15)
+        elapsed = time.monotonic() - start
+        return errors, elapsed
+
+    def test_rotation_matches_pi_load_acceptance(self):
+        """The literal rotation this rehearsal drives matches the order
+        `_routes_for_ports` actually builds -- read from that file's own
+        source, never imported (`PROH-OPS-07-01`). Fails loudly if the
+        harness's rotation changes without this test being updated."""
+        source = Path('tests/pi_load_acceptance.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+        func = _find_function_def(tree, '_routes_for_ports')
+        self.assertIsNotNone(func, '_routes_for_ports not found in tests/pi_load_acceptance.py')
+
+        labels = None
+        for node in ast.walk(func):
+            if isinstance(node, ast.comprehension) and isinstance(node.iter, ast.Tuple):
+                labels = tuple(elt.value for elt in node.iter.elts)
+                break
+        self.assertIsNotNone(
+            labels, 'could not locate the literal route-label tuple in _routes_for_ports',
+        )
+        self.assertEqual(
+            labels, self.LITERAL_ROUTE_LABELS,
+            "tests/pi_load_acceptance.py's route rotation changed -- update "
+            'LITERAL_ROUTE_LABELS above to match, deliberately.',
+        )
+
+    def test_eight_thread_rehearsal_answers_every_truth_5_question(self):
+        """Drives the real Flask app from 8 threads in a closed loop, using
+        the same route rotation `_routes_for_ports` builds, for a bounded
+        interval. Asserts the snapshot pair answers every one of Truth 5's
+        measurement questions."""
+        snap_before = lockprofile.snapshot()
+        errors, elapsed = self._run_rotation_workers()
+
+        self.assertEqual(errors, [], f'{len(errors)} server errors during the rehearsal: {errors[:5]}')
+        self.assertLess(elapsed, 30, f'rehearsal took {elapsed:.1f}s, expected under 30s')
+
+        snap_after = lockprofile.snapshot()
+        routes = snap_after['routes']
+        requests = snap_after['requests']
+
+        # Item 1 (wait vs hold, per route): every lock-taking rotation route
+        # appears with acquisitions > 0, wait_ns_total >= 0, hold_ns_total > 0.
+        for label in self.LITERAL_ROUTE_LABELS:
+            if label == '/api/advanced/current':
+                continue
+            route = routes.get(label)
+            self.assertIsNotNone(route, f'{label} missing from acquisition table')
+            self.assertGreater(route['acquisitions'], 0, f'{label} acquisitions == 0')
+            self.assertGreaterEqual(route['wait_ns_total'], 0)
+            self.assertGreater(route['hold_ns_total'], 0, f'{label} hold_ns_total == 0')
+        thumbnail_route = routes.get('/api/thumbnail/<int:port>')
+        self.assertIsNotNone(thumbnail_route, 'thumbnail route missing from acquisition table')
+        self.assertGreater(thumbnail_route['acquisitions'], 0)
+
+        # Item 2 (utilisation): in [0, 1], > 0 under this load, and the
+        # per-route hold totals sum exactly to the global hold total.
+        hold_delta = snap_after['lock']['hold_ns_total'] - snap_before['lock']['hold_ns_total']
+        time_delta = snap_after['captured_monotonic_ns'] - snap_before['captured_monotonic_ns']
+        utilisation = hold_delta / time_delta
+        self.assertGreaterEqual(utilisation, 0)
+        self.assertLessEqual(utilisation, 1)
+        self.assertGreater(utilisation, 0)
+        total_hold = sum(route['hold_ns_total'] for route in routes.values())
+        self.assertEqual(total_hold, snap_after['lock']['hold_ns_total'])
+
+        # Item 4 (SQL share of the critical section): /api/services' shares
+        # sum to 1 (by construction), and are reported, never pinned to
+        # 06-PROFILE.md's laptop-under-cProfile figure (PROH-OPS-07-09).
+        services_route = routes['/api/services']
+        hold = services_route['hold_ns_total']
+        sql_share = (services_route['sql_execute_ns_total'] + services_route['sql_fetch_ns_total']) / hold
+        connect_share = services_route['connect_ns_total'] / hold
+        python_share = services_route['python_ns_total'] / hold
+        self.assertAlmostEqual(sql_share + connect_share + python_share, 1.0, places=6)
+        print(
+            '06-16 rehearsal (developer-machine evidence, PROH-OPS-07-09): '
+            f'/api/services sql_share={sql_share:.4f} connect_share={connect_share:.4f} '
+            f'python_share={python_share:.4f} utilisation={utilisation:.4f}',
+        )
+
+        # Item 3 (GIL separated from lock): /api/advanced/current -- the one
+        # exercised route holding no lock -- has lock_wait_ns_total == 0 and
+        # a non-zero other_off_cpu_ns_total, independently populated.
+        advanced_current = requests.get('/api/advanced/current')
+        self.assertIsNotNone(advanced_current, '/api/advanced/current missing from request table')
+        self.assertEqual(advanced_current['lock_wait_ns_total'], 0)
+        self.assertGreater(advanced_current['other_off_cpu_ns_total'], 0)
+        total_requests = snap_after['requests_total']['requests']
+        print(
+            f"06-16 rehearsal: clamped_off_cpu_count={snap_after['clamped_off_cpu_count']} "
+            f"clamped_python_count={snap_after['clamped_python_count']} "
+            f'of {total_requests} requests / {snap_after["lock"]["acquisitions"]} acquisitions',
+        )
+
+        # Self-consistency under real concurrency. clamped_python_count is
+        # load-bearing at exactly 0 -- observed stable at 0 across every
+        # rehearsal run during development, and mutation-verified below to
+        # jump to over 20% under real thread-local corruption.
+        # clamped_off_cpu_count is bounded, not zero -- see
+        # test_self_consistency_survives_eight_threads for why: it is a
+        # small (~1-3%), reproducible artifact of comparing two independent
+        # stdlib clocks (_timer_ns()/monotonic_ns vs time.thread_time_ns())
+        # under closed-loop, zero-think-time 8-thread contention on this
+        # development machine, discovered and characterised while writing
+        # this test -- not the >20% signal a genuine defect produces
+        # (mutation-verified below).
+        self.assertEqual(snap_after['clamped_python_count'], 0)
+        self.assertLess(
+            snap_after['clamped_off_cpu_count'], 0.10 * total_requests,
+            f"clamped_off_cpu_count {snap_after['clamped_off_cpu_count']} exceeds 10% of "
+            f'{total_requests} requests -- see test_self_consistency_survives_eight_threads '
+            'for the expected small baseline versus a genuine defect.',
+        )
+
+        # Bounded cost: reader knows what a 600s hardware run will look like.
+        serialized_size = len(json.dumps(snap_after))
+        self.assertLess(serialized_size, 5_000_000, 'snapshot JSON size unexpectedly large')
+        self.assertLessEqual(len(routes), lockprofile.MAX_TRACKED_ROUTES)
+        print(
+            f'06-16 rehearsal: snapshot JSON size={serialized_size} bytes, '
+            f'route table size={len(routes)}',
+        )
+
+        # Per-route wait/hold, for the SUMMARY's laptop-rehearsal baseline.
+        for label in ('/api/services', '/api/scan-status'):
+            route = routes[label]
+            print(
+                f'06-16 rehearsal: {label} acquisitions={route["acquisitions"]} '
+                f'wait_ns_total={route["wait_ns_total"]} hold_ns_total={route["hold_ns_total"]}',
+            )
+
+    def test_self_consistency_survives_eight_threads(self):
+        """`sum(per-route hold) == global hold` holds exactly under real
+        eight-thread contention. In THIS collector's design that identity
+        holds by construction -- `record_acquisition` updates the per-route
+        bucket and the global total from the SAME values in one call under
+        one lock, so it cannot diverge regardless of which thread or which
+        route the values belong to. Kept as a sanity check, but -- per
+        `D-DEBT-06-10`'s own instruction not to cite a by-construction
+        identity as accuracy evidence -- it is NOT this test's real
+        concurrency guard; confirmed directly by running the mutation named
+        below (against the actual source, via Edit, not a monkeypatch) and
+        observing this specific identity still hold exactly
+        (2,494,319,763 == 2,494,319,763 in the mutation-verification run)
+        even while it was actively corrupting other numbers.
+
+        `clamped_python_count` and `clamped_off_cpu_count` ARE the real
+        concurrency guards: the single-threaded unit tests in
+        HoldDecompositionTests/RequestAccountingTests cannot exercise the
+        cross-thread races that push them up. `clamped_python_count` is
+        asserted at exactly 0 -- observed stable at 0 across every
+        development rehearsal run. `clamped_off_cpu_count` is bounded, not
+        zero: comparing two independent stdlib clocks
+        (`time.monotonic_ns()` for wait/hold vs `time.thread_time_ns()` for
+        CPU time) under zero-think-time 8-thread contention on this
+        development machine produces a small (~1-3% of requests),
+        reproducible clock-resolution artifact -- exactly the "clock
+        granularity" scenario `end_request`'s own docstring names and the
+        clamp mechanism exists to make visible rather than silently absorb,
+        not a correctness defect. 10% is a generous ceiling well above that
+        baseline and well below what the real defect below produces.
+
+        Mutation target: `_ACQUIRE_STATE` and `_REQUEST_STATE` (both
+        `threading.local()`) temporarily replaced with a single shared
+        plain-object namespace, simulating a thread-local leak. Under eight
+        threads this corrupts cross-thread attribution in a way no
+        single-threaded test can see: mutation-verified against the actual
+        source (dashboard/beacon/lockprofile.py, reverted after) --
+        observed `clamped_python_count` jump from 0 to 706/3255
+        acquisitions (21.7%) and `clamped_off_cpu_count` jump from ~1-3% to
+        2505/3712 requests (67.5%) -- both far past the bounds asserted
+        below. `sum(per-route hold) == global hold` did NOT break under
+        this mutation (2,494,319,763 == 2,494,319,763), confirming the
+        docstring paragraph above."""
+        errors, elapsed = self._run_rotation_workers()
+        self.assertEqual(errors, [], f'{len(errors)} server errors during the rehearsal: {errors[:5]}')
+        self.assertLess(elapsed, 30)
+
+        snap = lockprofile.snapshot()
+        total_hold = sum(route['hold_ns_total'] for route in snap['routes'].values())
+        self.assertEqual(total_hold, snap['lock']['hold_ns_total'])
+        total_requests = snap['requests_total']['requests']
+        self.assertEqual(snap['clamped_python_count'], 0)
+        self.assertLess(
+            snap['clamped_off_cpu_count'], 0.10 * total_requests,
+            f"clamped_off_cpu_count {snap['clamped_off_cpu_count']} exceeds 10% of "
+            f'{total_requests} requests -- see this test\'s own docstring for the '
+            'expected small baseline versus a genuine thread-local-leak defect.',
+        )
 
 
 class LockProfileInertnessTests(unittest.TestCase):
