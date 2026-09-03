@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import threading
 import time
 import unittest
@@ -1505,6 +1506,248 @@ class LockScopePreservationTests(unittest.TestCase):
             body[-1], ast.Return,
             "_db_lock's SCOPE changed: api_services no longer ends with a single "
             'terminal return statement after its with-block. See D-DEBT-06-01.',
+        )
+
+
+# ---------------------------------------------------------------------------
+# 06-19: the invariant T-06-24 is actually about (06-SECURITY.md), asserted
+# directly rather than via LockScopePreservationTests' frozen-scope proxy --
+# no route gains unserialized database access. PROH-OPS-04-05 prerequisite 1
+# (the per-call-site review of all 28 with-_db_lock sites) lives in
+# 06-LOCK-AUDIT.md; the tests below are what stop that document silently
+# going stale.
+# ---------------------------------------------------------------------------
+
+_DB_LOCK_ESCAPE_CALL_NAMES = {
+    'connect_db', 'get_db', 'database_access', 'read_transaction', 'write_transaction',
+}
+
+
+def _db_lock_with_nodes(subtree):
+    """Every ``ast.With`` node in ``subtree`` whose items bind the bare
+    ``_db_lock`` name -- a function may own more than one:
+    ``process_preview_requests`` and ``api_service_meta`` each own two,
+    which is why the 28 sites live in only 26 distinct functions. Do NOT
+    reuse ``_find_db_lock_with``, which returns the first match only."""
+    found = []
+    for node in ast.walk(subtree):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                ctx = item.context_expr
+                if isinstance(ctx, ast.Name) and ctx.id == '_db_lock':
+                    found.append(node)
+                    break
+    return found
+
+
+def _db_lock_owning_functions(tree):
+    """``(FunctionDef, [With, ...])`` for every function -- at any nesting
+    depth, so a closure defined inside a _db_lock-owning function is
+    inspected as part of its owner -- that owns at least one
+    ``with _db_lock`` block. ``api_advanced_current`` (AR-03-01, the one
+    route already outside `_db_lock` by accepted decision) owns none and so
+    never appears here."""
+    owning = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            withs = _db_lock_with_nodes(node)
+            if withs:
+                owning.append((node, withs))
+    return owning
+
+
+def _bound_connection_names(with_nodes):
+    """Union of the identifiers ``database_access(...) as <name>`` binds
+    across ``with_nodes`` (normally just ``{'conn'}``)."""
+    names = set()
+    for with_node in with_nodes:
+        for item in with_node.items:
+            ctx = item.context_expr
+            if (
+                isinstance(ctx, ast.Call) and _call_target_name(ctx) == 'database_access'
+                and isinstance(item.optional_vars, ast.Name)
+            ):
+                names.add(item.optional_vars.id)
+    return names
+
+
+def _rebinding_with_subtrees(func_node, bound_names):
+    """Every ``ast.With`` node anywhere in ``func_node`` -- _db_lock-owning
+    or not -- that itself binds one of ``bound_names``. Its subtree is a
+    fresh scope for that name: a sibling ``with _worker_write_transaction(
+    ...) as conn:`` block that reuses the identifier ``conn`` for an
+    unrelated, independently-opened connection is not an escape of the
+    _db_lock connection the name shadows -- it is a different connection
+    that happens to share a variable name."""
+    subtrees = []
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if isinstance(item.optional_vars, ast.Name) and item.optional_vars.id in bound_names:
+                    subtrees.append(node)
+                    break
+    return subtrees
+
+
+def _db_lock_escapes(func_node, with_nodes):
+    """Every database access in ``func_node`` that happens outside the
+    union of its own ``with _db_lock`` blocks: a load of a name one of
+    those blocks bound to a connection, or a call to a function that itself
+    opens or borrows a connection (``connect_db``, ``get_db``,
+    ``database_access``, ``read_transaction``, ``write_transaction``).
+    Returns ``(function_name, lineno, what_escaped)`` tuples."""
+    bound_names = _bound_connection_names(with_nodes)
+    excluded_ids = {id(n) for w in with_nodes for n in ast.walk(w)}
+    for rebinding_with in _rebinding_with_subtrees(func_node, bound_names):
+        excluded_ids.update(id(n) for n in ast.walk(rebinding_with))
+    violations = []
+    for node in ast.walk(func_node):
+        if id(node) in excluded_ids:
+            continue
+        if isinstance(node, ast.Name) and node.id in bound_names and isinstance(node.ctx, ast.Load):
+            violations.append((func_node.name, node.lineno, node.id))
+        elif isinstance(node, ast.Call):
+            target = _call_target_name(node)
+            if target in _DB_LOCK_ESCAPE_CALL_NAMES:
+                violations.append((func_node.name, node.lineno, target))
+    return violations
+
+
+_AUDIT_TABLE_ROW_RE = re.compile(
+    r'^\|\s*\d+\s*\|\s*`(?P<function>[A-Za-z_][A-Za-z0-9_]*)`[^|]*\|\s*(?P<line>\d+)\s*\|'
+)
+
+
+def _audit_table_site_pairs(audit_text):
+    """``(function, line)`` pairs parsed out of 06-LOCK-AUDIT.md's per-site
+    table, keyed exactly the way the AST derivation below is keyed -- never
+    on function name alone, since two functions in this codebase own two
+    sites each and a name-keyed set would have 26 members against 28
+    sites."""
+    pairs = set()
+    for line in audit_text.splitlines():
+        match = _AUDIT_TABLE_ROW_RE.match(line.strip())
+        if match:
+            pairs.add((match.group('function'), int(match.group('line'))))
+    return pairs
+
+
+class LockScopeInvariantTests(unittest.TestCase):
+    """06-19: the invariant `T-06-24` (`06-SECURITY.md`) is actually about --
+    no route gains unserialized database access -- asserted directly rather
+    than via `LockScopePreservationTests`' frozen-scope proxy above. `06-20`
+    retires that proxy deliberately, in the same commit as the narrowing;
+    this class does not, and must not, fail when that happens, because
+    `06-20` moves computation out of the critical section, never a database
+    call out of it.
+
+    `PROH-OPS-04-05` prerequisite 1 (the per-call-site review of all 28
+    `with _db_lock` sites) is `06-LOCK-AUDIT.md`. This class is what stops
+    that document silently going stale: `test_every_db_lock_site_is_
+    covered_by_the_audit` fails the moment a site's `(function, line)` pair
+    drifts from what the table names.
+    """
+
+    def setUp(self):
+        self.source = Path('dashboard/app.py').read_text(encoding='utf-8')
+        self.tree = ast.parse(self.source)
+        self.owning = _db_lock_owning_functions(self.tree)
+
+    def test_no_database_access_escapes_the_db_lock(self):
+        # T-06-97: a rule that silently matches nothing would pass
+        # vacuously and give false assurance. This function count must be
+        # recorded (SUMMARY) as evidence the walk matched real sites.
+        self.assertGreater(
+            len(self.owning), 0,
+            'no _db_lock-owning function was found at all -- the AST walk matched '
+            'nothing, which would make this invariant pass vacuously (T-06-97).',
+        )
+        violations = []
+        for func_node, with_nodes in self.owning:
+            violations.extend(_db_lock_escapes(func_node, with_nodes))
+        self.assertFalse(
+            violations,
+            'database access escaped its owning _db_lock block: '
+            f'{violations} -- see D-DEBT-06-01, PROH-OPS-04-05 and 06-SECURITY.md T-06-24 '
+            'before editing this assertion. If this fails at HEAD (not against a hand-applied '
+            'mutation), the defect is in this rule, never in dashboard/app.py.',
+        )
+
+    def test_no_database_access_escapes_the_db_lock_covers_both_two_block_functions(self):
+        """`process_preview_requests` and `api_service_meta` each own two
+        `_db_lock` blocks. A rule built over a single block (via
+        `_find_db_lock_with`, which returns first-match only) would read
+        the second block's `conn` as an escape and fail at HEAD on both.
+        Neither is excluded, special-cased, or allow-listed here -- both
+        are checked by the exact same union-based rule every other site
+        uses."""
+        owning_by_name = {func.name: withs for func, withs in self.owning}
+        for name in ('process_preview_requests', 'api_service_meta'):
+            self.assertIn(
+                name, owning_by_name, f'{name} not found as a _db_lock-owning function',
+            )
+            self.assertEqual(
+                len(owning_by_name[name]), 2,
+                f'{name} expected to own exactly two _db_lock blocks, found '
+                f'{len(owning_by_name[name])} -- the two-block shape this test exists to cover.',
+            )
+        for func_node, with_nodes in self.owning:
+            if func_node.name in ('process_preview_requests', 'api_service_meta'):
+                violations = _db_lock_escapes(func_node, with_nodes)
+                self.assertFalse(
+                    violations,
+                    f'{func_node.name} (two _db_lock blocks) reported an escape: {violations} -- '
+                    'a single-block rule would fail here at HEAD; that is a defect in the rule, '
+                    'never in dashboard/app.py. Relax nothing; take the union.',
+                )
+
+    def test_api_advanced_current_is_not_reported_as_a_violation(self):
+        """AR-03-01: the one route already outside `_db_lock` by accepted
+        decision. It owns no `_db_lock` block at all, so it must never
+        appear in the owning-function set this invariant walks, and cannot
+        appear in any violation list."""
+        owning_names = {func.name for func, _ in self.owning}
+        self.assertNotIn(
+            'api_advanced_current', owning_names,
+            'api_advanced_current owns a _db_lock block -- AR-03-01 no longer holds; this is '
+            'news, not a test bug.',
+        )
+
+    def test_every_db_lock_site_is_covered_by_the_audit(self):
+        ast_pairs = {
+            (func_node.name, with_node.lineno)
+            for func_node, with_nodes in self.owning
+            for with_node in with_nodes
+        }
+        audit_path = Path('.planning/phases/06-workload-resilience-pi-acceptance/06-LOCK-AUDIT.md')
+        audit_text = audit_path.read_text(encoding='utf-8')
+        audit_pairs = _audit_table_site_pairs(audit_text)
+
+        missing_from_audit = ast_pairs - audit_pairs
+        self.assertFalse(
+            missing_from_audit,
+            f'_db_lock site(s) not named in 06-LOCK-AUDIT.md: {sorted(missing_from_audit)}',
+        )
+        stale_in_audit = audit_pairs - ast_pairs
+        self.assertFalse(
+            stale_in_audit,
+            f'06-LOCK-AUDIT.md names site(s) that no longer exist in dashboard/app.py: '
+            f'{sorted(stale_in_audit)}',
+        )
+
+        # Asserted separately and by different names -- conflating row count
+        # with distinct-function count is the arithmetic error this
+        # criterion exists to prevent (process_preview_requests and
+        # api_service_meta each own two sites).
+        self.assertEqual(
+            len(audit_pairs), 28,
+            f'expected 28 rows in 06-LOCK-AUDIT.md (one per _db_lock site), found {len(audit_pairs)}',
+        )
+        distinct_functions = {name for name, _ in audit_pairs}
+        self.assertEqual(
+            len(distinct_functions), 26,
+            f'expected 26 distinct functions named in 06-LOCK-AUDIT.md, found '
+            f'{len(distinct_functions)}',
         )
 
 

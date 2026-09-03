@@ -572,6 +572,42 @@ round.
 
 ---
 
+### D-DEBT-06-16 — non-`api_services` sites holding non-database work under `_db_lock`, found by the 28-site audit and left untouched
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-19-PLAN.md` Task 1, `06-LOCK-AUDIT.md`'s per-call-site review |
+| **Status** | **Deferred — future narrowing candidates, not fixed here.** New this round. |
+| **Recorded in the plan** | `06-LOCK-AUDIT.md` "Future narrowing candidates this round is deliberately not taking" |
+
+**What the audit found.** `06-LOCK-AUDIT.md`'s per-call-site review of all 28 `with _db_lock` sites
+found two sites, beyond `api_services` (the sole site `06-20` narrows), that hold non-database
+Python work under the lock:
+
+- **`api_service_meta` (PUT), `dashboard/app.py:3069`.** Field validation, URL normalization
+  (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning
+  (`_outbound_policy().plan(...)`) all execute inside the critical section, ahead of the actual
+  metadata write. This route is not hardware-profiled this phase — no measured share of its held
+  region exists, unlike `api_services`' measured 25.0% Python share (`06-LOCK-DIAGNOSTIC.md` §4).
+- **`recover_worker_state`, `dashboard/app.py:240`.** JSON serialization of the `monitoring_gap`
+  event's `details` payload runs under the lock — a small, bounded cost (one `json.dumps` call over
+  a two-key dict), named for completeness rather than as a meaningful narrowing target.
+
+**Why neither is narrowed this round.** `PROH-OPS-04-05`'s decision checkpoint (`06-18-PLAN.md`
+Task 3) scoped the user's `fix-now` decision to `_db_lock`'s attribution evidence, which measured
+`api_services` and `/api/scan-status` specifically. Narrowing a site with no measured evidence
+behind it would be exactly the kind of un-evidenced fix `D-DEBT-06-09` and `D-DEBT-06-15` warn
+against repeating. `06-20`'s scope is `api_services` alone.
+
+**What would need to be true to close this entry.** A future round hardware-profiles
+`api_service_meta`'s PUT path specifically (its own lock-profile route label, analogous to
+`api_services`'), measures whether its held-region Python share is large enough to matter under
+load, and either narrows it on that evidence or explicitly declines to, the same way this round
+declined to act on the laptop-only `06-PROFILE.md` figure for `api_services` before
+`06-LOCK-DIAGNOSTIC.md`'s hardware measurement existed.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
