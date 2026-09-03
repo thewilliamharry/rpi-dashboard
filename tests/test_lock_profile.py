@@ -1103,10 +1103,29 @@ class LockProfileInertnessTests(unittest.TestCase):
             cleanup_db(db_path)
 
     def test_disabled_wrapper_path_costs_nothing_measurable(self):
-        """The same interleaved ABAB comparison, but against the exact
-        _db_lock a flag-off deployment uses (never wrapped), asserts the
-        same 1.02x bound -- guarding against a future regression that
-        wraps the lock even when the flag is off."""
+        """The same interleaved ABAB comparison, against the exact _db_lock a
+        flag-off deployment uses, asserting the same 1.02x bound.
+
+        WHAT THIS TEST DOES **NOT** DO, corrected after measurement: an
+        earlier docstring claimed it guarded "against a future regression
+        that wraps the lock even when the flag is off". It does not, and
+        cannot. Mutating dashboard/app.py's `if ENABLE_LOCK_PROFILE:` to
+        `if True:` -- the exact regression named -- leaves this test GREEN,
+        because a disabled InstrumentedLock adds roughly 0.1% while
+        reference_work() below costs milliseconds. The signal is buried
+        under the fixture.
+
+        That regression IS caught, by six tests including
+        test_zero_timing_work_when_disabled and
+        test_disabled_profile_timer_stays_at_zero_across_25_requests --
+        the zero-timer-call checks 06-15 deliberately chose over an
+        isinstance shape check. Verified by running that mutation.
+
+        What this test actually asserts is narrower and still worth having:
+        the flag-off lock's cost is indistinguishable from a bare
+        threading.Lock at best-of-N. Read it as a cost check, not a
+        wrapping check, and do not let its green reassure you about
+        wrapping."""
         appmod, db_path = load_app()
         try:
             self.assertFalse(appmod.ENABLE_LOCK_PROFILE)
@@ -1119,26 +1138,43 @@ class LockProfileInertnessTests(unittest.TestCase):
                     total += i * i
                 return total
 
+            # Compare MINIMA, not sums. When the flag is off `_db_lock` IS a
+            # bare threading.Lock, so the true ratio is 1.000 and anything
+            # above it is measurement noise. Summing 30 timed iterations
+            # accumulates that noise, and it is one-sided -- a scheduler
+            # hiccup only ever ADDS time, never removes it -- so the summed
+            # ratio drifted past the 1.02 bound on roughly 3 runs in 5 while
+            # the real overhead is ~0.1%. The minimum of N samples is the
+            # standard estimator for exactly this reason: it is the sample
+            # least contaminated by one-sided noise. Alternating order within
+            # each pair also removes the position bias the original had, where
+            # the disabled arm always ran second.
             iterations = 30
-            bare_total_ns = 0
-            disabled_total_ns = 0
-            for _ in range(iterations):
-                start = time.perf_counter_ns()
-                with raw_lock:
-                    reference_work()
-                bare_total_ns += time.perf_counter_ns() - start
+            bare_samples = []
+            disabled_samples = []
 
+            def _time_once(lock):
                 start = time.perf_counter_ns()
-                with disabled_lock:
+                with lock:
                     reference_work()
-                disabled_total_ns += time.perf_counter_ns() - start
+                return time.perf_counter_ns() - start
 
-            ratio = disabled_total_ns / bare_total_ns
+            for index in range(iterations):
+                if index % 2 == 0:
+                    bare_samples.append(_time_once(raw_lock))
+                    disabled_samples.append(_time_once(disabled_lock))
+                else:
+                    disabled_samples.append(_time_once(disabled_lock))
+                    bare_samples.append(_time_once(raw_lock))
+
+            bare_min_ns = min(bare_samples)
+            disabled_min_ns = min(disabled_samples)
+            ratio = disabled_min_ns / bare_min_ns
             self.assertLessEqual(
                 ratio, 1.02,
-                "flag-off deployment's _db_lock totalled "
-                f'{ratio:.4f}x a bare threading.Lock over {iterations} interleaved '
-                f'iterations (bare={bare_total_ns}ns disabled={disabled_total_ns}ns) '
+                "flag-off deployment's _db_lock cost "
+                f'{ratio:.4f}x a bare threading.Lock at best-of-{iterations} '
+                f'(bare_min={bare_min_ns}ns disabled_min={disabled_min_ns}ns) '
                 '-- this means _db_lock is being wrapped even when '
                 'ENABLE_LOCK_PROFILE is off, defeating the disabled-by-default '
                 'guarantee.',
