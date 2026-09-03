@@ -495,6 +495,202 @@ class HoldDecompositionTests(_InstrumentedLockTestCase):
             cleanup_db(db_path)
 
 
+class RequestAccountingTests(_InstrumentedLockTestCase):
+    """06-16 Task 2: decompose every request's wall time into on-CPU,
+    lock-wait, and other-off-CPU. Every millisecond figure here is
+    developer-machine evidence, never Pi evidence (`PROH-OPS-07-09`).
+
+    Probe routes are registered directly on this test's own throwaway Flask
+    app instance -- `_InstrumentedLockTestCase.setUp` (via `load_app()`)
+    reloads `dashboard.app` fresh for every single test method, so a probe
+    route added here never reaches `dashboard/app.py`'s committed source and
+    cannot leak into any other test's app object.
+    """
+
+    SLEEP_S = 0.05
+    LOCK_HOLD_S = 0.1
+
+    def setUp(self):
+        super().setUp()
+        app = self.appmod.app
+
+        def sleeping_view():
+            time.sleep(self.SLEEP_S)
+            return self.appmod.jsonify({'ok': True})
+
+        def cpu_view():
+            total = 0
+            for i in range(3_000_000):
+                total += i * i
+            return self.appmod.jsonify({'total': total})
+
+        def lock_wait_view():
+            with self.appmod._db_lock:
+                pass
+            return self.appmod.jsonify({'ok': True})
+
+        def raising_view():
+            raise RuntimeError('06-16 probe error')
+
+        app.add_url_rule('/test-06-16/sleep', 'test_06_16_sleep', sleeping_view)
+        app.add_url_rule('/test-06-16/cpu', 'test_06_16_cpu', cpu_view)
+        app.add_url_rule('/test-06-16/lock-wait', 'test_06_16_lock_wait', lock_wait_view)
+        app.add_url_rule('/test-06-16/raise', 'test_06_16_raise', raising_view)
+
+    def test_sleeping_lock_free_route_reports_off_cpu_within_tolerance(self):
+        """A route that sleeps a known duration and takes no lock reports
+        `other_off_cpu_ns_total` within 20% of the sleep and `cpu_ns_total`
+        well below it -- off-CPU time is measured, not assumed."""
+        resp = self.client.get('/test-06-16/sleep')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/sleep']
+        sleep_ns = self.SLEEP_S * 1_000_000_000
+        self.assertGreaterEqual(
+            route['other_off_cpu_ns_total'], sleep_ns * 0.8,
+            f"other_off_cpu_ns_total {route['other_off_cpu_ns_total']} below 80% of the "
+            f'known {sleep_ns:.0f}ns sleep',
+        )
+        self.assertLessEqual(
+            route['other_off_cpu_ns_total'], sleep_ns * 1.2 + 10_000_000,
+            f"other_off_cpu_ns_total {route['other_off_cpu_ns_total']} exceeds 120% of the "
+            f'known {sleep_ns:.0f}ns sleep plus 10ms slack',
+        )
+        self.assertLess(route['cpu_ns_total'], sleep_ns * 0.5)
+
+    def test_cpu_bound_lock_free_route_reports_high_on_cpu_fraction(self):
+        """A route that does a fixed CPU-bound computation and takes no lock
+        reports `cpu_ns_total` at least 70% of `wall_ns_total` -- the
+        instrument distinguishes on-CPU from off-CPU in both directions."""
+        resp = self.client.get('/test-06-16/cpu')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/cpu']
+        self.assertGreaterEqual(
+            route['cpu_ns_total'], 0.7 * route['wall_ns_total'],
+            f"cpu_ns_total {route['cpu_ns_total']} is below 70% of "
+            f"wall_ns_total {route['wall_ns_total']} for a CPU-bound route",
+        )
+
+    def test_lock_wait_is_subtracted_out_of_other_off_cpu(self):
+        """A request blocked behind a known-duration `_db_lock` holder
+        reports `lock_wait_ns_total` within 20% of that duration, and
+        `other_off_cpu_ns_total` that does NOT include it -- lock wait is
+        subtracted out, so what remains is attributable to something else
+        (`D-DEBT-06-09`: the GIL and the lock are measured independently,
+        never inferred from each other)."""
+        holder_ready = threading.Event()
+        waiter_started = threading.Event()
+
+        def holder():
+            with self.appmod._db_lock:
+                holder_ready.set()
+                waiter_started.wait(2)
+                time.sleep(self.LOCK_HOLD_S)
+
+        holder_thread = threading.Thread(target=holder, daemon=True)
+        holder_thread.start()
+        self.assertTrue(holder_ready.wait(2), 'holder failed to acquire the lock in time')
+
+        result = {}
+
+        def waiter():
+            waiter_started.set()
+            result['resp'] = self.client.get('/test-06-16/lock-wait')
+
+        waiter_thread = threading.Thread(target=waiter, daemon=True)
+        waiter_thread.start()
+        holder_thread.join(5)
+        waiter_thread.join(5)
+
+        self.assertEqual(result['resp'].status_code, 200)
+        route = lockprofile.snapshot()['requests']['/test-06-16/lock-wait']
+        hold_ns = self.LOCK_HOLD_S * 1_000_000_000
+        self.assertGreaterEqual(
+            route['lock_wait_ns_total'], 0.8 * hold_ns,
+            f"lock_wait_ns_total {route['lock_wait_ns_total']} below 80% of the known "
+            f'{hold_ns:.0f}ns holder duration',
+        )
+        self.assertLess(
+            route['other_off_cpu_ns_total'], 0.5 * hold_ns,
+            f"other_off_cpu_ns_total {route['other_off_cpu_ns_total']} is a large fraction "
+            f'of the {hold_ns:.0f}ns lock-wait duration -- lock wait was not subtracted out',
+        )
+
+    def test_identity_holds_by_construction_reported_for_readability(self):
+        """Not a guard -- `other_off_cpu_ns_total` is defined as the
+        remainder, so this identity cannot fail. Reported for readability
+        only, never cited as accuracy evidence (`D-DEBT-06-10`)."""
+        resp = self.client.get('/test-06-16/sleep')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/sleep']
+        self.assertEqual(
+            route['cpu_ns_total'] + route['lock_wait_ns_total'] + route['other_off_cpu_ns_total'],
+            route['wall_ns_total'],
+        )
+
+    def test_lock_free_route_appears_with_zero_lock_wait(self):
+        """`/api/advanced/current` -- the sole exercised route holding no
+        lock (`dashboard/beacon/diagnosis.py` has zero `_db_lock`
+        references) -- appears in the request table with a non-zero
+        `requests` count and zero `lock_wait_ns_total`: the structural
+        precondition the GIL probe depends on."""
+        resp = self.client.get('/api/advanced/current')
+        self.assertEqual(resp.status_code, 200)
+
+        route = lockprofile.snapshot()['requests']['/api/advanced/current']
+        self.assertGreater(route['requests'], 0)
+        self.assertEqual(route['lock_wait_ns_total'], 0)
+
+    def test_raising_handler_still_closes_its_accounting_region(self):
+        """A request that raises inside the handler still closes its
+        accounting region -- `teardown_request` runs on the error path --
+        and the route's `requests` count includes it."""
+        resp = self.client.get('/test-06-16/raise')
+        self.assertEqual(resp.status_code, 500)
+
+        route = lockprofile.snapshot()['requests']['/test-06-16/raise']
+        self.assertGreaterEqual(route['requests'], 1)
+
+    def test_clamped_off_cpu_count_is_zero_across_the_workload(self):
+        """Load-bearing: no measurement error is silently absorbed into
+        `other_off_cpu_ns` across a representative mixed workload. A
+        non-zero count would mean lock-wait exceeded off-CPU time -- the two
+        clocks disagreeing or accounting leaking across threads."""
+        self.client.get('/test-06-16/sleep')
+        self.client.get('/test-06-16/cpu')
+        self.client.get('/api/scan-status')
+        self.client.get('/api/services')
+
+        self.assertEqual(lockprofile.snapshot()['clamped_off_cpu_count'], 0)
+
+    def test_disabled_profile_timer_stays_at_zero_across_25_requests(self):
+        """With the profile disabled, the counting stub over
+        `lockprofile._timer_ns` remains at exactly 0 calls across 25 driven
+        requests -- unchanged from `06-15`'s inertness guarantee."""
+        appmod, db_path = load_app()
+        try:
+            self.assertFalse(appmod.ENABLE_LOCK_PROFILE)
+            lockprofile.ENABLED = False
+            call_count = {'timer': 0}
+            original_timer = lockprofile._timer_ns
+
+            def counting_timer():
+                call_count['timer'] += 1
+                return original_timer()
+
+            client = appmod.app.test_client()
+            routes = ('/api/services', '/api/scan-status', '/api/history')
+            with mock.patch.object(lockprofile, '_timer_ns', counting_timer):
+                for i in range(25):
+                    resp = client.get(routes[i % len(routes)])
+                    self.assertEqual(resp.status_code, 200)
+            self.assertEqual(call_count['timer'], 0)
+        finally:
+            cleanup_db(db_path)
+
+
 class LockProfileInertnessTests(unittest.TestCase):
     """Turning the diagnostic off returns the deployment to a state
     indistinguishable from today's, and turning it on costs a bounded,
