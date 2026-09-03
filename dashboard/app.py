@@ -2818,8 +2818,19 @@ def api_services():
     now = int(time.time())
     expire_cutoff = now - EXPIRE_DAYS * 86400
 
+    all_checks = []
+    boundary_by_port = {}
+    ports = []
+    start_ts = None
+
+    # D-DEBT-06-01 / PROH-OPS-04-06 / T-06-24: this critical section holds
+    # `_db_lock` across database reads only. Every value consumed after this
+    # block ends is materialized into a plain Python container before the
+    # block closes, so nothing below reads a sqlite3.Row or cursor whose
+    # connection has closed. Moving a `conn` call below this block is the
+    # change this boundary forbids.
     with _db_lock, database_access(DB_PATH) as conn:
-        services = conn.execute(
+        services = [dict(row) for row in conn.execute(
             "SELECT s.port, s.title, s.first_seen, s.last_seen, s.is_online, s.state_since, "
             "EXISTS (SELECT 1 FROM thumbnails t WHERE t.port = s.port AND t.data IS NOT NULL "
             "AND t.source='screenshot' AND (t.expires_ts IS NULL OR t.expires_ts > ?)) AS has_thumb, "
@@ -2831,11 +2842,9 @@ def api_services():
             "WHERE s.last_seen >= ? "
             "ORDER BY COALESCE(m.pinned_order, s.port) ASC, s.port ASC",
             (now, expire_cutoff),
-        ).fetchall()
+        ).fetchall()]
 
-        checks_by_port = defaultdict(list)
         windows_by_port = {}
-        offline_intervals_by_port = {}
         if services:
             ports = [s['port'] for s in services]
             placeholders = ','.join('?' * len(ports))
@@ -2863,24 +2872,12 @@ def api_services():
             # exactly the rows read_service_offline_intervals_by_port's own
             # `LIMIT` shed. Per-port sequences are identical to the previous
             # global `ts ASC` ordering, which is all either consumer reads.
-            all_checks = conn.execute(
+            all_checks = [dict(row) for row in conn.execute(
                 f"SELECT ts, port, online FROM service_checks "
                 f"WHERE port IN ({placeholders}) AND ts >= ? "
                 f"ORDER BY port ASC, ts ASC",
                 (*ports, start_ts),
-            ).fetchall()
-            points_by_port = defaultdict(list)
-            # Replicates the LIMIT that read_service_offline_intervals_by_port
-            # applies to its own in-window query: same constant, same
-            # (port ASC, ts ASC) order, counted after the `ts <= now` filter
-            # so the admitted set matches that query's `ts <= end_ts` bound.
-            offline_points_budget = beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT
-            for row in all_checks:
-                checks_by_port[row['port']].append((row['ts'], row['online']))
-                ts = int(row['ts'])
-                if ts <= now and offline_points_budget > 0:
-                    points_by_port[row['port']].append((ts, 1 if row['online'] else 0))
-                    offline_points_budget -= 1
+            ).fetchall()]
             # One bulk read for the whole list rather than one per-service window
             # query inside this loop (T-03.1-29) -- every service's coverage
             # derivation below shares this single read.
@@ -2898,80 +2895,97 @@ def api_services():
             boundary_by_port = beacon_repositories.read_service_offline_interval_boundaries_by_port(
                 conn, ports=ports, start_ts=start_ts,
             )
-            offline_intervals_by_port = beacon_repositories.offline_intervals_from_points_by_port(
-                ports=ports, boundary_by_port=boundary_by_port, points_by_port=points_by_port,
-                start_ts=start_ts, end_ts=now,
-            )
         tls_posture = beacon_repositories.get_runtime_state(conn, 'service_tls_posture', {})
-        tls_posture = tls_posture if isinstance(tls_posture, dict) else {}
-        preview_rows = conn.execute(
+        preview_rows = [dict(row) for row in conn.execute(
             "SELECT port, status, deadline_ts, revision FROM preview_requests "
             "WHERE id IN (SELECT MAX(id) FROM preview_requests GROUP BY port)"
-        ).fetchall()
-        previews_by_port = {row['port']: row for row in preview_rows}
+        ).fetchall()]
 
-        result = []
-        # Request-scoped memo for beacon_maintenance's occurrence walk, shared
-        # across every service's coverage()/attributed_downtime_seconds() call
-        # below. The walk is a pure function of (window, epoch, timezone), so
-        # memoizing it changes no output -- only how many times the same walk
-        # is repeated within this one request (06-PROFILE.md:
-        # maintenance_coverage, 29.649% of the route's measured residual
-        # cost, growth ratio 7.564 -- the single bucket the profile found
-        # growing faster than the measured check_row_ratio of 4.249).
-        maintenance_occurrence_cache = {}
-        for svc in services:
-            checks = checks_by_port.get(svc['port'], [])
-            uptime_pct, uptime_buckets = _uptime_summary(checks, now)
-            effective_url = _safe_service_url(svc['url'], svc['port'])
-            preview = previews_by_port.get(svc['port'])
-            port_windows = windows_by_port.get(svc['port'], [])
+    tls_posture = tls_posture if isinstance(tls_posture, dict) else {}
+    previews_by_port = {row['port']: row for row in preview_rows}
+    result = []
+    # Request-scoped memo for beacon_maintenance's occurrence walk, shared
+    # across every service's coverage()/attributed_downtime_seconds() call
+    # below. The walk is a pure function of (window, epoch, timezone), so
+    # memoizing it changes no output -- only how many times the same walk
+    # is repeated within this one request (06-PROFILE.md:
+    # maintenance_coverage, 29.649% of the route's measured residual
+    # cost, growth ratio 7.564 -- the single bucket the profile found
+    # growing faster than the measured check_row_ratio of 4.249).
+    maintenance_occurrence_cache = {}
 
-            # The maintenance literal is derived here, additively, from the same
-            # coverage rule the suppression write path calls -- never a second
-            # percentage, never a change to is_online/state_since/last_error
-            # below, which stay the true stored facts (D-06, D-09).
-            availability = 'online' if svc['is_online'] else 'offline'
-            maintenance_until = None
-            if not svc['is_online']:
-                covered, grace_until = beacon_maintenance.coverage(
-                    port_windows, now, SETTINGS.timezone, cache=maintenance_occurrence_cache,
-                )
-                if covered:
-                    availability = beacon_diagnosis.MAINTENANCE_AVAILABILITY
-                    maintenance_until = grace_until
-            offline_intervals = offline_intervals_by_port.get(svc['port'], [])
-            maintenance_attributed_seconds = beacon_maintenance.attributed_downtime_seconds(
-                offline_intervals, port_windows, SETTINGS.timezone, cache=maintenance_occurrence_cache,
+    checks_by_port = defaultdict(list)
+    offline_intervals_by_port = {}
+    if services:
+        points_by_port = defaultdict(list)
+        # Replicates the LIMIT that read_service_offline_intervals_by_port
+        # applies to its own in-window query: same constant, same
+        # (port ASC, ts ASC) order, counted after the `ts <= now` filter
+        # so the admitted set matches that query's `ts <= end_ts` bound.
+        offline_points_budget = beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT
+        for row in all_checks:
+            checks_by_port[row['port']].append((row['ts'], row['online']))
+            ts = int(row['ts'])
+            if ts <= now and offline_points_budget > 0:
+                points_by_port[row['port']].append((ts, 1 if row['online'] else 0))
+                offline_points_budget -= 1
+        offline_intervals_by_port = beacon_repositories.offline_intervals_from_points_by_port(
+            ports=ports, boundary_by_port=boundary_by_port, points_by_port=points_by_port,
+            start_ts=start_ts, end_ts=now,
+        )
+
+    for svc in services:
+        checks = checks_by_port.get(svc['port'], [])
+        uptime_pct, uptime_buckets = _uptime_summary(checks, now)
+        effective_url = _safe_service_url(svc['url'], svc['port'])
+        preview = previews_by_port.get(svc['port'])
+        port_windows = windows_by_port.get(svc['port'], [])
+
+        # The maintenance literal is derived here, additively, from the same
+        # coverage rule the suppression write path calls -- never a second
+        # percentage, never a change to is_online/state_since/last_error
+        # below, which stay the true stored facts (D-06, D-09).
+        availability = 'online' if svc['is_online'] else 'offline'
+        maintenance_until = None
+        if not svc['is_online']:
+            covered, grace_until = beacon_maintenance.coverage(
+                port_windows, now, SETTINGS.timezone, cache=maintenance_occurrence_cache,
             )
+            if covered:
+                availability = beacon_diagnosis.MAINTENANCE_AVAILABILITY
+                maintenance_until = grace_until
+        offline_intervals = offline_intervals_by_port.get(svc['port'], [])
+        maintenance_attributed_seconds = beacon_maintenance.attributed_downtime_seconds(
+            offline_intervals, port_windows, SETTINGS.timezone, cache=maintenance_occurrence_cache,
+        )
 
-            result.append({
-                "port": svc['port'],
-                "title": svc['title'],
-                "display_name": svc['display_name'] or None,
-                "first_seen": svc['first_seen'],
-                "last_seen": svc['last_seen'],
-                "state_since": svc['state_since'],
-                "is_online": svc['is_online'],
-                "has_thumb": svc['has_thumb'],
-                "latency_ms": svc['last_latency_ms'],
-                "last_error": svc['last_error'],
-                "critical": bool(svc['critical']),
-                "url": effective_url,
-                "path": _service_path_from_url(effective_url, svc['port']),
-                "tags": _parse_tags(svc['tags']),
-                "pinned_order": svc['pinned_order'],
-                "healthy_statuses": svc['healthy_statuses'],
-                "tls_unverified": bool(tls_posture.get(str(svc['port']), False)),
-                "preview_status": preview['status'] if preview else None,
-                "preview_revision": preview['revision'] if preview else None,
-                "preview_deadline_ts": preview['deadline_ts'] if preview else None,
-                "uptime_pct": uptime_pct,
-                "uptime_buckets": uptime_buckets,
-                "availability": availability,
-                "maintenance_until": maintenance_until,
-                "maintenance_attributed_seconds": maintenance_attributed_seconds,
-            })
+        result.append({
+            "port": svc['port'],
+            "title": svc['title'],
+            "display_name": svc['display_name'] or None,
+            "first_seen": svc['first_seen'],
+            "last_seen": svc['last_seen'],
+            "state_since": svc['state_since'],
+            "is_online": svc['is_online'],
+            "has_thumb": svc['has_thumb'],
+            "latency_ms": svc['last_latency_ms'],
+            "last_error": svc['last_error'],
+            "critical": bool(svc['critical']),
+            "url": effective_url,
+            "path": _service_path_from_url(effective_url, svc['port']),
+            "tags": _parse_tags(svc['tags']),
+            "pinned_order": svc['pinned_order'],
+            "healthy_statuses": svc['healthy_statuses'],
+            "tls_unverified": bool(tls_posture.get(str(svc['port']), False)),
+            "preview_status": preview['status'] if preview else None,
+            "preview_revision": preview['revision'] if preview else None,
+            "preview_deadline_ts": preview['deadline_ts'] if preview else None,
+            "uptime_pct": uptime_pct,
+            "uptime_buckets": uptime_buckets,
+            "availability": availability,
+            "maintenance_until": maintenance_until,
+            "maintenance_attributed_seconds": maintenance_attributed_seconds,
+        })
 
     return jsonify(result)
 
