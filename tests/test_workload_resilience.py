@@ -29,6 +29,8 @@ stays honest without needing hardware.
 
 import importlib
 import os
+import queue
+import random
 import sqlite3
 import subprocess
 import tempfile
@@ -938,6 +940,225 @@ class ConcurrentAccessTests(unittest.TestCase):
                 for row in beacon_repositories.read_background_job_health(conn)
             }
         self.assertEqual(health['J6']['state'], 'succeeded')
+
+
+class NarrowedShapeConcurrentAccessTests(unittest.TestCase):
+    """PROH-OPS-04-05 prerequisite 3, extended to the shape `06-20`'s
+    narrowing creates. `ConcurrentAccessTests` above proves the CURRENT,
+    unnarrowed `_db_lock`'s guarantee (PROH-OPS-04-01) and is left
+    untouched -- narrowing moves computation out of the critical section,
+    so a route now materializes rows INSIDE `_db_lock` and consumes them
+    (reads every field, computes over them) AFTER both the with-block and
+    the connection it opened have already closed. That is a hazard the
+    unnarrowed shape never had (its computation ran while the connection
+    was still open) and the existing proof does not cover. This class
+    proves it: is a snapshot read under the lock and consumed after the
+    connection closes still correct and readable, under eight concurrent
+    readers and a concurrent writer?
+
+    Seeded dataset (deterministic, fixed seeds, stated here rather than
+    hard-coded into any assertion body): `SEEDED_PORT` (8080) carries
+    `SEEDED_CHECK_COUNT` (60) `service_checks` rows for the first test,
+    seed 20260903. The second test additionally seeds `READER_PORTS`
+    (eight distinct ports, `8090`..`8097`), each with its OWN
+    `SEEDED_CHECK_COUNT` rows under a port-specific seed (`20260903 +
+    port`), so the eight reader threads read genuinely different data --
+    needed so a mispaired-snapshot defect (comparing one thread's computed
+    result against a DIFFERENT thread's snapshot) is detectable rather
+    than vacuously equal. In both cases `ts` is spaced
+    `CHECK_INTERVAL_SECONDS` (300) apart ending at `now`, online/offline
+    drawn from the seeded RNG so no oracle's uptime is 0 or 100 -- a
+    degenerate all-one-value dataset would not discriminate a computation
+    bug from a correct one.
+    """
+
+    SEEDED_PORT = 8080
+    READER_PORTS = tuple(range(8090, 8098))
+    SEEDED_CHECK_COUNT = 60
+    CHECK_INTERVAL_SECONDS = 300
+    _JOIN_TIMEOUT_SECONDS = 30
+    _MAX_WRITER_ITERATIONS = 2000
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+        self.now = int(time.time())
+        self._seed_port_checks(self.SEEDED_PORT, seed=20260903)
+        for port in self.READER_PORTS:
+            self._seed_port_checks(port, seed=20260903 + port)
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _seed_port_checks(self, port, *, seed):
+        rng = random.Random(seed)
+        rows = []
+        for i in range(self.SEEDED_CHECK_COUNT):
+            ts = self.now - (self.SEEDED_CHECK_COUNT - i) * self.CHECK_INTERVAL_SECONDS
+            online = 1 if rng.random() > 0.3 else 0
+            rows.append((ts, port, online))
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.executemany(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)', rows,
+            )
+            conn.commit()
+            conn.close()
+
+    def _snapshot_checks_under_lock(self, port=None):
+        """Take the app's own `_db_lock` and `database_access`, `fetchall()`
+        `port`'s (default `SEEDED_PORT`) `service_checks` slice, materialize
+        into plain tuples via an explicit list comprehension, and return
+        only after BOTH context managers have exited -- the exact shape the
+        narrowing creates."""
+        port = self.SEEDED_PORT if port is None else port
+        with self.appmod._db_lock, self.appmod.database_access(self.db_path) as conn:
+            rows = conn.execute(
+                'SELECT ts, online FROM service_checks WHERE port=? ORDER BY ts ASC',
+                (port,),
+            ).fetchall()
+            checks = [(row['ts'], row['online']) for row in rows]
+        return checks
+
+    def _serial_oracle_checks(self):
+        """A single-threaded, independently-connected read over the same
+        seeded data -- deliberately NOT sharing `_snapshot_checks_under_lock`,
+        so the mutation-verification below (which mutates that helper) still
+        has a trustworthy oracle to compare against."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                'SELECT ts, online FROM service_checks WHERE port=? ORDER BY ts ASC',
+                (self.SEEDED_PORT,),
+            ).fetchall()
+        return [(row['ts'], row['online']) for row in rows]
+
+    def test_snapshot_materialized_under_the_lock_survives_connection_close(self):
+        oracle = self._serial_oracle_checks()
+        self.assertEqual(len(oracle), self.SEEDED_CHECK_COUNT)
+
+        results = queue.Queue()
+        exceptions = queue.Queue()
+
+        def reader():
+            try:
+                checks = self._snapshot_checks_under_lock()
+                # Read every field of every row -- the exact hazard: an
+                # unconsumed cursor would raise sqlite3.ProgrammingError
+                # here, after the connection that produced it has closed.
+                for ts, online in checks:
+                    int(ts)
+                    int(online)
+                results.put(checks)
+            except Exception as exc:  # noqa: BLE001 -- every thread's failure must surface
+                exceptions.put(exc)
+
+        threads = [threading.Thread(target=reader, daemon=True) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=self._JOIN_TIMEOUT_SECONDS)
+        still_alive = [t.name for t in threads if t.is_alive()]
+        self.assertFalse(
+            still_alive, f'reader thread(s) did not finish within {self._JOIN_TIMEOUT_SECONDS}s: {still_alive}',
+        )
+        self.assertTrue(
+            exceptions.empty(), f'reader thread(s) raised: {list(exceptions.queue)}',
+        )
+        self.assertEqual(results.qsize(), 8)
+        while not results.empty():
+            self.assertEqual(results.get(), oracle)
+
+    def test_out_of_lock_computation_matches_a_serial_oracle_under_a_concurrent_writer(self):
+        now = self.now
+        writer_stop = threading.Event()
+        committed_markers = []
+        committed_lock = threading.Lock()
+        writer_errors = queue.Queue()
+
+        def writer():
+            for marker_index in range(self._MAX_WRITER_ITERATIONS):
+                if writer_stop.is_set():
+                    return
+                marker = f'narrowed-writer-{marker_index}'
+                try:
+                    with write_transaction(self.db_path) as conn:
+                        conn.execute(
+                            "INSERT INTO events(ts, port, event_type, details) VALUES(?,?,?,?)",
+                            (now, 0, 'narrowed_shape_probe', marker),
+                        )
+                    with committed_lock:
+                        committed_markers.append(marker)
+                except Exception as exc:  # noqa: BLE001
+                    writer_errors.put(exc)
+                    return
+
+        reader_results = queue.Queue()
+        reader_errors = queue.Queue()
+
+        def reader(port):
+            try:
+                checks = self._snapshot_checks_under_lock(port)
+                # The out-of-lock computation: run AFTER both the with-block
+                # and the connection it opened have closed, while the writer
+                # thread keeps inserting concurrently.
+                result = self.appmod._uptime_summary(checks, now)
+                reader_results.put((port, checks, result))
+            except Exception as exc:  # noqa: BLE001
+                reader_errors.put(exc)
+
+        writer_thread = threading.Thread(target=writer, daemon=True)
+        writer_thread.start()
+
+        # Each reader owns a DISTINCT, distinctly-seeded port (READER_PORTS)
+        # rather than all eight sharing SEEDED_PORT -- so a defect that pairs
+        # one thread's computed result against a DIFFERENT thread's snapshot
+        # is detectable (the two ports' data genuinely differ) rather than
+        # vacuously equal.
+        reader_threads = [
+            threading.Thread(target=reader, args=(port,), daemon=True) for port in self.READER_PORTS
+        ]
+        for thread in reader_threads:
+            thread.start()
+        for thread in reader_threads:
+            thread.join(timeout=self._JOIN_TIMEOUT_SECONDS)
+        still_alive = [t.name for t in reader_threads if t.is_alive()]
+        self.assertFalse(
+            still_alive, f'reader thread(s) did not finish within {self._JOIN_TIMEOUT_SECONDS}s: {still_alive}',
+        )
+
+        writer_stop.set()
+        writer_thread.join(timeout=self._JOIN_TIMEOUT_SECONDS)
+        self.assertFalse(
+            writer_thread.is_alive(),
+            f'writer thread did not finish within {self._JOIN_TIMEOUT_SECONDS}s',
+        )
+
+        self.assertTrue(reader_errors.empty(), f'reader thread(s) raised: {list(reader_errors.queue)}')
+        self.assertTrue(writer_errors.empty(), f'writer thread raised: {list(writer_errors.queue)}')
+        self.assertGreater(len(committed_markers), 0, 'the writer thread committed no markers')
+
+        self.assertEqual(reader_results.qsize(), 8)
+        while not reader_results.empty():
+            port, checks, concurrently_computed = reader_results.get()
+            # The serial oracle: the identical pure function over the
+            # identical already-materialized snapshot -- THIS reader's own,
+            # keyed by its own port -- computed with no concurrent activity
+            # at all. Any thread-interference defect (e.g. a mispaired
+            # result/snapshot) shows up as a mismatch here.
+            serial_oracle = self.appmod._uptime_summary(list(checks), now)
+            self.assertEqual(
+                concurrently_computed, serial_oracle,
+                f'port {port}: out-of-lock result did not match its own snapshot recomputed serially',
+            )
+
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+            recorded = {
+                row[0] for row in conn.execute(
+                    "SELECT details FROM events WHERE event_type='narrowed_shape_probe'"
+                )
+            }
+        self.assertEqual(recorded, set(committed_markers))
 
 
 class PiLoadAcceptanceHarnessTests(unittest.TestCase):

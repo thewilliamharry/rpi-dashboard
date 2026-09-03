@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import threading
 import time
 import unittest
@@ -1509,6 +1510,248 @@ class LockScopePreservationTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 06-19: the invariant T-06-24 is actually about (06-SECURITY.md), asserted
+# directly rather than via LockScopePreservationTests' frozen-scope proxy --
+# no route gains unserialized database access. PROH-OPS-04-05 prerequisite 1
+# (the per-call-site review of all 28 with-_db_lock sites) lives in
+# 06-LOCK-AUDIT.md; the tests below are what stop that document silently
+# going stale.
+# ---------------------------------------------------------------------------
+
+_DB_LOCK_ESCAPE_CALL_NAMES = {
+    'connect_db', 'get_db', 'database_access', 'read_transaction', 'write_transaction',
+}
+
+
+def _db_lock_with_nodes(subtree):
+    """Every ``ast.With`` node in ``subtree`` whose items bind the bare
+    ``_db_lock`` name -- a function may own more than one:
+    ``process_preview_requests`` and ``api_service_meta`` each own two,
+    which is why the 28 sites live in only 26 distinct functions. Do NOT
+    reuse ``_find_db_lock_with``, which returns the first match only."""
+    found = []
+    for node in ast.walk(subtree):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                ctx = item.context_expr
+                if isinstance(ctx, ast.Name) and ctx.id == '_db_lock':
+                    found.append(node)
+                    break
+    return found
+
+
+def _db_lock_owning_functions(tree):
+    """``(FunctionDef, [With, ...])`` for every function -- at any nesting
+    depth, so a closure defined inside a _db_lock-owning function is
+    inspected as part of its owner -- that owns at least one
+    ``with _db_lock`` block. ``api_advanced_current`` (AR-03-01, the one
+    route already outside `_db_lock` by accepted decision) owns none and so
+    never appears here."""
+    owning = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            withs = _db_lock_with_nodes(node)
+            if withs:
+                owning.append((node, withs))
+    return owning
+
+
+def _bound_connection_names(with_nodes):
+    """Union of the identifiers ``database_access(...) as <name>`` binds
+    across ``with_nodes`` (normally just ``{'conn'}``)."""
+    names = set()
+    for with_node in with_nodes:
+        for item in with_node.items:
+            ctx = item.context_expr
+            if (
+                isinstance(ctx, ast.Call) and _call_target_name(ctx) == 'database_access'
+                and isinstance(item.optional_vars, ast.Name)
+            ):
+                names.add(item.optional_vars.id)
+    return names
+
+
+def _rebinding_with_subtrees(func_node, bound_names):
+    """Every ``ast.With`` node anywhere in ``func_node`` -- _db_lock-owning
+    or not -- that itself binds one of ``bound_names``. Its subtree is a
+    fresh scope for that name: a sibling ``with _worker_write_transaction(
+    ...) as conn:`` block that reuses the identifier ``conn`` for an
+    unrelated, independently-opened connection is not an escape of the
+    _db_lock connection the name shadows -- it is a different connection
+    that happens to share a variable name."""
+    subtrees = []
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if isinstance(item.optional_vars, ast.Name) and item.optional_vars.id in bound_names:
+                    subtrees.append(node)
+                    break
+    return subtrees
+
+
+def _db_lock_escapes(func_node, with_nodes):
+    """Every database access in ``func_node`` that happens outside the
+    union of its own ``with _db_lock`` blocks: a load of a name one of
+    those blocks bound to a connection, or a call to a function that itself
+    opens or borrows a connection (``connect_db``, ``get_db``,
+    ``database_access``, ``read_transaction``, ``write_transaction``).
+    Returns ``(function_name, lineno, what_escaped)`` tuples."""
+    bound_names = _bound_connection_names(with_nodes)
+    excluded_ids = {id(n) for w in with_nodes for n in ast.walk(w)}
+    for rebinding_with in _rebinding_with_subtrees(func_node, bound_names):
+        excluded_ids.update(id(n) for n in ast.walk(rebinding_with))
+    violations = []
+    for node in ast.walk(func_node):
+        if id(node) in excluded_ids:
+            continue
+        if isinstance(node, ast.Name) and node.id in bound_names and isinstance(node.ctx, ast.Load):
+            violations.append((func_node.name, node.lineno, node.id))
+        elif isinstance(node, ast.Call):
+            target = _call_target_name(node)
+            if target in _DB_LOCK_ESCAPE_CALL_NAMES:
+                violations.append((func_node.name, node.lineno, target))
+    return violations
+
+
+_AUDIT_TABLE_ROW_RE = re.compile(
+    r'^\|\s*\d+\s*\|\s*`(?P<function>[A-Za-z_][A-Za-z0-9_]*)`[^|]*\|\s*(?P<line>\d+)\s*\|'
+)
+
+
+def _audit_table_site_pairs(audit_text):
+    """``(function, line)`` pairs parsed out of 06-LOCK-AUDIT.md's per-site
+    table, keyed exactly the way the AST derivation below is keyed -- never
+    on function name alone, since two functions in this codebase own two
+    sites each and a name-keyed set would have 26 members against 28
+    sites."""
+    pairs = set()
+    for line in audit_text.splitlines():
+        match = _AUDIT_TABLE_ROW_RE.match(line.strip())
+        if match:
+            pairs.add((match.group('function'), int(match.group('line'))))
+    return pairs
+
+
+class LockScopeInvariantTests(unittest.TestCase):
+    """06-19: the invariant `T-06-24` (`06-SECURITY.md`) is actually about --
+    no route gains unserialized database access -- asserted directly rather
+    than via `LockScopePreservationTests`' frozen-scope proxy above. `06-20`
+    retires that proxy deliberately, in the same commit as the narrowing;
+    this class does not, and must not, fail when that happens, because
+    `06-20` moves computation out of the critical section, never a database
+    call out of it.
+
+    `PROH-OPS-04-05` prerequisite 1 (the per-call-site review of all 28
+    `with _db_lock` sites) is `06-LOCK-AUDIT.md`. This class is what stops
+    that document silently going stale: `test_every_db_lock_site_is_
+    covered_by_the_audit` fails the moment a site's `(function, line)` pair
+    drifts from what the table names.
+    """
+
+    def setUp(self):
+        self.source = Path('dashboard/app.py').read_text(encoding='utf-8')
+        self.tree = ast.parse(self.source)
+        self.owning = _db_lock_owning_functions(self.tree)
+
+    def test_no_database_access_escapes_the_db_lock(self):
+        # T-06-97: a rule that silently matches nothing would pass
+        # vacuously and give false assurance. This function count must be
+        # recorded (SUMMARY) as evidence the walk matched real sites.
+        self.assertGreater(
+            len(self.owning), 0,
+            'no _db_lock-owning function was found at all -- the AST walk matched '
+            'nothing, which would make this invariant pass vacuously (T-06-97).',
+        )
+        violations = []
+        for func_node, with_nodes in self.owning:
+            violations.extend(_db_lock_escapes(func_node, with_nodes))
+        self.assertFalse(
+            violations,
+            'database access escaped its owning _db_lock block: '
+            f'{violations} -- see D-DEBT-06-01, PROH-OPS-04-05 and 06-SECURITY.md T-06-24 '
+            'before editing this assertion. If this fails at HEAD (not against a hand-applied '
+            'mutation), the defect is in this rule, never in dashboard/app.py.',
+        )
+
+    def test_no_database_access_escapes_the_db_lock_covers_both_two_block_functions(self):
+        """`process_preview_requests` and `api_service_meta` each own two
+        `_db_lock` blocks. A rule built over a single block (via
+        `_find_db_lock_with`, which returns first-match only) would read
+        the second block's `conn` as an escape and fail at HEAD on both.
+        Neither is excluded, special-cased, or allow-listed here -- both
+        are checked by the exact same union-based rule every other site
+        uses."""
+        owning_by_name = {func.name: withs for func, withs in self.owning}
+        for name in ('process_preview_requests', 'api_service_meta'):
+            self.assertIn(
+                name, owning_by_name, f'{name} not found as a _db_lock-owning function',
+            )
+            self.assertEqual(
+                len(owning_by_name[name]), 2,
+                f'{name} expected to own exactly two _db_lock blocks, found '
+                f'{len(owning_by_name[name])} -- the two-block shape this test exists to cover.',
+            )
+        for func_node, with_nodes in self.owning:
+            if func_node.name in ('process_preview_requests', 'api_service_meta'):
+                violations = _db_lock_escapes(func_node, with_nodes)
+                self.assertFalse(
+                    violations,
+                    f'{func_node.name} (two _db_lock blocks) reported an escape: {violations} -- '
+                    'a single-block rule would fail here at HEAD; that is a defect in the rule, '
+                    'never in dashboard/app.py. Relax nothing; take the union.',
+                )
+
+    def test_api_advanced_current_is_not_reported_as_a_violation(self):
+        """AR-03-01: the one route already outside `_db_lock` by accepted
+        decision. It owns no `_db_lock` block at all, so it must never
+        appear in the owning-function set this invariant walks, and cannot
+        appear in any violation list."""
+        owning_names = {func.name for func, _ in self.owning}
+        self.assertNotIn(
+            'api_advanced_current', owning_names,
+            'api_advanced_current owns a _db_lock block -- AR-03-01 no longer holds; this is '
+            'news, not a test bug.',
+        )
+
+    def test_every_db_lock_site_is_covered_by_the_audit(self):
+        ast_pairs = {
+            (func_node.name, with_node.lineno)
+            for func_node, with_nodes in self.owning
+            for with_node in with_nodes
+        }
+        audit_path = Path('.planning/phases/06-workload-resilience-pi-acceptance/06-LOCK-AUDIT.md')
+        audit_text = audit_path.read_text(encoding='utf-8')
+        audit_pairs = _audit_table_site_pairs(audit_text)
+
+        missing_from_audit = ast_pairs - audit_pairs
+        self.assertFalse(
+            missing_from_audit,
+            f'_db_lock site(s) not named in 06-LOCK-AUDIT.md: {sorted(missing_from_audit)}',
+        )
+        stale_in_audit = audit_pairs - ast_pairs
+        self.assertFalse(
+            stale_in_audit,
+            f'06-LOCK-AUDIT.md names site(s) that no longer exist in dashboard/app.py: '
+            f'{sorted(stale_in_audit)}',
+        )
+
+        # Asserted separately and by different names -- conflating row count
+        # with distinct-function count is the arithmetic error this
+        # criterion exists to prevent (process_preview_requests and
+        # api_service_meta each own two sites).
+        self.assertEqual(
+            len(audit_pairs), 28,
+            f'expected 28 rows in 06-LOCK-AUDIT.md (one per _db_lock site), found {len(audit_pairs)}',
+        )
+        distinct_functions = {name for name, _ in audit_pairs}
+        self.assertEqual(
+            len(distinct_functions), 26,
+            f'expected 26 distinct functions named in 06-LOCK-AUDIT.md, found '
+            f'{len(distinct_functions)}',
+        )
+
+
+# ---------------------------------------------------------------------------
 # 06-17: coverage for tests/pi_load_acceptance.py's lock-profile collection,
 # verdict, and rehearsal. Every millisecond/nanosecond figure these tests
 # print is developer-machine evidence, never Pi evidence (PROH-OPS-07-09).
@@ -2020,13 +2263,29 @@ class LockAttributionVerdictTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'INCONCLUSIVE')
 
     def test_predictions_match_the_verification_reports_own_stated_figures(self):
-        """06-VERIFICATION.md Truth 5's `missing:` items state these two
-        figures literally: "~200-500ms hold" for /api/services, and the
-        "~0.85" utilisation threshold. A later edit that quietly loosens
-        either fails this test (T-06-89)."""
+        """06-VERIFICATION.md Truth 5's `missing:` items originally stated
+        "~200-500ms hold" for /api/services as an absolute band; D-DEBT-06-14
+        retired that band (it failed under dataset growth) in favour of
+        `services_min_hold_over_scan_status_hold_ratio`, a same-run ratio
+        calibrated to round 4's own measured figures (596.245ms / 2.532ms =
+        235.5 against the 20.0 floor). The "~0.85" utilisation threshold is
+        unchanged. Asserted by full key-set equality, deliberately -- an
+        absence check for the two retired keys could pass on a typo; a
+        key-set mismatch cannot."""
         predictions = harness.LOCK_ATTRIBUTION_PREDICTIONS
-        self.assertEqual(predictions['services_min_median_hold_ns'], 200_000_000)
-        self.assertEqual(predictions['services_max_median_hold_ns'], 500_000_000)
+        self.assertEqual(
+            set(predictions.keys()),
+            {
+                'scan_status_max_median_hold_ns',
+                'services_min_hold_over_scan_status_hold_ratio',
+                'scan_status_min_wait_over_services_hold_fraction',
+                'utilisation_superlinear_threshold',
+                'min_acquisitions_for_median',
+                'min_lock_wait_share_of_wall_for_confirmation',
+                'scan_status_slow_wall_threshold_ns',
+            },
+        )
+        self.assertEqual(predictions['services_min_hold_over_scan_status_hold_ratio'], 20.0)
         self.assertEqual(predictions['utilisation_superlinear_threshold'], 0.85)
 
     def test_evaluate_lock_attribution_is_pure_and_deterministic(self):
@@ -2034,6 +2293,212 @@ class LockAttributionVerdictTests(unittest.TestCase):
         result1 = harness.evaluate_lock_attribution(world)
         result2 = harness.evaluate_lock_attribution(world)
         self.assertEqual(result1, result2)
+
+    def test_round_4_measured_hold_figures_hold_against_the_renamed_ratio_check(self):
+        """06-19/D-DEBT-06-14: round 4's own measured hold figures --
+        596,245,129ns for /api/services, 2,531,729ns for /api/scan-status
+        (06-LOCK-DIAGNOSTIC.md) -- replayed through the renamed
+        `services_hold_dominates_scan_status_hold` check must still HOLD.
+        This is the demonstration that the retired band's failure was a
+        property of the band, not of the data: the same measured reality
+        that failed the absolute band (596.2ms outside [200ms, 500ms])
+        passes the same-run ratio comfortably."""
+        world = {
+            'utilisation': 0.9,
+            'route_overflow': False,
+            'request_route_overflow': False,
+            'routes': {
+                '/api/services': {'acquisitions': 882, 'hold_ns_total': 882 * 596_245_129},
+                '/api/scan-status': {
+                    'acquisitions': 880,
+                    'hold_ns_total': 880 * 2_531_729,
+                    'wait_ns_total': 880 * 2_531_729,
+                },
+            },
+            'requests': {
+                '/api/scan-status': {
+                    'requests': 880,
+                    'wall_ns_total': 880 * 272_392_500,
+                    'lock_wait_ns_total': 880 * 269_736_400,
+                },
+            },
+        }
+        result = harness.evaluate_lock_attribution(world)
+        ratio_check = next(
+            check for check in result['checks']
+            if check['name'] == 'services_hold_dominates_scan_status_hold'
+        )
+        self.assertTrue(ratio_check['held'], ratio_check)
+        self.assertGreater(ratio_check['measured'], ratio_check['threshold'])
+        self.assertAlmostEqual(ratio_check['measured'], 235.5, delta=0.1)
+
+
+def _confirmed_narrowing_world():
+    """The world in which 06-20's narrowing achieved its predicted effect:
+    `/api/services`' held region is almost entirely SQL, `python_share`
+    well under the confirmation threshold, and utilisation below the
+    post-narrowing superlinear threshold."""
+    return {
+        'collected': True,
+        'route_overflow': False,
+        'request_route_overflow': False,
+        'utilisation': 0.5,
+        'clamped_python_count': 0,
+        'routes': {
+            '/api/services': {
+                'acquisitions': 500,
+                'python_share': 0.05,
+                'sql_share': 0.93,
+            },
+        },
+    }
+
+
+def _refuted_narrowing_world():
+    """`python_share` still at the pre-fix baseline (round 4 measured
+    25.0%) -- the Python work provably did not leave the critical
+    section."""
+    return {
+        'collected': True,
+        'route_overflow': False,
+        'request_route_overflow': False,
+        'utilisation': 0.5,
+        'clamped_python_count': 0,
+        'routes': {
+            '/api/services': {
+                'acquisitions': 500,
+                'python_share': 0.25,
+                'sql_share': 0.75,
+            },
+        },
+    }
+
+
+class NarrowingOutcomeVerdictTests(unittest.TestCase):
+    """06-19 Task 3: `evaluate_narrowing_outcome` reaches all three
+    verdicts, proven from literal, reviewable synthetic summaries, and its
+    verdict never contributes to the run's actual pass/fail oracle
+    (`PROH-OPS-07-13`)."""
+
+    def test_confirmed_world_yields_confirmed(self):
+        result = harness.evaluate_narrowing_outcome(_confirmed_narrowing_world())
+        self.assertEqual(result['verdict'], 'CONFIRMED')
+        self.assertTrue(result['checks'])
+        for check in result['checks']:
+            self.assertTrue(check['held'], check)
+            self.assertIn('measured', check)
+
+    def test_refuted_world_yields_refuted(self):
+        """The test this round exists for: if this cannot be made to pass,
+        the verdict logic cannot refute and the prediction is worthless."""
+        result = harness.evaluate_narrowing_outcome(_refuted_narrowing_world())
+        self.assertEqual(result['verdict'], 'REFUTED')
+        self.assertIn('did not move', result['reason'])
+        self.assertTrue(any(not check['held'] for check in result['checks']))
+
+    def test_missing_route_yields_inconclusive(self):
+        result = harness.evaluate_narrowing_outcome({
+            'collected': True, 'route_overflow': False, 'request_route_overflow': False,
+            'routes': {},
+        })
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertIn("routes['/api/services']", result['reason'])
+
+    def test_under_sampled_route_yields_inconclusive_never_refuted(self):
+        world = _confirmed_narrowing_world()
+        world['routes']['/api/services']['acquisitions'] = 5
+        result = harness.evaluate_narrowing_outcome(world)
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertIn('too few acquisitions', result['reason'])
+
+    def test_nonzero_clamped_python_count_yields_inconclusive_never_confirmed(self):
+        """D-DEBT-06-10: a suspect measurement -- the derived python_share
+        remainder went negative at least once -- must never read as
+        success, however good the shares themselves look."""
+        world = _confirmed_narrowing_world()
+        world['clamped_python_count'] = 3
+        result = harness.evaluate_narrowing_outcome(world)
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertIn('clamped_python_count', result['reason'])
+
+    def test_collected_false_yields_inconclusive(self):
+        result = harness.evaluate_narrowing_outcome({'collected': False})
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+
+    def test_evaluate_narrowing_outcome_is_pure_and_deterministic(self):
+        world = _confirmed_narrowing_world()
+        result1 = harness.evaluate_narrowing_outcome(world)
+        result2 = harness.evaluate_narrowing_outcome(world)
+        self.assertEqual(result1, result2)
+
+    def test_structural_arm_narrowing_outcome_never_feeds_the_verdict(self):
+        """`PROH-OPS-07-13`, the same shape
+        `test_structural_arm_lock_profile_never_feeds_the_verdict` uses: no
+        expression contributing to `report.overall_passed` or
+        `report.failure_reasons` anywhere in `tests/pi_load_acceptance.py`
+        references `narrowing_outcome` -- proven by `ast`, not by two runs
+        happening to agree."""
+        source = Path('tests/pi_load_acceptance.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+
+        def references_narrowing_outcome(node):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and 'narrowing_outcome' in sub.id:
+                    return True
+                if isinstance(sub, ast.Attribute) and 'narrowing_outcome' in sub.attr:
+                    return True
+            return False
+
+        offending = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute) and target.attr == 'overall_passed':
+                        if references_narrowing_outcome(node.value):
+                            offending.append(('overall_passed assignment', node.lineno))
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute) and func.attr in ('append', 'extend')
+                    and isinstance(func.value, ast.Attribute) and func.value.attr == 'failure_reasons'
+                ):
+                    if any(references_narrowing_outcome(arg) for arg in node.args):
+                        offending.append(('failure_reasons mutation', node.lineno))
+
+        self.assertEqual(
+            offending, [],
+            f'narrowing_outcome leaked into a verdict-affecting expression: {offending} '
+            '(PROH-OPS-07-13).',
+        )
+
+    def test_forced_refuted_narrowing_verdict_matches_the_same_run_without_the_block(self):
+        """The behavioral half of `PROH-OPS-07-13`, mirroring
+        `test_disabled_endpoint_matches_the_same_run_without_collection`'s
+        shape: forcing `evaluate_narrowing_outcome` to return REFUTED for a
+        genuinely live run must not move `overall_passed` or
+        `failure_reasons` relative to the same run without the diagnostic
+        block requested at all."""
+        with _live_beacon_server(enable_lock_profile=True) as (appmod, db_path, base_url):
+            scenario_without = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+            )
+            report_without = harness.run_acceptance(scenario_without)
+
+            scenario_with = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+                collect_lock_profile=True,
+            )
+            forced_refuted = {
+                'verdict': 'REFUTED', 'reason': 'forced for PROH-OPS-07-13 structural proof',
+                'checks': [],
+            }
+            with mock.patch.object(harness, 'evaluate_narrowing_outcome', return_value=forced_refuted):
+                report_with = harness.run_acceptance(scenario_with)
+
+        self.assertEqual(report_with.overall_passed, report_without.overall_passed)
+        self.assertEqual(report_with.failure_reasons, report_without.failure_reasons)
+        self.assertTrue(report_with.lock_profile.get('collected'))
+        self.assertEqual(report_with.lock_profile['narrowing_outcome']['verdict'], 'REFUTED')
 
 
 def _run_self_test_reliably(**kwargs):

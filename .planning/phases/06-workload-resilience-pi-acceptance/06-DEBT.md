@@ -463,7 +463,7 @@ harness must fix the underlying defect first, not merely repeat this round's avo
 | Field | Value |
 |---|---|
 | **Raised by** | `06-LOCK-DIAGNOSTIC.md`'s Verdict section, `06-18-PLAN.md` Task 1 |
-| **Status** | **Deferred — a diagnostic-harness change for round 5's predictions, not a code fix.** New this round. |
+| **Status** | **Closed 2026-09-03 — `06-19-PLAN.md` Task 3.** `services_median_hold_in_band` is replaced by `services_min_hold_over_scan_status_hold_ratio` (floor `20.0`), a same-run ratio between two quantities measured in one run. Round 4's own measured figures (596,245,129ns / 2,531,729ns = 235.5) are replayed through the renamed `services_hold_dominates_scan_status_hold` check and HOLD, comfortably above the floor — `tests/test_lock_profile.py::LockAttributionVerdictTests::test_round_4_measured_hold_figures_hold_against_the_renamed_ratio_check`. |
 | **Recorded in the plan** | `06-LOCK-DIAGNOSTIC.md` §§1–2 and Verdict, `tests/pi_load_acceptance.py`'s `LOCK_ATTRIBUTION_PREDICTIONS` |
 
 **What was observed.** Round 4's hardware run carried two predictions over the same underlying
@@ -505,6 +505,18 @@ a change to `_db_lock` or any production code path.
 re-runs the diagnostic harness) either replaces `services_median_hold_in_band` with a relational
 form, or documents why an absolute band is retained and how it is rescaled against the run's own
 measured dataset growth before being evaluated.
+
+**Closed 2026-09-03 — `06-19-PLAN.md` Task 3.** `LOCK_ATTRIBUTION_PREDICTIONS` no longer carries
+`services_min_median_hold_ns` / `services_max_median_hold_ns`; both are gone by full key-set
+equality (`tests/test_lock_profile.py::LockAttributionVerdictTests::
+test_predictions_match_the_verification_reports_own_stated_figures`), not by an absence check that
+could pass on a typo. The replacement, `services_min_hold_over_scan_status_hold_ratio` (`20.0`),
+is a ratio of two quantities measured in the same run, so it is dataset-size-invariant by
+construction. `evaluate_lock_attribution`'s renamed `services_hold_dominates_scan_status_hold`
+check, replayed against round 4's own measured figures (596,245,129ns / 2,531,729ns = 235.5), HOLDS
+comfortably above the floor — the same measured reality that failed the retired absolute band now
+passes cleanly, demonstrating the retired band's failure was a property of the band, not of the
+data.
 
 ---
 
@@ -569,6 +581,42 @@ expected to achieve once those prerequisites are met.
 its actual hardware-verified utilisation (not the arithmetic estimate here), and either closes
 `/api/advanced/current`'s budget failure by a separate remedy or explicitly scopes it into a further
 round.
+
+---
+
+### D-DEBT-06-16 — non-`api_services` sites holding non-database work under `_db_lock`, found by the 28-site audit and left untouched
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-19-PLAN.md` Task 1, `06-LOCK-AUDIT.md`'s per-call-site review |
+| **Status** | **Deferred — future narrowing candidates, not fixed here.** New this round. |
+| **Recorded in the plan** | `06-LOCK-AUDIT.md` "Future narrowing candidates this round is deliberately not taking" |
+
+**What the audit found.** `06-LOCK-AUDIT.md`'s per-call-site review of all 28 `with _db_lock` sites
+found two sites, beyond `api_services` (the sole site `06-20` narrows), that hold non-database
+Python work under the lock:
+
+- **`api_service_meta` (PUT), `dashboard/app.py:3069`.** Field validation, URL normalization
+  (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning
+  (`_outbound_policy().plan(...)`) all execute inside the critical section, ahead of the actual
+  metadata write. This route is not hardware-profiled this phase — no measured share of its held
+  region exists, unlike `api_services`' measured 25.0% Python share (`06-LOCK-DIAGNOSTIC.md` §4).
+- **`recover_worker_state`, `dashboard/app.py:240`.** JSON serialization of the `monitoring_gap`
+  event's `details` payload runs under the lock — a small, bounded cost (one `json.dumps` call over
+  a two-key dict), named for completeness rather than as a meaningful narrowing target.
+
+**Why neither is narrowed this round.** `PROH-OPS-04-05`'s decision checkpoint (`06-18-PLAN.md`
+Task 3) scoped the user's `fix-now` decision to `_db_lock`'s attribution evidence, which measured
+`api_services` and `/api/scan-status` specifically. Narrowing a site with no measured evidence
+behind it would be exactly the kind of un-evidenced fix `D-DEBT-06-09` and `D-DEBT-06-15` warn
+against repeating. `06-20`'s scope is `api_services` alone.
+
+**What would need to be true to close this entry.** A future round hardware-profiles
+`api_service_meta`'s PUT path specifically (its own lock-profile route label, analogous to
+`api_services`'), measures whether its held-region Python share is large enough to matter under
+load, and either narrows it on that evidence or explicitly declines to, the same way this round
+declined to act on the laptop-only `06-PROFILE.md` figure for `api_services` before
+`06-LOCK-DIAGNOSTIC.md`'s hardware measurement existed.
 
 ---
 
