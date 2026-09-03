@@ -462,8 +462,8 @@ Plans:
 - [x] 06-16-PLAN.md — Decompose the critical section (connect/SQL/Python) and each request (on-CPU/lock-wait/off-CPU)
 - [x] 06-17-PLAN.md — Harness collection around the load window, and a verdict that can say REFUTED
 - [x] 06-18-PLAN.md — Two instrumented Pi passes, 06-LOCK-DIAGNOSTIC.md, and the fix decision (human-gated)
-- [ ] 06-19-PLAN.md — The one-way-door prerequisites: a 28-site lock audit a test enforces, a narrowed-shape integrity proof, and predictions that survive dataset growth
-- [ ] 06-20-PLAN.md — Tracer: narrow `api_services`' critical section to database reads only, output proven byte-identical
+- [x] 06-19-PLAN.md — The one-way-door prerequisites: a 28-site lock audit a test enforces, a narrowed-shape integrity proof, and predictions that survive dataset growth
+- [x] 06-20-PLAN.md — Tracer: narrow `api_services`' critical section to database reads only, output proven byte-identical
 - [ ] 06-21-PLAN.md — Measurement A: the narrowing's effect on real Pi hardware (human-gated)
 - [ ] 06-22-PLAN.md — The `/api/advanced/current` remedy: a one-way-door decision and the chosen fix
 - [ ] 06-23-PLAN.md — Measurement B and the round-5 uninstrumented acceptance run (human-gated)
