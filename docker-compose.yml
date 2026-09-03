@@ -31,6 +31,7 @@ x-beacon-common: &beacon-common
     ALERT_COOLDOWN_SECONDS: "300"
     ALERT_ONLY_CRITICAL: "0"
     ENABLE_PROMETHEUS: "0"
+    ENABLE_LOCK_PROFILE: "${BEACON_LOCK_PROFILE:-0}"
 
 services:
   data-init:
