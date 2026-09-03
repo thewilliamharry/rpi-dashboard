@@ -80,6 +80,12 @@ def _log_spaced_edges_ns(start_ns, end_ns, bucket_count):
 WAIT_HISTOGRAM_EDGES_NS = _log_spaced_edges_ns(10_000, 10_000_000_000, 20)
 HOLD_HISTOGRAM_EDGES_NS = _log_spaced_edges_ns(10_000, 10_000_000_000, 20)
 
+# 06-16 Task 2: per-request wall/CPU histograms use the same fixed,
+# log-spaced shape as the acquisition histograms above, for the same reason
+# -- constant collector memory, independent of run duration.
+WALL_HISTOGRAM_EDGES_NS = _log_spaced_edges_ns(10_000, 10_000_000_000, 20)
+CPU_HISTOGRAM_EDGES_NS = _log_spaced_edges_ns(10_000, 10_000_000_000, 20)
+
 
 def _bucket_index(value_ns, edges):
     for index, edge in enumerate(edges):
@@ -167,6 +173,67 @@ def _accumulate(stats, wait_ns, hold_ns, connect_ns, lease_ns, sql_execute_ns, s
     stats.hold_histogram[_bucket_index(hold_ns, HOLD_HISTOGRAM_EDGES_NS)] += 1
 
 
+@dataclasses.dataclass
+class RequestStats:
+    """One route's per-request wall-time decomposition plus its two
+    fixed-edge histograms.
+
+    06-16 Task 2: every request's wall time is `cpu_ns` (this thread's own
+    `time.thread_time_ns()` delta -- genuinely on-CPU) plus `lock_wait_ns`
+    (accumulated from every `_db_lock` acquisition this request made) plus
+    `other_off_cpu_ns` -- the remainder, `wall_ns` minus the other two,
+    clamped at zero. That summing identity holds by construction and is
+    reported for readability only; it is never cited as accuracy evidence
+    (`D-DEBT-06-10`). `other_off_cpu_ns` also contains genuine I/O wait plus
+    scheduler delay, not GIL contention alone -- the GIL's contribution is
+    the EXCESS of a concurrency-8 run's value over the same route's
+    concurrency-1 value, never the raw figure.
+    """
+
+    requests: int = 0
+    wall_ns_total: int = 0
+    cpu_ns_total: int = 0
+    lock_wait_ns_total: int = 0
+    other_off_cpu_ns_total: int = 0
+    wall_ns_max: int = 0
+    cpu_ns_max: int = 0
+    wall_histogram: list = dataclasses.field(
+        default_factory=lambda: [0] * (len(WALL_HISTOGRAM_EDGES_NS) + 1)
+    )
+    cpu_histogram: list = dataclasses.field(
+        default_factory=lambda: [0] * (len(CPU_HISTOGRAM_EDGES_NS) + 1)
+    )
+
+
+def _copy_request_stats(stats):
+    """Plain-dict, JSON-serializable copy of one RequestStats -- no encoder."""
+    return {
+        'requests': stats.requests,
+        'wall_ns_total': stats.wall_ns_total,
+        'cpu_ns_total': stats.cpu_ns_total,
+        'lock_wait_ns_total': stats.lock_wait_ns_total,
+        'other_off_cpu_ns_total': stats.other_off_cpu_ns_total,
+        'wall_ns_max': stats.wall_ns_max,
+        'cpu_ns_max': stats.cpu_ns_max,
+        'wall_histogram': list(stats.wall_histogram),
+        'cpu_histogram': list(stats.cpu_histogram),
+    }
+
+
+def _accumulate_request(stats, wall_ns, cpu_ns, lock_wait_ns, other_off_cpu_ns):
+    stats.requests += 1
+    stats.wall_ns_total += wall_ns
+    stats.cpu_ns_total += cpu_ns
+    stats.lock_wait_ns_total += lock_wait_ns
+    stats.other_off_cpu_ns_total += other_off_cpu_ns
+    if wall_ns > stats.wall_ns_max:
+        stats.wall_ns_max = wall_ns
+    if cpu_ns > stats.cpu_ns_max:
+        stats.cpu_ns_max = cpu_ns
+    stats.wall_histogram[_bucket_index(wall_ns, WALL_HISTOGRAM_EDGES_NS)] += 1
+    stats.cpu_histogram[_bucket_index(cpu_ns, CPU_HISTOGRAM_EDGES_NS)] += 1
+
+
 class LockProfileCollector:
     """Owns the per-route table and the global totals for one process."""
 
@@ -186,6 +253,17 @@ class LockProfileCollector:
         # acquisition -- a real defect (leaked thread-local, double-counted
         # timer, misattributed SQL), never silently absorbed.
         self.clamped_python_count = 0
+        # 06-16 Task 2: the per-route request table, parallel to _routes/
+        # _total above but keyed by wall-time decomposition instead of
+        # lock wait/hold. Cardinality-bounded the same way.
+        self._requests = {}
+        self._request_total = RequestStats()
+        self.request_route_overflow = False
+        # A non-zero count means lock_wait_ns exceeded off_cpu_ns for at
+        # least one request -- the two clocks (time.thread_time_ns() and the
+        # monotonic wall timer) disagreeing, or accounting leaking across
+        # threads. Never silently absorbed.
+        self.clamped_off_cpu_count = 0
 
     def record_acquisition(
         self, route_label, wait_ns, hold_ns,
@@ -214,6 +292,22 @@ class LockProfileCollector:
         with self._collector_lock:
             self.sql_outside_lock_ns += elapsed_ns
 
+    def record_request(self, route_label, wall_ns, cpu_ns, lock_wait_ns, other_off_cpu_ns, clamped):
+        with self._collector_lock:
+            if clamped:
+                self.clamped_off_cpu_count += 1
+            stats = self._requests.get(route_label)
+            if stats is None:
+                if len(self._requests) >= MAX_TRACKED_ROUTES:
+                    self.request_route_overflow = True
+                    route_label = OVERFLOW_ROUTE_LABEL
+                    stats = self._requests.get(route_label)
+                if stats is None:
+                    stats = RequestStats()
+                    self._requests[route_label] = stats
+            _accumulate_request(stats, wall_ns, cpu_ns, lock_wait_ns, other_off_cpu_ns)
+            _accumulate_request(self._request_total, wall_ns, cpu_ns, lock_wait_ns, other_off_cpu_ns)
+
     def snapshot(self):
         # Hold the collector's own lock only long enough to copy scalar
         # counters and histogram lists (T-06-77b) -- no formatting here.
@@ -226,12 +320,23 @@ class LockProfileCollector:
             route_overflow = self.route_overflow
             sql_outside_lock_ns = self.sql_outside_lock_ns
             clamped_python_count = self.clamped_python_count
+            requests = {
+                label: _copy_request_stats(stats)
+                for label, stats in self._requests.items()
+            }
+            request_total = _copy_request_stats(self._request_total)
+            request_route_overflow = self.request_route_overflow
+            clamped_off_cpu_count = self.clamped_off_cpu_count
         return {
             'routes': routes,
             'lock': total,
             'route_overflow': route_overflow,
             'sql_outside_lock_ns': sql_outside_lock_ns,
             'clamped_python_count': clamped_python_count,
+            'requests': requests,
+            'requests_total': request_total,
+            'request_route_overflow': request_route_overflow,
+            'clamped_off_cpu_count': clamped_off_cpu_count,
         }
 
     def reset(self):
@@ -242,6 +347,10 @@ class LockProfileCollector:
             self.route_overflow = False
             self.sql_outside_lock_ns = 0
             self.clamped_python_count = 0
+            self._requests = {}
+            self._request_total = RequestStats()
+            self.request_route_overflow = False
+            self.clamped_off_cpu_count = 0
 
 
 # The one collector this process uses.
@@ -350,13 +459,67 @@ def install(lock):
 
 
 def begin_request(route_label):
-    """Bind the calling thread's route label for the duration of a request."""
+    """Bind the calling thread's route label and start its per-request
+    wall/CPU accounting for the duration of a request.
+
+    06-16 Task 2: also records `wall_start_ns` (`_timer_ns()`) and
+    `cpu_start_ns` (`time.thread_time_ns()`, the one per-thread CPU clock
+    the stdlib provides) and zeroes the per-request `lock_wait_ns` /
+    `lock_hold_ns` accumulators that `InstrumentedLock._release_and_record`
+    adds to on every `_db_lock` acquisition this request makes.
+    """
     _REQUEST_STATE.route_label = route_label
+    _REQUEST_STATE.wall_start_ns = _timer_ns()
+    _REQUEST_STATE.cpu_start_ns = time.thread_time_ns()
+    _REQUEST_STATE.lock_wait_ns = 0
+    _REQUEST_STATE.lock_hold_ns = 0
 
 
 def end_request():
-    """Clear the calling thread's route label."""
+    """Close the calling thread's request accounting region and clear its
+    route label.
+
+    Computes `wall_ns` (elapsed since `begin_request`), `cpu_ns` (this
+    thread's own CPU time since `begin_request`), `off_cpu_ns = wall_ns -
+    cpu_ns`, and `other_off_cpu_ns = off_cpu_ns - lock_wait_ns` -- the
+    portion of off-CPU time NOT already accounted for by blocking on
+    `_db_lock`. Clock granularity can make this negative for a
+    sub-millisecond request; when it does, it is clamped to zero and
+    counted via `clamped_off_cpu_count` rather than silently absorbed.
+
+    `other_off_cpu_ns` also contains genuine I/O wait and scheduler delay,
+    not GIL contention alone -- see `RequestStats`' docstring: the GIL's
+    contribution is the concurrency-8 EXCESS over the same route's
+    concurrency-1 value, never this raw figure.
+
+    A no-op if `begin_request` was never called on this thread (or was
+    already closed), matching `_release_and_record`'s tolerant handling of
+    the degenerate case.
+    """
+    wall_start_ns = getattr(_REQUEST_STATE, 'wall_start_ns', None)
+    if wall_start_ns is not None:
+        # Sampled in this order -- cpu_end BEFORE wall_end, mirroring
+        # begin_request's wall_start-before-cpu_start -- so the CPU-time
+        # measurement window is strictly nested inside the wall-time window
+        # ([wall_start <= cpu_start, cpu_end <= wall_end]) rather than merely
+        # overlapping it. Sampling wall_end first (the naive order) lets
+        # cpu_end creep a few instructions past wall_end, which can push
+        # cpu_ns fractionally above wall_ns for a tight, low-overhead
+        # request and trip the clamp below on ordinary correct behaviour,
+        # not just genuine clock-granularity noise.
+        cpu_start_ns = getattr(_REQUEST_STATE, 'cpu_start_ns', 0)
+        cpu_ns = time.thread_time_ns() - cpu_start_ns
+        wall_ns = _timer_ns() - wall_start_ns
+        lock_wait_ns = getattr(_REQUEST_STATE, 'lock_wait_ns', 0)
+        off_cpu_ns = wall_ns - cpu_ns
+        other_off_cpu_ns = off_cpu_ns - lock_wait_ns
+        clamped = other_off_cpu_ns < 0
+        if clamped:
+            other_off_cpu_ns = 0
+        route_label = getattr(_REQUEST_STATE, 'route_label', None) or NO_REQUEST_ROUTE_LABEL
+        COLLECTOR.record_request(route_label, wall_ns, cpu_ns, lock_wait_ns, other_off_cpu_ns, clamped)
     _REQUEST_STATE.route_label = None
+    _REQUEST_STATE.wall_start_ns = None
 
 
 def current_route_label():

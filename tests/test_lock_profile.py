@@ -646,9 +646,25 @@ class RequestAccountingTests(_InstrumentedLockTestCase):
     def test_raising_handler_still_closes_its_accounting_region(self):
         """A request that raises inside the handler still closes its
         accounting region -- `teardown_request` runs on the error path --
-        and the route's `requests` count includes it."""
-        resp = self.client.get('/test-06-16/raise')
-        self.assertEqual(resp.status_code, 500)
+        and the route's `requests` count includes it.
+
+        `PROPAGATE_EXCEPTIONS=True` is set for the duration of this one
+        request: with it off (Flask's normal non-debug default), Flask
+        itself converts an unhandled exception into a 500 response BEFORE
+        invoking `after_request` handlers, so an `end_request` registered on
+        `after_request` would still fire in that case and this test would
+        not distinguish the two hooks. With it on, Flask lets the exception
+        propagate WITHOUT building a response at all -- `after_request`
+        handlers never run, but `teardown_request` handlers still do. This
+        is the scenario that actually requires `end_request` to be wired to
+        `teardown_request`, confirmed directly against this interpreter's
+        Flask before relying on it."""
+        self.appmod.app.config['PROPAGATE_EXCEPTIONS'] = True
+        try:
+            with self.assertRaises(RuntimeError):
+                self.client.get('/test-06-16/raise')
+        finally:
+            self.appmod.app.config['PROPAGATE_EXCEPTIONS'] = False
 
         route = lockprofile.snapshot()['requests']['/test-06-16/raise']
         self.assertGreaterEqual(route['requests'], 1)
