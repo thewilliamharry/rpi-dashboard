@@ -3021,11 +3021,51 @@ class HarnessRehearsalTests(unittest.TestCase):
         )
 
     def test_profile_disabled_self_test_matches_the_enabled_runs_overall_passed(self):
-        os.environ['ENABLE_LOCK_PROFILE'] = '1'
-        enabled_report = _run_self_test_reliably(collect_lock_profile=True)
-        disabled_report = _run_self_test_reliably(collect_lock_profile=False)
+        """Enabling collection must not change a run's verdict.
 
-        self.assertEqual(enabled_report.overall_passed, disabled_report.overall_passed)
+        The cross-run comparison below is retried on DISAGREEMENT, not on a
+        named transient. Two separate self-test runs each generate their own
+        real HTTP load, so a slow run can trip a latency budget the other
+        did not and flip `overall_passed` for reasons that have nothing to do
+        with the lock profile -- observed failing 1 run in 3 in isolation
+        after 06-20, with the failing run taking 23s against 11s for a
+        passing one. That is the same "compares two separate live runs"
+        weakness the round-4 plan check raised against 06-17's
+        verdict-equivalence arm.
+
+        WHAT THIS TEST DOES **NOT** DO, established by measurement rather
+        than assumed. Injecting a deterministic leak into `run_acceptance`
+        (`if report.lock_profile.get('collected'): report.overall_passed =
+        False`, verified in place) leaves this test GREEN: in the suite's
+        context the enabled run's collection does not reach that path, so
+        both verdicts stay True and the equality holds trivially. Do not
+        read this test's green as evidence that collection cannot influence
+        a verdict.
+
+        The guarantee is carried by PROH-OPS-07-13's structural `ast` arm --
+        nothing feeding `overall_passed`/`failure_reasons` references
+        `lock_profile` -- and by 06-19's behavioral pair test, both
+        mutation-verified by their own plans. What THIS test actually
+        asserts is the deterministic half below: a disabled run produces an
+        empty `lock_profile`. The retry above keeps that half from being
+        lost to timing noise; it does not turn the cross-run comparison into
+        a leak detector.
+        """
+        os.environ['ENABLE_LOCK_PROFILE'] = '1'
+        attempts = []
+        for _ in range(3):
+            enabled_report = _run_self_test_reliably(collect_lock_profile=True)
+            disabled_report = _run_self_test_reliably(collect_lock_profile=False)
+            attempts.append((enabled_report.overall_passed, disabled_report.overall_passed))
+            if enabled_report.overall_passed == disabled_report.overall_passed:
+                break
+
+        self.assertTrue(
+            any(enabled == disabled for enabled, disabled in attempts),
+            'enabling lock-profile collection changed overall_passed on every attempt '
+            f'{attempts} -- a real leak is deterministic, so this is not timing noise. '
+            'See PROH-OPS-07-13 and its structural ast arm.',
+        )
         self.assertEqual(disabled_report.lock_profile, {})
 
     def test_report_round_trips_through_to_json_and_json_loads(self):
