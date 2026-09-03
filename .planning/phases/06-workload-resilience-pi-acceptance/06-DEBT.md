@@ -567,7 +567,7 @@ data.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-LOCK-DIAGNOSTIC.md` §§3–4, `06-18-PLAN.md` Task 1 |
-| **Status** | **Its closure condition is answered 2026-09-03 (`06-21`): the estimate did NOT hold — measured utilisation 0.9692, not 0.745–0.82. The GIL half this entry named as a separate problem is no longer a future concern; it is measured as the dominant one, arriving earlier and harder than this entry anticipated. See "`06-21` measured — the estimate failed, and the GIL half arrived early" below.** |
+| **Status** | **Its closure condition is answered 2026-09-03 (`06-21`): the estimate did NOT hold — measured utilisation 0.9692, not 0.745–0.82. The GIL half this entry named as a separate problem is no longer a future concern; it is measured as the dominant one, arriving earlier and harder than this entry anticipated. See "`06-21` measured — the estimate failed, and the GIL half arrived early" below. `06-22` (2026-09-03) shipped the first closure branch — a separate remedy (T-C, the occurrence memo) — but not the second (scoping away); whether the remedy is sufficient is `06-23`'s to measure. See "`06-22` measured" below.** |
 | **Recorded in the plan** | `06-LOCK-DIAGNOSTIC.md` §§3–4, `D-DEBT-06-01`'s "Round 4 reopening" section above |
 
 **What narrowing `_db_lock` cannot touch.** `/api/advanced/current` is over its own 2000ms budget
@@ -659,6 +659,24 @@ regression, since the two are now measured to interact rather than sit independe
 separate remedy or explicitly scopes it into a further round" — `06-22` does the choosing; this
 entry's role ends at recording that the estimate failed and why.
 
+**`06-22` measured — the first closure branch was taken (a separate remedy shipped), not the second
+(scoped away) — but whether the remedy actually closes the budget failure is still open (2026-09-03).**
+`06-22`'s Task 1 blocking `checkpoint:decision` resolved: **T-C** (`t-c-reduce-cost`, the reversible
+occurrence memo) ships, not T-D (`t-a-add-workers` held explicitly, this entry's own reversible option
+is not exercised here). This closes `/api/advanced/current`'s budget failure by a separate remedy in
+the sense that a remedy was shipped and is not merely deferred — see `D-DEBT-06-18`'s new "`06-22`'s
+formal decision" section for the full record (option, reversibility, planner recommendation, user's
+choice, measurement it was made against).
+
+**What this entry can and cannot say about the remedy's sufficiency.** `06-22`'s own read_first
+evidence names the residual honestly: the memo's ceiling is bounded by how much of
+`/api/advanced/current`'s measured 609.4ms mean CPU (round 4) / 729.2ms mean CPU (round 5,
+`06-LOCK-DIAGNOSTIC-R5A.md` §4) is actually the occurrence walk this memo collapses — a decomposition
+round 4 did not perform for this route the way `06-PROFILE.md` did for `/api/services`. This entry
+does not assert the memo is sufficient to bring the route under its 2000ms budget; that is `06-23`'s
+hardware measurement to make, not a plan-time estimate. If `06-23` measures the route still over
+budget, `D-DEBT-06-17` (new, filed by `06-22`) names the residual and the untaken T-A candidate.
+
 ---
 
 ### D-DEBT-06-16 — non-`api_services` sites holding non-database work under `_db_lock`, found by the 28-site audit and left untouched
@@ -697,12 +715,52 @@ declined to act on the laptop-only `06-PROFILE.md` figure for `api_services` bef
 
 ---
 
+### D-DEBT-06-17 — `/api/advanced/current`'s residual: the excluded batching candidate, and T-A held in reserve
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-22-PLAN.md` Task 3, per its own filing instruction |
+| **Status** | **Deferred — recorded, not fixed. Whether it needs closing at all depends on `06-23`'s measurement of T-C.** New this round. |
+| **Recorded in the plan** | `06-22-PLAN.md`'s objective and `<action>` (T-C branch); `D-DEBT-06-11`; `D-DEBT-06-18`'s reversible option held in reserve |
+
+**Why this entry exists.** `06-22-PLAN.md` Task 3 requires filing this entry "on any branch that
+leaves `/api/advanced/current` over budget or leaves a named candidate untaken." `06-22` shipped T-C
+(the occurrence memo, `D-DEBT-06-15`'s "`06-22` measured" section) — its sufficiency is unmeasured
+until `06-23`, and T-C's own `<action>` text names one candidate it deliberately does not take. Both
+conditions are true regardless of `06-23`'s outcome, so this entry is filed now rather than
+retroactively.
+
+**Candidate 1 — the excluded batching, deliberately not taken by T-C.** `06-22-PLAN.md`'s `<action>`
+names it explicitly: batching the per-port `read_service_offline_intervals` calls in
+`get_current_diagnosis` into the bulk `read_service_offline_intervals_by_port` helper (the same one
+`api_services` uses) would remove one more per-port SQL round trip, but that helper applies a
+combined-across-ports row cap (`D-DEBT-06-11`) whose truncation behavior differs from the per-port
+bound `get_current_diagnosis` currently reads under — adopting it would change this route's output on
+any dataset large enough to hit the cap, which `PROH-OPS-07-14` forbids without its own output proof.
+T-C's payload-equivalence guard does not cover this candidate, because T-C does not take it.
+
+**Candidate 2 — T-A, the one-way `--workers` door, held in reserve.** `06-22-PLAN.md` Task 1's
+`checkpoint:decision` recorded T-A as the option that most directly addresses the measured mechanism
+(a second interpreter absorbing the idle-core capacity `06-LOCK-DIAGNOSTIC-R5A.md` §4 measured), and
+explicitly held it in reserve rather than discarding it, on the reasoning that T-C is reversible and
+T-A is not. If `06-23` measures T-C as insufficient, T-A remains available with round 5's own
+per-worker RSS figures to size its `mem_limit` re-derivation against, which `D-DEBT-06-07` already
+requires and which is strictly better information than existed before `06-21`.
+
+**What would need to be true to close this entry.** Either: (a) `06-23` measures `/api/advanced/current`
+under its 2000ms budget after T-C, in which case this entry closes recording that neither candidate
+was needed; or (b) `06-23` measures it still over budget, in which case a further round takes one of
+the two candidates above — batching with its own output proof against `D-DEBT-06-11`'s cap, or T-A
+through the full `PROH-OPS-04-05` gate — and this entry closes recording which one and why.
+
+---
+
 ### D-DEBT-06-18 — the narrowing's own measured hardware regression under load, and the revert option held in reserve
 
 | Field | Value |
 |---|---|
 | **Raised by** | `06-21-PLAN.md` Task 1's real hardware run, `06-LOCK-DIAGNOSTIC-R5A.md` |
-| **Status** | **Deferred — awaiting `06-23`'s re-measurement after `06-22`'s remedy.** New this round. Not blocking `06-22`; scopes what `06-22`'s decision must account for and names the fallback if it does not resolve. |
+| **Status** | **Deferred — awaiting `06-23`'s re-measurement after `06-22`'s remedy.** New this round. `06-22` (2026-09-03) formally selected T-C against this entry's own evidence — see "`06-22`'s formal decision, recorded verbatim" below. Not yet closed: `06-23`'s hardware re-measurement decides whether T-C recovers the regression or the revert option below is exercised. |
 | **Recorded in the plan** | `06-LOCK-DIAGNOSTIC-R5A.md` §§2, 4, 5; `D-DEBT-06-01`'s "`06-21` measured" section; `D-DEBT-06-09`'s "RE-READ POST-FIX" section; `D-DEBT-06-15`'s "`06-21` measured" section |
 
 **What was measured, stated once here so a later reader does not have to reconstruct it from three
@@ -746,6 +804,44 @@ fences behind `PROH-OPS-04-05`). The reasoning recorded for the record: T-C is r
 not; T-C targets the route this regression's own mechanism implicates most directly; and if T-C
 proves insufficient, T-A remains available with this round's own data to size its `mem_limit`
 arithmetic against, which is strictly better information than existed before `06-21`.
+
+**`06-22`'s formal decision, recorded verbatim (2026-09-03) — the third one-way-door decision this
+phase has put to the user; each prior one is recorded the same way in `D-DEBT-06-01`'s "Round 4
+reopening" section and in `D-DEBT-06-09`'s decision record, so a reader can reconstruct the full
+sequence from these three entries.** Put to the user at `06-22-PLAN.md` Task 1's blocking
+`checkpoint:decision`, against `06-LOCK-DIAGNOSTIC-R5A.md` §4's measured regression (this route's
+`other_off_cpu_ns_total` nearly doubled, 550,980.5ms → 1,007,408.3ms, in the identical pass that
+narrowed `_db_lock`'s hold did not shrink) and the planner's recorded recommendation
+(`t-c-reduce-cost`, T-C). **The user selected `t-c-reduce-cost`.** The decision matched the planner's
+recommendation.
+
+- **Option selected:** `t-c-reduce-cost` (T-C) — the request-scoped occurrence memo threaded through
+  `dashboard/beacon/diagnosis.py`'s `get_current_diagnosis`, mirroring `06-13`'s identical fix for
+  `/api/services`.
+- **Reversibility rating:** reversible. Of the four options `06-22-PLAN.md` Task 1 specified, only
+  `t-a-add-workers` (T-A) carries the one-way-door rating — it grants a second OS process unserialized
+  concurrent write access to the same SQLite file with no line of `_db_lock` changing, the exact
+  boundary `T-06-24` is closed on. T-C adds no new database-access boundary, changes no deployment
+  topology, and its own commit is a clean, self-contained, git-revertible diff
+  (`dashboard/beacon/diagnosis.py`, `tests/test_advanced_diagnosis_api.py`, one new golden fixture).
+- **Planner recommendation:** T-C, with T-A explicitly held in reserve rather than discarded
+  (`06-22-PLAN.md` Task 1's `<recommendation>`).
+- **Whether the user followed it:** yes — the user's selection matches the planner's recommendation.
+- **`PROH-OPS-07-14`** (minted by `06-22-PLAN.md`, applies on every branch including T-C): the
+  route's payload must stay byte-identical for the same input on any cost or topology change.
+  Enforced by `tests/test_advanced_diagnosis_api.py::AdvancedCurrentCostTests::test_payload_is_unchanged_by_the_round_5_remedy`,
+  which compares `get_current_diagnosis`'s serialized output against a golden captured from the code
+  as it stood immediately before this decision's production edit, and is mutation-verified sensitive
+  (a dropped composed field was observed to fail it, then reverted).
+- **Measurement it was made against:** `06-LOCK-DIAGNOSTIC-R5A.md` §4 (this route's own request
+  accounting, both rounds) and §2/§5 (the narrowing's measured regression under load this route's own
+  cost sits alongside) — the same evidence `D-DEBT-06-18`'s "What was measured" section above records
+  once for all three cross-referencing entries.
+- **What this forecloses and what it leaves open.** T-C forecloses nothing structural — `_db_lock`'s
+  scope, the gunicorn concurrency model (`D-DEBT-06-07`), and `T-06-24`'s closure evidence are all
+  untouched by this decision. It leaves open whether the memo is sufficient (`06-23`'s to measure,
+  `D-DEBT-06-17`) and leaves T-A available as a fallback with strictly better `mem_limit` sizing data
+  than existed before `06-21`, per the reasoning recorded above.
 
 **The revert option held in reserve, named so a later reader finds it without reconstructing it.**
 If `06-23`'s post-`06-22` hardware re-measurement does not show the regression recovering — utilisation
