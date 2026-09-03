@@ -1197,26 +1197,40 @@ class LockProfileInertnessTests(unittest.TestCase):
                     total += i * i
                 return total
 
+            # Compare MINIMA, not sums -- identical reasoning to
+            # test_disabled_wrapper_path_costs_nothing_measurable, whose
+            # summed form failed 3 runs in 5 in isolation. Measurement noise
+            # here is one-sided (a scheduler hiccup only ADDS time), so a sum
+            # accumulates it while the minimum of N samples does not. Order
+            # alternates within each pair so neither arm systematically runs
+            # second. Still a same-run ratio, never an absolute wall-clock
+            # threshold (WR-03).
             iterations = 30
-            bare_total_ns = 0
-            instrumented_total_ns = 0
-            for _ in range(iterations):
-                start = time.perf_counter_ns()
-                with raw_lock:
-                    reference_work()
-                bare_total_ns += time.perf_counter_ns() - start
+            bare_samples = []
+            instrumented_samples = []
 
+            def _time_once(lock):
                 start = time.perf_counter_ns()
-                with instrumented_lock:
+                with lock:
                     reference_work()
-                instrumented_total_ns += time.perf_counter_ns() - start
+                return time.perf_counter_ns() - start
 
+            for index in range(iterations):
+                if index % 2 == 0:
+                    bare_samples.append(_time_once(raw_lock))
+                    instrumented_samples.append(_time_once(instrumented_lock))
+                else:
+                    instrumented_samples.append(_time_once(instrumented_lock))
+                    bare_samples.append(_time_once(raw_lock))
+
+            bare_total_ns = min(bare_samples)
+            instrumented_total_ns = min(instrumented_samples)
             ratio = instrumented_total_ns / bare_total_ns
             self.assertLessEqual(
                 ratio, 1.02,
-                f'WR-03 / D-DEBT-06-10: instrumented arm totalled {ratio:.4f}x the '
-                f'bare arm over {iterations} interleaved iterations '
-                f'(bare={bare_total_ns}ns instrumented={instrumented_total_ns}ns) '
+                f'WR-03 / D-DEBT-06-10: instrumented arm cost {ratio:.4f}x the '
+                f'bare arm at best-of-{iterations} interleaved iterations '
+                f'(bare_min={bare_total_ns}ns instrumented_min={instrumented_total_ns}ns) '
                 '-- exceeds the 1.02x ceiling, meaning the instrument is too '
                 'expensive to trust, not that the host is slow.',
             )
