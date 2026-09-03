@@ -461,7 +461,7 @@ Plans:
 - [x] 06-15-PLAN.md — Tracer: instrument `_db_lock`'s wait and hold time per route, readable over HTTP, inert when off
 - [x] 06-16-PLAN.md — Decompose the critical section (connect/SQL/Python) and each request (on-CPU/lock-wait/off-CPU)
 - [x] 06-17-PLAN.md — Harness collection around the load window, and a verdict that can say REFUTED
-- [ ] 06-18-PLAN.md — Two instrumented Pi passes, 06-LOCK-DIAGNOSTIC.md, and the fix decision (human-gated)
+- [x] 06-18-PLAN.md — Two instrumented Pi passes, 06-LOCK-DIAGNOSTIC.md, and the fix decision (human-gated)
 
 **Wave 1**
 
