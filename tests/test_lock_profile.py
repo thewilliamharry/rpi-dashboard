@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+import random
 import re
 import threading
 import time
@@ -502,6 +503,171 @@ class HoldDecompositionTests(_InstrumentedLockTestCase):
             self.assertEqual(call_count['connect'], 0)
         finally:
             cleanup_db(db_path)
+
+
+class HeldRegionCompositionTests(_InstrumentedLockTestCase):
+    """06-20 Task 2: measure the narrowing's effect on `/api/services`' own
+    held-region composition, in both directions -- the mechanism-level
+    analogue of `06-LOCK-DIAGNOSTIC.md` §4's Pi-measured shares (`.002 /
+    .748 / .250` loaded, `.001 / .423 / .576` control). Seeds 3 services and
+    2,000 `service_checks` rows per port (6,000 total) across the retention
+    window, generated from a fixed seed, with one offline service (the
+    lowest port) carrying an always-covering maintenance window so
+    `beacon_maintenance`'s coverage/attributed-downtime walk is exercised in
+    both tests below. Every share this class reports is developer-machine
+    evidence (`PROH-OPS-07-09`), never Pi latency evidence."""
+
+    HELD_REGION_PORTS = (9081, 9082, 9083)
+    CHECKS_PER_PORT = 2000
+
+    # 06-LOCK-DIAGNOSTIC.md §4's Pi figure (25.0%) does not transfer to this
+    # dev machine's own measurement, and no dataset shape makes it transfer
+    # (D-DEBT-06-14's lesson: an absolute threshold copied across machines is
+    # "a property of the band, not of the data"). Direct measurement on this
+    # machine: the narrowed route's Python share of its own held region --
+    # dict(row) materialization required by PROH-OPS-04-06/T-06-102, not
+    # composition -- sits in a 0.18-0.32 band across dataset sizes from 1 row
+    # to 24,000 rows and repetition counts from 5 to 40 (see SUMMARY for the
+    # sweep). Reintroducing `_uptime_summary` for every service inside the
+    # with-block (the exact defect this guard exists to catch) measures
+    # 0.62 under the identical harness -- reproduced against a real,
+    # temporary, reverted app.py edit, not merely asserted. 0.5 sits with a
+    # wide, empirically-verified margin below that failure mode and above
+    # every narrowed-route reading observed, so it is what this guard checks
+    # rather than the Pi figure the mechanism is modeled on. Developer-
+    # machine evidence only (PROH-OPS-07-09).
+    PYTHON_SHARE_CEILING = 0.5
+
+    def _run_in_held_region(self, route_label, work_fn):
+        """Copied from `HoldDecompositionTests`' idiom exactly (06-16 Task
+        1) -- not reinvented, per this task's own instruction."""
+        lockprofile.begin_request(route_label)
+        try:
+            with self.appmod._db_lock:
+                work_fn()
+        finally:
+            lockprofile.end_request()
+
+    def setUp(self):
+        super().setUp()
+        appmod = self.appmod
+        now = int(time.time())
+        start_ts = now - appmod.CHECK_RETENTION_SECONDS
+        step = appmod.CHECK_RETENTION_SECONDS // self.CHECKS_PER_PORT
+        rng = random.Random(20200)
+        offline_port = self.HELD_REGION_PORTS[0]
+
+        conn = appmod.get_db()
+        try:
+            for port in self.HELD_REGION_PORTS:
+                is_online = 0 if port == offline_port else 1
+                conn.execute(
+                    "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (port, f'held-region-{port}', start_ts, now, is_online, start_ts),
+                )
+            conn.execute(
+                'INSERT INTO maintenance_windows (port, start_minute, duration_minutes, '
+                'weekdays, grace_minutes, enabled, created_ts, updated_ts) '
+                'VALUES (?, 0, 1440, ?, 0, 1, ?, ?)',
+                (offline_port, '1,2,3,4,5,6,7', start_ts, start_ts),
+            )
+
+            self.checks_by_port = {}
+            for port in self.HELD_REGION_PORTS:
+                rows = []
+                for i in range(self.CHECKS_PER_PORT):
+                    ts = start_ts + i * step
+                    online = 0 if (port == offline_port and rng.random() < 0.9) else 1
+                    rows.append((ts, online))
+                conn.executemany(
+                    'INSERT INTO service_checks (ts, port, online) VALUES (?, ?, ?)',
+                    [(ts, port, online) for ts, online in rows],
+                )
+                self.checks_by_port[port] = rows
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.offline_port = offline_port
+        windows_conn = appmod.get_db()
+        try:
+            self.windows = appmod.beacon_repositories.read_maintenance_windows_by_port(
+                windows_conn, ports=[offline_port],
+            ).get(offline_port, [])
+        finally:
+            windows_conn.close()
+        self.offline_intervals = appmod.beacon_repositories.offline_intervals_from_points_by_port(
+            ports=[offline_port], boundary_by_port={},
+            points_by_port={offline_port: self.checks_by_port[offline_port]},
+            start_ts=start_ts, end_ts=now,
+        ).get(offline_port, [])
+
+    def test_services_held_region_is_sql_dominated_after_narrowing(self):
+        """Direction A: after 06-20's narrowing, `/api/services`' measured
+        Python share of its own held region stays well under
+        PYTHON_SHARE_CEILING. Fails when `_uptime_summary` (or any of the
+        other three moved computations) is moved back inside the
+        with-block -- see PYTHON_SHARE_CEILING's own docstring for the
+        measured before/after values that calibrated it."""
+        for _ in range(5):
+            response = self.client.get('/api/services')
+            self.assertEqual(response.status_code, 200)
+
+        snap = lockprofile.snapshot()
+        route = snap['routes']['/api/services']
+        python_share = route['python_ns_total'] / route['hold_ns_total']
+        self.assertLess(
+            python_share, self.PYTHON_SHARE_CEILING,
+            f"/api/services' held-region Python share measured {python_share:.4f} -- "
+            f'a share at or above {self.PYTHON_SHARE_CEILING} means a computation moved '
+            'back inside the critical section (D-DEBT-06-01, PROH-OPS-04-06). '
+            'Developer-machine evidence (PROH-OPS-07-09), not Pi evidence.',
+        )
+        self.assertEqual(
+            snap['clamped_python_count'], 0,
+            f"clamped_python_count is {snap['clamped_python_count']}, not 0 -- the derived "
+            'python_ns_total remainder is untrustworthy in this snapshot, so the measured '
+            'share above cannot be trusted either (D-DEBT-06-10).',
+        )
+
+    def test_the_moved_work_still_registers_as_python_when_run_inside_a_held_region(self):
+        """Direction B: the instrument's sensitivity, not the fix. Running
+        the SAME moved work (over the SAME seeded data) inside a synthetic
+        held region reports a HIGH Python share -- proving direction A's low
+        share is a measured absence of this work, not a blind spot in the
+        instrument itself."""
+        appmod = self.appmod
+        checks = self.checks_by_port[self.offline_port]
+        windows = self.windows
+        offline_intervals = self.offline_intervals
+        now = int(time.time())
+
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            def work():
+                conn.execute('SELECT 1').fetchall()
+                appmod._uptime_summary(checks, now)
+                appmod.beacon_maintenance.attributed_downtime_seconds(
+                    offline_intervals, windows, appmod.SETTINGS.timezone,
+                )
+
+            self._run_in_held_region('synthetic-python-06-20', work)
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        route = snap['routes']['synthetic-python-06-20']
+        python_share = route['python_ns_total'] / route['hold_ns_total']
+        self.assertGreater(
+            python_share, 0.75,
+            f'synthetic held region running the moved work reported Python share '
+            f'{python_share:.4f}, expected above 0.75 -- the instrument is not tracking '
+            "this work's cost in the direction it should, which would make direction "
+            "A's low share meaningless rather than reassuring.",
+        )
 
 
 class RequestAccountingTests(_InstrumentedLockTestCase):
@@ -1400,20 +1566,305 @@ def _find_db_lock_with(func_node):
     return None
 
 
+# ---------------------------------------------------------------------------
+# 06-20 Task 1: golden-output equivalence across the api_services narrowing.
+#
+# T-06-105: a fixture regenerated to match a changed output converts this
+# guard into a rubber stamp. `_REGENERATE_GOLDEN_FIXTURES` is read by
+# `generate_golden_fixtures()` alone -- no test in this module reads it, so
+# a normal test run can never silently regenerate a fixture.
+# ---------------------------------------------------------------------------
+
+_GOLDEN_FIXTURES_DIR = Path('tests/fixtures')
+_GOLDEN_MAINTENANCE_PATH_FIXTURE = _GOLDEN_FIXTURES_DIR / 'api_services_pre_narrowing_golden.json'
+_GOLDEN_OVER_CAP_FIXTURE = _GOLDEN_FIXTURES_DIR / 'api_services_pre_narrowing_over_cap_golden.json'
+_GOLDEN_EMPTY_FIXTURE = _GOLDEN_FIXTURES_DIR / 'api_services_pre_narrowing_empty_golden.json'
+_REGENERATE_GOLDEN_FIXTURES = False
+
+# Frozen clock for every golden case -- Tuesday 2023-11-14 22:13:20 UTC.
+# CHECK_RETENTION_SECONDS at the test env's default EXPIRE_DAYS=7 is fixed
+# (UPTIME_WINDOW_SECONDS + 86400 = 691200), independent of EXPIRE_DAYS.
+_GOLDEN_FROZEN_NOW = 1700000000
+_GOLDEN_CHECK_RETENTION_SECONDS = 691200
+_ALWAYS_COVERING_WINDOW = dict(
+    start_minute=0, duration_minutes=1440, weekdays='1,2,3,4,5,6,7', grace_minutes=0,
+)
+
+
+def _golden_insert_service(conn, *, port, title, first_seen, last_seen, is_online, state_since,
+                            last_latency_ms, last_error, display_name, url, critical, pinned_order,
+                            tags, healthy_statuses):
+    conn.execute(
+        'INSERT INTO services (port, title, first_seen, last_seen, is_online, state_since, '
+        'last_latency_ms, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        (port, title, first_seen, last_seen, is_online, state_since, last_latency_ms, last_error),
+    )
+    conn.execute(
+        'INSERT INTO service_meta (port, display_name, url, critical, pinned_order, tags, '
+        'healthy_statuses) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (port, display_name, url, critical, pinned_order, tags, healthy_statuses),
+    )
+
+
+def _golden_insert_window(conn, *, port, created_ts):
+    conn.execute(
+        'INSERT INTO maintenance_windows (port, start_minute, duration_minutes, weekdays, '
+        'grace_minutes, enabled, created_ts, updated_ts) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+        (port, _ALWAYS_COVERING_WINDOW['start_minute'], _ALWAYS_COVERING_WINDOW['duration_minutes'],
+         _ALWAYS_COVERING_WINDOW['weekdays'], _ALWAYS_COVERING_WINDOW['grace_minutes'],
+         created_ts, created_ts),
+    )
+
+
+def _golden_insert_checks(conn, *, port, rows):
+    """``rows`` is an iterable of ``(ts, online)`` pairs."""
+    conn.executemany(
+        'INSERT INTO service_checks (ts, port, online) VALUES (?, ?, ?)',
+        [(ts, port, online) for ts, online in rows],
+    )
+
+
+def _seed_maintenance_path_case(conn):
+    """Three services comfortably under `_OFFLINE_INTERVALS_BULK_ROW_LIMIT`:
+    one online (8081, has_thumb, a ready preview, tags, critical), one
+    offline and covered by an always-on maintenance window for its entire
+    stored history (8082, maintenance_attributed_seconds=691200,
+    maintenance_until set), one offline with NO maintenance window (8083,
+    real unattributed downtime, alternating uptime buckets). Exercises
+    ordinary composition: uptime_pct, buckets, availability, preview and
+    thumbnail fields (06-CONTEXT.md D-02)."""
+    now = _GOLDEN_FROZEN_NOW
+    start_ts = now - _GOLDEN_CHECK_RETENTION_SECONDS
+
+    _golden_insert_service(
+        conn, port=8081, title='alpha', first_seen=start_ts - 100000, last_seen=now,
+        is_online=1, state_since=start_ts, last_latency_ms=12.5, last_error=None,
+        display_name='Alpha', url='http://127.0.0.1:8081', critical=1, pinned_order=1,
+        tags='web,critical', healthy_statuses='200-399',
+    )
+    _golden_insert_service(
+        conn, port=8082, title='beta', first_seen=start_ts - 100000, last_seen=now,
+        is_online=0, state_since=start_ts + 10000, last_latency_ms=None, last_error='timeout',
+        display_name='Beta', url='http://127.0.0.1:8082', critical=0, pinned_order=2,
+        tags='', healthy_statuses='200-399',
+    )
+    _golden_insert_service(
+        conn, port=8083, title='gamma', first_seen=start_ts - 100000, last_seen=now,
+        is_online=0, state_since=start_ts + 20000, last_latency_ms=None, last_error='connection refused',
+        display_name='', url='http://127.0.0.1:8083', critical=0, pinned_order=3,
+        tags='infra', healthy_statuses='200-299',
+    )
+
+    _golden_insert_window(conn, port=8082, created_ts=start_ts)
+
+    checks_8081 = []
+    t, i = start_ts, 0
+    while t <= now:
+        checks_8081.append((t, 0 if i % 47 == 0 else 1))
+        t += 3600
+        i += 1
+    _golden_insert_checks(conn, port=8081, rows=checks_8081)
+
+    _golden_insert_checks(conn, port=8082, rows=[(start_ts - 3600, 0)])
+    checks_8082 = []
+    t = start_ts
+    while t <= now:
+        checks_8082.append((t, 0))
+        t += 3600
+    _golden_insert_checks(conn, port=8082, rows=checks_8082)
+
+    checks_8083 = []
+    t, i = start_ts, 0
+    while t <= now:
+        checks_8083.append((t, 1 if (i // 12) % 2 == 0 else 0))
+        t += 3600
+        i += 1
+    _golden_insert_checks(conn, port=8083, rows=checks_8083)
+
+    conn.execute(
+        'INSERT INTO thumbnails (port, data, mime, captured_ts, source, expires_ts) '
+        'VALUES (8081, ?, ?, ?, ?, NULL)',
+        (b'\x89PNG\r\n', 'image/png', now - 500, 'screenshot'),
+    )
+    conn.execute(
+        'INSERT INTO preview_requests (port, requested_ts, deadline_ts, status, error, revision) '
+        'VALUES (8081, ?, ?, ?, NULL, ?)',
+        (now - 60, now + 1740, 'ready', 3),
+    )
+    conn.execute(
+        'INSERT INTO preview_requests (port, requested_ts, deadline_ts, status, error, revision) '
+        'VALUES (8082, ?, ?, ?, NULL, ?)',
+        (now - 30, now + 1770, 'queued', 1),
+    )
+    conn.commit()
+
+
+# Over-cap case ports/shape: 8081 (low port) alone carries more in-window
+# rows than `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` (20000), so it exhausts the
+# whole budget by itself -- 8090 (high port, the shed region) is processed
+# entirely AFTER the budget is spent (`ORDER BY port ASC, ts ASC`), so every
+# one of its points is shed under the current cap and admitted in full under
+# the required mutation. 8090 carries both a covering maintenance window and
+# an offline transition inside the shed region, so the required mutation
+# (removing the decrement or its `> 0` guard) is observed to change
+# maintenance_attributed_seconds for port 8090 from 0 to a large nonzero
+# value -- verified interactively before this fixture was committed (see
+# SUMMARY). Port 8081's own maintenance_attributed_seconds (34000, from an
+# offline stretch entirely inside the admitted portion) is unaffected by the
+# mutation and is the fixture's cap-INsensitive nonzero value.
+_OVER_CAP_PORT_LOW = 8081
+_OVER_CAP_PORT_HIGH = 8090
+_OVER_CAP_LOW_ROW_COUNT = 20200
+_OVER_CAP_LOW_STEP = 34
+_OVER_CAP_LOW_OFFLINE_ROWS = 1000
+_OVER_CAP_HIGH_ROW_COUNT = 60
+_OVER_CAP_HIGH_OFFLINE_FROM = 55
+
+
+def _seed_over_cap_case(conn):
+    """20,260 in-window `service_checks` rows across two ports -- strictly
+    more than `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` (20000) -- with the excess
+    concentrated on the higher-numbered port, per the ``port ASC, ts ASC``
+    shedding order. See the module comment above for why port 8090 is the
+    cap-sensitive value and port 8081 is the cap-insensitive one."""
+    now = _GOLDEN_FROZEN_NOW
+    start_ts = now - _GOLDEN_CHECK_RETENTION_SECONDS
+    high_step = _GOLDEN_CHECK_RETENTION_SECONDS // _OVER_CAP_HIGH_ROW_COUNT
+
+    _golden_insert_service(
+        conn, port=_OVER_CAP_PORT_LOW, title='low', first_seen=start_ts - 100000, last_seen=now,
+        is_online=1, state_since=start_ts + _OVER_CAP_LOW_OFFLINE_ROWS * _OVER_CAP_LOW_STEP,
+        last_latency_ms=5.0, last_error=None,
+        display_name='Low', url='http://127.0.0.1:8081', critical=0, pinned_order=1,
+        tags='', healthy_statuses='200-399',
+    )
+    _golden_insert_service(
+        conn, port=_OVER_CAP_PORT_HIGH, title='high', first_seen=start_ts - 100000, last_seen=now,
+        is_online=0, state_since=start_ts + _OVER_CAP_HIGH_OFFLINE_FROM * high_step,
+        last_latency_ms=None, last_error='timeout',
+        display_name='High', url='http://127.0.0.1:8090', critical=0, pinned_order=2,
+        tags='', healthy_statuses='200-399',
+    )
+
+    _golden_insert_window(conn, port=_OVER_CAP_PORT_LOW, created_ts=start_ts)
+    _golden_insert_window(conn, port=_OVER_CAP_PORT_HIGH, created_ts=start_ts)
+
+    # Low port: boundary offline, transitions online at row
+    # _OVER_CAP_LOW_OFFLINE_ROWS -- comfortably inside the admitted
+    # (pre-shed) portion of the budget regardless of the cap's correctness.
+    _golden_insert_checks(conn, port=_OVER_CAP_PORT_LOW, rows=[(start_ts - 100, 0)])
+    rows_low = [
+        (start_ts + i * _OVER_CAP_LOW_STEP, 0 if i < _OVER_CAP_LOW_OFFLINE_ROWS else 1)
+        for i in range(_OVER_CAP_LOW_ROW_COUNT)
+    ]
+    assert rows_low[-1][0] <= now, 'low-port fixture rows must stay inside the window'
+    _golden_insert_checks(conn, port=_OVER_CAP_PORT_LOW, rows=rows_low)
+
+    # High port: boundary online, transitions offline near the end -- the
+    # shed region once the low port alone exhausts the budget.
+    _golden_insert_checks(conn, port=_OVER_CAP_PORT_HIGH, rows=[(start_ts - 100, 1)])
+    rows_high = [
+        (start_ts + j * high_step, 0 if j >= _OVER_CAP_HIGH_OFFLINE_FROM else 1)
+        for j in range(_OVER_CAP_HIGH_ROW_COUNT)
+    ]
+    assert rows_high[-1][0] <= now, 'high-port fixture rows must stay inside the window'
+    _golden_insert_checks(conn, port=_OVER_CAP_PORT_HIGH, rows=rows_high)
+
+    conn.commit()
+
+
+def _seed_empty_case(conn):
+    """Zero services -- the `if services:` guard's empty path, where
+    `result` must still be bound and serialize as `[]`."""
+    conn.commit()
+
+
+_GOLDEN_CASES = {
+    'maintenance_path': (_seed_maintenance_path_case, _GOLDEN_MAINTENANCE_PATH_FIXTURE),
+    'over_cap': (_seed_over_cap_case, _GOLDEN_OVER_CAP_FIXTURE),
+    'empty': (_seed_empty_case, _GOLDEN_EMPTY_FIXTURE),
+}
+
+
+def _capture_golden_response(seed_fn):
+    """Fresh app, seeded via ``seed_fn``, one frozen-clock `/api/services`
+    request. Returns the raw response body text -- the same text a fixture
+    file stores and an equality test compares against."""
+    appmod, db_path = load_app()
+    try:
+        conn = appmod.get_db()
+        seed_fn(conn)
+        conn.close()
+        with mock.patch('time.time', return_value=float(_GOLDEN_FROZEN_NOW)):
+            client = appmod.app.test_client()
+            response = client.get('/api/services')
+            assert response.status_code == 200, response.status_code
+            return response.get_data(as_text=True)
+    finally:
+        cleanup_db(db_path)
+
+
+def generate_golden_fixtures():
+    """Regenerate all three golden fixture files from the CURRENT code.
+
+    Deliberately not called by any test in this module (T-06-105) and not
+    reachable through `_REGENERATE_GOLDEN_FIXTURES` alone -- a caller must
+    invoke this function directly, by name, to regenerate a fixture. Used
+    exactly once, against unmodified pre-narrowing code, to capture the
+    three committed fixtures this class compares against; SUMMARY.md
+    records the fixtures' `sha256` from that capture.
+    """
+    _GOLDEN_FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+    for seed_fn, path in _GOLDEN_CASES.values():
+        path.write_text(_capture_golden_response(seed_fn), encoding='utf-8')
+
+
+class ApiServicesOutputEquivalenceTests(unittest.TestCase):
+    """06-20 Task 1: `/api/services` returns byte-identical output across the
+    `_db_lock` narrowing (`PROH-OPS-07-05`). Three fixtures, not one --
+    the maintenance-path case cannot see the `offline_points_budget` cap's
+    behavior (inert below `_OFFLINE_INTERVALS_BULK_ROW_LIMIT`) or the
+    empty-services `result`-binding path; each needs its own case. See
+    D-DEBT-06-10 and T-06-105 before editing this class."""
+
+    def test_narrowed_route_reproduces_the_pre_narrowing_response_bytes(self):
+        for case_name, (seed_fn, fixture_path) in _GOLDEN_CASES.items():
+            with self.subTest(case=case_name):
+                self.assertTrue(
+                    fixture_path.exists(),
+                    f'{fixture_path} is missing -- golden fixtures must be generated once, '
+                    'from unmodified pre-narrowing code, and committed alongside the '
+                    'narrowing itself. See generate_golden_fixtures().',
+                )
+                expected = fixture_path.read_text(encoding='utf-8')
+                actual = _capture_golden_response(seed_fn)
+                self.assertEqual(
+                    actual, expected,
+                    f'/api/services response bytes changed for the {case_name!r} case -- '
+                    'the narrowing must be a scope change, never an output change '
+                    '(PROH-OPS-07-05). See D-DEBT-06-01 and T-06-105 before editing this '
+                    'assertion or regenerating the fixture.',
+                )
+
+
 class LockScopePreservationTests(unittest.TestCase):
     """Pins `_db_lock`'s SCOPE, not merely its call-site count (06-CONTEXT.md
     D-01, PROH-OPS-04-02). If a test in this class fails: `_db_lock`'s scope
-    changed. Go to D-DEBT-06-01 in 06-DEBT.md and re-examine the decision to
-    defer narrowing it -- do not edit these assertions to make the test
-    pass. This is the routing convention
-    `test_the_deployment_pins_its_gunicorn_concurrency_model` established
-    for D-DEBT-06-07.
+    changed. Go to D-DEBT-06-01 in 06-DEBT.md and re-examine the decision
+    before editing these assertions to make the test pass. This is the
+    routing convention `test_the_deployment_pins_its_gunicorn_concurrency_model`
+    established for D-DEBT-06-07.
 
-    This class pins that THIS ROUND did not narrow the lock. It is not a
-    claim that narrowing is wrong -- when the round-5 fix decision is taken
-    against this round's measurements, whoever narrows the lock updates
-    these tests deliberately, with D-DEBT-06-01's reopening conditions and
-    PROH-OPS-04-05's audit list in hand.
+    The lock WAS narrowed by `06-20`, under the user's `fix-now` decision at
+    `06-18` Task 3 -- `api_services` now holds `_db_lock` across database
+    reads only. This class pins THAT narrowed shape. A failure here means
+    the shape moved again -- most likely one of the four computations
+    `06-20` moved out (`_uptime_summary`, `beacon_maintenance.coverage`,
+    `beacon_maintenance.attributed_downtime_seconds`,
+    `beacon_repositories.offline_intervals_from_points_by_port`) got moved
+    back in, silently undoing the fix without changing output (`T-06-101`).
+    Go to `D-DEBT-06-01` and `PROH-OPS-04-06` before editing an assertion in
+    this class.
     """
 
     def setUp(self):
@@ -1445,12 +1896,11 @@ class LockScopePreservationTests(unittest.TestCase):
         )
         self.assertEqual(bare_count + combined_count, 28)
 
-    def test_api_services_lock_scope_containment_and_termination(self):
-        """Pins the SCOPE, not merely the count, using ast. Fails on all
-        three mutations that matter: deleting a call site, dedenting one
-        statement out of the block, and moving one of the four expensive
-        computations outside the with-block (the round-5 narrowing shape
-        this pin exists to catch)."""
+    def test_api_services_lock_scope_is_database_reads_only(self):
+        """Pins the NARROWED shape `06-20` created, using ast. If this test
+        fails: `_db_lock`'s scope moved again. Go to `D-DEBT-06-01` and
+        `PROH-OPS-04-06` before editing an assertion here -- do not loosen
+        this test to make it pass (`T-06-101`)."""
         func = _find_function_def(self.tree, 'api_services')
         self.assertIsNotNone(func, 'api_services function not found in dashboard/app.py')
 
@@ -1460,52 +1910,64 @@ class LockScopePreservationTests(unittest.TestCase):
             "_db_lock's SCOPE changed. See D-DEBT-06-01.",
         )
 
-        # Containment: locate every call inside the _db_lock with-block
-        # (bounded by the With node's own subtree / end_lineno) and confirm
-        # all four expensive computations are among them. Matched by
-        # name/attribute, never by line number, so this survives ordinary
-        # edits above the function.
-        found_calls = {
+        calls_inside_with = {
             _call_target_name(node)
             for node in ast.walk(with_node)
             if isinstance(node, ast.Call)
         }
-        required_calls = {
+        required_inside = {
+            'beacon_repositories.read_maintenance_windows_by_port',
+            'beacon_repositories.read_service_offline_interval_boundaries_by_port',
+            'beacon_repositories.get_runtime_state',
+        }
+        missing_inside = required_inside - calls_inside_with
+        self.assertFalse(
+            missing_inside,
+            f"_db_lock's SCOPE changed: {sorted(missing_inside)} no longer execute inside "
+            "api_services' _db_lock with-block. PROH-OPS-04-06 requires every database "
+            'read to stay inside the lock. See D-DEBT-06-01 before editing this assertion.',
+        )
+
+        forbidden_inside = {
             '_uptime_summary',
             'beacon_maintenance.coverage',
             'beacon_maintenance.attributed_downtime_seconds',
             'beacon_repositories.offline_intervals_from_points_by_port',
         }
-        missing = required_calls - found_calls
+        reintroduced = forbidden_inside & calls_inside_with
         self.assertFalse(
-            missing,
-            f"_db_lock's SCOPE changed: {sorted(missing)} no longer execute inside "
-            "api_services' _db_lock with-block (bounded by end_lineno "
-            f'{with_node.end_lineno}). D-01 and PROH-OPS-04-02 fence exactly this '
-            'scope. See D-DEBT-06-01 before editing this assertion.',
+            reintroduced,
+            f"_db_lock's SCOPE changed: {sorted(reintroduced)} execute INSIDE "
+            "api_services' _db_lock with-block again -- one of the four computations "
+            '06-20 moved out was moved back in, silently undoing the narrowing without '
+            'changing output (T-06-101). See D-DEBT-06-01 and PROH-OPS-04-06 before '
+            'editing this assertion.',
         )
 
-        # Nothing escaped: the only function-level statement after the
-        # with-block is the terminal `return jsonify(result)`. That return
-        # IS a function-level statement after the with, and that is
-        # expected -- an earlier draft of this plan asserted no statement
-        # followed the block at all, which is false at HEAD and
-        # unsatisfiable. Encoding the real shape (with, then exactly one
-        # return, nothing else) is what makes this guard catch a narrowing
-        # rather than force it to be weakened.
-        body = func.body
-        with_index = body.index(with_node)
-        self.assertEqual(
-            with_index, len(body) - 2,
-            "_db_lock's SCOPE changed: a statement other than the terminal return "
-            "now follows api_services' with-block (or a statement was dedented out "
-            'of it). D-01 and PROH-OPS-04-02 fence exactly this scope. See '
-            'D-DEBT-06-01 before editing this assertion.',
+        # A computation that vanished entirely (rather than merely moving)
+        # would also satisfy "not inside the with-block" -- so each of the
+        # four must still appear SOMEWHERE in the function, outside the
+        # with-block's own subtree, to catch that failure mode too.
+        with_subtree_ids = {id(node) for node in ast.walk(with_node)}
+        calls_outside_with = {
+            _call_target_name(node)
+            for node in ast.walk(func)
+            if isinstance(node, ast.Call) and id(node) not in with_subtree_ids
+        }
+        vanished = forbidden_inside - calls_outside_with
+        self.assertFalse(
+            vanished,
+            f"_db_lock's SCOPE changed: {sorted(vanished)} no longer execute ANYWHERE "
+            'in api_services -- a computation vanished entirely rather than merely '
+            'moving out of the lock. See D-DEBT-06-01 before editing this assertion.',
         )
+
         self.assertIsInstance(
-            body[-1], ast.Return,
+            func.body[-1], ast.Return,
             "_db_lock's SCOPE changed: api_services no longer ends with a single "
-            'terminal return statement after its with-block. See D-DEBT-06-01.',
+            'terminal return statement. See D-DEBT-06-01. (This test deliberately does '
+            "NOT assert the with-block's index within the function body -- several "
+            'statements legitimately follow it now that the narrowing has landed.)',
         )
 
 

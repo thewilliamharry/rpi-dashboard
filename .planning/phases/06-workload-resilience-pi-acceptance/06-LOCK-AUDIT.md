@@ -22,10 +22,13 @@ function.
 separately inside the block). `combined` = `with _db_lock, database_access(DB_PATH) as conn:` (one
 statement, connection setup itself inside the critical section).
 
-**Narrowed this round:** `yes` only for `api_services` (line 2821) — the sole site this round's
+**Narrowed this round:** `yes` only for `api_services` (line 2832) — the sole site this round's
 follow-up plan (`06-20`) narrows, per `D-DEBT-06-01`'s "Round 4 reopening" and
-`06-LOCK-DIAGNOSTIC.md` §4's measured 25.0% Python share under load. Every other site is reviewed
-here but left untouched.
+`06-LOCK-DIAGNOSTIC.md` §4's measured 25.0% Python share under load. The narrowing landed in
+`06-20`; every other site is reviewed here but left untouched. Every line number in this table
+below `api_services` shifted by +14 as a direct consequence of that edit (lines were added inside
+`api_services`, earlier in the file); the table reflects the post-narrowing line numbers, and
+`test_every_db_lock_site_is_covered_by_the_audit` is what would catch any of them drifting again.
 
 | # | Function | Line | Form | Read/Write | Non-DB work held under the lock | Narrowed this round |
 |---|----------|------|------|------------|----------------------------------|----------------------|
@@ -47,16 +50,16 @@ here but left untouched.
 | 16 | `api_history` | 2575 | combined | read | none | no |
 | 17 | `api_telemetry_history` | 2645 | combined | read | none — every call inside the block is itself a DB read (`get_host_telemetry`/`get_service_telemetry`/`get_telemetry_coverage`/`get_pending_aggregation`); response composition happens after | no |
 | 18 | `api_events_history` | 2773 | combined | read | none — `read_events_in_range`/`read_episode_state_changes`/`anchor_candidate_ports`/`read_open_episode_anchors` are all DB reads; response composition happens after | no |
-| 19 | `api_services` | 2821 | combined | read | `_uptime_summary`, `beacon_maintenance.coverage`, `beacon_maintenance.attributed_downtime_seconds`, `beacon_repositories.offline_intervals_from_points_by_port`, and the per-service `result` dict construction — measured **25.0% of this route's held region** under concurrency-8 load (`06-LOCK-DIAGNOSTIC.md` §4, `beacon-lockdiag-c8.json`) | **yes** |
-| 20 | `api_events` | 2995 | combined | read | none | no |
-| 21 | `api_service_meta` (GET) | 3028 | combined | read | none — delegates to `beacon_web.metadata_response`, itself DB reads only | no |
-| 22 | `api_service_meta` (PUT) | 3069 | combined | read+write | field validation, URL normalization (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning (`_outbound_policy().plan(...)`) — see "Future narrowing candidates" below | no |
-| 23 | `api_thumbnail` | 3144 | combined | read | none | no |
-| 24 | `api_thumbnail_status` | 3159 | combined | read | none — `thumb_state` derivation happens after the block closes | no |
-| 25 | `api_scan_status` | 3223 | combined | read | none — freshness/staleness classification happens after the block closes | no |
-| 26 | `healthz` | 3293 | combined | read | none (`SELECT 1`) | no |
-| 27 | `readyz` | 3303 | bare | read | none — readiness classification happens after the block closes | no |
-| 28 | `prometheus_metrics` | 3314 | combined | read | none | no |
+| 19 | `api_services` | 2832 | combined | read | none — narrowed in `06-20`. Was: `_uptime_summary`, `beacon_maintenance.coverage`, `beacon_maintenance.attributed_downtime_seconds`, `beacon_repositories.offline_intervals_from_points_by_port`, and the per-service `result` dict construction, measured **25.0% of this route's held region** under concurrency-8 load (`06-LOCK-DIAGNOSTIC.md` §4, `beacon-lockdiag-c8.json`) before the narrowing. All four now execute after the block closes, over rows materialized into plain dicts inside it (`D-DEBT-06-01`, `PROH-OPS-04-06`). | **yes (landed)** |
+| 20 | `api_events` | 3009 | combined | read | none | no |
+| 21 | `api_service_meta` (GET) | 3042 | combined | read | none — delegates to `beacon_web.metadata_response`, itself DB reads only | no |
+| 22 | `api_service_meta` (PUT) | 3083 | combined | read+write | field validation, URL normalization (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning (`_outbound_policy().plan(...)`) — see "Future narrowing candidates" below | no |
+| 23 | `api_thumbnail` | 3158 | combined | read | none | no |
+| 24 | `api_thumbnail_status` | 3173 | combined | read | none — `thumb_state` derivation happens after the block closes | no |
+| 25 | `api_scan_status` | 3237 | combined | read | none — freshness/staleness classification happens after the block closes | no |
+| 26 | `healthz` | 3307 | combined | read | none (`SELECT 1`) | no |
+| 27 | `readyz` | 3317 | bare | read | none — readiness classification happens after the block closes | no |
+| 28 | `prometheus_metrics` | 3328 | combined | read | none | no |
 
 **Row count: 28. Distinct function count: 26** (`process_preview_requests` and `api_service_meta`
 each contribute two rows). `LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit`
