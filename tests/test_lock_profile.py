@@ -438,10 +438,19 @@ class HoldDecompositionTests(_InstrumentedLockTestCase):
     def test_disabled_profile_never_touches_record_sql_or_record_connect(self):
         """With the profile disabled, counting stubs over `record_sql` and
         `record_connect` register exactly 0 calls across 50 queries and 10
-        connections, and `ManagedConnection` returns ordinary results."""
+        connections, and `ManagedConnection` returns ordinary results.
+
+        `ENABLED` is one process-wide flag, and this class's own fixture
+        (`_InstrumentedLockTestCase.setUp`) already flipped it True via
+        `lockprofile.install()` for `self.appmod`'s lock. This test exercises
+        a deliberately different, never-installed app, so it must flip
+        `ENABLED` back to False itself rather than rely on the shared
+        fixture -- tearDown resets it to False afterward either way.
+        """
         appmod, db_path = load_app()
         try:
             self.assertFalse(appmod.ENABLE_LOCK_PROFILE)
+            lockprofile.ENABLED = False
             from dashboard.beacon.db import connect_db
 
             call_count = {'sql': 0, 'connect': 0}
@@ -462,7 +471,7 @@ class HoldDecompositionTests(_InstrumentedLockTestCase):
                 try:
                     for _ in range(50):
                         result = conn.execute('SELECT 1').fetchall()
-                        self.assertEqual(result, [(1,)])
+                        self.assertEqual([tuple(row) for row in result], [(1,)])
                 finally:
                     conn.close()
                 for _ in range(9):

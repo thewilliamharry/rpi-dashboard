@@ -34,7 +34,14 @@ import time
 
 
 # Lets 06-17's analyzer refuse a snapshot shape it does not understand.
-SNAPSHOT_SCHEMA_VERSION = 1
+# Bumped to 2 in 06-16: RouteStats gains connect/lease/sql_execute/sql_fetch/
+# python fields and the snapshot gains a request table and clamp counters.
+SNAPSHOT_SCHEMA_VERSION = 2
+
+# The two SQL buckets, matching 06-PROFILE.md's own sql_execute / sql_fetch
+# split.
+SQL_KIND_EXECUTE = 'sql_execute'
+SQL_KIND_FETCH = 'sql_fetch'
 
 # The single switch every hot path checks first. Flipped to True by install().
 ENABLED = False
@@ -94,13 +101,29 @@ def _timer_ns():
 
 @dataclasses.dataclass
 class RouteStats:
-    """One route's counters plus its two fixed-edge histograms."""
+    """One route's counters plus its two fixed-edge histograms.
+
+    06-16 adds the held-region decomposition: `connect_ns_total` (the whole
+    `_acquire_lock` + `sqlite3.connect` + PRAGMA span), `lease_ns_total` (the
+    `_acquire_lock` portion of that span, reported separately so contention
+    on the maintenance lease is distinguishable from the rest of connection
+    setup), `sql_execute_ns_total` / `sql_fetch_ns_total` (the two SQL
+    buckets), and `python_ns_total` -- the remainder, `hold_ns_total` minus
+    the other three, clamped at zero. That summing identity holds by
+    construction and is reported for readability only; it is never cited as
+    accuracy evidence (`D-DEBT-06-10`).
+    """
 
     acquisitions: int = 0
     wait_ns_total: int = 0
     hold_ns_total: int = 0
     wait_ns_max: int = 0
     hold_ns_max: int = 0
+    connect_ns_total: int = 0
+    lease_ns_total: int = 0
+    sql_execute_ns_total: int = 0
+    sql_fetch_ns_total: int = 0
+    python_ns_total: int = 0
     wait_histogram: list = dataclasses.field(
         default_factory=lambda: [0] * (len(WAIT_HISTOGRAM_EDGES_NS) + 1)
     )
@@ -117,15 +140,25 @@ def _copy_route_stats(stats):
         'hold_ns_total': stats.hold_ns_total,
         'wait_ns_max': stats.wait_ns_max,
         'hold_ns_max': stats.hold_ns_max,
+        'connect_ns_total': stats.connect_ns_total,
+        'lease_ns_total': stats.lease_ns_total,
+        'sql_execute_ns_total': stats.sql_execute_ns_total,
+        'sql_fetch_ns_total': stats.sql_fetch_ns_total,
+        'python_ns_total': stats.python_ns_total,
         'wait_histogram': list(stats.wait_histogram),
         'hold_histogram': list(stats.hold_histogram),
     }
 
 
-def _accumulate(stats, wait_ns, hold_ns):
+def _accumulate(stats, wait_ns, hold_ns, connect_ns, lease_ns, sql_execute_ns, sql_fetch_ns, python_ns):
     stats.acquisitions += 1
     stats.wait_ns_total += wait_ns
     stats.hold_ns_total += hold_ns
+    stats.connect_ns_total += connect_ns
+    stats.lease_ns_total += lease_ns
+    stats.sql_execute_ns_total += sql_execute_ns
+    stats.sql_fetch_ns_total += sql_fetch_ns
+    stats.python_ns_total += python_ns
     if wait_ns > stats.wait_ns_max:
         stats.wait_ns_max = wait_ns
     if hold_ns > stats.hold_ns_max:
@@ -144,9 +177,27 @@ class LockProfileCollector:
         self._routes = {}
         self._total = RouteStats()
         self.route_overflow = False
+        # 06-16: SQL issued while no thread-local `held` flag is set --
+        # outside any `_db_lock` critical section. Never inflates any
+        # route's held-SQL share.
+        self.sql_outside_lock_ns = 0
+        # A non-zero count means the measured parts (connect + sql_execute +
+        # sql_fetch) exceeded the measured whole (hold_ns) for at least one
+        # acquisition -- a real defect (leaked thread-local, double-counted
+        # timer, misattributed SQL), never silently absorbed.
+        self.clamped_python_count = 0
 
-    def record_acquisition(self, route_label, wait_ns, hold_ns):
+    def record_acquisition(
+        self, route_label, wait_ns, hold_ns,
+        connect_ns=0, lease_ns=0, sql_execute_ns=0, sql_fetch_ns=0,
+    ):
+        python_ns = hold_ns - connect_ns - sql_execute_ns - sql_fetch_ns
+        clamped = python_ns < 0
+        if clamped:
+            python_ns = 0
         with self._collector_lock:
+            if clamped:
+                self.clamped_python_count += 1
             stats = self._routes.get(route_label)
             if stats is None:
                 if len(self._routes) >= MAX_TRACKED_ROUTES:
@@ -156,8 +207,12 @@ class LockProfileCollector:
                 if stats is None:
                     stats = RouteStats()
                     self._routes[route_label] = stats
-            _accumulate(stats, wait_ns, hold_ns)
-            _accumulate(self._total, wait_ns, hold_ns)
+            _accumulate(stats, wait_ns, hold_ns, connect_ns, lease_ns, sql_execute_ns, sql_fetch_ns, python_ns)
+            _accumulate(self._total, wait_ns, hold_ns, connect_ns, lease_ns, sql_execute_ns, sql_fetch_ns, python_ns)
+
+    def add_sql_outside_lock(self, elapsed_ns):
+        with self._collector_lock:
+            self.sql_outside_lock_ns += elapsed_ns
 
     def snapshot(self):
         # Hold the collector's own lock only long enough to copy scalar
@@ -169,10 +224,14 @@ class LockProfileCollector:
             }
             total = _copy_route_stats(self._total)
             route_overflow = self.route_overflow
+            sql_outside_lock_ns = self.sql_outside_lock_ns
+            clamped_python_count = self.clamped_python_count
         return {
             'routes': routes,
             'lock': total,
             'route_overflow': route_overflow,
+            'sql_outside_lock_ns': sql_outside_lock_ns,
+            'clamped_python_count': clamped_python_count,
         }
 
     def reset(self):
@@ -181,6 +240,8 @@ class LockProfileCollector:
             self._routes = {}
             self._total = RouteStats()
             self.route_overflow = False
+            self.sql_outside_lock_ns = 0
+            self.clamped_python_count = 0
 
 
 # The one collector this process uses.
@@ -212,6 +273,7 @@ class InstrumentedLock:
         acquired_ns = _timer_ns()
         _ACQUIRE_STATE.acquired_ns = acquired_ns
         _ACQUIRE_STATE.wait_ns = acquired_ns - start_ns
+        self._begin_held_region()
         return True
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -225,10 +287,23 @@ class InstrumentedLock:
             acquired_ns = _timer_ns()
             _ACQUIRE_STATE.acquired_ns = acquired_ns
             _ACQUIRE_STATE.wait_ns = acquired_ns - start_ns
+            self._begin_held_region()
         return acquired
 
     def release(self):
         self._release_and_record()
+
+    def _begin_held_region(self):
+        # 06-16: zeroes this thread's per-acquisition SQL/connect
+        # accumulators and sets the `held` flag `holding_lock()` consults --
+        # ManagedConnection.execute/executemany and TimingCursor.fetch*
+        # attribute their timing here rather than to `sql_outside_lock_ns`
+        # while this flag is set.
+        _ACQUIRE_STATE.held = True
+        _ACQUIRE_STATE.connect_ns = 0
+        _ACQUIRE_STATE.lease_ns = 0
+        _ACQUIRE_STATE.sql_execute_ns = 0
+        _ACQUIRE_STATE.sql_fetch_ns = 0
 
     def _release_and_record(self):
         release_ns = _timer_ns()
@@ -239,10 +314,26 @@ class InstrumentedLock:
         acquired_ns = getattr(_ACQUIRE_STATE, 'acquired_ns', release_ns)
         wait_ns = getattr(_ACQUIRE_STATE, 'wait_ns', 0)
         hold_ns = release_ns - acquired_ns
+        connect_ns = getattr(_ACQUIRE_STATE, 'connect_ns', 0)
+        lease_ns = getattr(_ACQUIRE_STATE, 'lease_ns', 0)
+        sql_execute_ns = getattr(_ACQUIRE_STATE, 'sql_execute_ns', 0)
+        sql_fetch_ns = getattr(_ACQUIRE_STATE, 'sql_fetch_ns', 0)
+        # held is cleared before release so any SQL that races the release
+        # (there should be none -- this is the same thread) attributes
+        # outside the lock rather than into a region that no longer exists.
+        _ACQUIRE_STATE.held = False
         # Release before record: the collector's own bookkeeping must never
         # run inside _db_lock's critical section.
         self.raw.release()
-        COLLECTOR.record_acquisition(current_route_label(), wait_ns, hold_ns)
+        COLLECTOR.record_acquisition(
+            current_route_label(), wait_ns, hold_ns,
+            connect_ns, lease_ns, sql_execute_ns, sql_fetch_ns,
+        )
+        # 06-16 Task 2: accumulate this acquisition's wait/hold onto the
+        # calling thread's REQUEST totals (zeroed by begin_request), if any
+        # -- lets end_request subtract lock_wait_ns out of off-CPU time.
+        _REQUEST_STATE.lock_wait_ns = getattr(_REQUEST_STATE, 'lock_wait_ns', 0) + wait_ns
+        _REQUEST_STATE.lock_hold_ns = getattr(_REQUEST_STATE, 'lock_hold_ns', 0) + hold_ns
 
     def locked(self):
         return self.raw.locked()
@@ -271,6 +362,52 @@ def end_request():
 def current_route_label():
     """The calling thread's bound route label, or NO_REQUEST_ROUTE_LABEL."""
     return getattr(_REQUEST_STATE, 'route_label', None) or NO_REQUEST_ROUTE_LABEL
+
+
+def holding_lock():
+    """True when the calling thread is inside an InstrumentedLock's critical
+    section -- decides whether record_sql/record_connect attribute to the
+    current held region or to the outside-lock buckets."""
+    return getattr(_ACQUIRE_STATE, 'held', False)
+
+
+def record_sql(kind, elapsed_ns):
+    """Attribute one query or fetch's elapsed nanoseconds.
+
+    Inside a held region (`holding_lock()` true) this accumulates onto the
+    current acquisition's per-region totals, which `InstrumentedLock.
+    _release_and_record` passes to `record_acquisition` alongside wait and
+    hold. Outside any held region it accumulates onto the collector's
+    `sql_outside_lock_ns` global instead, so it never inflates a route's
+    held-SQL share. Returns immediately when ENABLED is false, before any
+    timing work -- callers in dashboard/beacon/db.py check ENABLED first,
+    but this is defense in depth for any other caller.
+    """
+    if not ENABLED:
+        return
+    if holding_lock():
+        if kind == SQL_KIND_FETCH:
+            _ACQUIRE_STATE.sql_fetch_ns = getattr(_ACQUIRE_STATE, 'sql_fetch_ns', 0) + elapsed_ns
+        else:
+            _ACQUIRE_STATE.sql_execute_ns = getattr(_ACQUIRE_STATE, 'sql_execute_ns', 0) + elapsed_ns
+    else:
+        COLLECTOR.add_sql_outside_lock(elapsed_ns)
+
+
+def record_connect(total_ns, lease_ns):
+    """Attribute one connection-setup span: `total_ns` is the whole
+    `_acquire_lock` + `sqlite3.connect` + PRAGMA sequence; `lease_ns` is the
+    `_acquire_lock` portion alone, reported separately so lease contention
+    is distinguishable from the rest of connection setup. Only meaningful
+    inside a held region -- every production `connect_db` call happens
+    inside `_db_lock` -- so this is a no-op when `holding_lock()` is false.
+    Returns immediately when ENABLED is false, before any timing work.
+    """
+    if not ENABLED:
+        return
+    if holding_lock():
+        _ACQUIRE_STATE.connect_ns = getattr(_ACQUIRE_STATE, 'connect_ns', 0) + total_ns
+        _ACQUIRE_STATE.lease_ns = getattr(_ACQUIRE_STATE, 'lease_ns', 0) + lease_ns
 
 
 def snapshot():
