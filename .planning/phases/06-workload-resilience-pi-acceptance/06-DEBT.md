@@ -94,7 +94,7 @@ question — this entry documents the promotion *rule*, not a pending promotion.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-14-PLAN.md` Task 1's real hardware run, `06-ACCEPTANCE-ROUND3.md` |
-| **Status** | **Measured 2026-09-03 — verdict INCONCLUSIVE, not CONFIRMED. The user chose `fix-now` against that measurement; the narrowing itself lands in a follow-up plan (06-19+), not here.** See "MEASURED — round 4 hardware diagnostic" below. |
+| **Status** | **Measured 2026-09-03 — verdict INCONCLUSIVE, not CONFIRMED. The user chose `fix-now` against that measurement; the narrowing landed in `06-19`/`06-20` and was itself measured post-fix in `06-21`: the attribution now reads MORE strongly confirmed (5/5 checks HELD), not less, because the narrowed lock's hold did not shrink.** See "MEASURED — round 4 hardware diagnostic" below, and "RE-READ POST-FIX — round 5" further below. |
 | **Recorded in the plan** | `06-ACCEPTANCE-ROUND3.md`, `beacon-acceptance-round3.json`, `06-18-PLAN.md`, `06-LOCK-DIAGNOSTIC.md` |
 
 **MEASURED — round 4 hardware diagnostic (2026-09-03).** `06-18-PLAN.md` Task 1 ran two instrumented
@@ -228,6 +228,30 @@ figures), which specific serialization point — `_db_lock`, gunicorn's `--threa
 SQLite's own busy-timeout/WAL-writer serialization, or another mechanism not yet named — is responsible
 for the measured 74x-on-a-3ms-route degradation. Only then should a fix be proposed and implemented
 against that attribution.
+
+**RE-READ POST-FIX — round 5 (2026-09-03), `06-21`'s hardware measurement.** `06-19`/`06-20` narrowed
+`_db_lock`'s scope on the `fix-now` decision this entry records above. `06-21` re-ran
+`evaluate_lock_attribution` on the narrowed shape, on real hardware, under the same concurrency-8
+load. **All five checks HELD** — `scan_status_lock_wait_share_of_wall` (0.9933 vs 0.5),
+`scan_status_median_hold_near_zero` (3,415,058ns vs 5,000,000ns), the renamed
+`services_hold_dominates_scan_status_hold` (180.76 vs 20.0), `scan_status_wait_tracks_services_hold`
+(0.9368 vs 0.5), `utilisation_above_superlinear_threshold` (0.9692 vs 0.85) —
+(`06-LOCK-DIAGNOSTIC-R5A.md` §5). Round 4's pre-narrowing run held 4 of 5 (INCONCLUSIVE); this
+post-narrowing run holds 5 of 5.
+
+**This is the opposite of what a successful fix would show, and it is recorded as such rather than
+read as a second confirmation to be pleased about.** The plan that scoped this measurement
+(`06-21-PLAN.md` Task 2) anticipated that "a post-fix run reading the attribution as no longer
+CONFIRMED is the fix working, not the instrument failing." What was actually measured is a run
+reading the attribution as *more* strongly confirmed than before — because `/api/services`' own
+lock hold did not shrink after the narrowing (`06-LOCK-DIAGNOSTIC-R5A.md` §2 measures it roughly
++3.5%, not lower), `/api/scan-status`'s wait behind it did not shrink either (§3), and the lock is
+therefore measured to be exactly as dominant a serializer as `D-DEBT-06-09`'s original attribution
+found it to be. **The attribution this entry closes on stands unweakened by the fix that was chosen
+against it — the fix addressed a different quantity (the held region's own composition) than the one
+this entry attributes (the lock's queueing effect on `/api/scan-status`), and the two turned out not
+to move together.** See `D-DEBT-06-01`'s "`06-21` measured" section and the new `D-DEBT-06-18` for
+the regression this produced and what `06-22` does about it.
 
 ---
 
@@ -378,6 +402,24 @@ the floor), or the floor criterion is restated as "no NEW failures outside the k
 that set named. Round 4's remaining plans should not adopt the current floor wording unchanged without
 noticing this.
 
+**A third test now shows this entry's own pattern, observed 2026-09-03 during `06-21`'s full-suite
+verification.** `HeldRegionCompositionTests::test_services_held_region_is_sql_dominated_after_narrowing`
+(`06-20`'s own new test, first flagged as a one-off transient full-suite-load flake in
+`06-20-SUMMARY.md`'s Issues Encountered) failed on **both** of two consecutive full-suite runs this
+round — `python_share` measured 0.6239 then 0.5792 against the 0.5 `PYTHON_SHARE_CEILING`, each time
+passing cleanly in isolation (`tests/test_lock_profile.py::HeldRegionCompositionTests` alone: 2
+passed in 0.51s). This is a stronger recurrence than `06-20` saw (one flake in three runs) and is
+recorded here as new evidence for this entry's own diagnosis — a small, load-sensitive quantity
+assertion under whole-suite contention — not fixed, per this plan's own scope (`06-21` writes no
+code; `git diff --quiet -- dashboard/` and `git diff --quiet -- tests/` both hold). `06-21`'s own
+acceptance criterion ("no NEW failures outside the known-flaky set") is read against this entry's own
+stated ambiguity: this is the same *pattern* this entry already names, on a *different* test than
+either of the two originally listed — not a defect this plan introduced, but not literally inside the
+originally-named two-test set either. A future round closing this entry should widen its named set or
+adopt the "measurement-sensitive, excluded from the floor" branch explicitly, since a third test
+reproducing the same pattern is evidence the floor wording itself, not any one test, is what needs
+fixing.
+
 ---
 
 ### D-DEBT-06-11 — the offline-interval reconstruction path's row cap silently bounds `maintenance_attributed_seconds`
@@ -525,7 +567,7 @@ data.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-LOCK-DIAGNOSTIC.md` §§3–4, `06-18-PLAN.md` Task 1 |
-| **Status** | **Deferred — scoping input for the follow-up fix plan (`06-19` or later); not fixed here.** New this round. |
+| **Status** | **Its closure condition is answered 2026-09-03 (`06-21`): the estimate did NOT hold — measured utilisation 0.9692, not 0.745–0.82. The GIL half this entry named as a separate problem is no longer a future concern; it is measured as the dominant one, arriving earlier and harder than this entry anticipated. See "`06-21` measured — the estimate failed, and the GIL half arrived early" below.** |
 | **Recorded in the plan** | `06-LOCK-DIAGNOSTIC.md` §§3–4, `D-DEBT-06-01`'s "Round 4 reopening" section above |
 
 **What narrowing `_db_lock` cannot touch.** `/api/advanced/current` is over its own 2000ms budget
@@ -582,6 +624,41 @@ its actual hardware-verified utilisation (not the arithmetic estimate here), and
 `/api/advanced/current`'s budget failure by a separate remedy or explicitly scopes it into a further
 round.
 
+**`06-21` measured — the estimate failed, and the GIL half arrived early (2026-09-03).** The
+follow-up plan this entry named (`06-19`/`06-20`) implemented the fix; `06-21` measured its actual
+hardware-verified utilisation, on real Pi hardware, post-narrowing: **0.9692**
+(`06-LOCK-DIAGNOSTIC-R5A.md` §2), against the 0.745–0.82 range this entry's own arithmetic produced.
+The measured figure sits 18.2% above the top of the range and, worse, above round 4's own
+*pre-narrowing* utilisation (0.9639) — the narrowing did not merely fail to reach the target, total
+lock hold rose relative to the pre-fix baseline (+0.81%).
+
+**Why: this entry's own two assumptions, both named in the arithmetic above, both broke — and they
+broke via the mechanism this entry already flagged as the untouched half.** "It assumes the 25%
+Python cut translates linearly into hold-time reduction and holds all other routes' behavior
+constant, neither of which this round measures directly" — `06-21` did measure both directly, and
+both failed. `/api/services`' own hold did not fall by anything close to 25%; it rose ≈3.5%, because
+the SQL still inside the lock got slower (`sql_share` rose `.748 → .844` in the same pass). Every
+other route's behavior did not hold constant: `/api/advanced/current`'s off-CPU time nearly doubled
+in the identical pass, on a route this narrowing never touches. The mechanism connecting both
+failures is the one this entry already named as separate and untouched — GIL/thread-scheduling
+contention — except it is not merely untouched, it is **actively worsened** by releasing
+`/api/services`' Python work to compete for the GIL instead of queueing behind a lock
+(`06-LOCK-DIAGNOSTIC-R5A.md` §2, §4). **"The GIL/topology half is a separate problem" is now measured
+to be true in a stronger sense than this entry originally stated: it is not merely a second budget
+failure sitting alongside the lock fix, it is the mechanism that ate the lock fix's payoff.**
+
+**What this changes for `06-22`.** This entry's own "what the follow-up plan must carry" section
+above told `06-22` to plan for `/api/advanced/current`'s budget failure as a second, separate
+problem. `06-22`'s decision must now also account for the fact that whatever it does to
+`/api/advanced/current` is not solely closing a second budget failure — per the mechanism above, it
+may also be the intervention that determines whether `06-20`'s narrowing nets out as a win or a
+regression, since the two are now measured to interact rather than sit independently. See the new
+`D-DEBT-06-18` for the full regression record and the reversible option held in reserve.
+
+**Closure condition met, this branch:** "either closes `/api/advanced/current`'s budget failure by a
+separate remedy or explicitly scopes it into a further round" — `06-22` does the choosing; this
+entry's role ends at recording that the estimate failed and why.
+
 ---
 
 ### D-DEBT-06-16 — non-`api_services` sites holding non-database work under `_db_lock`, found by the 28-site audit and left untouched
@@ -620,6 +697,75 @@ declined to act on the laptop-only `06-PROFILE.md` figure for `api_services` bef
 
 ---
 
+### D-DEBT-06-18 — the narrowing's own measured hardware regression under load, and the revert option held in reserve
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-21-PLAN.md` Task 1's real hardware run, `06-LOCK-DIAGNOSTIC-R5A.md` |
+| **Status** | **Deferred — awaiting `06-23`'s re-measurement after `06-22`'s remedy.** New this round. Not blocking `06-22`; scopes what `06-22`'s decision must account for and names the fallback if it does not resolve. |
+| **Recorded in the plan** | `06-LOCK-DIAGNOSTIC-R5A.md` §§2, 4, 5; `D-DEBT-06-01`'s "`06-21` measured" section; `D-DEBT-06-09`'s "RE-READ POST-FIX" section; `D-DEBT-06-15`'s "`06-21` measured" section |
+
+**What was measured, stated once here so a later reader does not have to reconstruct it from three
+other entries' cross-references.** `06-21` measured `06-20`'s narrowing on real Raspberry Pi
+hardware, post-fix, under the identical concurrency-8/600s load round 4 used. The narrowing worked
+mechanically — `/api/services`' held-region Python share fell `.250 → .112` under load,
+`clamped_python_count` 0, trustworthy — and the system got measurably worse on every load-bearing
+aggregate: utilisation rose (0.9639 → 0.9692); total lock hold rose (+0.81%, the opposite of the
+0.745–0.82 estimate's predicted ~15% cut); three routes' p95 rose 26.2–83.3%
+(`/api/services` +38.6%, `/api/scan-status` +83.3%, `/api/advanced/current` +26.2%); `/api/services`'
+own throughput fell 11.1%. One route improved: `/api/thumbnail/<port>` dropped out of the failure
+list (p95 1695.6ms → 1023.0ms, lock-wait total halved).
+
+**The mechanism, measured not inferred.** `/api/advanced/current` — no lock, unmodified by the
+narrowing — had its `other_off_cpu_ns_total` nearly double (550,980.5ms → 1,007,408.3ms) in the same
+pass. `/api/services`' own hold rose ≈3.5% despite its Python share collapsing, because its
+`sql_share` rose `.748 → .844` — the SQL still inside the lock got slower. Total requested CPU
+across all routes stayed essentially flat (~1.57 → ~1.575 core-equivalents) while wall-clock and
+off-CPU time exploded. Work released from `_db_lock` now competes for the GIL concurrently instead
+of queueing behind the lock serially — lock contention was converted into GIL contention, on a
+deployment with no second interpreter to absorb it.
+
+**Why this is not, by itself, grounds to revert `06-20`.** The regression's mechanism is specifically
+an *interaction* between the narrowing and an unaddressed GIL-bound route
+(`/api/advanced/current`, `D-DEBT-06-15`), not evidence that narrowing the lock is unsound in
+isolation — the concurrency-1 control pass shows the narrowing producing a genuine 34.8% utilisation
+reduction with no queue to reabsorb the freed time into (`06-LOCK-DIAGNOSTIC-R5A.md` §2). Reverting
+on this evidence alone would discard a mechanically-working change because of an interaction that a
+still-pending second change (`06-22`) may resolve.
+
+**The user's decision, made on this evidence, for `06-22`'s remedy choice.** Put informally against
+this round's measurement (formally decided at `06-22-PLAN.md` Task 1's blocking
+`checkpoint:decision`): proceed to `06-22` taking the **reversible memo option** (`06-22-PLAN.md`'s
+`t-c-reduce-cost` branch) — add the request-scoped occurrence cache to
+`dashboard/beacon/diagnosis.py`'s `get_current_diagnosis` (line 653 in the pre-`06-22` source), which
+calls `maintenance.attributed_downtime_seconds` with no `cache=` argument, mirroring the identical
+memo `/api/services` already uses (`06-13`, measured 9-10x reduction on the same computation). This
+targets `/api/advanced/current` directly — the route whose off-CPU time doubled and is the measured
+mechanism above — without a topology change (`t-a-add-workers`, the one-way door `06-22-PLAN.md`
+fences behind `PROH-OPS-04-05`). The reasoning recorded for the record: T-C is reversible, T-A is
+not; T-C targets the route this regression's own mechanism implicates most directly; and if T-C
+proves insufficient, T-A remains available with this round's own data to size its `mem_limit`
+arithmetic against, which is strictly better information than existed before `06-21`.
+
+**The revert option held in reserve, named so a later reader finds it without reconstructing it.**
+If `06-23`'s post-`06-22` hardware re-measurement does not show the regression recovering — utilisation
+back toward or below the 0.745–0.82 range, `/api/services` and `/api/scan-status` p95 back toward
+their round-4 (pre-narrowing) figures, not merely better than this round's worse figures — then
+`06-20`'s narrowing should be reverted on that evidence, not on theory. `06-20`'s commit
+(`1a4db68`/`065939e`/`41a0f73`) is a clean, self-contained change (`dashboard/app.py`,
+`tests/test_lock_profile.py`, plus the three golden fixtures) with no other production code
+depending on the narrowed shape, so a revert is mechanically simple; the cost of reverting is
+re-litigating `D-DEBT-06-01` a fourth time, not an entangled rollback.
+
+**What would need to be true to close this entry.** `06-23` re-measures on real hardware after
+`06-22`'s remedy ships, and either: (a) the regression recovers — utilisation and the three
+regressed routes' p95 return to at or below their round-4 pre-narrowing figures, in which case this
+entry closes on that evidence and the narrowing stands; or (b) it does not recover, in which case
+`06-20`'s narrowing is reverted on that evidence and this entry closes recording the revert and its
+rationale, not a further deferral.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
@@ -627,7 +773,7 @@ declined to act on the laptop-only `06-PROFILE.md` figure for `api_services` bef
 | Field | Value |
 |---|---|
 | **Raised by** | `06-RESEARCH.md` Open Question 3, `PROJECT.md`'s `AR-03-01` accepted-risk note |
-| **Status** | **Narrowing landed 2026-09-03 (`06-20`) — the user's `fix-now` decision (`06-18-PLAN.md` Task 3) is implemented.** Two items remain outstanding before this entry can be read as closed: `/gsd-secure-phase 06`'s formal re-run (`PROH-OPS-04-05` prerequisite 4, scheduled in `06-24`) and the actual measured post-narrowing utilisation (`06-21`'s to produce — this entry does not yet contain it). See "`06-20` landed" below for what moved, what did not, and the estimate range. |
+| **Status** | **Narrowing landed 2026-09-03 (`06-20`) and measured on real hardware 2026-09-03 (`06-21`) — the narrowing worked mechanically and the system regressed under load.** Measured utilisation 0.9692, NOT the estimated 0.745-0.82 (see "`06-21` measured" below). One item remains outstanding: `/gsd-secure-phase 06`'s formal re-run (`PROH-OPS-04-05` prerequisite 4, scheduled in `06-24`). This entry cannot be read as closed while a measured regression sits unresolved and that audit is outstanding. See "`06-20` landed" below for what moved, and "`06-21` measured" for the hardware result. |
 | **Recorded in the plan** | `06-05-PLAN.md` decision D-01, `PROH-OPS-04-02`, `06-10-PLAN.md` Task 2's decision checkpoint |
 
 **What was not done and why.** `_db_lock`'s scope in `dashboard/app.py` remains unchanged at every one
@@ -934,6 +1080,63 @@ execute outside it.
 formal re-run (`PROH-OPS-04-05` prerequisite 4, scheduled in `06-24`), and `06-21`'s hardware
 measurement of the actual post-narrowing utilisation (this entry records the estimate above, not
 the measured figure).
+
+**`06-21` measured — the estimate above did not materialise; the narrowing worked mechanically and
+the system regressed under load (2026-09-03).** `06-21-PLAN.md` Task 1 ran two instrumented passes
+on the same real Raspberry Pi hardware, post-narrowing (`cc87995`), and Task 2 wrote
+`06-LOCK-DIAGNOSTIC-R5A.md` from the two attached JSON reports. Full figures, arithmetic and the
+mechanism are there; this section states the verdict and its consequence.
+
+**The narrowing did what it was built to do.** `/api/services`' held-region Python share fell
+`.576 → .353` at concurrency 1 and `.250 → .112` under load (`06-LOCK-DIAGNOSTIC-R5A.md` §1) —
+`clamped_python_count` is 0 on both passes, so both readings are trustworthy. At concurrency 1, with
+no queue to reabsorb the freed time, this translated into a genuine 34.8% utilisation reduction
+(0.6653 → 0.4339, §2).
+
+**Under load, it did not help — the measured figures moved the wrong direction on every aggregate
+that matters.** Utilisation **rose** (0.9639 → 0.9692); total lock hold **rose** (578,783,964,515ns
+→ 583,472,152,134ns, +0.81%) — the opposite of the ~15% reduction the 0.745–0.82 estimate predicted.
+Measured utilisation sits 18.2% above the top of that estimate range and, more starkly, above round
+4's own pre-narrowing figure. Three of four previously-failing routes got measurably worse:
+`/api/services` p95 +38.6% (2138.5ms → 2962.9ms), `/api/scan-status` p95 +83.3% (853.0ms →
+1563.9ms), `/api/advanced/current` p95 +26.2% (2217.6ms → 2799.3ms) — the last of these on a route
+this narrowing does not touch at all. `/api/services`' own throughput fell 11.1% (882 → 784
+completions) on more lock-wait time per request, not less.
+
+**The mechanism, measured directly rather than inferred.** `/api/advanced/current` takes no lock and
+was not modified by `06-20`; its `other_off_cpu_ns_total` nearly doubled in the same pass
+(550,980.5ms → 1,007,408.3ms, +82.9%, `06-LOCK-DIAGNOSTIC-R5A.md` §4). `/api/services`' own hold
+(back-calculated from two directly-reported fields, §2) rose ≈+3.5% (596.245ms → ≈617.3ms) despite
+its Python share collapsing, because its `sql_share` rose `.748 → .844` — the SQL still inside the
+lock got absolutely slower. Total requested CPU across all routes stayed essentially flat (~1.57 →
+~1.575 core-equivalents, §4) while wall-clock and off-CPU time exploded — the signature of increased
+scheduling contention, not increased work. **Work released from `_db_lock` now runs concurrently and
+competes for the GIL instead of being serialized behind the lock. Lock contention was converted into
+GIL contention on this single-interpreter deployment.** This is exactly the half `D-DEBT-06-15`
+already named as outside `_db_lock`'s reach, arriving earlier and harder than expected — not as a
+separate untouched problem, but as an active mechanism actively made worse by narrowing the lock.
+
+**Which of the estimate's two stated assumptions broke, per `06-LOCK-DIAGNOSTIC-R5A.md` §2's
+arithmetic: both, via the same mechanism.** Assumption 1 (linear translation of the Python-share cut
+into hold reduction) is falsified directly — the hold rose, not fell, despite the predicted-magnitude
+share cut occurring. Assumption 2 (all other routes' behavior held constant) is falsified directly —
+`/api/advanced/current` and `/api/scan-status` both measurably worsened. The narrowing-outcome
+verdict (`evaluate_narrowing_outcome`) reads **REFUTED** at concurrency 1 (python_share 0.3532 ≥ the
+0.2 refutation threshold) and **INCONCLUSIVE** under load (refutation did not fire at 0.1118, but
+all three confirmation checks — including the decisive utilisation check, 0.9692 vs 0.85 — failed).
+Both verdicts stand as the harness computed them; neither is upgraded or softened here.
+
+**One genuine improvement, recorded alongside the regression rather than let it obscure it.**
+`/api/thumbnail/<port>` dropped out of the failure list entirely (p95 1695.6ms → 1023.0ms against a
+1500ms budget) and its lock-wait total halved (2,021,760.3ms → 984,592.1ms). Round 4 had four
+failing routes; round 5 has three.
+
+**What this reopens, and what does not follow from it.** This does not by itself mean the narrowing
+should be reverted — `06-22`'s remedy for `/api/advanced/current` (the GIL-contention route the
+narrowing cannot reach) has not yet shipped, and the regression's mechanism is specifically that
+narrowing plus an unaddressed GIL-bound route interact badly, not that the narrowing is unsound in
+isolation. See the new `D-DEBT-06-18` below for the regression's own entry, the revert option held
+in reserve, and the decision the user made on this evidence for `06-22`'s remedy choice.
 
 ---
 
