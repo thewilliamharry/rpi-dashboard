@@ -488,7 +488,17 @@ class LockProfileInertnessTests(unittest.TestCase):
                             state['max_occupancy'] = state['occupancy']
                         state['occupancy'] -= 1
 
-            threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+            # daemon=True is load-bearing, not hygiene. join(10) below already
+            # bounds the WAIT, so a lock that loses mutual exclusion still
+            # reaches the assertions -- but a non-daemon worker blocked forever
+            # on a never-released lock prevents the INTERPRETER from exiting,
+            # so pytest prints its result and then hangs. That is exactly what
+            # happened while mutation-verifying this test during 06-15: the
+            # release-skipping mutation deadlocked the run for ~8 minutes and
+            # stalled the executor, which is a far worse failure mode than a
+            # red test. A mutation test that hangs instead of failing cannot be
+            # trusted in a suite.
+            threads = [threading.Thread(target=worker, daemon=True) for _ in range(thread_count)]
             for thread in threads:
                 thread.start()
             for thread in threads:
