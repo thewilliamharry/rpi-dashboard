@@ -442,7 +442,7 @@ Plans:
   4. Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage.
   5. A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling.
 
-**Plans**: 14/18 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added 2026-09-02). Phase does NOT seal — the third Pi acceptance run still returns `overall_passed: false`; OPS-07 remains Pending.
+**Plans**: 18/24 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added and executed 2026-09-02; **6 fix-round plans added 2026-09-03**). Phase does NOT seal. Round 4's hardware diagnostic returned INCONCLUSIVE with 4 of 5 checks holding; the user chose `fix-now` at `06-18`'s blocking checkpoint, reversing `D-DEBT-06-01`'s three-round deferral. Round 5 lands both halves of the fix in sequence with a hardware measurement between them. OPS-07 remains Pending — `PROH-OPS-07-08` scopes promotion to an independent verification round.
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -462,6 +462,12 @@ Plans:
 - [x] 06-16-PLAN.md — Decompose the critical section (connect/SQL/Python) and each request (on-CPU/lock-wait/off-CPU)
 - [x] 06-17-PLAN.md — Harness collection around the load window, and a verdict that can say REFUTED
 - [x] 06-18-PLAN.md — Two instrumented Pi passes, 06-LOCK-DIAGNOSTIC.md, and the fix decision (human-gated)
+- [ ] 06-19-PLAN.md — The one-way-door prerequisites: a 28-site lock audit a test enforces, a narrowed-shape integrity proof, and predictions that survive dataset growth
+- [ ] 06-20-PLAN.md — Tracer: narrow `api_services`' critical section to database reads only, output proven byte-identical
+- [ ] 06-21-PLAN.md — Measurement A: the narrowing's effect on real Pi hardware (human-gated)
+- [ ] 06-22-PLAN.md — The `/api/advanced/current` remedy: a one-way-door decision and the chosen fix
+- [ ] 06-23-PLAN.md — Measurement B and the round-5 uninstrumented acceptance run (human-gated)
+- [ ] 06-24-PLAN.md — Re-close the security boundary (`/gsd-secure-phase 06`) and record what round 5 changed
 
 **Wave 1**
 
@@ -587,6 +593,65 @@ and one run cannot yield it. OPS-07 is again deliberately NOT promoted (`PROH-OP
 new prohibitions are minted: `PROH-OPS-07-11` (an instrumented run is diagnostic evidence only,
 never OPS-07 evidence) and `PROH-OPS-07-12` (the lock-profile block contributes to no pass/fail
 verdict).*
+
+### Fourth gap-closure round — THE FIX (added 2026-09-03, waves continue from 13)
+
+Round 4's instrumented hardware diagnostic measured `/api/scan-status`' degradation as **99.0%**
+`_db_lock` wait and lock utilisation at **0.9639**, past the ~0.85 M/G/1 superlinear threshold, with
+`/api/services` alone accounting for ~90.9% of total hold. The recorded verdict was **INCONCLUSIVE**
+— 4 of 5 checks held, and the one failure was a stale absolute millisecond band calibrated to a
+dataset that had since grown 2.24x (`D-DEBT-06-14`). The user selected **`fix-now`** at `06-18`'s
+blocking checkpoint, against the planner's recommendation to defer, reversing `D-DEBT-06-01`'s
+three-round deferral and lifting `06-CONTEXT.md` D-01's fence for this round.
+
+**Both halves ship, sequenced, with a measurement between them.** A lock-only round cannot make
+OPS-07 pass: `/api/advanced/current` is over budget at p95 2217.6ms and records **exactly 0.0ms lock
+wait**, so narrowing cannot reach it (`D-DEBT-06-15`). Doing both at once would destroy the
+attribution this phase has guarded for four rounds — round 4's instrument is what makes a reading
+between the two changes possible, and the wave ordering exists to take it.
+
+**Wave 14** *(blocked on Wave 13)*
+
+- `06-19` — `PROH-OPS-04-05` prerequisites 1-3: the 28-site audit made an AST invariant
+  (`test_no_database_access_escapes_the_db_lock`), a narrowed-shape concurrent-writer proof, and the
+  same-run ratio that retires `D-DEBT-06-14`'s absolute band — plus `evaluate_narrowing_outcome`,
+  the fix's own falsifiable prediction, written before the fix
+
+**Wave 15** *(tracer; blocked on Wave 14)*
+
+- `06-20` — Narrow `api_services`' `_db_lock`-held region to database reads only. Output proven
+  byte-identical against a golden captured from pre-narrowing code; `06-15`'s scope pin fails by
+  design and is rewritten to the new shape in the same commit; `T-06-24` re-closed
+
+**Wave 16** *(blocked on Wave 15; contains a blocking human checkpoint)*
+
+- `06-21` — Attribution point one: two instrumented Pi passes after the narrowing and before
+  anything else moves, and `06-LOCK-DIAGNOSTIC-R5A.md`
+
+**Wave 17** *(blocked on Wave 16; contains a blocking one-way-door decision checkpoint)*
+
+- `06-22` — The `/api/advanced/current` remedy: four fully-specified options from a reversible cost
+  reduction to a one-way `--workers` increase, chosen by the user against round 5's own measurement
+
+**Wave 18** *(blocked on Wave 17; contains a blocking human checkpoint)*
+
+- `06-23` — Attribution point two plus the acceptance run: instrumented passes after `06-22`, then an
+  **uninstrumented** concurrency-8/600s pass on the same commit, and `06-ACCEPTANCE-ROUND5.md`
+
+**Wave 19** *(blocked on Wave 18; contains a blocking human checkpoint)*
+
+- `06-24` — `PROH-OPS-04-05` prerequisite 4: `/gsd-secure-phase 06` re-run because `T-06-24`'s
+  closure evidence is invalidated by construction, plus the round-5 debt and roadmap consolidation
+
+*Strictly sequential, and each dependency is load-bearing rather than incidental. `06-20` cannot
+precede `06-19` because `PROH-OPS-04-05` gates the narrowing behind the audit. `06-22` cannot precede
+`06-21` because landing both halves before measuring destroys the attribution. `06-23`'s segment B
+must be uninstrumented on the same commit as segment A (`PROH-OPS-07-11`). `06-24` cannot run earlier
+because it audits a change that must already exist. Three new prohibitions are minted:
+`PROH-OPS-04-06` (only computation over already-fetched data may leave `_db_lock`; no database access
+may), `PROH-OPS-07-13` (`evaluate_narrowing_outcome` is diagnostic-only), and `PROH-OPS-07-14`
+(`/api/advanced/current`'s payload must be byte-identical for the same input). OPS-07 is again
+deliberately NOT promoted (`PROH-OPS-07-08`, `D-DEBT-06-08`).*
 
 ## Progress
 
