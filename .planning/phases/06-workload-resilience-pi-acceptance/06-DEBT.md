@@ -627,7 +627,7 @@ declined to act on the laptop-only `06-PROFILE.md` figure for `api_services` bef
 | Field | Value |
 |---|---|
 | **Raised by** | `06-RESEARCH.md` Open Question 3, `PROJECT.md`'s `AR-03-01` accepted-risk note |
-| **Status** | **Reopened 2026-09-03 — the user selected `fix-now` at `06-18-PLAN.md` Task 3's checkpoint, against `06-LOCK-DIAGNOSTIC.md`'s measured INCONCLUSIVE verdict.** Deferred three times before this (see history below); the deferral is now reversed by explicit user decision. Narrowing itself is scoped into a follow-up plan (`06-19` or later), not this plan — see "Round 4 reopening" below for what that plan must carry. |
+| **Status** | **Narrowing landed 2026-09-03 (`06-20`) — the user's `fix-now` decision (`06-18-PLAN.md` Task 3) is implemented.** Two items remain outstanding before this entry can be read as closed: `/gsd-secure-phase 06`'s formal re-run (`PROH-OPS-04-05` prerequisite 4, scheduled in `06-24`) and the actual measured post-narrowing utilisation (`06-21`'s to produce — this entry does not yet contain it). See "`06-20` landed" below for what moved, what did not, and the estimate range. |
 | **Recorded in the plan** | `06-05-PLAN.md` decision D-01, `PROH-OPS-04-02`, `06-10-PLAN.md` Task 2's decision checkpoint |
 
 **What was not done and why.** `_db_lock`'s scope in `dashboard/app.py` remains unchanged at every one
@@ -892,6 +892,48 @@ is materially smaller than the laptop profile's 82.042%-Python figure would have
 the hardware's own SQL share is far higher (74.8% under load, not 17.958%). `_db_lock`'s narrowing
 also does nothing for `/api/advanced/current`'s GIL-bound degradation, which is a second, separate
 problem the follow-up plan must have in view — narrowing the lock alone cannot make OPS-07 pass.
+
+**`06-20` landed — what moved, what did not, and the estimate range.** `api_services`' `_db_lock`
+block now holds database reads only: the `services`, `all_checks`, `preview_rows` queries,
+`beacon_repositories.read_maintenance_windows_by_port`,
+`beacon_repositories.read_service_offline_interval_boundaries_by_port`, and
+`beacon_repositories.get_runtime_state`. Every result consumed after the block closes is
+materialized into a plain dict inside it first (`PROH-OPS-04-06`, `T-06-102`). Moved OUT of the
+lock, unconditionally after it closes: `previews_by_port` construction, the `tls_posture`
+`isinstance` normalization, `result = []`, `maintenance_occurrence_cache = {}`; inside a
+post-lock `if services:` guard: the `checks_by_port`/`points_by_port` loop (including the
+`offline_points_budget` cap), `beacon_repositories.offline_intervals_from_points_by_port`, and the
+per-service composition loop (`_uptime_summary`, `beacon_maintenance.coverage`,
+`beacon_maintenance.attributed_downtime_seconds`). **No database access moved outside the lock** —
+`LockScopeInvariantTests::test_no_database_access_escapes_the_db_lock` passes unchanged before and
+after, which is what distinguishes this narrowing from the `PROH-OPS-04-06` violation it forbids.
+
+The estimate range this objective's own arithmetic produced: **0.745–0.82** utilisation. Cutting
+`/api/services`' measured 25.0% Python share (`06-LOCK-DIAGNOSTIC.md` §4, hardware) of its
+~90.9%-of-total-hold contribution gives `525,888.19 × 0.25 = 131,472.05ms` removed from a
+`578,783.96ms` total hold over a `600,444.80ms` window, leaving `447,311.91ms` — utilisation
+~0.745. Round 4's own planning-stage share estimate (61% rather than 90.9%) gives ~0.82 instead;
+`D-DEBT-06-15` records both because they bracket the sensitivity. **This is the estimate; `06-21`
+measures the actual — this entry does not yet contain that figure.**
+
+`06-15`'s frozen-scope pin (`LockScopePreservationTests::test_api_services_lock_scope_containment_and_termination`)
+failed the moment the narrowing landed, exactly as designed (see "Round 4 reopening" prerequisite 4
+above) — it was rewritten, in the same commit as the narrowing, to
+`test_api_services_lock_scope_is_database_reads_only`, encoding the new expected scope rather than
+being loosened to pass. `T-06-24` is re-closed on this new evidence (`06-SECURITY.md`); three new
+threats this narrowing introduces (`T-06-101` moved-back-in, `T-06-102` post-close Row read,
+`T-06-103` output drift) are registered and closed on their own tests.
+
+**`PROH-OPS-04-06` (new):** within a `_db_lock`-owning function, only computation over
+already-fetched data may move outside the lock; no database access — no `conn` use, no
+`connect_db`, no `get_db`, no `database_access`, `read_transaction` or `write_transaction` — may
+execute outside it.
+`LockScopeInvariantTests::test_no_database_access_escapes_the_db_lock` is the enforcement.
+
+**What is still outstanding, so this entry cannot be read as closed:** `/gsd-secure-phase 06`'s
+formal re-run (`PROH-OPS-04-05` prerequisite 4, scheduled in `06-24`), and `06-21`'s hardware
+measurement of the actual post-narrowing utilisation (this entry records the estimate above, not
+the measured figure).
 
 ---
 

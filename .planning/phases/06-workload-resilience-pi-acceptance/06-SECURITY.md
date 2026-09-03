@@ -65,7 +65,10 @@ mode was not required).
 | T-06-21 | Denial of Service | WAL breaking schema inspection and locking every deployment out of upgrading | high | mitigate | `_readonly_connection` falls back to a `PRAGMA query_only=ON` connection when `mode=ro` cannot initialize `-shm` (`inventory.py:41-56`); the live upgrade path (`_apply_pending_migrations` → `collect_inventory`) runs against a writable data dir and is covered end-to-end by a non-empty-sidecar WAL fixture test. Residual gap on read-only *source* copies recorded as AR-06-02 | closed |
 | T-06-22 | Denial of Service | WAL breaking the pre-migration verified backup | high | mitigate | The backup artifact is normalized to rollback-journal mode before its integrity check (`migrations.py:678`), so it passes `mode=ro` and carries no sidecars | closed |
 | T-06-23 | Repudiation | a failed write reported as succeeded | high | mitigate | `write_transaction` rolls back and re-raises on any exception (`db.py:144-151`); asserted by the stress test's injected `OperationalError` propagation | closed |
-| T-06-24 | Elevation of Privilege | a route gaining unserialized DB access as a WAL side effect | high | mitigate | **Verified by scoped diff:** `git diff 8c2fc48..HEAD -- dashboard/app.py` shows **0** added or removed lines mentioning `_db_lock`. Narrowing recorded as deferred debt (D-DEBT-06-01) | closed |
+| T-06-24 | Elevation of Privilege | a route gaining unserialized DB access as a WAL side effect | high | mitigate | **Re-closed on the narrowed shape's own evidence (`06-20`), diff-based and frozen-scope forms both retired:** `LockScopeInvariantTests::test_no_database_access_escapes_the_db_lock` (no connection use escapes its owning `_db_lock` block, across all 28 sites, mutation-verified twice in `06-19`); `LockScopePreservationTests::test_api_services_lock_scope_is_database_reads_only` (the narrowed scope pinned by AST); `NarrowedShapeConcurrentAccessTests` (snapshot-after-close and serial-oracle proofs under a concurrent writer, `06-19`). `/gsd-secure-phase 06` re-run remains outstanding per `PROH-OPS-04-05` prerequisite 4, scheduled in `06-24` — see Security Audit Trail | closed |
+| T-06-101 | Tampering | a computation quietly moved back inside the critical section, undoing `06-20`'s narrowing without changing output | high | mitigate | `HeldRegionCompositionTests::test_services_held_region_is_sql_dominated_after_narrowing` (measured composition guard) and `LockScopePreservationTests::test_api_services_lock_scope_is_database_reads_only` (AST pin) — both fail on the same mutation, one asserting a consequence, the other a shape (`06-20`) | closed |
+| T-06-102 | Information Disclosure | a `sqlite3.Row` field read after its connection closed, yielding a partial or wrong value | high | mitigate | Every result consumed outside `api_services`' `_db_lock` block is materialized into a plain dict inside it (`services`, `all_checks`, `preview_rows`); `06-19` Task 2's recorded `sqlite3.ProgrammingError` mutation is the evidence the hazard is real, not hypothetical (`06-20`) | closed |
+| T-06-103 | Repudiation | `/api/services`' output changing under a scope-only edit while every gate stays green — the `D-DEBT-06-10` `CR-01` shape | critical | mitigate | `ApiServicesOutputEquivalenceTests::test_narrowed_route_reproduces_the_pre_narrowing_response_bytes` — three golden fixtures (maintenance-path, over-cap, empty-services) captured from unmodified pre-narrowing code, byte-equality re-checked after; `PROH-OPS-07-05` (`06-20`) | closed |
 | T-06-25 | Spoofing | a dead worker epoch writing a terminal outcome | high | mitigate | `_assert_current_worker_owner` fencing (`queues.py:181-204`) raising `LeaseLost`, plus `recover_queues_for_worker`; asserted by the restart test | closed |
 | T-06-26 | Repudiation | a smoke run passed off as hardware acceptance evidence | high | mitigate | `run_kind = 'smoke' if scenario.self_test else 'acceptance'` derived from the invocation (`tests/pi_load_acceptance.py:420`); the report always carries `platform.machine()` and `platform.node()` (`:423-424`) | closed |
 | T-06-27 | Tampering | thresholds tuned to make a run pass | high | mitigate | The cadence oracle delegates to the product's own `freshness_state`; `test_pi_load_acceptance_oracles_are_the_products_own` (`test_workload_resilience.py:947`) locks the oracles to product code | closed |
@@ -116,6 +119,24 @@ Contract tests executed at audit time, all green:
 
 Per the workflow's short-circuit rule (`threats_open: 0` ∧ `register_authored_at_plan_time: true`
 ∧ `asvs_level == 1`), no separate auditor subagent pass was required.
+
+### 06-20 — `T-06-24` re-closed on the narrowed shape's own evidence; formal re-audit still outstanding
+
+`api_services`' `_db_lock` scope narrowed (`D-DEBT-06-01`, `PROH-OPS-04-06`). `T-06-24`'s closure
+evidence is replaced above — the retired diff-based form (`git diff 8c2fc48..HEAD`) and `06-15`'s
+frozen-scope pin are both superseded by three tests describing the shape the code now has, per
+`PROH-OPS-04-05` prerequisite 4's own instruction ("re-close `T-06-24` again on new evidence
+describing the narrowed shape — not to restore the retired diff-based form"). Three new threats
+this narrowing introduces (`T-06-101`, `T-06-102`, `T-06-103`) are added to the register above,
+each closed on its own named test.
+
+**`/gsd-secure-phase 06` itself has NOT re-run.** `PROH-OPS-04-05` prerequisite 4 requires the
+formal re-audit; this SUMMARY-level re-closure is evidence for that re-audit to consume, not a
+substitute for it. Scheduled in `06-24`, per this plan's own sequencing and `D-DEBT-06-01`'s
+"Round 4 reopening" prerequisite list. `threats_open` stays `0` — every threat in the register
+above, including the three new ones, has a `closed` disposition — but the phase-level
+`status: verified` / Sign-Off below describes the `2026-09-01` audit, not a re-run against this
+narrowing; `06-24`'s re-run is what makes that frontmatter current again.
 
 ---
 
