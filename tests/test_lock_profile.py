@@ -1986,6 +1986,36 @@ class LockAttributionVerdictTests(unittest.TestCase):
         self.assertEqual(result1, result2)
 
 
+def _run_self_test_reliably(**kwargs):
+    """`run_self_test` starts its own werkzeug server and issues several
+    real HTTP round trips against it in quick succession. Under a
+    full-suite run's heavy thread/socket load this occasionally hits one of
+    two transient, environment-level failures rather than any defect in the
+    collection code: an honest 'target unreachable' early return before the
+    accept() backlog is serviced (empty `lock_profile`), or -- observed on
+    this development machine -- `errno 49 Can't assign requested address`
+    from local ephemeral-port pressure across many short-lived 127.0.0.1
+    connections in the same process. Both are the same full-suite-only
+    flakiness shape D-DEBT-06-13 documents elsewhere in this suite. Retried
+    a bounded few times rather than asserted flaky; reliable every time
+    observed in isolation. Any OTHER `collected: False` reason (a genuine
+    404, schema mismatch, etc.) is NOT retried -- only these two named
+    transient strings are."""
+    report = None
+    for _ in range(5):
+        report = harness.run_self_test(**kwargs)
+        target_unreachable = any('target unreachable' in reason for reason in report.failure_reasons)
+        lock_profile_reason = report.lock_profile.get('reason') or ''
+        transient_lock_profile_failure = (
+            kwargs.get('collect_lock_profile')
+            and report.lock_profile.get('collected') is False
+            and "Can't assign requested address" in lock_profile_reason
+        )
+        if not target_unreachable and not transient_lock_profile_failure:
+            return report
+    return report
+
+
 class HarnessRehearsalTests(unittest.TestCase):
     """06-17 Task 3: rehearses the operator's exact `--lock-profile` command
     path end to end on the developer machine, through `run_self_test` --
@@ -2004,7 +2034,7 @@ class HarnessRehearsalTests(unittest.TestCase):
 
     def test_profile_enabled_self_test_returns_a_populated_diagnostic_block(self):
         os.environ['ENABLE_LOCK_PROFILE'] = '1'
-        report = harness.run_self_test(collect_lock_profile=True)
+        report = _run_self_test_reliably(collect_lock_profile=True)
 
         self.assertEqual(report.run_kind, 'smoke')
         self.assertTrue(report.lock_profile['collected'])
@@ -2015,15 +2045,15 @@ class HarnessRehearsalTests(unittest.TestCase):
 
     def test_profile_disabled_self_test_matches_the_enabled_runs_overall_passed(self):
         os.environ['ENABLE_LOCK_PROFILE'] = '1'
-        enabled_report = harness.run_self_test(collect_lock_profile=True)
-        disabled_report = harness.run_self_test(collect_lock_profile=False)
+        enabled_report = _run_self_test_reliably(collect_lock_profile=True)
+        disabled_report = _run_self_test_reliably(collect_lock_profile=False)
 
         self.assertEqual(enabled_report.overall_passed, disabled_report.overall_passed)
         self.assertEqual(disabled_report.lock_profile, {})
 
     def test_report_round_trips_through_to_json_and_json_loads(self):
         os.environ['ENABLE_LOCK_PROFILE'] = '1'
-        report = harness.run_self_test(collect_lock_profile=True)
+        report = _run_self_test_reliably(collect_lock_profile=True)
 
         round_tripped = json.loads(report.to_json())
         self.assertTrue(round_tripped['lock_profile']['collected'])
