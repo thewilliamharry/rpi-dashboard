@@ -286,6 +286,84 @@ noticing this.
 
 ---
 
+### D-DEBT-06-11 — the offline-interval reconstruction path's row cap silently bounds `maintenance_attributed_seconds`
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-VERIFICATION.md` gap 2's third `missing:` item |
+| **Status** | **Deferred — accepted by design, separable from Phase 6, not fixed here.** New this round. |
+| **Recorded in the plan** | `06-18-PLAN.md` `<artifacts_this_plan_produces>`, `06-13-SUMMARY.md` (the entry `06-13` declined to file) |
+
+**What it is.** `_OFFLINE_INTERVALS_BULK_ROW_LIMIT = 20000`
+(`dashboard/beacon/repositories.py:1105`) bounds `read_service_offline_intervals_by_port`'s own
+in-window `service_checks` query (`ORDER BY port ASC, ts ASC LIMIT ...`,
+`dashboard/beacon/repositories.py:1206-1210`) — once the combined row count across every requested
+port exceeds 20,000, the cap sheds the highest-numbered port(s)' **newest** in-window rows. Since
+`06-13`, `/api/services` no longer calls that function directly; `bcad398` made it replicate the
+identical cap in Python over its own already-fetched `checks_by_port` points
+(`dashboard/app.py:2863-2897`), so the same truncation behavior governs
+`maintenance_attributed_seconds` (`dashboard/app.py:2944`) regardless of which code path computes
+it. `read_service_offline_intervals_by_port` itself is currently exercised only by tests
+(`tests/test_services_route_scaling.py`), not by any live `app.py` route.
+
+**Why this is not the same defect `bcad398` fixed.** The uptime-sweep path
+(`checks_by_port` -> `_uptime_summary`) was fixed to be unbounded because truncation there silently
+inflated `uptime_pct` — a correctness failure on the phase goal's own "keeps essential monitoring
+reliable" clause. The offline-interval/maintenance path is bounded **by design** — `06-RESEARCH.md`'s
+precedent for `_MAINTENANCE_WINDOWS_BULK_ROW_LIMIT` and this constant's own docstring both accept
+truncation here as a memory/DoS bound with graceful degradation, not a defect. "By design" does not
+mean invisible, though: a port whose newest in-window checks are shed under-reports
+`maintenance_attributed_seconds` for the same structural reason the uptime path over-reported
+`uptime_pct` before the fix.
+
+**Why it is recorded here rather than left as prose.** `06-13-SUMMARY.md` explicitly declined to
+file a discrete entry ("No separate Deferred-section entry was added"), so this finding has survived
+only as prose inside `D-DEBT-06-01` and `06-PROFILE.md` §6 — at risk of being lost when the phase
+closes. `06-VERIFICATION.md` gap 2's own wording agrees the finding is separable from Phase 6 and
+asks only for an ID of its own, not a fix.
+
+**What would need to be true to close this entry.** A decision on whether
+`maintenance_attributed_seconds` tolerates truncation at the current 20,000-row cap at realistic
+production data volumes — the cap is combined across every port requested in one call, not
+per-port, so an install with many services and long retention could reach it even though this
+round's Pi (56,828 `service_checks` rows total, 8 services) and `06-PROFILE.md`'s reference shape
+both sit well under it — and a test asserting `maintenance_attributed_seconds`' actual value under
+a patched-small limit, the same shape `WR-04` (see `D-DEBT-06-12`) already names as missing.
+
+---
+
+### D-DEBT-06-12 — carried-forward `06-REVIEW-ROUND3.md` findings still open
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-REVIEW-ROUND3.md` Medium and Low sections |
+| **Status** | **Deferred — recorded, not fixed.** New this round; consolidates seven findings so they survive the phase. |
+| **Recorded in the plan** | `06-18-PLAN.md` `<artifacts_this_plan_produces>`, `06-REVIEW-ROUND3.md` |
+
+Seven findings from `06-REVIEW-ROUND3.md` remain open. None is fixed by this round; this entry exists
+so none evaporates when the phase closes.
+
+| ID | Severity | File / line | Issue | Disposition |
+|---|---|---|---|---|
+| WR-01 | Medium | `tests/pi_load_acceptance.py:530-538` (prime on insert), `:621-626` (read in tick) | A process discovered mid-run gets two `cpu_percent` calls in the same tick; the second, over a sub-millisecond delta, can read in the thousands of percent and flows into `peak_cpu_percent`. | Open. Handled by avoidance this round, not fixed — see below. |
+| WR-02 | Medium | `tests/pi_load_acceptance.py:832` | `primed_pid_count` reports the last tick's live PID count (post-pruning), not the count actually primed — a plausible-looking wrong number. | Open. Handled by avoidance this round, not fixed — see below. |
+| WR-04 | Medium | `tests/test_services_route_scaling.py:488-543` (`OfflineIntervalsFromPointsTests`), `:352-419` (route bound guard) | No test exercises reconstruction or uptime output from a *truncated* row set — only that a `LIMIT` clause is present, which is exactly how `D-DEBT-06-10`'s regression shipped green. | Open. Directly relevant to closing `D-DEBT-06-11` above. |
+| WR-05 | Medium | `dashboard/app.py:2825`; constant/docstring at `dashboard/beacon/repositories.py:1095-1105` | `app.py` reaches across the module boundary into a private (`_`-prefixed) `beacon_repositories` constant; the constant's docstring is now stale since `06-13` gave it a second consumer with a different failure mode. | Open. |
+| IN-01 | Low | `dashboard/app.py:2822-2833` | The row-limit budget is spent on rows with `ts > now` before the Python-side upper-bound filter is applied, so a future-dated row (clock skew, NTP step) can displace a real in-window row. | Open. |
+| IN-02 | Low | `dashboard/beacon/maintenance.py:223-252` | `_local_occurrence_epochs` is no longer lazy on the `cache=None` path, contrary to its docstring's "preserves the previous unmemoized behavior exactly" claim — the *values* are preserved, the evaluation strategy is not. | Open. No current caller breaks early, so nothing behaves differently today. |
+| IN-03 | Low | `tests/pi_load_acceptance.py:489-497` | Both self-test roles share one `psutil.Process` object; the second role sampled each tick always reads ~0.0 CPU, which the harness's own `cpu_sampling.all_samples_zero` flag would report as a broken measurement in self-test mode specifically. | Open. Pre-existing; only newly visible now that `cpu_sampling` reports it. |
+
+**Two of the seven bore directly on this round and were handled by avoidance, not by fix.** WR-01
+can inflate `peak_cpu_percent` into the thousands of percent when a process is discovered mid-run;
+this round's diagnostic reasoning about CPU (where it appears at all) uses `mean_cpu_percent`
+exclusively and any `peak_cpu_percent` figure this artifact reports is caveated inline, never relied
+on. WR-02 makes `primed_pid_count` report the last tick's live PID count rather than the primed
+count; `06-LOCK-DIAGNOSTIC.md` does not cite that field anywhere as evidence. **Neither defect was
+fixed by this round.** A future round reading `peak_cpu_percent` or `primed_pid_count` from the
+harness must fix the underlying defect first, not merely repeat this round's avoidance.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
