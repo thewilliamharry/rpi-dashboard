@@ -238,6 +238,54 @@ observable consequence. Closing it needs a planning round that does that, not an
 
 ---
 
+### D-DEBT-06-13 — the full suite has become intermittently flaky under load (2 tests, both green in isolation)
+
+| Field | Value |
+|---|---|
+| **Raised by** | Orchestrator, during round 4 wave 11 verification |
+| **Status** | **Deferred — recorded, not fixed.** Does not block round 4. |
+| **Severity** | Low for correctness; **medium for process** — the suite floor is a gate every plan cites |
+
+**What was observed.** Two consecutive full-suite runs at the same commit produced two *different*
+failures, and a third would likely produce another:
+
+| run | result |
+|---|---|
+| 1 | `2 failed, 894 passed, 559 subtests` — `test_worker_ownership_matrix.py::…::test_heartbeat_renewal_to_persistence_handoff_is_fenced` (subtests S2, J1) |
+| 2 | `1 failed, 893 passed, 561 subtests` — `test_services_route_scaling.py::…::test_a_check_count_independent_bucket_does_not_track_the_check_row_ratio` |
+
+**Both pass reliably in isolation** — the ownership test 3/3, the bucket-ratio test 5/5. Neither
+indicates a functional defect; both are assertions about very small measured quantities under
+whole-suite load.
+
+**A hypothesis that was tested and REFUTED, recorded so it is not re-proposed.** The obvious suspect
+was `06-16`'s `TimingCursor`, which adds a Python-level override to every
+`fetchall`/`fetchone`/`fetchmany` even on the disabled path. Measured directly:
+**94 ns/query, 0.1%** (82,231 ns plain vs 82,325 ns via `TimingCursor`, `lockprofile.ENABLED` false,
+3,000 queries). That cannot account for a flaky test. `db.py`'s "zero-overhead-when-disabled"
+claim stands as written; the instrumentation is not the cause.
+
+**The more likely reading.** Both assertions are inherently load-sensitive.
+`test_a_check_count_independent_bucket…` asserts a growth ratio on `maintenance_windows_read`, which
+`06-PROFILE.md` measured at **0.004% share / 0.032ms** — a quantity small enough that scheduler noise
+dominates it. And `D-DEBT-06-05` already records the ownership fencing test as pre-existing flaky, not
+a Phase 6 regression. The suite has grown from 859 to 894 tests across this round, which raises load
+and surfaces latent sensitivity that was always there.
+
+**Why this matters more than its severity suggests.** Every plan in this phase cites the suite floor
+("no fewer than N passed") as an acceptance criterion. A floor that fails intermittently for reasons
+unrelated to the change under test either blocks good work or, worse, trains a reader to wave failures
+through — which is precisely how `06-13`'s truncation defect survived a green suite. A gate that cries
+wolf is a gate that stops being read.
+
+**What would need to be true to close this entry.** Either the two assertions are rewritten to bound
+quantities large enough to be stable under load (or marked as measurement-sensitive and excluded from
+the floor), or the floor criterion is restated as "no NEW failures outside the known-flaky set", with
+that set named. Round 4's remaining plans should not adopt the current floor wording unchanged without
+noticing this.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
