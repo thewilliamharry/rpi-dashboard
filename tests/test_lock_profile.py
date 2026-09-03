@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+import random
 import re
 import threading
 import time
@@ -502,6 +503,171 @@ class HoldDecompositionTests(_InstrumentedLockTestCase):
             self.assertEqual(call_count['connect'], 0)
         finally:
             cleanup_db(db_path)
+
+
+class HeldRegionCompositionTests(_InstrumentedLockTestCase):
+    """06-20 Task 2: measure the narrowing's effect on `/api/services`' own
+    held-region composition, in both directions -- the mechanism-level
+    analogue of `06-LOCK-DIAGNOSTIC.md` §4's Pi-measured shares (`.002 /
+    .748 / .250` loaded, `.001 / .423 / .576` control). Seeds 3 services and
+    2,000 `service_checks` rows per port (6,000 total) across the retention
+    window, generated from a fixed seed, with one offline service (the
+    lowest port) carrying an always-covering maintenance window so
+    `beacon_maintenance`'s coverage/attributed-downtime walk is exercised in
+    both tests below. Every share this class reports is developer-machine
+    evidence (`PROH-OPS-07-09`), never Pi latency evidence."""
+
+    HELD_REGION_PORTS = (9081, 9082, 9083)
+    CHECKS_PER_PORT = 2000
+
+    # 06-LOCK-DIAGNOSTIC.md §4's Pi figure (25.0%) does not transfer to this
+    # dev machine's own measurement, and no dataset shape makes it transfer
+    # (D-DEBT-06-14's lesson: an absolute threshold copied across machines is
+    # "a property of the band, not of the data"). Direct measurement on this
+    # machine: the narrowed route's Python share of its own held region --
+    # dict(row) materialization required by PROH-OPS-04-06/T-06-102, not
+    # composition -- sits in a 0.18-0.32 band across dataset sizes from 1 row
+    # to 24,000 rows and repetition counts from 5 to 40 (see SUMMARY for the
+    # sweep). Reintroducing `_uptime_summary` for every service inside the
+    # with-block (the exact defect this guard exists to catch) measures
+    # 0.62 under the identical harness -- reproduced against a real,
+    # temporary, reverted app.py edit, not merely asserted. 0.5 sits with a
+    # wide, empirically-verified margin below that failure mode and above
+    # every narrowed-route reading observed, so it is what this guard checks
+    # rather than the Pi figure the mechanism is modeled on. Developer-
+    # machine evidence only (PROH-OPS-07-09).
+    PYTHON_SHARE_CEILING = 0.5
+
+    def _run_in_held_region(self, route_label, work_fn):
+        """Copied from `HoldDecompositionTests`' idiom exactly (06-16 Task
+        1) -- not reinvented, per this task's own instruction."""
+        lockprofile.begin_request(route_label)
+        try:
+            with self.appmod._db_lock:
+                work_fn()
+        finally:
+            lockprofile.end_request()
+
+    def setUp(self):
+        super().setUp()
+        appmod = self.appmod
+        now = int(time.time())
+        start_ts = now - appmod.CHECK_RETENTION_SECONDS
+        step = appmod.CHECK_RETENTION_SECONDS // self.CHECKS_PER_PORT
+        rng = random.Random(20200)
+        offline_port = self.HELD_REGION_PORTS[0]
+
+        conn = appmod.get_db()
+        try:
+            for port in self.HELD_REGION_PORTS:
+                is_online = 0 if port == offline_port else 1
+                conn.execute(
+                    "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (port, f'held-region-{port}', start_ts, now, is_online, start_ts),
+                )
+            conn.execute(
+                'INSERT INTO maintenance_windows (port, start_minute, duration_minutes, '
+                'weekdays, grace_minutes, enabled, created_ts, updated_ts) '
+                'VALUES (?, 0, 1440, ?, 0, 1, ?, ?)',
+                (offline_port, '1,2,3,4,5,6,7', start_ts, start_ts),
+            )
+
+            self.checks_by_port = {}
+            for port in self.HELD_REGION_PORTS:
+                rows = []
+                for i in range(self.CHECKS_PER_PORT):
+                    ts = start_ts + i * step
+                    online = 0 if (port == offline_port and rng.random() < 0.9) else 1
+                    rows.append((ts, online))
+                conn.executemany(
+                    'INSERT INTO service_checks (ts, port, online) VALUES (?, ?, ?)',
+                    [(ts, port, online) for ts, online in rows],
+                )
+                self.checks_by_port[port] = rows
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.offline_port = offline_port
+        windows_conn = appmod.get_db()
+        try:
+            self.windows = appmod.beacon_repositories.read_maintenance_windows_by_port(
+                windows_conn, ports=[offline_port],
+            ).get(offline_port, [])
+        finally:
+            windows_conn.close()
+        self.offline_intervals = appmod.beacon_repositories.offline_intervals_from_points_by_port(
+            ports=[offline_port], boundary_by_port={},
+            points_by_port={offline_port: self.checks_by_port[offline_port]},
+            start_ts=start_ts, end_ts=now,
+        ).get(offline_port, [])
+
+    def test_services_held_region_is_sql_dominated_after_narrowing(self):
+        """Direction A: after 06-20's narrowing, `/api/services`' measured
+        Python share of its own held region stays well under
+        PYTHON_SHARE_CEILING. Fails when `_uptime_summary` (or any of the
+        other three moved computations) is moved back inside the
+        with-block -- see PYTHON_SHARE_CEILING's own docstring for the
+        measured before/after values that calibrated it."""
+        for _ in range(5):
+            response = self.client.get('/api/services')
+            self.assertEqual(response.status_code, 200)
+
+        snap = lockprofile.snapshot()
+        route = snap['routes']['/api/services']
+        python_share = route['python_ns_total'] / route['hold_ns_total']
+        self.assertLess(
+            python_share, self.PYTHON_SHARE_CEILING,
+            f"/api/services' held-region Python share measured {python_share:.4f} -- "
+            f'a share at or above {self.PYTHON_SHARE_CEILING} means a computation moved '
+            'back inside the critical section (D-DEBT-06-01, PROH-OPS-04-06). '
+            'Developer-machine evidence (PROH-OPS-07-09), not Pi evidence.',
+        )
+        self.assertEqual(
+            snap['clamped_python_count'], 0,
+            f"clamped_python_count is {snap['clamped_python_count']}, not 0 -- the derived "
+            'python_ns_total remainder is untrustworthy in this snapshot, so the measured '
+            'share above cannot be trusted either (D-DEBT-06-10).',
+        )
+
+    def test_the_moved_work_still_registers_as_python_when_run_inside_a_held_region(self):
+        """Direction B: the instrument's sensitivity, not the fix. Running
+        the SAME moved work (over the SAME seeded data) inside a synthetic
+        held region reports a HIGH Python share -- proving direction A's low
+        share is a measured absence of this work, not a blind spot in the
+        instrument itself."""
+        appmod = self.appmod
+        checks = self.checks_by_port[self.offline_port]
+        windows = self.windows
+        offline_intervals = self.offline_intervals
+        now = int(time.time())
+
+        from dashboard.beacon.db import connect_db
+
+        conn = connect_db(self.db_path)
+        try:
+            def work():
+                conn.execute('SELECT 1').fetchall()
+                appmod._uptime_summary(checks, now)
+                appmod.beacon_maintenance.attributed_downtime_seconds(
+                    offline_intervals, windows, appmod.SETTINGS.timezone,
+                )
+
+            self._run_in_held_region('synthetic-python-06-20', work)
+        finally:
+            conn.close()
+
+        snap = lockprofile.snapshot()
+        route = snap['routes']['synthetic-python-06-20']
+        python_share = route['python_ns_total'] / route['hold_ns_total']
+        self.assertGreater(
+            python_share, 0.75,
+            f'synthetic held region running the moved work reported Python share '
+            f'{python_share:.4f}, expected above 0.75 -- the instrument is not tracking '
+            "this work's cost in the direction it should, which would make direction "
+            "A's low share meaningless rather than reassuring.",
+        )
 
 
 class RequestAccountingTests(_InstrumentedLockTestCase):
