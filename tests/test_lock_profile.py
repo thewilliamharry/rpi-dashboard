@@ -15,14 +15,21 @@ per-acquisition nanosecond cost instead of an absolute millisecond threshold
 """
 
 import ast
+import contextlib
 import json
+import math
+import os
 import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import requests
+
+import tests.pi_load_acceptance as harness
 from dashboard.beacon import lockprofile
+from dashboard.beacon import repositories as beacon_repositories
 from tests.helpers import cleanup_db, load_app
 
 
@@ -1449,3 +1456,629 @@ class LockScopePreservationTests(unittest.TestCase):
             "_db_lock's SCOPE changed: api_services no longer ends with a single "
             'terminal return statement after its with-block. See D-DEBT-06-01.',
         )
+
+
+# ---------------------------------------------------------------------------
+# 06-17: coverage for tests/pi_load_acceptance.py's lock-profile collection,
+# verdict, and rehearsal. Every millisecond/nanosecond figure these tests
+# print is developer-machine evidence, never Pi evidence (PROH-OPS-07-09).
+# ---------------------------------------------------------------------------
+
+_HISTOGRAM_LENGTH = len(lockprofile.WAIT_HISTOGRAM_EDGES_NS) + 1
+
+
+def _bucket(index, count, length=_HISTOGRAM_LENGTH):
+    """A histogram list of `length` zeroed buckets with `count` at `index`."""
+    histogram = [0] * length
+    histogram[index] = count
+    return histogram
+
+
+def _stub_route_stats(**overrides):
+    base = {
+        'acquisitions': 0, 'wait_ns_total': 0, 'hold_ns_total': 0, 'wait_ns_max': 0,
+        'hold_ns_max': 0, 'connect_ns_total': 0, 'lease_ns_total': 0,
+        'sql_execute_ns_total': 0, 'sql_fetch_ns_total': 0, 'python_ns_total': 0,
+        'wait_histogram': [0] * _HISTOGRAM_LENGTH, 'hold_histogram': [0] * _HISTOGRAM_LENGTH,
+    }
+    base.update(overrides)
+    return base
+
+
+def _stub_request_stats(**overrides):
+    base = {
+        'requests': 0, 'wall_ns_total': 0, 'cpu_ns_total': 0, 'lock_wait_ns_total': 0,
+        'other_off_cpu_ns_total': 0, 'wall_ns_max': 0, 'cpu_ns_max': 0,
+        'wall_histogram': [0] * _HISTOGRAM_LENGTH, 'cpu_histogram': [0] * _HISTOGRAM_LENGTH,
+    }
+    base.update(overrides)
+    return base
+
+
+def _stub_snapshot(
+    *, captured_monotonic_ns, routes=None, lock=None, requests=None, requests_total=None,
+    route_overflow=False, request_route_overflow=False, sql_outside_lock_ns=0,
+    clamped_python_count=0, clamped_off_cpu_count=0,
+    schema_version=harness.LOCK_PROFILE_SCHEMA_VERSION,
+):
+    """A literal, JSON-shaped stand-in for `lockprofile.snapshot()`'s return
+    value, so `diff_lock_profile`/`summarize_lock_profile` tests are
+    deterministic and reviewable rather than depending on real timing."""
+    return {
+        'captured_monotonic_ns': captured_monotonic_ns,
+        'captured_epoch': 0.0,
+        'schema_version': schema_version,
+        'enabled': True,
+        'routes': routes or {},
+        'lock': lock or _stub_route_stats(),
+        'route_overflow': route_overflow,
+        'requests': requests or {},
+        'requests_total': requests_total or _stub_request_stats(),
+        'request_route_overflow': request_route_overflow,
+        'sql_outside_lock_ns': sql_outside_lock_ns,
+        'clamped_python_count': clamped_python_count,
+        'clamped_off_cpu_count': clamped_off_cpu_count,
+    }
+
+
+@contextlib.contextmanager
+def _live_beacon_server(*, enable_lock_profile, service_url=None):
+    """Start a real Flask app on a real werkzeug server -- the same idiom
+    `pi_load_acceptance.run_self_test` uses -- so these tests drive
+    `fetch_lock_profile` over real HTTP rather than through the Flask test
+    client, and can point `pi_load_acceptance.run_acceptance` at a real
+    `--base-url`.
+
+    `ENABLE_LOCK_PROFILE` is set in the environment BEFORE `load_app`'s
+    `importlib.reload` (via `extra_env`), the same way it will be set on the
+    Pi, rather than by patching the module's attributes after import
+    (mirrors `HarnessRehearsalTests`' own rehearsal, and 06-15/06-16's
+    `_InstrumentedLockTestCase` idiom for the parts that DO need to patch
+    after import).
+    """
+    from werkzeug.serving import make_server
+
+    appmod, db_path = load_app(
+        extra_env={'ENABLE_LOCK_PROFILE': '1' if enable_lock_profile else '0'},
+    )
+    if enable_lock_profile:
+        lockprofile.COLLECTOR.reset()
+
+    now = int(time.time())
+    with appmod._db_lock:
+        conn = appmod.get_db()
+        conn.execute(
+            "INSERT INTO services (port, title, first_seen, last_seen, is_online, "
+            "last_latency_ms, last_error) VALUES (?,?,?,?,?,?,?)",
+            (9950, 'Lock-profile harness fixture', now - 120, now, 1, 12.0, None),
+        )
+        if service_url is not None:
+            conn.execute(
+                'INSERT INTO service_meta (port, display_name, url) VALUES (?,?,?)',
+                (9950, 'Lock-profile harness fixture', service_url),
+            )
+        for job_id in harness.ESSENTIAL_JOB_IDS:
+            beacon_repositories.record_background_job_succeeded(conn, job_id, now=now)
+        conn.commit()
+        conn.close()
+
+    server = make_server('127.0.0.1', 0, appmod.app, threaded=True)
+    server_port = server.server_address[1]
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        yield appmod, db_path, f'http://127.0.0.1:{server_port}'
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=5)
+        if enable_lock_profile:
+            lockprofile.ENABLED = False
+            lockprofile.COLLECTOR.reset()
+        cleanup_db(db_path)
+
+
+class LockProfileCollectionTests(unittest.TestCase):
+    """06-17 Task 1: the harness collects the lock-profile snapshot pair
+    around exactly its own load window, and requesting that measurement can
+    never move the run's verdict (PROH-OPS-07-12, T-06-86)."""
+
+    def test_reachable_collection_produces_a_populated_block(self):
+        with _live_beacon_server(enable_lock_profile=True) as (appmod, db_path, base_url):
+            scenario = harness.LoadScenario(
+                duration_seconds=2, base_url=base_url, db_path=db_path, concurrency=2,
+                self_test=True, collect_lock_profile=True,
+            )
+            report = harness.run_acceptance(scenario)
+
+        lock_profile = report.lock_profile
+        self.assertTrue(lock_profile['collected'])
+        self.assertTrue(lock_profile['instrumented'])
+        expected_window_ns = scenario.duration_seconds * 1_000_000_000
+        self.assertLess(
+            abs(lock_profile['window_ns'] - expected_window_ns), 0.25 * expected_window_ns,
+            f"window_ns {lock_profile['window_ns']} not within 25% of {expected_window_ns}",
+        )
+        for label in ('/api/services', '/api/scan-status'):
+            self.assertIn(label, lock_profile['routes'], f'{label} missing from lock_profile routes')
+            self.assertGreater(lock_profile['routes'][label]['acquisitions'], 0)
+
+    def test_deterministic_arm_the_collection_block_never_moves_the_verdict(self):
+        """T-06-86, the arm that actually proves PROH-OPS-07-12: within ONE
+        run, with lock-profile collection failing (the diagnostic endpoint
+        disabled) and a deliberately non-empty `failure_reasons` (an
+        unopenable `--db` path), `overall_passed`/`failure_reasons`
+        captured immediately before the collection block are identical to
+        the same two values captured immediately after it.
+
+        Comparing two empty lists would prove nothing -- and here BOTH
+        captures ARE empty, because `run_acceptance`'s database-oracle read
+        (the one that appends the seeded failure) executes AFTER both
+        capture points, not before. This is the orchestrator's correction
+        after plan-check revision 1: without an additional assertion, this
+        arm silently degenerates into exactly the vacuous comparison it was
+        written to avoid. So this test ALSO asserts the run's FINAL
+        `failure_reasons` is non-empty, proving the seeded oracle failure
+        genuinely occurred and this was a realistic failing run.
+        """
+        captures = []
+
+        def observer(failure_reasons, overall_passed):
+            captures.append((failure_reasons, overall_passed))
+
+        with _live_beacon_server(enable_lock_profile=False) as (appmod, db_path, base_url):
+            unopenable_db_path = os.path.join(db_path, 'does-not-exist', 'dashboard.db')
+            scenario = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=unopenable_db_path, concurrency=2,
+                self_test=True, collect_lock_profile=True, observer=observer,
+            )
+            report = harness.run_acceptance(scenario)
+
+        self.assertEqual(len(captures), 2, 'observer must fire exactly once before and once after')
+        self.assertEqual(
+            captures[0], captures[1],
+            'overall_passed/failure_reasons moved across the lock-profile collection block',
+        )
+        self.assertTrue(
+            report.failure_reasons,
+            'the seeded failing oracle produced no failure_reasons -- this run was vacuous, not '
+            "a genuine failing run (see this test's own docstring).",
+        )
+        self.assertFalse(report.overall_passed)
+        self.assertFalse(report.lock_profile['collected'])
+
+    def test_structural_arm_lock_profile_never_feeds_the_verdict(self):
+        """T-06-86, structural half: no expression contributing to
+        `report.overall_passed` or `report.failure_reasons` anywhere in
+        `tests/pi_load_acceptance.py` references `lock_profile` -- proven
+        by `ast`, not by two runs happening to agree."""
+        source = Path('tests/pi_load_acceptance.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+
+        def references_lock_profile(node):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and 'lock_profile' in sub.id:
+                    return True
+                if isinstance(sub, ast.Attribute) and 'lock_profile' in sub.attr:
+                    return True
+            return False
+
+        offending = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute) and target.attr == 'overall_passed':
+                        if references_lock_profile(node.value):
+                            offending.append(('overall_passed assignment', node.lineno))
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute) and func.attr in ('append', 'extend')
+                    and isinstance(func.value, ast.Attribute) and func.value.attr == 'failure_reasons'
+                ):
+                    if any(references_lock_profile(arg) for arg in node.args):
+                        offending.append(('failure_reasons mutation', node.lineno))
+
+        self.assertEqual(
+            offending, [],
+            f'lock_profile leaked into a verdict-affecting expression: {offending} (PROH-OPS-07-12).',
+        )
+
+    def test_disabled_endpoint_matches_the_same_run_without_collection(self):
+        """Cross-check, smoke-level (not the primary T-06-86 evidence --
+        see the deterministic and structural arms above): two separate live
+        runs against a profile-disabled server produce the same verdict
+        whether or not collection is requested, and the requested run's
+        `lock_profile` names the 404."""
+        with _live_beacon_server(enable_lock_profile=False) as (appmod, db_path, base_url):
+            scenario_without = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+            )
+            report_without = harness.run_acceptance(scenario_without)
+
+            scenario_with = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+                collect_lock_profile=True,
+            )
+            report_with = harness.run_acceptance(scenario_with)
+
+        self.assertEqual(report_with.overall_passed, report_without.overall_passed)
+        self.assertEqual(report_with.failure_reasons, report_without.failure_reasons)
+        self.assertFalse(report_with.lock_profile['collected'])
+        self.assertIn('404', report_with.lock_profile['reason'])
+
+    def test_schema_mismatch_matches_the_same_run_without_collection(self):
+        """Same cross-check, forcing a schema_version this harness does not
+        understand by patching the constant it checks against -- the real
+        endpoint's own snapshot is untouched, so this exercises the real
+        HTTP round trip with only the harness's expectation changed."""
+        with _live_beacon_server(enable_lock_profile=True) as (appmod, db_path, base_url):
+            scenario_without = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+            )
+            report_without = harness.run_acceptance(scenario_without)
+
+            scenario_with = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+                collect_lock_profile=True,
+            )
+            with mock.patch.object(harness, 'LOCK_PROFILE_SCHEMA_VERSION', 999):
+                report_with = harness.run_acceptance(scenario_with)
+
+        self.assertEqual(report_with.overall_passed, report_without.overall_passed)
+        self.assertEqual(report_with.failure_reasons, report_without.failure_reasons)
+        self.assertFalse(report_with.lock_profile['collected'])
+        self.assertIn('schema_version', report_with.lock_profile['reason'])
+
+    def test_timeout_matches_the_same_run_without_collection(self):
+        with _live_beacon_server(enable_lock_profile=True) as (appmod, db_path, base_url):
+            scenario_without = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+            )
+            report_without = harness.run_acceptance(scenario_without)
+
+            scenario_with = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2, self_test=True,
+                collect_lock_profile=True,
+            )
+            with mock.patch.object(
+                harness, 'fetch_lock_profile',
+                side_effect=requests.exceptions.Timeout('lock-profile fetch timed out'),
+            ):
+                report_with = harness.run_acceptance(scenario_with)
+
+        self.assertEqual(report_with.overall_passed, report_without.overall_passed)
+        self.assertEqual(report_with.failure_reasons, report_without.failure_reasons)
+        self.assertFalse(report_with.lock_profile['collected'])
+
+    def test_no_collection_requested_makes_zero_requests_and_reports_empty(self):
+        with _live_beacon_server(enable_lock_profile=True) as (appmod, db_path, base_url):
+            scenario = harness.LoadScenario(
+                duration_seconds=1, base_url=base_url, db_path=db_path, concurrency=2,
+                self_test=True, collect_lock_profile=False,
+            )
+            with mock.patch.object(harness, 'fetch_lock_profile') as mock_fetch:
+                report = harness.run_acceptance(scenario)
+
+        mock_fetch.assert_not_called()
+        self.assertEqual(report.lock_profile, {})
+
+    # -- Pure-function unit coverage over literal synthetic snapshots -----
+
+    def test_diff_lock_profile_reproduces_exact_arithmetic_difference(self):
+        before = _stub_snapshot(
+            captured_monotonic_ns=1_000_000_000,
+            routes={'/api/services': _stub_route_stats(
+                acquisitions=10, wait_ns_total=1_000, hold_ns_total=2_000,
+                wait_histogram=_bucket(0, 1), hold_histogram=_bucket(0, 2),
+            )},
+            lock=_stub_route_stats(
+                acquisitions=10, wait_ns_total=1_000, hold_ns_total=2_000,
+                wait_histogram=_bucket(0, 1), hold_histogram=_bucket(0, 2),
+            ),
+            requests={'/api/services': _stub_request_stats(requests=10, wall_ns_total=5_000)},
+            requests_total=_stub_request_stats(requests=10, wall_ns_total=5_000),
+            sql_outside_lock_ns=500, clamped_python_count=1, clamped_off_cpu_count=2,
+        )
+        after = _stub_snapshot(
+            captured_monotonic_ns=6_000_000_000,
+            routes={'/api/services': _stub_route_stats(
+                acquisitions=25, wait_ns_total=4_000, hold_ns_total=9_000,
+                wait_histogram=_bucket(0, 4), hold_histogram=_bucket(0, 9),
+            )},
+            lock=_stub_route_stats(
+                acquisitions=25, wait_ns_total=4_000, hold_ns_total=9_000,
+                wait_histogram=_bucket(0, 4), hold_histogram=_bucket(0, 9),
+            ),
+            requests={'/api/services': _stub_request_stats(requests=25, wall_ns_total=13_000)},
+            requests_total=_stub_request_stats(requests=25, wall_ns_total=13_000),
+            sql_outside_lock_ns=900, clamped_python_count=3, clamped_off_cpu_count=5,
+        )
+
+        diff = harness.diff_lock_profile(before, after)
+
+        self.assertEqual(diff['window_ns'], 5_000_000_000)
+        self.assertEqual(diff['routes']['/api/services']['acquisitions'], 15)
+        self.assertEqual(diff['routes']['/api/services']['wait_ns_total'], 3_000)
+        self.assertEqual(diff['routes']['/api/services']['hold_ns_total'], 7_000)
+        self.assertEqual(diff['routes']['/api/services']['wait_histogram'][0], 3)
+        self.assertEqual(diff['routes']['/api/services']['hold_histogram'][0], 7)
+        self.assertEqual(diff['lock']['acquisitions'], 15)
+        self.assertEqual(diff['requests']['/api/services']['requests'], 15)
+        self.assertEqual(diff['requests_total']['wall_ns_total'], 8_000)
+        self.assertEqual(diff['sql_outside_lock_ns'], 400)
+        self.assertEqual(diff['clamped_python_count'], 2)
+        self.assertEqual(diff['clamped_off_cpu_count'], 3)
+
+    def test_diff_lock_profile_raises_a_named_error_when_counters_go_backwards(self):
+        before = _stub_snapshot(
+            captured_monotonic_ns=1_000_000_000,
+            routes={'/api/services': _stub_route_stats(acquisitions=20)},
+        )
+        after = _stub_snapshot(
+            captured_monotonic_ns=2_000_000_000,
+            routes={'/api/services': _stub_route_stats(acquisitions=5)},
+        )
+        with self.assertRaises(harness.LockProfileCounterWentBackwardsError):
+            harness.diff_lock_profile(before, after)
+
+    def test_percentile_from_histogram_brackets_a_known_distribution(self):
+        edges = (10, 20, 30, 40, 50)
+        counts = [0, 0, 100, 0, 0, 0]  # every observation lands in bucket (20, 30]
+        self.assertEqual(harness.percentile_from_histogram(counts, edges, 50), (20, 30))
+
+    def test_percentile_from_histogram_overflow_bucket_has_an_infinite_upper_bound(self):
+        edges = (10, 20, 30, 40, 50)
+        counts = [0, 0, 0, 0, 0, 100]  # every observation past the last edge
+        lower, upper = harness.percentile_from_histogram(counts, edges, 50)
+        self.assertEqual(lower, 50)
+        self.assertEqual(upper, math.inf)
+
+    def test_percentile_from_histogram_empty_returns_zero_zero(self):
+        edges = (10, 20, 30, 40, 50)
+        self.assertEqual(harness.percentile_from_histogram([0] * 6, edges, 50), (0, 0))
+
+    def test_utilisation_matches_a_known_held_fraction(self):
+        window_ns = 10_000_000_000
+        hold_ns = 3_000_000_000  # exactly 30% of the window
+        before = _stub_snapshot(captured_monotonic_ns=0, lock=_stub_route_stats(hold_ns_total=0))
+        after = _stub_snapshot(
+            captured_monotonic_ns=window_ns, lock=_stub_route_stats(hold_ns_total=hold_ns),
+        )
+        summary = harness.summarize_lock_profile(before, after)
+        self.assertAlmostEqual(summary['utilisation'], 0.3, places=9)
+
+
+def _confirmed_world():
+    """The world in which the `_db_lock` attribution holds: `/api/scan-status`
+    holds briefly and waits behind a full `/api/services` critical section;
+    `/api/services`' hold sits in the predicted band; utilisation is high."""
+    return {
+        'utilisation': 0.9,
+        'route_overflow': False,
+        'request_route_overflow': False,
+        'routes': {
+            '/api/services': {'acquisitions': 500, 'hold_ns_total': 500 * 300_000_000},
+            '/api/scan-status': {
+                'acquisitions': 500,
+                'hold_ns_total': 500 * 1_000_000,
+                'wait_ns_total': 500 * 200_000_000,
+            },
+        },
+        'requests': {
+            '/api/scan-status': {
+                'requests': 500,
+                'wall_ns_total': 500 * 240_000_000,
+                'lock_wait_ns_total': 500 * 200_000_000,
+            },
+        },
+    }
+
+
+def _refuted_world():
+    """The world in which the attribution does NOT hold, built from
+    06-ACCEPTANCE-ROUND3.md's OWN hardware figures (/api/scan-status
+    acceptance p50 242.614ms) with the lock-wait component set to a
+    negligible share -- the concrete counterfactual `evaluate_lock_attribution`
+    must be able to detect. This is the test the round exists for."""
+    return {
+        'utilisation': 0.9,
+        'route_overflow': False,
+        'request_route_overflow': False,
+        'routes': {
+            '/api/services': {'acquisitions': 500, 'hold_ns_total': 500 * 300_000_000},
+            '/api/scan-status': {
+                'acquisitions': 500,
+                'hold_ns_total': 500 * 500_000,
+                'wait_ns_total': 500 * 1_000_000,
+            },
+        },
+        'requests': {
+            '/api/scan-status': {
+                'requests': 500,
+                # 242.614ms median wall time, matching 06-ACCEPTANCE-ROUND3.md's
+                # acceptance-pass p50 for /api/scan-status.
+                'wall_ns_total': 500 * 242_614_000,
+                # Negligible lock-wait share of that wall time (~0.4%): the
+                # slowdown is real but _db_lock provably is not why.
+                'lock_wait_ns_total': 500 * 1_000_000,
+            },
+        },
+    }
+
+
+def _inconclusive_world_too_few_acquisitions():
+    """Too few acquisitions to read a median -- a missing measurement must
+    never read as REFUTED."""
+    return {
+        'utilisation': 0.9,
+        'route_overflow': False,
+        'request_route_overflow': False,
+        'routes': {
+            '/api/services': {'acquisitions': 5, 'hold_ns_total': 5 * 300_000_000},
+            '/api/scan-status': {
+                'acquisitions': 5, 'hold_ns_total': 5 * 1_000_000, 'wait_ns_total': 5 * 200_000_000,
+            },
+        },
+        'requests': {
+            '/api/scan-status': {
+                'requests': 5, 'wall_ns_total': 5 * 240_000_000, 'lock_wait_ns_total': 5 * 200_000_000,
+            },
+        },
+    }
+
+
+class LockAttributionVerdictTests(unittest.TestCase):
+    """06-17 Task 2: `evaluate_lock_attribution` reaches all three verdicts,
+    proven by driving it there from literal, reviewable synthetic summaries
+    built from the hardware run's own figures."""
+
+    def test_attribution_holds_world_yields_confirmed(self):
+        result = harness.evaluate_lock_attribution(_confirmed_world())
+        self.assertEqual(result['verdict'], 'CONFIRMED')
+        self.assertTrue(result['checks'])
+        for check in result['checks']:
+            self.assertTrue(check['held'], check)
+            self.assertIn('measured', check)
+
+    def test_attribution_fails_world_yields_refuted(self):
+        """The test the round exists for: if this cannot be made to pass,
+        the verdict logic cannot refute and the diagnostic is worthless."""
+        result = harness.evaluate_lock_attribution(_refuted_world())
+        self.assertEqual(result['verdict'], 'REFUTED')
+        self.assertIn('lock-wait share', result['reason'])
+        self.assertTrue(any(not check['held'] for check in result['checks']))
+
+    def test_under_determined_world_yields_inconclusive_never_refuted(self):
+        result = harness.evaluate_lock_attribution(_inconclusive_world_too_few_acquisitions())
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertIn('too few acquisitions', result['reason'])
+
+    def test_route_overflow_yields_inconclusive(self):
+        world = _confirmed_world()
+        world['route_overflow'] = True
+        result = harness.evaluate_lock_attribution(world)
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+
+    def test_collected_false_yields_inconclusive(self):
+        result = harness.evaluate_lock_attribution({'collected': False})
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+
+    def test_missing_route_yields_inconclusive(self):
+        world = _confirmed_world()
+        del world['routes']['/api/scan-status']
+        result = harness.evaluate_lock_attribution(world)
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+
+    def test_predictions_match_the_verification_reports_own_stated_figures(self):
+        """06-VERIFICATION.md Truth 5's `missing:` items state these two
+        figures literally: "~200-500ms hold" for /api/services, and the
+        "~0.85" utilisation threshold. A later edit that quietly loosens
+        either fails this test (T-06-89)."""
+        predictions = harness.LOCK_ATTRIBUTION_PREDICTIONS
+        self.assertEqual(predictions['services_min_median_hold_ns'], 200_000_000)
+        self.assertEqual(predictions['services_max_median_hold_ns'], 500_000_000)
+        self.assertEqual(predictions['utilisation_superlinear_threshold'], 0.85)
+
+    def test_evaluate_lock_attribution_is_pure_and_deterministic(self):
+        world = _confirmed_world()
+        result1 = harness.evaluate_lock_attribution(world)
+        result2 = harness.evaluate_lock_attribution(world)
+        self.assertEqual(result1, result2)
+
+
+class HarnessRehearsalTests(unittest.TestCase):
+    """06-17 Task 3: rehearses the operator's exact `--lock-profile` command
+    path end to end on the developer machine, through `run_self_test` --
+    never a substitute for Pi evidence (PROH-OPS-07-09, PROH-OPS-07-11)."""
+
+    def setUp(self):
+        self._original_enable = os.environ.get('ENABLE_LOCK_PROFILE')
+
+    def tearDown(self):
+        if self._original_enable is None:
+            os.environ.pop('ENABLE_LOCK_PROFILE', None)
+        else:
+            os.environ['ENABLE_LOCK_PROFILE'] = self._original_enable
+        lockprofile.ENABLED = False
+        lockprofile.COLLECTOR.reset()
+
+    def test_profile_enabled_self_test_returns_a_populated_diagnostic_block(self):
+        os.environ['ENABLE_LOCK_PROFILE'] = '1'
+        report = harness.run_self_test(collect_lock_profile=True)
+
+        self.assertEqual(report.run_kind, 'smoke')
+        self.assertTrue(report.lock_profile['collected'])
+        self.assertTrue(report.lock_profile['instrumented'])
+        self.assertIn(
+            report.lock_profile['attribution']['verdict'], {'CONFIRMED', 'REFUTED', 'INCONCLUSIVE'},
+        )
+
+    def test_profile_disabled_self_test_matches_the_enabled_runs_overall_passed(self):
+        os.environ['ENABLE_LOCK_PROFILE'] = '1'
+        enabled_report = harness.run_self_test(collect_lock_profile=True)
+        disabled_report = harness.run_self_test(collect_lock_profile=False)
+
+        self.assertEqual(enabled_report.overall_passed, disabled_report.overall_passed)
+        self.assertEqual(disabled_report.lock_profile, {})
+
+    def test_report_round_trips_through_to_json_and_json_loads(self):
+        os.environ['ENABLE_LOCK_PROFILE'] = '1'
+        report = harness.run_self_test(collect_lock_profile=True)
+
+        round_tripped = json.loads(report.to_json())
+        self.assertTrue(round_tripped['lock_profile']['collected'])
+        self.assertIn(
+            round_tripped['lock_profile']['attribution']['verdict'],
+            {'CONFIRMED', 'REFUTED', 'INCONCLUSIVE'},
+        )
+
+    def test_no_operator_data_leaks_into_the_serialized_report(self):
+        """T-06-29, extended to the new block: a distinctive seeded service
+        URL, constructed here (never written into a source comment, so the
+        assertion cannot be satisfied or defeated by unrelated text), must
+        not appear anywhere in the serialized report."""
+        distinctive = 'https://lockprofile-t06-29-sentinel-' + str(id(self)) + '.example.invalid/meta'
+        os.environ['ENABLE_LOCK_PROFILE'] = '1'
+
+        from werkzeug.serving import make_server
+
+        appmod, db_path = load_app()
+        now = int(time.time())
+        port = 8080
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            conn.execute(
+                "INSERT INTO services (port, title, first_seen, last_seen, is_online, "
+                "last_latency_ms, last_error) VALUES (?,?,?,?,?,?,?)",
+                (port, 'Self-test smoke service', now - 120, now, 1, 12.0, None),
+            )
+            conn.execute(
+                'INSERT INTO service_meta (port, display_name, url) VALUES (?,?,?)',
+                (port, 'Self-test smoke service', distinctive),
+            )
+            for job_id in harness.ESSENTIAL_JOB_IDS:
+                beacon_repositories.record_background_job_succeeded(conn, job_id, now=now)
+            conn.commit()
+            conn.close()
+
+        server = make_server('127.0.0.1', 0, appmod.app, threaded=True)
+        server_port = server.server_address[1]
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            scenario = harness.LoadScenario(
+                duration_seconds=harness.SELF_TEST_DURATION_SECONDS,
+                base_url=f'http://127.0.0.1:{server_port}',
+                db_path=db_path,
+                concurrency=harness.SELF_TEST_CONCURRENCY,
+                self_test=True,
+                collect_lock_profile=True,
+            )
+            report = harness.run_acceptance(scenario)
+        finally:
+            server.shutdown()
+            server_thread.join(timeout=5)
+            cleanup_db(db_path)
+
+        serialized = report.to_json()
+        self.assertNotIn(distinctive, serialized)
