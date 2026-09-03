@@ -94,8 +94,57 @@ question — this entry documents the promotion *rule*, not a pending promotion.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-14-PLAN.md` Task 1's real hardware run, `06-ACCEPTANCE-ROUND3.md` |
-| **Status** | **Deferred — awaiting a diagnostic round, chosen by the user over a third inferred fix.** New this round. |
-| **Recorded in the plan** | `06-ACCEPTANCE-ROUND3.md`, `beacon-acceptance-round3.json` |
+| **Status** | **Measured 2026-09-03 — verdict INCONCLUSIVE, not CONFIRMED. The user chose `fix-now` against that measurement; the narrowing itself lands in a follow-up plan (06-19+), not here.** See "MEASURED — round 4 hardware diagnostic" below. |
+| **Recorded in the plan** | `06-ACCEPTANCE-ROUND3.md`, `beacon-acceptance-round3.json`, `06-18-PLAN.md`, `06-LOCK-DIAGNOSTIC.md` |
+
+**MEASURED — round 4 hardware diagnostic (2026-09-03).** `06-18-PLAN.md` Task 1 ran two instrumented
+passes on real Raspberry Pi hardware (`d9cecb8`, concurrency-1 control + concurrency-8/600s
+acceptance-shaped) and Task 2 wrote `06-LOCK-DIAGNOSTIC.md` from the two attached JSON reports. This
+replaces the "not yet attributed" framing below with a measured verdict; a later reader should read
+this section first, not re-derive an attribution the round already measured.
+
+**Verdict: INCONCLUSIVE** (`lock_profile.attribution.verdict`, `beacon-lockdiag-c8.json`). Four of
+five checks held, including both decisive ones:
+
+| check | measured | threshold | held |
+|---|---|---|---|
+| `scan_status_lock_wait_share_of_wall` (refutation check, decisive) | 0.9902 | 0.5 | **HELD** |
+| `scan_status_median_hold_near_zero` | 2,531,729ns | 5,000,000ns | **HELD** |
+| `services_median_hold_in_band` | 596,245,129ns | [200,000,000, 500,000,000]ns | **FAILED** (high) |
+| `scan_status_wait_tracks_services_hold` | 0.5141 | 0.5 | **HELD** |
+| `utilisation_above_superlinear_threshold` (decisive) | 0.9639 | 0.85 | **HELD** |
+
+`/api/scan-status`'s degradation is measured, not inferred, to be 99.0% `_db_lock` wait
+(`requests['/api/scan-status'].lock_wait_ns_total / wall_ns_total = 269,736.4ms / 272,392.5ms`).
+Utilisation over the concurrency-8 window is 0.9639, well past the 0.85 superlinear threshold, and
+`/api/services` alone accounts for ~90.9% of total lock hold time
+(`882 × 596.245129ms = 525,888.19ms` of `578,783.96ms` total). The single failed check
+(`services_median_hold_in_band`) failed on the *high* side — 596.2ms against a band calibrated to
+round 3's 25,278-row dataset, on a Pi that now holds 2.24x that (56,828 rows) — which strengthens
+the attribution's mechanism (a lock held longer because there is genuinely more work under it on a
+larger dataset) without the verdict function papering over a failed prediction to call it CONFIRMED.
+Full figures, the clause-by-clause prediction evaluation, and the GIL-versus-lock separation are in
+`06-LOCK-DIAGNOSTIC.md`; this entry states the verdict and its consequence, not the derivation.
+
+**The decision.** Put to the user at `06-18-PLAN.md` Task 3's checkpoint, against this INCONCLUSIVE
+measurement and the planner's recorded recommendation to defer. **The user selected `fix-now`.**
+This is recorded as the user's engineering call, made on the evidence, without upgrading the
+verdict: four of five checks held (including both decisive ones), and the lone failure is a stale
+absolute band, not a missing measurement — rescaling that band to this run's own dataset growth
+(`257.6ms / 209.355ms ≈ 1.230x`, applied to `[200,000,000, 500,000,000]`ns) gives approximately
+`[246,000,000, 615,000,000]`ns, inside which the measured 596.2ms falls. The same figures would
+read CONFIRMED against a band calibrated to the data that actually exists. That recalibration
+arithmetic is context for the decision; it is not a retroactive upgrade of `06-LOCK-DIAGNOSTIC.md`'s
+recorded verdict, which states what the harness measured and stays INCONCLUSIVE.
+
+**What this closes and what remains open.** This entry's own stated closure condition — "a
+diagnostic round that instruments the deployment under concurrency-8 load and identifies, with
+direct evidence, which specific serialization point is responsible" — is **met**: `_db_lock` is
+identified with direct evidence (99.0% lock-wait share on `/api/scan-status`, 0.9639 utilisation),
+and the GIL is separately measured and shown not to explain `/api/scan-status`'s degradation (0.33%
+off-CPU share of its own wall). What remains is the fix itself, scoped into a follow-up plan
+(`06-19` or later) per `PROH-OPS-04-05`'s prerequisites — see `D-DEBT-06-01` below, which the
+`fix-now` decision reopens.
 
 **ATTRIBUTION ADDED 2026-09-02, after verification and code review.** This entry was filed as
 "measured but not attributed." It is now attributed, with a mechanism that survived falsification.
@@ -190,7 +239,7 @@ against that attribution.
 | **Severity** | Critical (fixed); the *process* half remains open |
 | **Found by** | `gsd-verifier` and `gsd-code-reviewer`, independently, with separate reproductions |
 | **Code fix** | `bcad398` — shipped and pushed |
-| **Status** | Code fixed. This entry stays open for the planning-process lesson. |
+| **Status** | **Closed 2026-09-03 — both halves discharged.** Code fixed (`bcad398`). Process half closed by round 4's planning, which satisfied this entry's own stated closure condition ("a planning round that does that, not another code change") across all four of its plans. |
 
 **What happened.** `06-13-PLAN.md` Task 2 carried an unconditional clause: *"`/api/services` must remain
 bounded in rows read per request on whatever path it uses."* `06-13` satisfied it literally, moving
@@ -235,6 +284,51 @@ second is mutation-verified to fail against the bug (`90.0` vs `100.0`).
 **What would need to be true to close this entry.** Round 4's planning explicitly reviews any clause
 mandating a *mechanism* rather than an *outcome*, and confirms each such clause's guard asserts
 observable consequence. Closing it needs a planning round that does that, not another code change.
+
+**Process half closed 2026-09-03.** All four of round 4's plans (`06-15` through `06-18`) carry an
+explicit `<plan_review_against_d_debt_06_10>` section, and each one changed the plan it reviewed —
+this is the entry's own bar ("a planning round that does that"), and it is met four times over, not
+merely asserted once:
+
+- **`06-15`** (the instrument itself). The unsatisfiable AST clause was caught at plan-check: an
+  earlier draft asserted that no statement at all followed the `with _db_lock` block in
+  `api_services` — false at HEAD, where the terminal `return jsonify(result)` genuinely does follow
+  it — and the review replaced that with the real shape (containment of the four expensive calls
+  plus a "nothing escaped but the terminal return" assertion), because a clause that is false at HEAD
+  forces either a wrong pin or a weakened one. Two further changes: the hold-time guard moved from "a
+  non-zero hold time" (satisfiable by a wrapper recording garbage) to "a hold matching a known
+  critical-section duration within a stated tolerance"; and the inertness check moved from an
+  `isinstance(lock, threading.Lock)` shape assertion to a call-count assertion on the module's own
+  timing entry point, falsifiable by any code path that does timing work.
+- **`06-16`** (the hold decomposition). Two summing identities were demoted from load-bearing guards
+  to sanity checks reported for readability only: `connect_ns + sql_execute_ns + sql_fetch_ns +
+  python_ns == hold_ns` and `wall_ns_total == cpu_ns_total + lock_wait_ns_total +
+  other_off_cpu_ns_total` both hold by construction (each is a defined remainder), so neither
+  demonstrates accuracy — confirmed directly by mutation: a thread-local-leak mutation pushed
+  `clamped_python_count` to 706/3255 (21.7%) and `clamped_off_cpu_count` to 2505/3712 (67.5%) while
+  the `sum(per-route hold) == global hold` identity survived exactly (`2,494,319,763 ==
+  2,494,319,763`), proving the identity cannot catch the defect its prose originally claimed it
+  would. `clamped_python_count`/`clamped_off_cpu_count` are documented as the real, mutation-verified
+  concurrency guards instead.
+- **`06-17`** (the harness wiring and verdict). A collection failure originally fed
+  `failure_reasons` directly, which would have turned a diagnostic instrument into an oracle
+  (violating `PROH-OPS-07-12`); the review changed it to record `collected: false` with a reason and
+  leave the verdict untouched, with a test asserting the equivalence. Separately, the verdict
+  function originally returned a boolean `attribution_confirmed`, which cannot express "the
+  measurement did not settle it" — a run with too few acquisitions to be conclusive would have read
+  as a refutation; it now returns the three-valued CONFIRMED/REFUTED/INCONCLUSIVE verdict this
+  round's own result (INCONCLUSIVE) depended on existing.
+- **`06-18`** (the hardware report). The deterministic arm's failing-oracle test gained the
+  non-empty assertion it needed: the observer fires before the database-oracle read that appends the
+  seeded failure, so both captured `(failure_reasons, overall_passed)` pairs are legitimately
+  empty/`False` at that point — the review added an assertion on the run's *final*
+  `failure_reasons` being non-empty, so the test proves the seeded failure genuinely fired rather
+  than comparing two vacuously-empty snapshots.
+
+**Every new test added across the four plans was mutation-verified, with observed failure values
+recorded in each plan's own SUMMARY** — `06-15-SUMMARY.md`, `06-16-SUMMARY.md`, `06-17-SUMMARY.md`
+each name their mutation and its observed effect, matching this entry's own evidentiary bar
+("removing a guard's mechanism must be observed to fail before the guard is trusted").
 
 ---
 
@@ -364,6 +458,120 @@ harness must fix the underlying defect first, not merely repeat this round's avo
 
 ---
 
+### D-DEBT-06-14 — an absolute-band prediction failed under dataset growth; the relational prediction on the same quantity did not
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-LOCK-DIAGNOSTIC.md`'s Verdict section, `06-18-PLAN.md` Task 1 |
+| **Status** | **Deferred — a diagnostic-harness change for round 5's predictions, not a code fix.** New this round. |
+| **Recorded in the plan** | `06-LOCK-DIAGNOSTIC.md` §§1–2 and Verdict, `tests/pi_load_acceptance.py`'s `LOCK_ATTRIBUTION_PREDICTIONS` |
+
+**What was observed.** Round 4's hardware run carried two predictions over the same underlying
+quantity — `/api/services`' measured hold — expressed two different ways, and only one survived the
+Pi's dataset growing 2.24x since the predictions were calibrated (25,278 → 56,828 `service_checks`
+rows):
+
+- **The relational check, `scan_status_wait_tracks_services_hold`** (`scan_status_wait_median /
+  services_hold_median >= 0.5`) **HELD**, measured **0.5141**.
+- **The absolute check, `services_median_hold_in_band`** (a fixed `[200,000,000, 500,000,000]`ns
+  band) **FAILED**, measured **596,245,129ns** — 19.2% over the band's upper edge.
+
+Both checks were evaluated against the same hardware run's own `/api/services` hold figure. The
+relational check expresses a ratio between two quantities measured in that same run; the absolute
+check encodes a fixed millisecond value calibrated to round 3's dataset size and does not rescale
+when the deployment's data volume grows.
+
+**Why this is the same defect class `D-DEBT-06-10` names, in a different costume.** `D-DEBT-06-10`'s
+lesson is that a plan clause mandating a *mechanism* instead of an *outcome* can be satisfied by the
+exact defect it exists to catch. An absolute-millisecond prediction is a mechanism-shaped
+commitment wearing an outcome's clothing: it looks like it asserts a measured consequence, but it
+actually asserts a specific number tied to the dataset size that number was calibrated against —
+change the dataset and the prediction fails for a reason that has nothing to do with whether the
+attributed mechanism (the lock) is real. `06-LOCK-DIAGNOSTIC.md`'s own recalibration arithmetic
+demonstrates this precisely: rescaling the band by this run's own control-pass growth ratio
+(`257.6ms / 209.355ms ≈ 1.230x`, applied to `[200,000,000, 500,000,000]`ns) gives approximately
+`[246,000,000, 615,000,000]`ns — inside which the measured 596.2ms falls, which would read
+CONFIRMED on the identical measured figures. The relational check needed no such rescaling because
+it was never tied to an absolute dataset size in the first place.
+
+**What round 5 must do differently.** Any new prediction phrased in `LOCK_ATTRIBUTION_PREDICTIONS`
+should be relational (a ratio or comparison between two quantities measured in the same run) or, if
+an absolute figure is genuinely required, explicitly dataset-scaled (calibrated against a
+recorded row count or growth ratio captured in the same run, not a constant carried over from a
+prior round's dataset size). This is a change to the diagnostic harness's prediction constants, not
+a change to `_db_lock` or any production code path.
+
+**What would need to be true to close this entry.** Round 5 (or the follow-up fix plan, if it
+re-runs the diagnostic harness) either replaces `services_median_hold_in_band` with a relational
+form, or documents why an absolute band is retained and how it is rescaled against the run's own
+measured dataset growth before being evaluated.
+
+---
+
+### D-DEBT-06-15 — narrowing `_db_lock` alone cannot make OPS-07 pass; the GIL/topology half is a separate problem, and the laptop-based fix sizing overstated the payoff
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-LOCK-DIAGNOSTIC.md` §§3–4, `06-18-PLAN.md` Task 1 |
+| **Status** | **Deferred — scoping input for the follow-up fix plan (`06-19` or later); not fixed here.** New this round. |
+| **Recorded in the plan** | `06-LOCK-DIAGNOSTIC.md` §§3–4, `D-DEBT-06-01`'s "Round 4 reopening" section above |
+
+**What narrowing `_db_lock` cannot touch.** `/api/advanced/current` is over its own 2000ms budget
+(measured p95 2217.6ms per the operator's Task-1 transcript) and records **exactly 0.0ms** lock wait
+across 880 requests (`requests['/api/advanced/current'].lock_wait_ns_total`,
+`beacon-lockdiag-c8.json`) — its cost is entirely `cpu_ns_total = 536,241.0ms` and
+`other_off_cpu_ns_total = 550,980.5ms` (`06-LOCK-DIAGNOSTIC.md` §3). A lock this route never
+acquires cannot be narrowed into fixing it; whatever is producing that 12.31x degradation
+(92.4ms → 1,137.5ms wall p50) is GIL/thread-scheduling or topology-bound, and lives entirely outside
+`_db_lock`'s reach. **A fix that narrows `_db_lock` and nothing else cannot make OPS-07 pass on its
+own** — `/api/advanced/current`'s budget failure needs its own remedy (a topology change such as
+`--workers`/`--threads` retuning, which `PROH-OPS-04-05` gates separately, or a cost reduction in
+`beacon/diagnosis.py` itself) or the round must accept it as a second, un-fixed budget failure.
+
+**Why the candidate fix's sizing was overstated.** `06-PROFILE.md` §3 measured, on a laptop,
+`/api/services`' held region at 17.958% SQL / 82.042% Python (`sql_execute` 2.338% + `sql_fetch`
+15.620%). Round 4's hardware measurement, under the same concurrency-8 load the fix is meant to
+relieve, found the opposite proportion: **connect .002 / sql .748 / py .250** — roughly **75% SQL,
+25% Python** (`06-LOCK-DIAGNOSTIC.md` §4, `beacon-lockdiag-c8.json`
+`lock_profile.routes['/api/services']`). The laptop figure implied that moving the "Python" work out
+of the critical section would remove roughly 82% of what the lock protects; the hardware figure
+shows only 25% of it is actually Python — SQL, not Python, dominates the held region under real
+load. The achievable cut is therefore much smaller than the laptop profile suggested.
+
+**Arithmetic, shown against round 4's own planning-stage sizing assumption.** Before Task 2's
+correction (see `06-18-SUMMARY.md`'s Issues Encountered section), this round's own plan text
+estimated `/api/services` at "roughly 61% of total hold." Applying the hardware-measured 25.0%
+Python share — not the laptop's assumed 82.042% — to that planning-stage share estimate:
+`0.61 × 0.25 ≈ 0.1525` — **roughly a 15% cut to total hold**. New total hold:
+`578,783.964515ms × (1 − 0.1525) ≈ 490,530ms`. New utilisation: `490,530 / 600,444.800885 ≈ 0.82` —
+barely under the 0.85 superlinear threshold, not a comfortable margin. This is a materially smaller
+and more marginal payoff than the laptop-implied estimate would have promised (a naive
+`0.61 × 0.82042 ≈ 0.50` cut would have suggested utilisation falling to roughly 0.48, comfortably
+under threshold) and is also more marginal than `06-LOCK-DIAGNOSTIC.md` §4's own corrected estimate
+using the accurate 90.9%-of-total-hold share (`882 × 596.245129ms = 525,888.19ms`,
+`525,888.19 × 0.25 = 131,472.05ms` cut, `(578,783.96 − 131,472.05) / 600,444.80 ≈ 0.745`). Both
+figures are recorded here because they bracket the payoff's sensitivity to which share estimate is
+used — the round's own planning-stage estimate (0.82, barely under threshold) versus its
+measurement-corrected one (0.745, comfortably under threshold) — and `06-LOCK-DIAGNOSTIC.md` §4
+itself cautions that even the corrected 0.745 figure "is sized as a payoff estimate, not a
+commitment... it assumes the 25% Python cut translates linearly into hold-time reduction and holds
+all other routes' behavior constant, neither of which this round measures directly."
+
+**What the follow-up plan must carry as a result.** The fix plan should treat 0.745–0.82 as the
+estimated post-fix utilisation range for a Python-only cut to `/api/services`' critical section —
+not the deeper cut the laptop profile implied — and should plan for `/api/advanced/current`'s
+budget failure as a second, separate problem `_db_lock` narrowing does not touch, per the item
+above. `D-DEBT-06-01`'s "Round 4 reopening" section names the audit and testing prerequisites
+(`PROH-OPS-04-05`) that gate the fix itself; this entry names what the fix can and cannot be
+expected to achieve once those prerequisites are met.
+
+**What would need to be true to close this entry.** The follow-up plan implements the fix, measures
+its actual hardware-verified utilisation (not the arithmetic estimate here), and either closes
+`/api/advanced/current`'s budget failure by a separate remedy or explicitly scopes it into a further
+round.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
@@ -371,7 +579,7 @@ harness must fix the underlying defect first, not merely repeat this round's avo
 | Field | Value |
 |---|---|
 | **Raised by** | `06-RESEARCH.md` Open Question 3, `PROJECT.md`'s `AR-03-01` accepted-risk note |
-| **Status** | **Decided — deferred a third time, now on a third hardware run whose failure the entry's own reopening test rules out as newly implicating this lock.** Re-examined by the user in `06-10-PLAN.md` Task 2 and upheld; re-examined again in `06-13-PLAN.md` Task 1 against `06-PROFILE.md`'s attribution and upheld again; re-examined against `06-14`'s round-3 hardware run below and upheld a third time. Closed for this phase; revisit only if the condition below occurs. |
+| **Status** | **Reopened 2026-09-03 — the user selected `fix-now` at `06-18-PLAN.md` Task 3's checkpoint, against `06-LOCK-DIAGNOSTIC.md`'s measured INCONCLUSIVE verdict.** Deferred three times before this (see history below); the deferral is now reversed by explicit user decision. Narrowing itself is scoped into a follow-up plan (`06-19` or later), not this plan — see "Round 4 reopening" below for what that plan must carry. |
 | **Recorded in the plan** | `06-05-PLAN.md` decision D-01, `PROH-OPS-04-02`, `06-10-PLAN.md` Task 2's decision checkpoint |
 
 **What was not done and why.** `_db_lock`'s scope in `dashboard/app.py` remains unchanged at every one
@@ -559,6 +767,86 @@ remains open below.
 
 ---
 
+**Round 4 reopening (2026-09-03) — the second reopening test is withdrawn as non-diagnostic, and the
+user's `fix-now` decision replaces it as the entry's live reopening evidence.**
+
+**The second reopening test named above — "the unlocked `/api/advanced/current` route recovering to
+near its control-pass p95 under concurrency 8 while the locked routes stay over budget" — is
+withdrawn.** It never fired across rounds 3 or 4, and round 4's own hardware measurement establishes
+why it never could: it uses `/api/advanced/current`, an unlocked, GIL-bound 82.281ms route, as the
+discriminator for a *lock* it never takes. Round 4 measured that route directly:
+`requests['/api/advanced/current'].lock_wait_ns_total` is exactly **0.0ms** across 880 requests
+(`beacon-lockdiag-c8.json`), confirming by direct measurement, not inference, that this route can
+never carry evidence about `_db_lock` in either direction — a route with zero lock exposure cannot
+discriminate a lock hypothesis regardless of how it performs. Its own degradation (92.4ms → 1,137.5ms
+wall p50, 12.31x) is separately measured to be GIL/CPU contention (`cpu = 536,241.0ms`,
+`other_off_cpu = 550,980.5ms` across 880 requests, `06-LOCK-DIAGNOSTIC.md` §3), not evidence about
+the lock. This test is retired, not merely unfired — a future round must not run it a third time
+expecting a different reading; the mechanism that makes it non-diagnostic does not depend on load or
+dataset size, only on the route never acquiring `_db_lock`.
+
+**The decision, recorded verbatim.** Put to the user at `06-18-PLAN.md` Task 3's blocking
+`checkpoint:decision`, against `06-LOCK-DIAGNOSTIC.md`'s measured INCONCLUSIVE verdict and the
+planner's recorded recommendation (`defer-to-round-5`). **The user selected `fix-now`.** This
+reverses the `defer-again` decision recorded above for the third time — the deferral held across
+three prior rounds (`06-10`, `06-13`, `06-14`), each re-examined against fresh evidence; round 4's
+hardware measurement is the first evidence to support the mechanism directly (99.0%
+`scan_status_lock_wait_share_of_wall`, 0.9639 utilisation) rather than only rule out competing
+explanations, and the user weighed that against the round's own recorded verdict being INCONCLUSIVE,
+not CONFIRMED, and chose to proceed anyway. That is the reopening evidence now on record for this
+entry; the second reopening test above no longer applies.
+
+**`06-CONTEXT.md` D-01's fence is explicitly lifted by this decision, not implicitly overridden.**
+D-01 fenced `_db_lock`'s scope for this phase; `PROH-OPS-04-02` forbade narrowing it "unless the
+decision checkpoint in this plan explicitly resolves in favour of narrowing it." That checkpoint has
+now resolved in favour of narrowing it. No line touching `_db_lock` changes in this plan (`06-18`)
+— the fence is lifted for the follow-up plan that implements the fix, not retroactively for this one.
+
+**What the follow-up plan (`06-19` or later) must carry, restating `PROH-OPS-04-05`'s prerequisites
+rather than re-deriving them.** `PROH-OPS-04-05` (`06-13-PLAN.md`) states: *"Raising gunicorn's
+worker count therefore grants a second OS process unserialized concurrent write access to the same
+database file without any line of `_db_lock` changing. Such a change must never be made as an
+incidental performance tuning: it requires the same cross-process audit `D-DEBT-06-01` names for
+narrowing the lock, a `mem_limit` re-derived from the measured per-worker RSS, and
+`/gsd-secure-phase 06` re-run because `T-06-24`'s closure evidence is invalidated by construction."*
+Narrowing `_db_lock`'s scope is the same class of change this prohibition describes for a different
+lever (scope instead of worker count), and the original entry's own prerequisites still apply
+verbatim:
+
+1. **The cross-process audit this entry has always named:** a per-call-site `_db_lock` audit across
+   all 28 sites — `06-15`'s `LockScopePreservationTests` already pins the current shape by count (28
+   sites: 3 bare, 25 combined `database_access(DB_PATH) as conn:`) and by AST containment/escape
+   assertions on `api_services`' critical section specifically; the follow-up plan's audit is a
+   superset of that pin, covering every site the narrowing touches, not only `api_services`'.
+2. **A demonstration that read-only routes no longer block behind a writer under WAL specifically**
+   — not an assumption that WAL implies it (unchanged from the original entry).
+3. **A cross-process/concurrent-writer integrity test** extending
+   `tests/test_workload_resilience.py::ConcurrentAccessTests::test_concurrent_web_and_worker_writers_are_corruption_free`'s
+   guarantee (`PROH-OPS-04-01`) across whatever new concurrency the narrowing introduces — the
+   existing test proves the *current*, unnarrowed lock's guarantee; a narrowed lock needs its own
+   proof, not an inherited one.
+4. **`/gsd-secure-phase 06` re-run**, because `T-06-24`'s closure evidence is invalidated by
+   construction the moment `_db_lock`'s scope changes. `06-15` already replaced `T-06-24`'s original
+   diff-based closure evidence (`git diff 8c2fc48..HEAD -- dashboard/app.py` showing 0 added/removed
+   `_db_lock` lines) with a test-enforced call-site pin (`LockScopePreservationTests`' count
+   assertion) plus the AST scope pin (containment + no-escape, `06-SECURITY.md` `T-06-24`). The
+   follow-up plan's job is to re-close `T-06-24` again on new evidence describing the narrowed
+   shape — not to restore the retired diff-based form. `06-15`'s scope pin **will fail by design**
+   when the narrowing changes what sits inside the `with _db_lock` block; that failure is the pin
+   doing its job (routing the implementer to this entry and to `PROH-OPS-04-05`, per the assertion
+   message convention `test_the_deployment_pins_its_gunicorn_concurrency_model` established for
+   `D-DEBT-06-07`), and it is correct and expected — not something to suppress or work around.
+
+**What `06-LOCK-DIAGNOSTIC.md` §4 sizes for that follow-up plan, and why the sizing is smaller than
+`06-PROFILE.md`'s laptop figure implied.** See the new `D-DEBT-06-15` below — narrowing `_db_lock`
+addresses only `/api/services`' lock-hold contribution, and the hardware-measured payoff of that fix
+is materially smaller than the laptop profile's 82.042%-Python figure would have suggested, because
+the hardware's own SQL share is far higher (74.8% under load, not 17.958%). `_db_lock`'s narrowing
+also does nothing for `/api/advanced/current`'s GIL-bound degradation, which is a second, separate
+problem the follow-up plan must have in view — narrowing the lock alone cannot make OPS-07 pass.
+
+---
+
 ### D-DEBT-06-07 — deployment gunicorn concurrency model pinned at the source level
 
 | Field | Value |
@@ -695,6 +983,24 @@ per the second named trigger condition, unaffected by this round), but the CPU-s
 specifically has now been tested and did not hold.
 
 Full figures: `06-ACCEPTANCE-ROUND3.md`, `beacon-acceptance-round3.json`.
+
+**Round 4 re-read attempted, and why it could not add a new figure.** `06-18-PLAN.md` Task 1's
+acceptance criteria required `mean_cpu_percent` and `peak_cpu_percent` to be recorded for both roles
+on both instrumented passes (`beacon-lockdiag-c1.json`, `beacon-lockdiag-c8.json`), specifically so
+this entry's trigger could be re-read against a fourth data point. `06-LOCK-DIAGNOSTIC.md` does not
+transcribe those process-level CPU-sampling fields into the artifact — its own figures are all
+per-request wall/CPU/lock-wait accounting from `lock_profile.requests[*]` (e.g.
+`/api/advanced/current`: 536,241.0ms CPU across 880 requests, ≈609.4ms/request mean), which measures
+per-request CPU time inside the Python process, not the process-level `psutil.cpu_percent()` reading
+`cpu_sampling.mean_cpu_percent` reports. The two hardware JSON reports themselves are not committed
+to this repository (unchanged from `D-DEBT-06-04`'s note: they exist only on the Pi host), so this
+entry cannot re-derive `mean_cpu_percent` from a source available here. **This entry's trigger is
+therefore re-read against round 3's figure, unchanged by round 4**: `mean_cpu_percent: 165.504` (web
+role, `06-ACCEPTANCE-ROUND3.md`) remains the most recent process-level CPU reading on record, the
+trigger reading stays **NOT TRIGGERED** on that basis, and a future round wanting a round-4 CPU
+figure must read it directly from `beacon-lockdiag-c8.json`'s `cpu_sampling` block on the Pi host,
+or have a future round commit that block into a durable artifact the way `06-ACCEPTANCE-ROUND3.md`
+did for round 3.
 
 ---
 
