@@ -68,6 +68,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from dashboard.beacon import lockprofile as beacon_lockprofile  # noqa: E402
 from dashboard.beacon import repositories as beacon_repositories  # noqa: E402
 from dashboard.beacon.config import load_settings  # noqa: E402
 from dashboard.beacon.db import database_access  # noqa: E402
@@ -112,6 +113,28 @@ SAMPLE_INTERVAL_SECONDS = 1.0
 SELF_TEST_DURATION_SECONDS = 5
 SELF_TEST_CONCURRENCY = 4
 
+# 06-17: the round-4 diagnostic collection this harness adds on top of the
+# round-1 acceptance oracles above. `/api/diagnostics/lock-profile` is
+# appended to the run's own `--base-url` so there is no second URL to keep
+# in sync with a live deployment.
+LOCK_PROFILE_PATH = '/api/diagnostics/lock-profile'
+
+# The snapshot shape this harness understands. A live snapshot reporting a
+# different `schema_version` is an honest `collected: False` reason, never a
+# crash -- see `_collect_lock_profile`. Matches
+# `dashboard/beacon/lockprofile.SNAPSHOT_SCHEMA_VERSION` at the time this was
+# written; deliberately a literal, not an import binding, so a future bump
+# to that module does not silently widen what this harness claims to
+# understand without a person choosing to update this constant too.
+LOCK_PROFILE_SCHEMA_VERSION = 2
+
+# Generous next to 06-16-SUMMARY.md's measured serialized snapshot size
+# (6315 bytes for a 3-service, 8-thread, 3s rehearsal) -- a fetch this small
+# has no reason to approach this ceiling; it exists so a hung diagnostic
+# endpoint degrades to `collected: False` (T-06-90) rather than stalling a
+# 600s hardware run.
+LOCK_PROFILE_FETCH_TIMEOUT_SECONDS = 10
+
 # Bounded so an unresponsive docker daemon produces a named, unresolved-role
 # failure rather than a hung run (T-06-34); 10s is generous next to a local
 # `docker inspect` call, which normally completes in well under a second.
@@ -137,6 +160,17 @@ class LoadScenario:
     compose_path: str = str(DEFAULT_COMPOSE_PATH)
     worker_container: str = 'beacon-worker'
     web_container: str = 'beacon-web'
+    # 06-17: requests the lock-profile snapshot pair around the load window.
+    # Off by default -- production behaviour (and every prior round's
+    # scenario shape) is untouched when this stays False.
+    collect_lock_profile: bool = False
+    # 06-17 T-06-86: an optional callable(failure_reasons_copy, overall_passed_copy)
+    # `run_acceptance` invokes immediately before and immediately after the
+    # lock-profile collection block, so a test can prove the block never
+    # moves either value without restructuring `run_acceptance` itself.
+    # `None` in every real invocation -- this field exists for
+    # `LockProfileCollectionTests`' deterministic arm only.
+    observer: object = None
 
 
 @dataclass
@@ -164,6 +198,11 @@ class AcceptanceReport:
     assertions: dict = field(default_factory=dict)
     failure_reasons: list = field(default_factory=list)
     overall_passed: bool = False
+    # 06-17: diagnostic-only. `{}` when collection was not requested, and
+    # `{'collected': False, 'reason': ...}` when it was requested but
+    # failed. Never read by any assertion above and never contributes to
+    # `overall_passed` or `failure_reasons` (PROH-OPS-07-12).
+    lock_profile: dict = field(default_factory=dict)
 
     def to_json(self):
         return json.dumps(asdict(self), indent=2, sort_keys=True, default=str)
@@ -679,6 +718,536 @@ def _resource_unavailable_reason(role, target, sample_count):
     return None
 
 
+# ---------------------------------------------------------------------------
+# 06-17: lock-profile collection and the CONFIRMED/REFUTED/INCONCLUSIVE
+# verdict. Everything in this section is diagnostic-only (PROH-OPS-07-11,
+# PROH-OPS-07-12) -- it contributes to no assertion above and to neither
+# report.overall_passed nor report.failure_reasons. See `06-VERIFICATION.md`
+# Truth 5's `missing:` items for what this section derives and why.
+# ---------------------------------------------------------------------------
+
+# `06-VERIFICATION.md` Truth 5's own falsifiable predictions and
+# `06-ACCEPTANCE-ROUND3.md`'s own figures, declared as data (T-06-89) so the
+# verdict's thresholds are visible without re-deriving them, and so a test
+# can assert each constant against the document it came from.
+LOCK_ATTRIBUTION_PREDICTIONS = {
+    # Truth 5 missing item 1: "/api/scan-status will show ~0ms hold" -- the
+    # max median hold below which scan-status counts as "holding the lock
+    # only briefly." 5ms is generous headroom above the instrument's own
+    # ~1469.1ns per-acquisition cost (06-15-SUMMARY.md) while staying far
+    # below /api/services' predicted 200-500ms hold.
+    'scan_status_max_median_hold_ns': 5_000_000,
+    # Same item: "/api/services will show ~200-500ms hold" -- the band
+    # /api/services' own median hold must fall in.
+    'services_min_median_hold_ns': 200_000_000,
+    'services_max_median_hold_ns': 500_000_000,
+    # Same item: "and a wait that grows with the number of siblings queued
+    # ahead of it". 06-DEBT.md D-DEBT-06-09's arithmetic
+    # (242.614 - 3.281 = 239.333ms is 1.143x one /api/services critical
+    # section, 209.355ms control p50 -- 06-ACCEPTANCE-ROUND3.md) puts
+    # scan-status' median wait at roughly one full /api/services hold. 0.5 is
+    # a conservative floor: the wait must be at least half of services'
+    # median hold to count as "queued behind one full critical section."
+    'scan_status_min_wait_over_services_hold_fraction': 0.5,
+    # Truth 5 missing item 2: the ~0.85 utilisation threshold where M/G/1
+    # queueing delay goes superlinear.
+    'utilisation_superlinear_threshold': 0.85,
+    # Below this many acquisitions for a route, no median is read -- too few
+    # samples for a bucketed percentile to mean anything.
+    'min_acquisitions_for_median': 20,
+    # The refutation condition (this is the constant that makes the round a
+    # diagnostic rather than a confirmation exercise): the minimum lock-wait
+    # share of a slow route's wall time below which the attribution is
+    # CONTRADICTED, not merely unsupported.
+    'min_lock_wait_share_of_wall_for_confirmation': 0.5,
+    # Below this wall time, a run has not reproduced a slow /api/scan-status
+    # at all and has nothing to explain either way.
+    # 06-ACCEPTANCE-ROUND3.md's control p50 was 3.281ms; its acceptance p50
+    # was 242.614ms (a 74x degradation) -- 50ms sits well above control noise
+    # and well below the degraded figure.
+    'scan_status_slow_wall_threshold_ns': 50_000_000,
+}
+
+
+class LockProfileCounterWentBackwardsError(Exception):
+    """Raised by ``diff_lock_profile`` when an ``after`` counter (or bucket)
+    is smaller than its ``before`` value -- meaning the collector's process
+    restarted mid-window, so the window is not measurable. Never silently
+    returns a negative or nonsense delta (D-DEBT-06-10)."""
+
+
+def fetch_lock_profile(base_url, *, timeout_seconds):
+    """One GET against ``LOCK_PROFILE_PATH``, derived from ``base_url`` so
+    there is no second URL to keep in sync with a live deployment. Returns
+    the parsed snapshot dict on success; raises for the caller to record
+    honestly on any failure -- connection error, non-200 status (via
+    ``raise_for_status``), or an unparseable body. Never swallowed here."""
+    url = base_url.rstrip('/') + LOCK_PROFILE_PATH
+    response = requests.get(url, timeout=timeout_seconds)
+    response.raise_for_status()
+    return response.json()
+
+
+def percentile_from_histogram(counts, edges, pct):
+    """Return ``(lower_edge_ns, upper_edge_ns)`` bounding the ``pct``-th
+    percentile of a fixed-edge cumulative histogram's bucket counts -- never
+    a single false-precision number (D-DEBT-06-10).
+
+    ``counts`` has ``len(edges) + 1`` entries, mirroring
+    ``dashboard/beacon/lockprofile.py``'s ``_bucket_index``: bucket ``i`` for
+    ``i < len(edges)`` covers ``(edges[i-1], edges[i]]`` (with an implicit
+    lower bound of 0 for ``i == 0``), and the final bucket (index
+    ``len(edges)``) is the unbounded overflow bucket. Returns ``(0, 0)`` when
+    every bucket is empty (nothing to bound), and ``(edges[-1], math.inf)``
+    when the percentile falls in the overflow bucket.
+    """
+    total = sum(counts)
+    if total <= 0:
+        return (0, 0)
+    rank = max(1, math.ceil(pct / 100 * total))
+    cumulative = 0
+    for index, count in enumerate(counts):
+        cumulative += count
+        if cumulative < rank:
+            continue
+        if index >= len(edges):
+            return (edges[-1], math.inf)
+        lower = 0 if index == 0 else edges[index - 1]
+        return (lower, edges[index])
+    return (edges[-1], math.inf)
+
+
+# Field groups diffed by _diff_stats -- shared between the per-route
+# acquisition table (`routes`/`lock`) and the per-route request table
+# (`requests`/`requests_total`), which have different scalar-counter shapes.
+_ROUTE_COUNTER_FIELDS = (
+    'acquisitions', 'wait_ns_total', 'hold_ns_total', 'wait_ns_max', 'hold_ns_max',
+    'connect_ns_total', 'lease_ns_total', 'sql_execute_ns_total', 'sql_fetch_ns_total',
+    'python_ns_total',
+)
+_ROUTE_HISTOGRAM_FIELDS = ('wait_histogram', 'hold_histogram')
+
+_REQUEST_COUNTER_FIELDS = (
+    'requests', 'wall_ns_total', 'cpu_ns_total', 'lock_wait_ns_total',
+    'other_off_cpu_ns_total', 'wall_ns_max', 'cpu_ns_max',
+)
+_REQUEST_HISTOGRAM_FIELDS = ('wall_histogram', 'cpu_histogram')
+
+
+def _diff_stats(before, after, counter_fields, histogram_fields, *, context):
+    result = {}
+    for field_name in counter_fields:
+        before_value = before.get(field_name, 0)
+        after_value = after.get(field_name, 0)
+        if after_value < before_value:
+            raise LockProfileCounterWentBackwardsError(
+                f'{context}.{field_name} went backwards ({before_value} -> {after_value}) -- '
+                'the collector likely restarted mid-window; the window is not measurable.'
+            )
+        result[field_name] = after_value - before_value
+    for field_name in histogram_fields:
+        before_hist = before.get(field_name) or []
+        after_hist = after.get(field_name) or []
+        diffed = []
+        for index, after_count in enumerate(after_hist):
+            before_count = before_hist[index] if index < len(before_hist) else 0
+            if after_count < before_count:
+                raise LockProfileCounterWentBackwardsError(
+                    f'{context}.{field_name}[{index}] went backwards '
+                    f'({before_count} -> {after_count}) -- the collector likely restarted '
+                    'mid-window; the window is not measurable.'
+                )
+            diffed.append(after_count - before_count)
+        result[field_name] = diffed
+    return result
+
+
+def diff_lock_profile(before, after):
+    """Windowed counters and histogram bucket counts from two cumulative
+    ``lockprofile.snapshot()`` dicts. Raises
+    ``LockProfileCounterWentBackwardsError`` rather than returning nonsense
+    when any ``after`` value is smaller than its ``before`` counterpart --
+    the collector's process restarted mid-window and the window is not
+    measurable."""
+    window_ns = after['captured_monotonic_ns'] - before['captured_monotonic_ns']
+    if window_ns < 0:
+        raise LockProfileCounterWentBackwardsError(
+            f'captured_monotonic_ns went backwards ({before["captured_monotonic_ns"]} -> '
+            f'{after["captured_monotonic_ns"]}) -- the collector likely restarted mid-window.'
+        )
+
+    route_labels = set(before.get('routes', {})) | set(after.get('routes', {}))
+    routes = {
+        label: _diff_stats(
+            before.get('routes', {}).get(label, {}), after.get('routes', {}).get(label, {}),
+            _ROUTE_COUNTER_FIELDS, _ROUTE_HISTOGRAM_FIELDS, context=f'routes[{label!r}]',
+        )
+        for label in route_labels
+    }
+    lock = _diff_stats(
+        before.get('lock', {}), after.get('lock', {}),
+        _ROUTE_COUNTER_FIELDS, _ROUTE_HISTOGRAM_FIELDS, context='lock',
+    )
+
+    request_labels = set(before.get('requests', {})) | set(after.get('requests', {}))
+    requests_by_route = {
+        label: _diff_stats(
+            before.get('requests', {}).get(label, {}), after.get('requests', {}).get(label, {}),
+            _REQUEST_COUNTER_FIELDS, _REQUEST_HISTOGRAM_FIELDS, context=f'requests[{label!r}]',
+        )
+        for label in request_labels
+    }
+    requests_total = _diff_stats(
+        before.get('requests_total', {}), after.get('requests_total', {}),
+        _REQUEST_COUNTER_FIELDS, _REQUEST_HISTOGRAM_FIELDS, context='requests_total',
+    )
+
+    for scalar_name in ('sql_outside_lock_ns', 'clamped_python_count', 'clamped_off_cpu_count'):
+        before_value = before.get(scalar_name, 0)
+        after_value = after.get(scalar_name, 0)
+        if after_value < before_value:
+            raise LockProfileCounterWentBackwardsError(
+                f'{scalar_name} went backwards ({before_value} -> {after_value}) -- the '
+                'collector likely restarted mid-window; the window is not measurable.'
+            )
+
+    return {
+        'window_ns': window_ns,
+        'routes': routes,
+        'lock': lock,
+        'requests': requests_by_route,
+        'requests_total': requests_total,
+        'sql_outside_lock_ns': after.get('sql_outside_lock_ns', 0) - before.get('sql_outside_lock_ns', 0),
+        'clamped_python_count': (
+            after.get('clamped_python_count', 0) - before.get('clamped_python_count', 0)
+        ),
+        'clamped_off_cpu_count': (
+            after.get('clamped_off_cpu_count', 0) - before.get('clamped_off_cpu_count', 0)
+        ),
+        'route_overflow': after.get('route_overflow', False),
+        'request_route_overflow': after.get('request_route_overflow', False),
+    }
+
+
+def _percentile_bounds(histogram, edges, pct):
+    lower_ns, upper_ns = percentile_from_histogram(histogram, edges, pct)
+    return {'lower_ns': lower_ns, 'upper_ns': upper_ns}
+
+
+def summarize_lock_profile(before, after):
+    """Derive the per-route wait/hold percentiles and hold-decomposition
+    shares, the per-route request wall/cpu/lock-wait/other-off-cpu
+    percentiles, and the global utilisation from two cumulative
+    ``lockprofile.snapshot()`` dicts taken around the load window. Every
+    percentile is a pair of bounding edges (``percentile_from_histogram``),
+    never a single false-precision number.
+    """
+    diff = diff_lock_profile(before, after)
+    window_ns = diff['window_ns']
+
+    routes_summary = {}
+    for label, route in diff['routes'].items():
+        hold = route['hold_ns_total']
+        sql = route['sql_execute_ns_total'] + route['sql_fetch_ns_total']
+        routes_summary[label] = {
+            'acquisitions': route['acquisitions'],
+            'wait_ns_total': route['wait_ns_total'],
+            'hold_ns_total': hold,
+            'wait_ns_max': route['wait_ns_max'],
+            'hold_ns_max': route['hold_ns_max'],
+            'wait_percentiles_ns': {
+                'p50': _percentile_bounds(
+                    route['wait_histogram'], beacon_lockprofile.WAIT_HISTOGRAM_EDGES_NS, 50,
+                ),
+                'p95': _percentile_bounds(
+                    route['wait_histogram'], beacon_lockprofile.WAIT_HISTOGRAM_EDGES_NS, 95,
+                ),
+            },
+            'hold_percentiles_ns': {
+                'p50': _percentile_bounds(
+                    route['hold_histogram'], beacon_lockprofile.HOLD_HISTOGRAM_EDGES_NS, 50,
+                ),
+                'p95': _percentile_bounds(
+                    route['hold_histogram'], beacon_lockprofile.HOLD_HISTOGRAM_EDGES_NS, 95,
+                ),
+            },
+            'connect_share': (route['connect_ns_total'] / hold) if hold else None,
+            'sql_share': (sql / hold) if hold else None,
+            'python_share': (route['python_ns_total'] / hold) if hold else None,
+        }
+
+    requests_summary = {}
+    for label, req in diff['requests'].items():
+        requests_summary[label] = {
+            'requests': req['requests'],
+            'wall_ns_total': req['wall_ns_total'],
+            'cpu_ns_total': req['cpu_ns_total'],
+            'lock_wait_ns_total': req['lock_wait_ns_total'],
+            'other_off_cpu_ns_total': req['other_off_cpu_ns_total'],
+            'wall_percentiles_ns': {
+                'p50': _percentile_bounds(
+                    req['wall_histogram'], beacon_lockprofile.WALL_HISTOGRAM_EDGES_NS, 50,
+                ),
+                'p95': _percentile_bounds(
+                    req['wall_histogram'], beacon_lockprofile.WALL_HISTOGRAM_EDGES_NS, 95,
+                ),
+            },
+            'cpu_percentiles_ns': {
+                'p50': _percentile_bounds(
+                    req['cpu_histogram'], beacon_lockprofile.CPU_HISTOGRAM_EDGES_NS, 50,
+                ),
+                'p95': _percentile_bounds(
+                    req['cpu_histogram'], beacon_lockprofile.CPU_HISTOGRAM_EDGES_NS, 95,
+                ),
+            },
+        }
+
+    total_hold = diff['lock']['hold_ns_total']
+    utilisation = (total_hold / window_ns) if window_ns > 0 else None
+
+    return {
+        'window_ns': window_ns,
+        'total_hold_ns': total_hold,
+        'utilisation': utilisation,
+        'route_overflow': diff['route_overflow'],
+        'request_route_overflow': diff['request_route_overflow'],
+        'sql_outside_lock_ns': diff['sql_outside_lock_ns'],
+        'clamped_python_count': diff['clamped_python_count'],
+        'clamped_off_cpu_count': diff['clamped_off_cpu_count'],
+        'routes': routes_summary,
+        'requests': requests_summary,
+    }
+
+
+def evaluate_lock_attribution(summary):
+    """Three-valued verdict against ``LOCK_ATTRIBUTION_PREDICTIONS``:
+    ``CONFIRMED``, ``REFUTED`` or ``INCONCLUSIVE``. Pure function of
+    ``summary`` -- reads no module-level mutable state; called twice with
+    the same input it returns equal output.
+
+    Preconditions are evaluated first: an explicit ``collected: False``, a
+    route overflow, or a missing/under-sampled route all read as
+    ``INCONCLUSIVE`` -- a missing measurement is never a refutation. The
+    refutation condition is evaluated next, BEFORE the confirmation
+    condition -- deliberately: a function that checks its hypothesis first
+    and only falls through to refutation is the shape that produced two
+    wrong rounds this phase (D-DEBT-06-09, D-DEBT-06-10).
+    """
+    checks = []
+
+    if summary.get('collected') is False:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': 'collected is False -- no measurement was taken this window.',
+            'checks': checks,
+        }
+
+    if summary.get('route_overflow') or summary.get('request_route_overflow'):
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                'route_overflow or request_route_overflow is set -- the per-route table lost '
+                'data and the measurement cannot be trusted.'
+            ),
+            'checks': checks,
+        }
+
+    routes = summary.get('routes', {})
+    requests = summary.get('requests', {})
+    services_route = routes.get('/api/services')
+    scan_status_route = routes.get('/api/scan-status')
+    scan_status_request = requests.get('/api/scan-status')
+
+    missing = [
+        name for name, value in (
+            ("routes['/api/services']", services_route),
+            ("routes['/api/scan-status']", scan_status_route),
+            ("requests['/api/scan-status']", scan_status_request),
+        ) if value is None
+    ]
+    if missing:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': f'missing measurement: {", ".join(missing)} not present in this window.',
+            'checks': checks,
+        }
+
+    min_acquisitions = LOCK_ATTRIBUTION_PREDICTIONS['min_acquisitions_for_median']
+    if (
+        services_route['acquisitions'] < min_acquisitions
+        or scan_status_route['acquisitions'] < min_acquisitions
+    ):
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                f"too few acquisitions to read a median: /api/services="
+                f"{services_route['acquisitions']}, /api/scan-status="
+                f"{scan_status_route['acquisitions']} (need >= {min_acquisitions} each)."
+            ),
+            'checks': checks,
+        }
+
+    services_hold_median = services_route['hold_ns_total'] / services_route['acquisitions']
+    scan_status_hold_median = scan_status_route['hold_ns_total'] / scan_status_route['acquisitions']
+    scan_status_wait_median = scan_status_route['wait_ns_total'] / scan_status_route['acquisitions']
+    scan_status_requests = scan_status_request['requests']
+    scan_status_wall_median = (
+        scan_status_request['wall_ns_total'] / scan_status_requests if scan_status_requests else 0
+    )
+    scan_status_lock_wait_median = (
+        scan_status_request['lock_wait_ns_total'] / scan_status_requests if scan_status_requests else 0
+    )
+
+    slow_threshold = LOCK_ATTRIBUTION_PREDICTIONS['scan_status_slow_wall_threshold_ns']
+    if scan_status_wall_median < slow_threshold:
+        return {
+            'verdict': 'INCONCLUSIVE',
+            'reason': (
+                f'this run did not reproduce a slow /api/scan-status (median wall '
+                f'{scan_status_wall_median:.0f}ns < {slow_threshold}ns threshold) -- nothing '
+                'to explain either way.'
+            ),
+            'checks': checks,
+        }
+
+    lock_wait_share = (
+        scan_status_lock_wait_median / scan_status_wall_median if scan_status_wall_median else 0
+    )
+    min_share = LOCK_ATTRIBUTION_PREDICTIONS['min_lock_wait_share_of_wall_for_confirmation']
+    checks.append({
+        'name': 'scan_status_lock_wait_share_of_wall',
+        'threshold': min_share,
+        'measured': lock_wait_share,
+        'held': lock_wait_share >= min_share,
+    })
+    if lock_wait_share < min_share:
+        return {
+            'verdict': 'REFUTED',
+            'reason': (
+                f'/api/scan-status median wall time is {scan_status_wall_median:.0f}ns '
+                f'(genuinely slow), but its measured lock-wait share of that wall time is only '
+                f'{lock_wait_share:.4f}, below the {min_share} threshold -- the _db_lock '
+                'attribution is contradicted by direct measurement.'
+            ),
+            'checks': checks,
+        }
+
+    # Confirmation conditions -- only reached when the refutation condition
+    # above did not hold.
+    scan_status_max_hold = LOCK_ATTRIBUTION_PREDICTIONS['scan_status_max_median_hold_ns']
+    checks.append({
+        'name': 'scan_status_median_hold_near_zero',
+        'threshold': scan_status_max_hold,
+        'measured': scan_status_hold_median,
+        'held': scan_status_hold_median <= scan_status_max_hold,
+    })
+
+    services_min_hold = LOCK_ATTRIBUTION_PREDICTIONS['services_min_median_hold_ns']
+    services_max_hold = LOCK_ATTRIBUTION_PREDICTIONS['services_max_median_hold_ns']
+    checks.append({
+        'name': 'services_median_hold_in_band',
+        'threshold': [services_min_hold, services_max_hold],
+        'measured': services_hold_median,
+        'held': services_min_hold <= services_hold_median <= services_max_hold,
+    })
+
+    wait_fraction = scan_status_wait_median / services_hold_median if services_hold_median else 0
+    min_fraction = LOCK_ATTRIBUTION_PREDICTIONS['scan_status_min_wait_over_services_hold_fraction']
+    checks.append({
+        'name': 'scan_status_wait_tracks_services_hold',
+        'threshold': min_fraction,
+        'measured': wait_fraction,
+        'held': wait_fraction >= min_fraction,
+    })
+
+    utilisation = summary.get('utilisation')
+    utilisation_threshold = LOCK_ATTRIBUTION_PREDICTIONS['utilisation_superlinear_threshold']
+    checks.append({
+        'name': 'utilisation_above_superlinear_threshold',
+        'threshold': utilisation_threshold,
+        'measured': utilisation,
+        'held': utilisation is not None and utilisation >= utilisation_threshold,
+    })
+
+    if all(check['held'] for check in checks):
+        return {
+            'verdict': 'CONFIRMED',
+            'reason': (
+                'every prediction held: /api/scan-status holds the lock only briefly and waits '
+                "behind /api/services' critical section, /api/services' hold sits in the "
+                'predicted band, and utilisation is above the superlinear threshold.'
+            ),
+            'checks': checks,
+        }
+    failed_names = ', '.join(
+        f"{check['name']} (measured {check['measured']}, threshold {check['threshold']})"
+        for check in checks if not check['held']
+    )
+    return {
+        'verdict': 'INCONCLUSIVE',
+        'reason': (
+            f'the refutation condition did not hold, but not every confirmation prediction did '
+            f'either: {failed_names}.'
+        ),
+        'checks': checks,
+    }
+
+
+def _collect_lock_profile(scenario, before_snapshot, before_failure_reason):
+    """Derive the report's ``lock_profile`` block from the ``before``
+    snapshot captured immediately before the load window started and an
+    ``after`` snapshot fetched here, immediately after the load window
+    ended.
+
+    PROH-OPS-07-12: this block is evidence a human reads, never an oracle.
+    Any failure -- the before-fetch already failed, the after-fetch fails,
+    an unexpected ``schema_version``, or a counter that went backwards --
+    results in ``{'collected': False, 'reason': ...}`` and nothing else.
+    This function never appends to ``report.failure_reasons``, never
+    touches ``report.overall_passed``, and never raises. A later reader
+    must not "improve" this into an oracle.
+    """
+    if before_snapshot is None:
+        return {'collected': False, 'reason': before_failure_reason}
+    if before_snapshot.get('schema_version') != LOCK_PROFILE_SCHEMA_VERSION:
+        return {
+            'collected': False,
+            'reason': (
+                f"before-snapshot schema_version {before_snapshot.get('schema_version')!r} is "
+                f'not the {LOCK_PROFILE_SCHEMA_VERSION!r} this harness understands'
+            ),
+        }
+
+    try:
+        after_snapshot = fetch_lock_profile(
+            scenario.base_url, timeout_seconds=LOCK_PROFILE_FETCH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001 -- any fetch failure is an honest collected: False
+        return {'collected': False, 'reason': f'after-snapshot fetch failed: {exc}'}
+
+    if after_snapshot.get('schema_version') != LOCK_PROFILE_SCHEMA_VERSION:
+        return {
+            'collected': False,
+            'reason': (
+                f"after-snapshot schema_version {after_snapshot.get('schema_version')!r} is not "
+                f'the {LOCK_PROFILE_SCHEMA_VERSION!r} this harness understands'
+            ),
+        }
+
+    try:
+        summary = summarize_lock_profile(before_snapshot, after_snapshot)
+    except LockProfileCounterWentBackwardsError as exc:
+        return {'collected': False, 'reason': str(exc)}
+
+    summary['collected'] = True
+    # T-06-78 / PROH-OPS-07-11: self-identifying as a diagnostic run, so a
+    # report carrying this block is never mistaken for OPS-07 acceptance
+    # evidence just because overall_passed happens to be true.
+    summary['instrumented'] = True
+    summary['attribution'] = evaluate_lock_attribution(summary)
+    return summary
+
+
 def run_acceptance(scenario):
     """Run one full load-and-assert pass and return its ``AcceptanceReport``.
 
@@ -736,6 +1305,22 @@ def run_acceptance(scenario):
         for _ in range(max(1, scenario.concurrency))
     ]
 
+    # 06-17: the `before` snapshot is taken immediately before
+    # resource_thread.start() and the `after` snapshot (in the collection
+    # block below) immediately after resource_thread's join, so the window
+    # brackets exactly the load the latencies were measured over -- a
+    # snapshot taken outside those boundaries would measure a different
+    # window than the latencies it is read against (D-DEBT-06-10).
+    before_lock_profile = None
+    before_lock_profile_failure_reason = None
+    if scenario.collect_lock_profile:
+        try:
+            before_lock_profile = fetch_lock_profile(
+                scenario.base_url, timeout_seconds=LOCK_PROFILE_FETCH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 -- an honest collected: False, not a crash
+            before_lock_profile_failure_reason = f'before-snapshot fetch failed: {exc}'
+
     resource_thread.start()
     for thread in load_threads:
         thread.start()
@@ -747,6 +1332,22 @@ def run_acceptance(scenario):
 
     report.route_latencies_ms = latencies_by_route
     report.resource_samples = resource_samples
+
+    # PROH-OPS-07-12 / T-06-86: an optional observer, `None` in every real
+    # invocation, lets a test capture overall_passed/failure_reasons
+    # immediately before and immediately after the collection block below
+    # without restructuring this function -- proving the block never moves
+    # either value.
+    if scenario.observer is not None:
+        scenario.observer(list(report.failure_reasons), report.overall_passed)
+
+    if scenario.collect_lock_profile:
+        report.lock_profile = _collect_lock_profile(
+            scenario, before_lock_profile, before_lock_profile_failure_reason,
+        )
+
+    if scenario.observer is not None:
+        scenario.observer(list(report.failure_reasons), report.overall_passed)
 
     now = int(time.time())
     settings = load_settings(os.environ)
@@ -882,13 +1483,19 @@ def run_acceptance(scenario):
     return report
 
 
-def run_self_test():
+def run_self_test(*, collect_lock_profile=False):
     """Run a short, bounded smoke pass against a locally-started Beacon app.
 
     Never a substitute for real-hardware acceptance evidence: ``run_kind``
     is always ``smoke`` here (PROH-OPS-07-02), computed the same way
     ``run_acceptance`` computes it for any ``--self-test`` invocation --
     never settable independently.
+
+    ``collect_lock_profile`` (06-17) requests the lock-profile snapshot
+    pair the same way ``--lock-profile`` does for a real run; it does not
+    itself flip the app's ``ENABLE_LOCK_PROFILE`` -- the caller sets that in
+    the environment before this function's ``load_app()`` call for a
+    rehearsal to exercise the diagnostic endpoint end to end.
     """
     from werkzeug.serving import make_server
 
@@ -921,6 +1528,7 @@ def run_self_test():
             db_path=db_path,
             concurrency=SELF_TEST_CONCURRENCY,
             self_test=True,
+            collect_lock_profile=collect_lock_profile,
         )
         return run_acceptance(scenario)
     finally:
@@ -971,6 +1579,18 @@ def build_arg_parser():
             "running a modified compose file)"
         ),
     )
+    parser.add_argument(
+        '--lock-profile', action='store_true',
+        help=(
+            'Collect the `_db_lock` wait/hold snapshot pair around the load window and embed the '
+            'derived figures and CONFIRMED/REFUTED/INCONCLUSIVE attribution verdict in the report '
+            '(06-17). Off by default. Requires the deployment be started with '
+            'ENABLE_LOCK_PROFILE=1 -- otherwise the diagnostic endpoint 404s and the report '
+            "carries lock_profile: {'collected': False, ...} without affecting overall_passed "
+            '(PROH-OPS-07-12). Diagnostic evidence only -- never OPS-07 acceptance evidence '
+            '(PROH-OPS-07-11).'
+        ),
+    )
     return parser
 
 
@@ -979,7 +1599,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.self_test:
-        report = run_self_test()
+        report = run_self_test(collect_lock_profile=args.lock_profile)
     else:
         scenario = LoadScenario(
             duration_seconds=args.duration,
@@ -989,6 +1609,7 @@ def main(argv=None):
             self_test=False,
             worker_container=args.worker_container,
             web_container=args.web_container,
+            collect_lock_profile=args.lock_profile,
         )
         report = run_acceptance(scenario)
 
