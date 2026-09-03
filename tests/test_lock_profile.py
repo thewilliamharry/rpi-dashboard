@@ -336,25 +336,36 @@ class HoldDecompositionTests(_InstrumentedLockTestCase):
         """Load-bearing: the derived Python remainder never goes negative
         across a representative mixed workload -- no measurement error is
         silently absorbed into it. Mutation target: double-counting
-        `record_connect`."""
+        `record_connect`.
+
+        Each iteration opens its OWN connection INSIDE the held region --
+        the real production shape (`with _db_lock, database_access(DB_PATH)
+        as conn:` opens a fresh connection every time) -- so a
+        double-counted `record_connect` is actually exercised here, not
+        just a double-counted `record_sql`.
+        """
         from dashboard.beacon.db import connect_db
 
-        conn = connect_db(self.db_path)
+        setup_conn = connect_db(self.db_path)
         try:
-            conn.execute('CREATE TABLE _t_06_16_clamp(v INTEGER)')
-            conn.executemany(
+            setup_conn.execute('CREATE TABLE _t_06_16_clamp(v INTEGER)')
+            setup_conn.executemany(
                 'INSERT INTO _t_06_16_clamp(v) VALUES (?)', [(i,) for i in range(500)],
             )
-            conn.commit()
-            for i in range(20):
-                label = f'clamp-workload-06-16-{i % 3}'
-
-                def work():
-                    conn.execute('SELECT v FROM _t_06_16_clamp').fetchall()
-
-                self._run_in_held_region(label, work)
+            setup_conn.commit()
         finally:
-            conn.close()
+            setup_conn.close()
+
+        for i in range(20):
+            label = f'clamp-workload-06-16-{i % 3}'
+            opened = {}
+
+            def work():
+                opened['conn'] = connect_db(self.db_path)
+                opened['conn'].execute('SELECT v FROM _t_06_16_clamp').fetchall()
+
+            self._run_in_held_region(label, work)
+            opened['conn'].close()
 
         snap = lockprofile.snapshot()
         self.assertEqual(snap['clamped_python_count'], 0)
