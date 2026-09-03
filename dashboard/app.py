@@ -32,6 +32,7 @@ try:
     from .beacon import previews as beacon_previews
     from .beacon import queues as beacon_queues
     from .beacon import worker_main as beacon_worker_main
+    from .beacon import lockprofile as beacon_lockprofile
     from .beacon.db import connect_db, database_access, MaintenanceBusy
     from .beacon.migrations import RECOVERY_MARKER
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
@@ -47,6 +48,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import previews as beacon_previews
     from beacon import queues as beacon_queues
     from beacon import worker_main as beacon_worker_main
+    from beacon import lockprofile as beacon_lockprofile
     from beacon.db import connect_db, database_access, MaintenanceBusy
     from beacon.migrations import RECOVERY_MARKER
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
@@ -91,6 +93,10 @@ METRIC_HISTORY_SECONDS = SETTINGS.metric_history_seconds
 WORKER_READY_SECONDS = SETTINGS.worker_ready_seconds
 DISCOVERY_TIMEOUT_SECONDS = SETTINGS.discovery_timeout_seconds
 ENABLE_PROMETHEUS = SETTINGS.enable_prometheus
+# 06-15: default-off diagnostic. Governs whether _db_lock below is wrapped in
+# beacon_lockprofile.InstrumentedLock; see the conditional rebinding at its
+# declaration for the D-01 / PROH-OPS-04-02 / T-06-24 scope note.
+ENABLE_LOCK_PROFILE = SETTINGS.enable_lock_profile
 
 DEFAULT_TRUSTED_HOSTS = (
     "raspi.local,raspi,localhost,127.0.0.1,::1,"
@@ -125,6 +131,15 @@ ALERT_ONLY_CRITICAL = SETTINGS.alert_only_critical
 MAINTENANCE_OVERRUN_EVENT_TYPE = 'maintenance_overrun'
 
 _db_lock = threading.Lock()
+# D-01 / PROH-OPS-04-02 / T-06-24: this conditional rebinding changes
+# _db_lock's *instrumentation*, never its *scope*. Every one of the 28
+# call sites below that acquire this lock is untouched, and
+# tests/test_lock_profile.py::LockScopePreservationTests pins that fact by
+# source inspection. When ENABLE_LOCK_PROFILE is off (the default, and the
+# state every prior acceptance run in this phase was measured in), _db_lock
+# stays exactly the bare threading.Lock() constructed above.
+if ENABLE_LOCK_PROFILE:
+    _db_lock = beacon_lockprofile.install(_db_lock)
 _scan_lock = threading.Lock()
 _startup_lock = threading.Lock()
 _screenshot_sem = threading.Semaphore(1)
@@ -2445,6 +2460,27 @@ def enforce_request_security():
             return jsonify({'error': 'unexpected origin'}), 403
 
 
+@app.before_request
+def begin_lock_profile_request():
+    # Registered after enforce_request_security, so an untrusted-host
+    # rejection above (which short-circuits Flask's before_request chain)
+    # is never attributed to a route label here. Both branches return
+    # immediately when the flag is off, before touching lockprofile at all
+    # -- part of the zero-timing-work guarantee the disabled path proves.
+    if not ENABLE_LOCK_PROFILE:
+        return None
+    route_label = request.url_rule.rule if request.url_rule is not None else request.path
+    beacon_lockprofile.begin_request(route_label)
+    return None
+
+
+@app.teardown_request
+def end_lock_profile_request(exc=None):
+    if not ENABLE_LOCK_PROFILE:
+        return
+    beacon_lockprofile.end_request()
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers['Content-Security-Policy'] = (
@@ -3290,6 +3326,19 @@ def prometheus_metrics():
         '# TYPE beacon_services_total gauge', f'beacon_services_total {total}',
     ]
     return '\n'.join(lines) + '\n', 200, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
+
+
+@app.route('/api/diagnostics/lock-profile')
+def lock_profile_snapshot():
+    """Diagnostic-only readout: 404s by default, mirroring prometheus_metrics.
+
+    PROH-OPS-07-11 / PROH-OPS-07-12: a run performed with this on is
+    diagnostic evidence only, never OPS-07 acceptance evidence, and never
+    contributes to any pass/fail verdict.
+    """
+    if not ENABLE_LOCK_PROFILE:
+        return '', 404
+    return jsonify(beacon_lockprofile.snapshot())
 
 
 # Gunicorn keeps importing ``app:app`` while composition moves behind the

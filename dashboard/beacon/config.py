@@ -61,6 +61,10 @@ class Settings:
     worker_ready_seconds: int = 20
     discovery_timeout_seconds: int = 180
     enable_prometheus: bool = False
+    # 06-15: the single switch deciding whether _db_lock is a bare
+    # threading.Lock or an InstrumentedLock (dashboard/beacon/lockprofile.py).
+    # Default off, mirroring enable_prometheus's shape exactly.
+    enable_lock_profile: bool = False
     trusted_hosts: frozenset[str] = frozenset()
     trusted_host_networks: tuple = ()
     local_service_hosts: frozenset[str] = frozenset()
@@ -269,6 +273,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         worker_ready_seconds=_positive_int(source, 'WORKER_READY_SECONDS', 20),
         discovery_timeout_seconds=_positive_int(source, 'DISCOVERY_TIMEOUT_SECONDS', 180),
         enable_prometheus=_enabled(source.get('ENABLE_PROMETHEUS', '0')),
+        enable_lock_profile=_enabled(source.get('ENABLE_LOCK_PROFILE', '0')),
         trusted_hosts=trusted_hosts,
         trusted_host_networks=trusted_networks,
         local_service_hosts=frozenset(local_hosts),
