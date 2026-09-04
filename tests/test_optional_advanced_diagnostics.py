@@ -86,6 +86,34 @@ _REGENERATE_ENABLED_GOLDEN = False
 
 _ORIGINAL_ENABLE_ADVANCED_DIAGNOSTICS = 'unset'  # sentinel distinct from None
 
+# The enabled response's `settings` block (dashboard/beacon/diagnosis.py's
+# _settings_payload) is sensitive to TELEMETRY_* and METRIC_SAMPLE_SECONDS /
+# DISCOVERY_TIMEOUT_SECONDS, none of which `load_app`'s own baseline reset
+# covers (tests/helpers.py:52-59 resets only six unrelated keys). At least
+# one other module (tests/test_historical_telemetry_api.py's
+# ConfiguredTelemetryPolicyApiTests) sets TELEMETRY_RAW_DAYS/
+# TELEMETRY_FIVE_MINUTE_DAYS/TELEMETRY_RETENTION_DAYS/TELEMETRY_POINT_BUDGET
+# via `load_app` and never clears them either, so the golden comparison
+# observed those values leak through when the full suite runs in
+# alphabetical file order (that module sorts before this one) even though it
+# passes cleanly in isolation. Every key `_settings_payload` reads is pinned
+# here at `dashboard/beacon/config.py`'s literal defaults, so this test's
+# result can never move because an unrelated module ran first.
+_DEFAULT_SETTINGS_PAYLOAD_ENV = {
+    'ENABLE_ADVANCED_DIAGNOSTICS': '1',
+    'METRIC_SAMPLE_SECONDS': '5',
+    'DISCOVERY_TIMEOUT_SECONDS': '180',
+    'TELEMETRY_RAW_DAYS': '7',
+    'TELEMETRY_FIVE_MINUTE_DAYS': '30',
+    'TELEMETRY_RETENTION_DAYS': '90',
+    'TELEMETRY_POINT_BUDGET': '2048',
+    'TELEMETRY_DB_MAX_BYTES': '536870912',
+    'TELEMETRY_MIN_FREE_BYTES': '1073741824',
+    'TELEMETRY_PRESSURE_WARNING_PERCENT': '80',
+    'TELEMETRY_PRESSURE_HARD_PERCENT': '90',
+    'TELEMETRY_PRESSURE_RECOVERY_PERCENT': '75',
+}
+
 
 def setUpModule():
     global _ORIGINAL_ENABLE_ADVANCED_DIAGNOSTICS
@@ -263,7 +291,7 @@ def generate_enabled_response_golden():
             'set _REGENERATE_ENABLED_GOLDEN = True to regenerate the enabled response golden',
         )
 
-    appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+    appmod, db_path = load_app(dict(_DEFAULT_SETTINGS_PAYLOAD_ENV))  # ENABLE_ADVANCED_DIAGNOSTICS='1'
     try:
         client = appmod.app.test_client()
         with mock.patch('time.time', lambda: _GOLDEN_FROZEN_NOW):
@@ -432,8 +460,14 @@ class EnabledResponseGoldenTests(_FrozenClockTestCase):
         # Module rule: explicit '1' -- DisabledAdvancedApiTests runs first
         # alphabetically and leaves '0' in os.environ that `load_app` never
         # clears (tests/helpers.py:51-65). This is the site that rule exists
-        # to protect.
-        self.appmod, self.db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+        # to protect. Also pins every TELEMETRY_*/METRIC_SAMPLE_SECONDS/
+        # DISCOVERY_TIMEOUT_SECONDS key `_settings_payload` reads at its
+        # config.py default, so an unrelated module's own environment leak
+        # (e.g. tests/test_historical_telemetry_api.py's
+        # ConfiguredTelemetryPolicyApiTests, which sets TELEMETRY_RAW_DAYS
+        # etc. via `load_app` and never clears them either) can never move
+        # this golden comparison when the full suite runs in file order.
+        self.appmod, self.db_path = load_app(dict(_DEFAULT_SETTINGS_PAYLOAD_ENV))
         self.client = self.appmod.app.test_client()
 
     def tearDown(self):
