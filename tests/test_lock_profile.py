@@ -1926,11 +1926,21 @@ class LockScopePreservationTests(unittest.TestCase):
         )
         self.assertEqual(bare_count + combined_count, 28)
 
-    def test_api_services_lock_scope_is_database_reads_only(self):
-        """Pins the NARROWED shape `06-20` created, using ast. If this test
-        fails: `_db_lock`'s scope moved again. Go to `D-DEBT-06-01` and
-        `PROH-OPS-04-06` before editing an assertion here -- do not loosen
-        this test to make it pass (`T-06-101`)."""
+    # REVERTED 2026-09-03. 06-20's narrowed-shape pin
+    # (test_api_services_lock_scope_is_database_reads_only) asserted the
+    # critical section held database reads ONLY. That narrowing was reverted
+    # after round 5's hardware measurement showed it made the deployment
+    # materially worse (see 06-LOCK-DIAGNOSTIC-R5B.md), so the assertion it
+    # made is no longer true and would fail for a correct reason. Restored
+    # here verbatim from 1a4db68^ -- the pre-narrowing pin, which asserts the
+    # four computations ARE inside the block, matching the code as it now
+    # stands again. Mutation-verified in 06-15 and unchanged since.
+    def test_api_services_lock_scope_containment_and_termination(self):
+        """Pins the SCOPE, not merely the count, using ast. Fails on all
+        three mutations that matter: deleting a call site, dedenting one
+        statement out of the block, and moving one of the four expensive
+        computations outside the with-block (the round-5 narrowing shape
+        this pin exists to catch)."""
         func = _find_function_def(self.tree, 'api_services')
         self.assertIsNotNone(func, 'api_services function not found in dashboard/app.py')
 
@@ -1940,64 +1950,52 @@ class LockScopePreservationTests(unittest.TestCase):
             "_db_lock's SCOPE changed. See D-DEBT-06-01.",
         )
 
-        calls_inside_with = {
+        # Containment: locate every call inside the _db_lock with-block
+        # (bounded by the With node's own subtree / end_lineno) and confirm
+        # all four expensive computations are among them. Matched by
+        # name/attribute, never by line number, so this survives ordinary
+        # edits above the function.
+        found_calls = {
             _call_target_name(node)
             for node in ast.walk(with_node)
             if isinstance(node, ast.Call)
         }
-        required_inside = {
-            'beacon_repositories.read_maintenance_windows_by_port',
-            'beacon_repositories.read_service_offline_interval_boundaries_by_port',
-            'beacon_repositories.get_runtime_state',
-        }
-        missing_inside = required_inside - calls_inside_with
-        self.assertFalse(
-            missing_inside,
-            f"_db_lock's SCOPE changed: {sorted(missing_inside)} no longer execute inside "
-            "api_services' _db_lock with-block. PROH-OPS-04-06 requires every database "
-            'read to stay inside the lock. See D-DEBT-06-01 before editing this assertion.',
-        )
-
-        forbidden_inside = {
+        required_calls = {
             '_uptime_summary',
             'beacon_maintenance.coverage',
             'beacon_maintenance.attributed_downtime_seconds',
             'beacon_repositories.offline_intervals_from_points_by_port',
         }
-        reintroduced = forbidden_inside & calls_inside_with
+        missing = required_calls - found_calls
         self.assertFalse(
-            reintroduced,
-            f"_db_lock's SCOPE changed: {sorted(reintroduced)} execute INSIDE "
-            "api_services' _db_lock with-block again -- one of the four computations "
-            '06-20 moved out was moved back in, silently undoing the narrowing without '
-            'changing output (T-06-101). See D-DEBT-06-01 and PROH-OPS-04-06 before '
-            'editing this assertion.',
+            missing,
+            f"_db_lock's SCOPE changed: {sorted(missing)} no longer execute inside "
+            "api_services' _db_lock with-block (bounded by end_lineno "
+            f'{with_node.end_lineno}). D-01 and PROH-OPS-04-02 fence exactly this '
+            'scope. See D-DEBT-06-01 before editing this assertion.',
         )
 
-        # A computation that vanished entirely (rather than merely moving)
-        # would also satisfy "not inside the with-block" -- so each of the
-        # four must still appear SOMEWHERE in the function, outside the
-        # with-block's own subtree, to catch that failure mode too.
-        with_subtree_ids = {id(node) for node in ast.walk(with_node)}
-        calls_outside_with = {
-            _call_target_name(node)
-            for node in ast.walk(func)
-            if isinstance(node, ast.Call) and id(node) not in with_subtree_ids
-        }
-        vanished = forbidden_inside - calls_outside_with
-        self.assertFalse(
-            vanished,
-            f"_db_lock's SCOPE changed: {sorted(vanished)} no longer execute ANYWHERE "
-            'in api_services -- a computation vanished entirely rather than merely '
-            'moving out of the lock. See D-DEBT-06-01 before editing this assertion.',
+        # Nothing escaped: the only function-level statement after the
+        # with-block is the terminal `return jsonify(result)`. That return
+        # IS a function-level statement after the with, and that is
+        # expected -- an earlier draft of this plan asserted no statement
+        # followed the block at all, which is false at HEAD and
+        # unsatisfiable. Encoding the real shape (with, then exactly one
+        # return, nothing else) is what makes this guard catch a narrowing
+        # rather than force it to be weakened.
+        body = func.body
+        with_index = body.index(with_node)
+        self.assertEqual(
+            with_index, len(body) - 2,
+            "_db_lock's SCOPE changed: a statement other than the terminal return "
+            "now follows api_services' with-block (or a statement was dedented out "
+            'of it). D-01 and PROH-OPS-04-02 fence exactly this scope. See '
+            'D-DEBT-06-01 before editing this assertion.',
         )
-
         self.assertIsInstance(
-            func.body[-1], ast.Return,
+            body[-1], ast.Return,
             "_db_lock's SCOPE changed: api_services no longer ends with a single "
-            'terminal return statement. See D-DEBT-06-01. (This test deliberately does '
-            "NOT assert the with-block's index within the function body -- several "
-            'statements legitimately follow it now that the narrowing has landed.)',
+            'terminal return statement after its with-block. See D-DEBT-06-01.',
         )
 
 
@@ -2139,7 +2137,6 @@ class LockScopeInvariantTests(unittest.TestCase):
     covered_by_the_audit` fails the moment a site's `(function, line)` pair
     drifts from what the table names.
     """
-
     def setUp(self):
         self.source = Path('dashboard/app.py').read_text(encoding='utf-8')
         self.tree = ast.parse(self.source)
