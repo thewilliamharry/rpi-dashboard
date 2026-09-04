@@ -46,6 +46,7 @@ Edit `docker-compose.yml` or supply equivalent environment values.
 | `DISCOVERY_TIMEOUT_SECONDS` | `180` | Full discovery deadline. |
 | `WORKER_READY_SECONDS` | `20` | Maximum heartbeat age for readiness. |
 | `ENABLE_PROMETHEUS` | `0` | Enables the optional `/metrics` endpoint. |
+| `ENABLE_ADVANCED_DIAGNOSTICS` | `1` | Setting to `0` removes the advanced workspace, its three assets, its API route and the front page's link to it — for a deployment monitored elsewhere. No stored data changes, and the setting is reversed by restarting with it back on. |
 | `THUMB_REFRESH_DAYS` | `1` | Successful screenshot refresh interval. |
 | `EXPIRE_DAYS` | `7` | Remove long-unseen services. |
 | `ALERT_WEBHOOK_URL` | empty | Optional transition webhook. |

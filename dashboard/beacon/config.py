@@ -65,6 +65,10 @@ class Settings:
     # threading.Lock or an InstrumentedLock (dashboard/beacon/lockprofile.py).
     # Default off, mirroring enable_prometheus's shape exactly.
     enable_lock_profile: bool = False
+    # 07-01/D-07-01: the only one of these three optional-surface toggles
+    # defaulting True. Existing deployments have the advanced workspace
+    # today, so an upgrade that sets nothing must not silently remove it.
+    enable_advanced_diagnostics: bool = True
     trusted_hosts: frozenset[str] = frozenset()
     trusted_host_networks: tuple = ()
     local_service_hosts: frozenset[str] = frozenset()
@@ -274,6 +278,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         discovery_timeout_seconds=_positive_int(source, 'DISCOVERY_TIMEOUT_SECONDS', 180),
         enable_prometheus=_enabled(source.get('ENABLE_PROMETHEUS', '0')),
         enable_lock_profile=_enabled(source.get('ENABLE_LOCK_PROFILE', '0')),
+        enable_advanced_diagnostics=_enabled(source.get('ENABLE_ADVANCED_DIAGNOSTICS', '1')),
         trusted_hosts=trusted_hosts,
         trusted_host_networks=trusted_networks,
         local_service_hosts=frozenset(local_hosts),
