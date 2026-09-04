@@ -691,9 +691,9 @@ deliberately NOT promoted (`PROH-OPS-07-08`, `D-DEBT-06-08`).*
 
 Plans:
 
-- [ ] 07-01-PLAN.md — Tracer: `ENABLE_ADVANCED_DIAGNOSTICS` end to end on `/api/advanced/current`, the pre-change response golden, and the connection/statement counting instrument
-- [ ] 07-02-PLAN.md — The remaining three routes, the entry point removed from the served front page, and a real-Chromium proof that the services page still boots without it
-- [ ] 07-03-PLAN.md — Front-page cost equality, the no-stored-change round trip, `PROH-DIA-09-01`, and the recorded acceptance-harness finding
+- [x] 07-01-PLAN.md — Tracer: `ENABLE_ADVANCED_DIAGNOSTICS` end to end on `/api/advanced/current`, the pre-change response golden, and the connection/statement counting instrument
+- [x] 07-02-PLAN.md — The remaining three routes, the entry point removed from the served front page, and a real-Chromium proof that the services page still boots without it
+- [x] 07-03-PLAN.md — Front-page cost equality, the no-stored-change round trip, `PROH-DIA-09-01`, and the recorded acceptance-harness finding
 
 **Wave 1**
 

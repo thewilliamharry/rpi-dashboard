@@ -41,8 +41,11 @@ a run of this module.
 
 import contextlib
 import hashlib
+import importlib
 import json
 import os
+import re
+import sqlite3
 import subprocess
 import threading
 import time
@@ -58,9 +61,10 @@ from werkzeug.serving import make_server
 import dashboard.app as _appmod_ref
 import dashboard.beacon.db as _beacon_db_ref
 from dashboard.beacon import frontpage as beacon_frontpage
+from dashboard.beacon import migrations as beacon_migrations
 from dashboard.beacon import repositories
 from dashboard.beacon.config import load_settings
-from tests.helpers import cleanup_db, load_app
+from tests.helpers import _ensure_psutil_stub, cleanup_db, load_app
 
 
 def _epoch(year, month, day, hour, minute, second=0):
@@ -71,6 +75,10 @@ FIXTURES_DIR = Path(__file__).resolve().parent / 'fixtures'
 GOLDEN_PATH = FIXTURES_DIR / '07_advanced_current_enabled_response_golden.json'
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / 'dashboard'
 STATIC_ASSET_NAMES = ('index.html', 'advanced.html', 'advanced.css', 'advanced.js')
+
+# 07-03: docker-compose.yml lives at the repository root, one level above
+# DASHBOARD_DIR.
+COMPOSE_PATH = DASHBOARD_DIR.parent / 'docker-compose.yml'
 
 # The last commit that touched dashboard/ before this phase's first
 # production edit -- the fixed referent EnabledResponseGoldenTests compares
@@ -184,6 +192,118 @@ def _asset_sha256():
         name: hashlib.sha256((DASHBOARD_DIR / name).read_bytes()).hexdigest()
         for name in STATIC_ASSET_NAMES
     }
+
+
+def _load_app_over_existing_db(extra_env, db_path):
+    """Reopen `db_path` under a fresh `dashboard.app` reload -- the same
+    mechanism `tests/helpers.py`'s `load_app` uses (write baseline env,
+    reload the module, set `DB_PATH`, call `init_db()`), minus minting a
+    fresh temporary database directory (`tests/helpers.py:73-74`).
+
+    07-03 needs two application builds to see the SAME on-disk database --
+    `FrontPageCostEqualityTests`' off-vs-on comparison and
+    `ToggleReversibilityTests`' restart round trip both depend on it -- and
+    plain `load_app` cannot do that; every call mints its own `db_dir`.
+
+    Carries the module rule exactly like `load_app`: every caller passes
+    its own explicit `ENABLE_ADVANCED_DIAGNOSTICS` value.
+    """
+    env = {
+        'TRIGGER_SCAN_RATE_LIMIT': '2',
+        'TRIGGER_SCAN_WINDOW_SECONDS': '60',
+        'ALERT_WEBHOOK_URL': '',
+        'ALERT_COOLDOWN_SECONDS': '60',
+        'ALERT_ONLY_CRITICAL': '0',
+        'EXPIRE_DAYS': '7',
+    }
+    if extra_env:
+        for key, value in extra_env.items():
+            env[key] = str(value)
+    for key, value in env.items():
+        os.environ[key] = value
+
+    _ensure_psutil_stub()
+
+    appmod = importlib.reload(_appmod_ref)
+    appmod.DB_PATH = db_path
+    appmod.init_db()
+    return appmod
+
+
+def _iterdump_sha256(db_path):
+    """sha256 of a fresh connection's `iterdump()` output -- the
+    database's LOGICAL content, not its bytes. The deployment runs SQLite
+    in WAL mode, so read-only traffic can move the `-wal`/`-shm` sidecar
+    files; a file-bytes oracle would fail for a reason unrelated to stored
+    data, and a guard that fails for unrelated reasons is a guard that gets
+    silenced by whoever hits that false failure first."""
+    conn = sqlite3.connect(db_path)
+    try:
+        dump = '\n'.join(conn.iterdump())
+    finally:
+        conn.close()
+    return hashlib.sha256(dump.encode('utf-8')).hexdigest()
+
+
+# 07-03 Task 2: docker-compose.yml's ENABLE_ADVANCED_DIAGNOSTICS lives in the
+# `environment: &beacon-environment` anchor under `x-beacon-common`, entirely
+# ABOVE `services:` (docker-compose.yml lines 14-35 at the time this was
+# written). tests/pi_load_acceptance.py's `parse_compose_memory_limits`
+# (lines 254-291) is this repository's style precedent for a line-oriented,
+# no-YAML-dependency compose scan -- copied for STYLE ONLY. Its own
+# `in_services` gate confines it to lines below `services:` and would return
+# an empty result for this key by construction; reusing its logic here would
+# produce a guard that passes on nothing.
+_BEACON_ENVIRONMENT_ANCHOR_HEADER = 'environment: &beacon-environment'
+
+
+def _scan_beacon_environment_anchor(compose_path):
+    """Scan the `environment: &beacon-environment` anchor block for its
+    `KEY: value` entries, returning a LIST of `(key, raw_value)` pairs (not
+    a dict) so a duplicated key is observable as two entries rather than
+    silently collapsed to one."""
+    lines = Path(compose_path).read_text().splitlines()
+    in_anchor = False
+    entries = []
+    for line in lines:
+        if line.strip() == _BEACON_ENVIRONMENT_ANCHOR_HEADER:
+            in_anchor = True
+            continue
+        if not in_anchor:
+            continue
+        if not line.startswith('    '):
+            # A blank line, or a dedent back to `environment:`'s own 2-space
+            # indent (or shallower), ends the anchor block.
+            break
+        match = re.match(r'^ {4}([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$', line)
+        if match:
+            entries.append((match.group(1), match.group(2).strip()))
+    return entries
+
+
+def _enable_advanced_diagnostics_compose_entries(compose_path):
+    return [
+        raw_value for key, raw_value in _scan_beacon_environment_anchor(compose_path)
+        if key == 'ENABLE_ADVANCED_DIAGNOSTICS'
+    ]
+
+
+_COMPOSE_INTERPOLATION_RE = re.compile(r'^\$\{[A-Za-z_][A-Za-z0-9_]*:-(.*)\}$')
+
+
+def _resolve_unset_default(raw_value):
+    """Resolve compose's `${NAME:-default}` interpolation form down to the
+    value the deployment uses when the operator sets no shell variable.
+    The raw scanned value is still quoted
+    (e.g. `"${BEACON_ADVANCED_DIAGNOSTICS:-1}"`), so surrounding double
+    quotes are stripped first."""
+    text = raw_value.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = text[1:-1]
+    match = _COMPOSE_INTERPOLATION_RE.match(text)
+    if not match:
+        raise ValueError(f'expected a ${{NAME:-default}} interpolation, got {raw_value!r}')
+    return match.group(1)
 
 
 class _SeedingHelpers:
@@ -891,6 +1011,258 @@ class SettingsAdvancedDiagnosticsTests(unittest.TestCase):
         by 07-03."""
         settings = load_settings({'ENABLE_ADVANCED_DIAGNOSTICS': 'enabled'})
         self.assertFalse(settings.enable_advanced_diagnostics)
+
+
+class FrontPageCostEqualityTests(_FrozenClockTestCase):
+    """07-03 Task 1: the property under test is "the toggle changed nothing
+    about the front page's cost" -- what gives criterion 3 real content that
+    07-01's zero-work assertion on `/` alone does not have, because `/` is a
+    static `send_file` performing no diagnosis work today even with
+    advanced diagnostics fully enabled. The measurement here is an equality
+    between two measured statement counts over the front page's whole boot
+    request set, never a threshold against either total (D-DEBT-06-14's
+    lesson: an absolute figure ties a guard to the seeded dataset and the
+    executing machine).
+
+    BOOT_PATHS is derived from dashboard/app.js's own `DOMContentLoaded`
+    handler (line 795's `Promise.allSettled([loadStats(), loadHistory(),
+    loadScan(), loadServices(), loadEvents()])` at the time this was
+    written) plus `/` itself -- the exact six requests the front page's own
+    boot sequence issues, read from that line rather than from memory.
+
+    THE EXPLICIT '1' IS THE ENTIRE INTEGRITY OF THIS TEST. Built without it,
+    the enabled side would inherit the '0' `DisabledAdvancedApiTests` (and
+    this class's own disabled build) leaves in `os.environ`
+    (`load_app`/`_load_app_over_existing_db` never clear it --
+    tests/helpers.py:51-65); both sides would then run disabled, their
+    statement totals would agree by construction, and criterion 3 would be
+    reported satisfied by a comparison of two identical disabled runs -- the
+    same defect class Phase 6 found six times. `setUp` reads
+    `enable_advanced_diagnostics` off each application's own `SETTINGS`
+    IMMEDIATELY after building it.
+
+    A SECOND, load-bearing hazard beyond the module rule: `dashboard.app` is
+    a SINGLETON module. `importlib.reload` (inside `load_app` and
+    `_load_app_over_existing_db`) mutates that ONE module object's
+    namespace IN PLACE and returns the SAME object -- it does not hand back
+    an independent copy. `ENABLE_ADVANCED_DIAGNOSTICS`/`SETTINGS` are plain
+    globals snapshotted at reload time, read live via each route function's
+    `__globals__` at call time, not frozen per Flask `app` instance. Building
+    the enabled side therefore rebinds those globals for the ALREADY-BUILT
+    disabled side too -- a request dispatched through the disabled side's
+    OWN test client, issued AFTER the enabled side's reload, would silently
+    run enabled. The only correct ordering is sequential: build disabled,
+    read its `SETTINGS` value, issue its ENTIRE boot request set to
+    completion -- THEN reload to enabled, read ITS `SETTINGS` value (this is
+    where the settings pair is asserted, immediately upon the second build
+    and before the enabled side's own requests), and only then issue the
+    enabled boot request set.
+    """
+
+    BOOT_PATHS = (
+        '/',
+        '/api/stats',
+        '/api/history',
+        '/api/scan-status',
+        '/api/services',
+        '/api/events?limit=50',
+    )
+
+    def setUp(self):
+        super().setUp()
+        appmod, self.db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        self._freeze_clock(_GOLDEN_FROZEN_NOW)
+        _SeedingHelpers.seed_three_service_dataset(appmod, _GOLDEN_FROZEN_NOW)
+
+        off_enabled = appmod.SETTINGS.enable_advanced_diagnostics
+        off_client = appmod.app.test_client()
+        with _counting_connections() as self.off_counter:
+            self.off_statuses = {path: off_client.get(path).status_code for path in self.BOOT_PATHS}
+
+        # Reopen the SAME database, explicitly enabled -- see class
+        # docstring's singleton-module hazard for why the off side's own
+        # boot-request measurement above MUST run to completion before this
+        # reload: dashboard.app.SETTINGS is one module global rebound by
+        # every reload, shared by every previously-built Flask `app` object
+        # too, so a disabled-side request issued after this call would
+        # silently observe the enabled value.
+        appmod = _load_app_over_existing_db({'ENABLE_ADVANCED_DIAGNOSTICS': '1'}, self.db_path)
+        on_enabled = appmod.SETTINGS.enable_advanced_diagnostics
+
+        self.settings_pair = (off_enabled, on_enabled)
+        self.assertEqual(
+            self.settings_pair, (False, True),
+            f'expected (False, True) read off the two applications immediately as each was '
+            f'built, observed {self.settings_pair} -- load_app/_load_app_over_existing_db '
+            f'leak extra_env into os.environ and never clear it (tests/helpers.py:51-65); an '
+            f'implicit enabled build after a disabled one in the same process would silently '
+            f'run disabled too, and the cost equality below would then be satisfied by '
+            f'comparing two identical disabled runs -- the vacuous pass this test exists to '
+            f'refuse.',
+        )
+
+        on_client = appmod.app.test_client()
+        with _counting_connections() as self.on_counter:
+            self.on_statuses = {path: on_client.get(path).status_code for path in self.BOOT_PATHS}
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+        super().tearDown()
+
+    def test_the_settings_pair_is_false_true_read_immediately_upon_each_build(self):
+        """The setUp assertion above IS this criterion; a dedicated test
+        method makes the pair itself, not only its consequence, a named and
+        independently reportable assertion."""
+        self.assertEqual(self.settings_pair, (False, True))
+
+    def test_per_path_status_codes_agree_between_the_two_sides(self):
+        """A separate test from the statement-count equality below, so an
+        early failure on one side (e.g. a 500) cannot masquerade as
+        agreement by coincidentally producing equal totals."""
+        for path in self.BOOT_PATHS:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self.off_statuses[path], self.on_statuses[path],
+                    f'{path} answered {self.off_statuses[path]} disabled vs '
+                    f'{self.on_statuses[path]} enabled',
+                )
+
+    def test_front_page_boot_costs_the_same_measured_statements_and_connections_off_and_on(self):
+        """The equality: a full front-page boot request set executes the
+        same total SQLite statement count and the same total connection
+        count with the toggle off as with it on, measured on the same
+        seeded dataset. This is what gives criterion 3 independent force
+        beyond 07-01's zero-work assertion on `/` alone."""
+        self.assertEqual(
+            self.off_counter.statements, self.on_counter.statements,
+            f'front-page boot set executed {self.off_counter.statements} SQLite statement(s) '
+            f'disabled vs {self.on_counter.statements} enabled -- the toggle-delivery '
+            f'mechanism cost the front page something',
+        )
+        self.assertEqual(
+            self.off_counter.connections, self.on_counter.connections,
+            f'front-page boot set opened {self.off_counter.connections} connection(s) '
+            f'disabled vs {self.on_counter.connections} enabled',
+        )
+
+
+class ToggleReversibilityTests(_FrozenClockTestCase):
+    """07-03 Task 1: criterion 5 as a round trip, not an assertion --
+    exercise a disabled deployment against a seeded database, confirm the
+    database's logical content and applied schema version are unchanged,
+    then reopen the SAME database file with the toggle back on and recover
+    07-01's captured golden.
+
+    Uses `_iterdump_sha256` (logical content), never file bytes, as the
+    oracle -- see that function's docstring for why a file-bytes comparison
+    would be a guard that fails for reasons unrelated to stored data.
+    """
+
+    def test_a_disabled_session_leaves_the_database_unchanged_and_restart_recovers_the_golden(self):
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        self._freeze_clock(_GOLDEN_FROZEN_NOW)
+        _SeedingHelpers.seed_three_service_dataset(appmod, _GOLDEN_FROZEN_NOW)
+
+        before_dump = _iterdump_sha256(db_path)
+        before_version = beacon_migrations._recorded_version(db_path)
+
+        client = appmod.app.test_client()
+        for path in FrontPageCostEqualityTests.BOOT_PATHS:
+            client.get(path)
+        for path in ('/advanced', '/advanced.css', '/advanced.js', '/api/advanced/current'):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 404, f'{path} answered {response.status_code}, expected 404')
+
+        after_dump = _iterdump_sha256(db_path)
+        after_version = beacon_migrations._recorded_version(db_path)
+
+        self.assertEqual(
+            before_dump, after_dump,
+            f"disabled session's database content moved -- before {before_dump}, "
+            f'after {after_dump}',
+        )
+        self.assertEqual(
+            before_version, after_version,
+            f'applied schema version moved from {before_version} to {after_version} across a '
+            f'disabled session',
+        )
+
+        # Reopen the SAME database file, explicitly enabled -- this call
+        # follows a disabled build in the same process and an implicit one
+        # would reopen disabled (tests/helpers.py:51-65). Pinned at
+        # _DEFAULT_SETTINGS_PAYLOAD_ENV's literal defaults so no earlier
+        # class's own load_app leak can move the golden comparison, exactly
+        # like EnabledResponseGoldenTests.setUp.
+        try:
+            on_appmod = _load_app_over_existing_db(dict(_DEFAULT_SETTINGS_PAYLOAD_ENV), db_path)
+            on_client = on_appmod.app.test_client()
+            golden = json.loads(GOLDEN_PATH.read_text(encoding='utf-8'))
+            response = on_client.get('/api/advanced/current')
+            referent = f"the golden captured at {golden['captured_at_commit']}"
+            self.assertEqual(
+                response.status_code, golden['status_code'],
+                f'reopened, toggle-on status moved from {referent}',
+            )
+            self.assertEqual(
+                response.content_type, golden['content_type'],
+                f'reopened, toggle-on content type moved from {referent}',
+            )
+            self.assertEqual(
+                response.headers.get('Cache-Control'), golden['cache_control'],
+                f'reopened, toggle-on Cache-Control moved from {referent}',
+            )
+            self.assertEqual(
+                response.get_data(as_text=True), golden['body'],
+                f'reopened, toggle-on body moved from {referent}',
+            )
+        finally:
+            cleanup_db(db_path)
+
+
+class AcceptanceConfigurationGuardTests(unittest.TestCase):
+    """07-03 Task 2: `PROH-DIA-09-01`'s automated guard -- the value
+    docker-compose.yml supplies for `ENABLE_ADVANCED_DIAGNOSTICS`, resolved
+    for the case where the operator sets no shell variable, produces a
+    `Settings` whose `enable_advanced_diagnostics` is True when fed to the
+    real `load_settings`.
+
+    Scans the `environment: &beacon-environment` anchor with this module's
+    OWN scan (`_scan_beacon_environment_anchor`), not
+    `tests/pi_load_acceptance.py`'s `parse_compose_memory_limits` -- see
+    that helper's module-level comment for why reusing its logic here would
+    scan zero lines. Assertion runs through the real parser, never a text
+    comparison, so it tests the consequence the deployment actually gets.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.occurrences = _enable_advanced_diagnostics_compose_entries(COMPOSE_PATH)
+        # Unable to pass on an empty (or ambiguous) result: this is
+        # PROH-DIA-09-01's only automated guard, and a scan that silently
+        # finds nothing must never report a pass over nothing.
+        self.assertEqual(
+            len(self.occurrences), 1,
+            f'expected exactly one ENABLE_ADVANCED_DIAGNOSTICS entry in {COMPOSE_PATH}, '
+            f'observed {len(self.occurrences)}: {self.occurrences!r}',
+        )
+
+    def test_the_scan_finds_exactly_one_entry_before_any_value_is_interpreted(self):
+        """The setUp assertion above IS this criterion; a dedicated test
+        method makes the count itself a named and independently reportable
+        assertion, not only a precondition of the test below."""
+        self.assertEqual(len(self.occurrences), 1)
+
+    def test_the_shipped_default_resolves_to_enabled_through_the_real_parser(self):
+        default_value = _resolve_unset_default(self.occurrences[0])
+        settings = load_settings({'ENABLE_ADVANCED_DIAGNOSTICS': default_value})
+        self.assertTrue(
+            settings.enable_advanced_diagnostics,
+            f"PROH-DIA-09-01: docker-compose.yml's shipped default for "
+            f'ENABLE_ADVANCED_DIAGNOSTICS resolved to {default_value!r}, which load_settings '
+            f'parses as disabled -- every OPS-07 acceptance run measures the fully-enabled '
+            f'configuration; flipping the shipped default is the specific act PROH-DIA-09-01 '
+            f'forbids.',
+        )
 
 
 if __name__ == '__main__':
