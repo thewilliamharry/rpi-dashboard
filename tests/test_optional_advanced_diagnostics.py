@@ -44,6 +44,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -74,6 +75,10 @@ FIXTURES_DIR = Path(__file__).resolve().parent / 'fixtures'
 GOLDEN_PATH = FIXTURES_DIR / '07_advanced_current_enabled_response_golden.json'
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / 'dashboard'
 STATIC_ASSET_NAMES = ('index.html', 'advanced.html', 'advanced.css', 'advanced.js')
+
+# 07-03: docker-compose.yml lives at the repository root, one level above
+# DASHBOARD_DIR.
+COMPOSE_PATH = DASHBOARD_DIR.parent / 'docker-compose.yml'
 
 # The last commit that touched dashboard/ before this phase's first
 # production edit -- the fixed referent EnabledResponseGoldenTests compares
@@ -238,6 +243,67 @@ def _iterdump_sha256(db_path):
     finally:
         conn.close()
     return hashlib.sha256(dump.encode('utf-8')).hexdigest()
+
+
+# 07-03 Task 2: docker-compose.yml's ENABLE_ADVANCED_DIAGNOSTICS lives in the
+# `environment: &beacon-environment` anchor under `x-beacon-common`, entirely
+# ABOVE `services:` (docker-compose.yml lines 14-35 at the time this was
+# written). tests/pi_load_acceptance.py's `parse_compose_memory_limits`
+# (lines 254-291) is this repository's style precedent for a line-oriented,
+# no-YAML-dependency compose scan -- copied for STYLE ONLY. Its own
+# `in_services` gate confines it to lines below `services:` and would return
+# an empty result for this key by construction; reusing its logic here would
+# produce a guard that passes on nothing.
+_BEACON_ENVIRONMENT_ANCHOR_HEADER = 'environment: &beacon-environment'
+
+
+def _scan_beacon_environment_anchor(compose_path):
+    """Scan the `environment: &beacon-environment` anchor block for its
+    `KEY: value` entries, returning a LIST of `(key, raw_value)` pairs (not
+    a dict) so a duplicated key is observable as two entries rather than
+    silently collapsed to one."""
+    lines = Path(compose_path).read_text().splitlines()
+    in_anchor = False
+    entries = []
+    for line in lines:
+        if line.strip() == _BEACON_ENVIRONMENT_ANCHOR_HEADER:
+            in_anchor = True
+            continue
+        if not in_anchor:
+            continue
+        if not line.startswith('    '):
+            # A blank line, or a dedent back to `environment:`'s own 2-space
+            # indent (or shallower), ends the anchor block.
+            break
+        match = re.match(r'^ {4}([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$', line)
+        if match:
+            entries.append((match.group(1), match.group(2).strip()))
+    return entries
+
+
+def _enable_advanced_diagnostics_compose_entries(compose_path):
+    return [
+        raw_value for key, raw_value in _scan_beacon_environment_anchor(compose_path)
+        if key == 'ENABLE_ADVANCED_DIAGNOSTICS'
+    ]
+
+
+_COMPOSE_INTERPOLATION_RE = re.compile(r'^\$\{[A-Za-z_][A-Za-z0-9_]*:-(.*)\}$')
+
+
+def _resolve_unset_default(raw_value):
+    """Resolve compose's `${NAME:-default}` interpolation form down to the
+    value the deployment uses when the operator sets no shell variable.
+    The raw scanned value is still quoted
+    (e.g. `"${BEACON_ADVANCED_DIAGNOSTICS:-1}"`), so surrounding double
+    quotes are stripped first."""
+    text = raw_value.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = text[1:-1]
+    match = _COMPOSE_INTERPOLATION_RE.match(text)
+    if not match:
+        raise ValueError(f'expected a ${{NAME:-default}} interpolation, got {raw_value!r}')
+    return match.group(1)
 
 
 class _SeedingHelpers:
@@ -1151,6 +1217,52 @@ class ToggleReversibilityTests(_FrozenClockTestCase):
             )
         finally:
             cleanup_db(db_path)
+
+
+class AcceptanceConfigurationGuardTests(unittest.TestCase):
+    """07-03 Task 2: `PROH-DIA-09-01`'s automated guard -- the value
+    docker-compose.yml supplies for `ENABLE_ADVANCED_DIAGNOSTICS`, resolved
+    for the case where the operator sets no shell variable, produces a
+    `Settings` whose `enable_advanced_diagnostics` is True when fed to the
+    real `load_settings`.
+
+    Scans the `environment: &beacon-environment` anchor with this module's
+    OWN scan (`_scan_beacon_environment_anchor`), not
+    `tests/pi_load_acceptance.py`'s `parse_compose_memory_limits` -- see
+    that helper's module-level comment for why reusing its logic here would
+    scan zero lines. Assertion runs through the real parser, never a text
+    comparison, so it tests the consequence the deployment actually gets.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.occurrences = _enable_advanced_diagnostics_compose_entries(COMPOSE_PATH)
+        # Unable to pass on an empty (or ambiguous) result: this is
+        # PROH-DIA-09-01's only automated guard, and a scan that silently
+        # finds nothing must never report a pass over nothing.
+        self.assertEqual(
+            len(self.occurrences), 1,
+            f'expected exactly one ENABLE_ADVANCED_DIAGNOSTICS entry in {COMPOSE_PATH}, '
+            f'observed {len(self.occurrences)}: {self.occurrences!r}',
+        )
+
+    def test_the_scan_finds_exactly_one_entry_before_any_value_is_interpreted(self):
+        """The setUp assertion above IS this criterion; a dedicated test
+        method makes the count itself a named and independently reportable
+        assertion, not only a precondition of the test below."""
+        self.assertEqual(len(self.occurrences), 1)
+
+    def test_the_shipped_default_resolves_to_enabled_through_the_real_parser(self):
+        default_value = _resolve_unset_default(self.occurrences[0])
+        settings = load_settings({'ENABLE_ADVANCED_DIAGNOSTICS': default_value})
+        self.assertTrue(
+            settings.enable_advanced_diagnostics,
+            f"PROH-DIA-09-01: docker-compose.yml's shipped default for "
+            f'ENABLE_ADVANCED_DIAGNOSTICS resolved to {default_value!r}, which load_settings '
+            f'parses as disabled -- every OPS-07 acceptance run measures the fully-enabled '
+            f'configuration; flipping the shipped default is the specific act PROH-DIA-09-01 '
+            f'forbids.',
+        )
 
 
 if __name__ == '__main__':
