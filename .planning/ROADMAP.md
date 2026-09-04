@@ -666,7 +666,39 @@ deliberately NOT promoted (`PROH-OPS-07-08`, `D-DEBT-06-08`).*
   4. With the toggle on, behaviour is byte-identical to today's, proven against a captured response golden.
   5. Turning the toggle off changes no stored data and is reversible by restarting with it on — no migration, no destructive step.
 
-**Plans**: not yet planned
+**Plans**: 3 plans
+
+Plans:
+
+- [ ] 07-01-PLAN.md — Tracer: `ENABLE_ADVANCED_DIAGNOSTICS` end to end on `/api/advanced/current`, the pre-change response golden, and the connection/statement counting instrument
+- [ ] 07-02-PLAN.md — The remaining three routes, the entry point removed from the served front page, and a real-Chromium proof that the services page still boots without it
+- [ ] 07-03-PLAN.md — Front-page cost equality, the no-stored-change round trip, `PROH-DIA-09-01`, and the recorded acceptance-harness finding
+
+**Wave 1**
+
+- `07-01` — Tracer: one configuration value from environment to handler to deployment, on the one advanced route that touches the database, with its enabled bytes captured before any edit
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- `07-02` — `/advanced`, `/advanced.css`, `/advanced.js` gated the same way; `dashboard/beacon/frontpage.py` removes the entry point server-side; `dashboard/app.js` survives its absence
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- `07-03` — Criterion 3 as a measured equality, criterion 5 as an off-then-on round trip, and the OPS-07 fence
+
+*Strictly sequential: all three plans write `tests/test_optional_advanced_diagnostics.py`, and `07-01`
+and `07-02` both write `dashboard/app.py`, so no two have disjoint `files_modified`. The ordering is
+also load-bearing beyond file conflicts — `07-01` Task 1 captures the enabled goldens from the
+unmodified tree, so it cannot follow any production edit, and `07-03`'s cost and reversibility
+measurements are meaningless until `07-02` has given `/` its disabled branch.*
+
+*No task in this phase is rated `costly` or `one-way`: a defaulted `Settings` field, four early
+returns, one pure transform module, two guarded element lookups, one deployment environment line.
+No migration, no schema change, no write to stored data. `REVERSIBILITY_GATES` therefore produces no
+`checkpoint:decision`, and `07-03` Task 1 turns that judgement into a measurement rather than leaving
+it as a claim. Success criterion 3 is satisfied in a deliberately narrowed form recorded in
+`07-03`'s objective: read literally it is near-vacuous against today's static front page, so its
+operative content is the measured equality of front-page cost across the toggle.*
 
 > **OPS-07 guardrail.** `/api/advanced/current` is one of the routes currently failing Phase 6's Pi
 > acceptance budgets, and the most expensive in the mix (584s CPU and 1091s off-CPU across 750
@@ -679,7 +711,7 @@ deliberately NOT promoted (`PROH-OPS-07-08`, `D-DEBT-06-08`).*
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -689,3 +721,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
 | 5. Theme-Parity Analytics Experience | 7/7 | Complete    | 2026-08-28 |
 | 6. Workload Resilience & Pi Acceptance | 10/10 | In Progress|  |
+| 7. Optional Advanced Diagnostics | 0/3 | Planned     |  |
