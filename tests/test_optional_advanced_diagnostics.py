@@ -52,6 +52,7 @@ from unittest import mock
 
 import dashboard.app as _appmod_ref
 import dashboard.beacon.db as _beacon_db_ref
+from dashboard.beacon import frontpage as beacon_frontpage
 from dashboard.beacon import repositories
 from dashboard.beacon.config import load_settings
 from tests.helpers import cleanup_db, load_app
@@ -591,6 +592,133 @@ class DisabledAdvancedAssetTests(unittest.TestCase):
             "07-01's fixture -- this phase must not change a served asset; "
             'a later phase legitimately editing one of these files should '
             'update the fixture instead',
+        )
+
+
+class FrontPageEntryPointTests(unittest.TestCase):
+    """07-02 Task 2: `/` with the toggle off serves a document that never
+    carried the advanced-diagnosis entry point in its bytes; with the
+    toggle on it serves `dashboard/index.html` verbatim and the transform
+    is never invoked at all.
+
+    Disabled-side members build through
+    `load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})` and enabled-side
+    members through `load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})` --
+    explicit on both sides, per the module rule, because `load_app` leaves
+    `extra_env` in `os.environ` for the rest of the process and an implicit
+    enabled build here would compare the transformed document against
+    `index.html` rather than the raw file.
+    """
+
+    def test_the_markup_invariant_dashboard_index_html_has_exactly_one_entry_point(self):
+        """TRIPWIRE, not evidence: this converts a future edit to
+        dashboard/index.html's anchor markup into a failing test here
+        rather than a failing deployment. The behavioural evidence that the
+        feature actually works is the served body below and Task 3's
+        rendered page -- never this inspection."""
+        document = (DASHBOARD_DIR / 'index.html').read_text(encoding='utf-8')
+        matches = beacon_frontpage._ENTRY_POINT_PATTERN.findall(document)
+        self.assertEqual(
+            len(matches), 1,
+            "TRIPWIRE (not behavioural evidence): dashboard/index.html's "
+            "advanced-diagnosis anchor markup moved away from the shape "
+            'without_advanced_entry_point depends on -- update '
+            'dashboard/beacon/frontpage.py to match the new markup.',
+        )
+
+    def test_disabled_body_omits_the_entry_point_and_keeps_the_rest_of_the_page(self):
+        """Both halves matter: the first three assertions are criterion 2
+        (absent, not hidden); the last two are that the transform excised
+        only what it was aimed at."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        try:
+            client = appmod.app.test_client()
+            response = client.get('/')
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn('id="advanced-diagnosis-link"', body)
+            self.assertNotIn('href="/advanced"', body)
+            self.assertNotIn('Advanced diagnosis', body)
+            self.assertIn('id="services-grid"', body)
+            self.assertIn('id="toggle"', body)
+        finally:
+            cleanup_db(db_path)
+
+    def test_enabled_body_is_byte_identical_to_index_html_and_the_transform_is_unreached(self):
+        """The explicit '1' matters here specifically: an earlier class in
+        this module has already written '0' into `os.environ`
+        (tests/helpers.py:51-65)."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+        try:
+            client = appmod.app.test_client()
+            with mock.patch.object(
+                beacon_frontpage, 'without_advanced_entry_point',
+                side_effect=AssertionError('the transform must not be invoked on the enabled path'),
+            ):
+                response = client.get('/')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, (DASHBOARD_DIR / 'index.html').read_bytes())
+        finally:
+            cleanup_db(db_path)
+
+    def test_the_transform_runs_at_most_once_per_process_across_five_disabled_requests(self):
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        appmod._index_document_without_advanced_entry_point_cache = None
+
+        def _cleanup():
+            appmod._index_document_without_advanced_entry_point_cache = None
+            cleanup_db(db_path)
+
+        self.addCleanup(_cleanup)
+
+        client = appmod.app.test_client()
+        real_transform = beacon_frontpage.without_advanced_entry_point
+        calls = []
+
+        def _counting(document):
+            calls.append(1)
+            return real_transform(document)
+
+        with mock.patch.object(beacon_frontpage, 'without_advanced_entry_point', _counting):
+            for _ in range(5):
+                response = client.get('/')
+                self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(
+            len(calls), 1,
+            f'expected exactly 1 transform invocation across 5 disabled GET / '
+            f'requests, observed {len(calls)}',
+        )
+
+    def test_a_transform_failure_propagates_out_of_the_route_rather_than_serving_a_page(self):
+        """Pinning zero-match and duplicate-match raises on the pure
+        function (dashboard/beacon/frontpage.py) proves the *function*
+        refuses; this proves the *server* refuses, which is the property a
+        mismatched deployment actually depends on. The document cache is
+        reset first so the patched function is genuinely reached rather
+        than short-circuited by a value an earlier test already computed."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        appmod._index_document_without_advanced_entry_point_cache = None
+
+        def _cleanup():
+            appmod._index_document_without_advanced_entry_point_cache = None
+            cleanup_db(db_path)
+
+        self.addCleanup(_cleanup)
+
+        client = appmod.app.test_client()
+
+        def _raising(document):
+            raise beacon_frontpage.AdvancedEntryPointNotFound('mutated for this test: forced raise')
+
+        with mock.patch.object(beacon_frontpage, 'without_advanced_entry_point', _raising):
+            response = client.get('/')
+
+        body = response.get_data(as_text=True)
+        self.assertFalse(
+            response.status_code == 200 and 'advanced-diagnosis-link' in body,
+            f'a transform failure must never be served as a 200 page carrying the '
+            f'entry point -- observed status {response.status_code}',
         )
 
 
