@@ -653,6 +653,29 @@ may), `PROH-OPS-07-13` (`evaluate_narrowing_outcome` is diagnostic-only), and `P
 (`/api/advanced/current`'s payload must be byte-identical for the same input). OPS-07 is again
 deliberately NOT promoted (`PROH-OPS-07-08`, `D-DEBT-06-08`).*
 
+### Phase 7: Optional Advanced Diagnostics
+
+**Goal**: Beacon runs as a services-only dashboard on hosts that already have monitoring, with advanced diagnostics off by configuration and costing nothing when off.
+**Depends on**: Phase 3 (Advanced Current Diagnosis)
+**Requirements**: DIA-09
+**Success Criteria** (what must be TRUE):
+
+  1. A single configuration toggle, defaulting to enabled, controls whether advanced diagnostics is available; an existing deployment that sets nothing keeps the page it has today.
+  2. With the toggle off, `/advanced`, `/advanced.css`, `/advanced.js` and `/api/advanced/current` all serve 404 and the front page's entry point to them is absent rather than merely hidden by styling.
+  3. With the toggle off, a request to the services front page performs none of the work advanced diagnostics would have required, demonstrated by measurement rather than by inspection.
+  4. With the toggle on, behaviour is byte-identical to today's, proven against a captured response golden.
+  5. Turning the toggle off changes no stored data and is reversible by restarting with it on — no migration, no destructive step.
+
+**Plans**: not yet planned
+
+> **OPS-07 guardrail.** `/api/advanced/current` is one of the routes currently failing Phase 6's Pi
+> acceptance budgets, and the most expensive in the mix (584s CPU and 1091s off-CPU across 750
+> requests in round 5b). Disabling it makes an acceptance run dramatically easier. That is a
+> legitimate deployment option and an illegitimate way to pass OPS-07: `PROH-OPS-07-01` and
+> `PROH-OPS-07-10` forbid reaching a pass by asking less of the deployment. **Every OPS-07 acceptance
+> run measures the fully-enabled configuration.** The toggle is a deployment mode, never a test knob.
+
+
 ## Progress
 
 **Execution Order:**

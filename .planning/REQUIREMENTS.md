@@ -41,6 +41,7 @@
 - [x] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
 - [x] **DIA-07**: Correlated views present observed evidence without asserting an unsupported root cause.
 - [x] **DIA-08**: The operator can view effective monitoring settings and change supported analytics presentation, refresh, range, and filtering preferences without exposing remote-control actions.
+- [ ] **DIA-09**: The operator can disable advanced diagnostics for a deployment that is already monitored elsewhere, hiding the page and its entry point and serving none of its routes, while the services front page keeps working unchanged.
 
 ### Historical Investigation
 
@@ -133,6 +134,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | DIA-06 | Phase 4 | Complete |
 | DIA-07 | Phase 4 | Complete |
 | DIA-08 | Phase 3 + Phase 4 | Complete |
+| DIA-09 | Phase 7 | Pending |
 | HIS-01 | Phase 4 | Complete |
 | HIS-02 | Phase 4 | Complete |
 | HIS-03 | Phase 4 | Complete |
