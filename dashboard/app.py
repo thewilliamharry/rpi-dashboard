@@ -2505,6 +2505,10 @@ def index():
 
 @app.route('/advanced')
 def advanced_index():
+    """07-02: mirrors api_advanced_current's gate exactly (D-07-02) -- the
+    404 is the handler's first statement."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return '', 404
     return send_file('advanced.html', mimetype='text/html')
 
 
@@ -2515,6 +2519,9 @@ def serve_css():
 
 @app.route('/advanced.css')
 def serve_advanced_css():
+    """07-02: mirrors api_advanced_current's gate exactly (D-07-02)."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return '', 404
     return send_file('advanced.css', mimetype='text/css')
 
 
@@ -2525,6 +2532,9 @@ def serve_js():
 
 @app.route('/advanced.js')
 def serve_advanced_js():
+    """07-02: mirrors api_advanced_current's gate exactly (D-07-02)."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return '', 404
     return send_file('advanced.js', mimetype='application/javascript')
 
 

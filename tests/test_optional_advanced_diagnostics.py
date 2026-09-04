@@ -502,6 +502,98 @@ class EnabledResponseGoldenTests(_FrozenClockTestCase):
         self.assertEqual(_asset_sha256(), self.golden['asset_sha256'])
 
 
+class DisabledAdvancedAssetTests(unittest.TestCase):
+    """07-02 Task 1: the three remaining advanced surfaces (`/advanced`,
+    `/advanced.css`, `/advanced.js`) 404 with the toggle off, mirroring
+    `api_advanced_current`'s gate (D-07-02) -- and the front page's own
+    assets (`/`, `/style.css`, `/app.js`) are never gated, only the advanced
+    bundle is.
+
+    Runs alphabetically after `DisabledAdvancedApiTests`, which has already
+    written '0' into `os.environ['ENABLE_ADVANCED_DIAGNOSTICS']` via
+    `load_app` (never cleared -- tests/helpers.py:51-65). This class's own
+    `setUp` deepens that leak; every enabled-side method below builds its
+    own application through an explicit `'1'`, per the module rule.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.appmod, self.db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        self.client = self.appmod.app.test_client()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+        super().tearDown()
+
+    def test_the_disabled_toggle_gates_only_the_advanced_bundle(self):
+        """Drives the three gated paths and the three ungated front-page
+        paths in one subtest loop so a regression names the path that
+        moved, with its observed status."""
+        cases = [
+            ('/advanced', 404),
+            ('/advanced.css', 404),
+            ('/advanced.js', 404),
+            ('/', 200),
+            ('/style.css', 200),
+            ('/app.js', 200),
+        ]
+        for path, expected_status in cases:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(
+                    response.status_code, expected_status,
+                    f'{path} answered {response.status_code}, expected {expected_status}',
+                )
+                if expected_status == 404:
+                    self.assertEqual(response.get_data(as_text=True), '')
+
+    def test_enabled_advanced_surfaces_are_byte_identical_to_disk(self):
+        """The explicit '1' is required rather than stylistic: this class's
+        own `setUp` above has already written '0' into `os.environ`, and
+        `load_app` never clears it (tests/helpers.py:51-65) -- an implicit
+        build here would compare a 404 body against a file's bytes.
+
+        This assertion is deliberately an invariant rather than a frozen
+        digest: it stays true across any legitimate future edit to these
+        four files and still fails the moment the enabled path starts
+        transforming a document -- the property criterion 4 actually needs,
+        and the property 07-02 Task 2 puts at risk."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+        try:
+            client = appmod.app.test_client()
+            asset_directory = Path(appmod.__file__).resolve().parent
+            for path, filename in [
+                ('/', 'index.html'),
+                ('/advanced', 'advanced.html'),
+                ('/advanced.css', 'advanced.css'),
+                ('/advanced.js', 'advanced.js'),
+            ]:
+                with self.subTest(path=path):
+                    response = client.get(path)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        response.data, (asset_directory / filename).read_bytes(),
+                        f'{path} diverged from {filename} on disk',
+                    )
+        finally:
+            cleanup_db(db_path)
+
+    def test_the_enabled_asset_digests_still_match_07_01s_fixture(self):
+        """Distinct from the invariant above, and deliberately so: this
+        phase must not change a served asset. A later phase legitimately
+        editing one of these files is expected to update the fixture; this
+        assertion failing is that phase's cue to do so, not evidence this
+        assertion is wrong."""
+        golden = json.loads(GOLDEN_PATH.read_text(encoding='utf-8'))
+        self.assertEqual(
+            _asset_sha256(), golden['asset_sha256'],
+            'a served advanced asset moved from the digests captured in '
+            "07-01's fixture -- this phase must not change a served asset; "
+            'a later phase legitimately editing one of these files should '
+            'update the fixture instead',
+        )
+
+
 class SettingsAdvancedDiagnosticsTests(unittest.TestCase):
     """Task 2: the parse vocabulary at the settings layer, driven through
     `load_settings` with an explicit mapping -- never through `load_app`.
