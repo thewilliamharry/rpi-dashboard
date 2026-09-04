@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 15
+open_count: 16
 waived_count: 0
 fixed_count: 5
-total_count: 20
-last_updated: 2026-09-02T13:56:12.629Z
+total_count: 21
+last_updated: 2026-09-04T08:08:41.000Z
 ---
 
 # Broken Windows Ledger
@@ -35,6 +35,7 @@ last_updated: 2026-09-02T13:56:12.629Z
 | 18 | 05 | deviation | tests/test_ui_safety_integration.py |  | test_stale_to_fresh_page_persists_actions_and_records_recovery: intermittent full-suite-load timeout (wall-clock worker-heartbeat aging + 18s Playwright wait), passes in isolation and in 2/3 full-suite runs; confirmed unrelated to 05-03 (file not in 05-03's declared scope, no env/os mutation in 05-03's new tests). See deferred-items.md Entry 2. | open |  | 2026-08-27T14:16:22.736Z |  |
 | 19 | 05 | deviation | tests/test_advanced_ui.py |  | 05-06 reconciled dashboard/advanced.css narrow boundary 719px->720px; two hardcoded assertions in test_advanced_ui.py (lines ~2037, ~2056) still assert the old 719px value and now fail. Owned by parallel plan 05-05; needs a 2-line follow-up fix during wave-4 merge (see 05-06-SUMMARY.md). | open |  | 2026-08-27T15:21:32.497Z |  |
 | 20 | 06 | deviation | tests/test_ui_states.py |  | test_safety_matrix_keeps_recovery_tls_errors_and_narrow_controls_distinct fails deterministically (4/4), confirmed unrelated to 06-12's diff (empty git diff on the test file and dashboard/); see 06 deferred-items.md Entry 1 | open |  | 2026-09-02T13:56:12.629Z |  |
+| 21 | 07 | deviation | .planning/phases/06-workload-resilience-pi-acceptance/06-LOCK-AUDIT.md |  | 07-01's mandated ENABLE_ADVANCED_DIAGNOSTICS module constant and api_advanced_current gate add 4 and 6 lines respectively above/within dashboard/app.py's _db_lock sites, shifting every site below each insertion point and failing tests/test_lock_profile.py::LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit (line numbers only -- same 28 sites, same 26 functions, no scope/safety change). Not fixed: 06-LOCK-AUDIT.md is a Phase-6 artifact and 07-01's scope fence explicitly forbids touching .planning/phases/06-*. Needs a mechanical line-number refresh of 06-LOCK-AUDIT.md's table, owned by whoever next unseals Phase 6. | open |  | 2026-09-04T08:08:41.000Z |  |
 
 ````json
 [
@@ -276,6 +277,18 @@ last_updated: 2026-09-02T13:56:12.629Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-02T13:56:12.629Z",
+    "resolved_at": null
+  },
+  {
+    "id": 21,
+    "kind": "deviation",
+    "phase": "07",
+    "file": ".planning/phases/06-workload-resilience-pi-acceptance/06-LOCK-AUDIT.md",
+    "line": null,
+    "description": "07-01's mandated ENABLE_ADVANCED_DIAGNOSTICS module constant and api_advanced_current gate add 4 and 6 lines respectively above/within dashboard/app.py's _db_lock sites, shifting every site below each insertion point and failing tests/test_lock_profile.py::LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit (line numbers only -- same 28 sites, same 26 functions, no scope/safety change). Not fixed: 06-LOCK-AUDIT.md is a Phase-6 artifact and 07-01's scope fence explicitly forbids touching .planning/phases/06-*. Needs a mechanical line-number refresh of 06-LOCK-AUDIT.md's table, owned by whoever next unseals Phase 6.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-04T08:08:41.000Z",
     "resolved_at": null
   }
 ]
