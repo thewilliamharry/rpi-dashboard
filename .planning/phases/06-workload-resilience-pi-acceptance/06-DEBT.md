@@ -862,6 +862,67 @@ rationale, not a further deferral.
 
 ---
 
+### D-DEBT-06-19 — round 5's fix attempt was reverted; the cost model, not the lock, is the target
+
+| Field | Value |
+|---|---|
+| **Raised by** | Round 5b hardware measurement, `06-LOCK-DIAGNOSTIC-R5B.md` |
+| **Status** | **Deferred — supersedes the fix approach, sets up the next round.** New. |
+| **Revert commit** | `ea8689e` (production code only; all round-5 test infrastructure retained) |
+
+**What was tried and reverted.** `06-20` narrowed `api_services`' `_db_lock` critical section to
+database reads only (155 → 71 lines). `06-22` added a request-scoped occurrence memo to
+`get_current_diagnosis`. Both were measured on real hardware and both made the deployment worse.
+Uninstrumented acceptance, same scenario, round 3 → round 5, with 5.4% dataset growth between them:
+
+| route | round 3 p95 | round 5 p95 | change |
+|---|---:|---:|---:|
+| `/api/services` | 1732.3ms | 2917.3ms | +68.4% |
+| `/api/scan-status` | 656.5ms | 1892.8ms | +188.3% |
+| `/api/advanced/current` | 2382.2ms | 3291.9ms | +38.2% |
+
+**Why the narrowing backfired.** Work released from the critical section stopped being serialized
+behind the lock and began contending for the GIL instead. `/api/advanced/current` takes no lock and
+was never modified, yet its non-lock off-CPU went 550,980ms → 1,007,408ms → 1,090,992ms across the
+three measurements. The lock attribution got *stronger* after narrowing the lock: 4/5 checks held in
+round 4, 5/5 post-narrowing, a full `CONFIRMED` verdict post-memo.
+
+**The reframe this round earned.** Four rounds attacked *where* work happens. The measured problem is
+*how much* work happens: `/api/services` recomputes 168 hourly uptime buckets from ~7,500 raw
+`service_checks` rows per service on every request, so its cost is O(stored rows) while stored rows
+more than doubled during this phase (25,278 → 59,914). Round 3's control-pass p50 drifted 209ms →
+300ms on identical code purely from data growth. No amount of rearranging serialization fixes a cost
+model that grows with retention.
+
+**What the next round should do instead.** `service_rollups` already exists, is already populated by
+the telemetry pipeline at 300s and 3600s granularity, already stores
+`online_seconds`/`offline_seconds`/`unknown_seconds`/`gap_seconds`/`check_count` per bucket, is
+already pruned by J8, and already has an aggregating reader with a fallback variant plus
+`telemetry_coverage` tracking. `/api/services` ignores all of it. `/api/history` — which reads
+rollups — measured p50 105.1ms / p95 827.5ms in the same acceptance run where `/api/services` measured
+1489.4 / 2917.3, over a *longer* window. The same data served from rollups is already fast on this Pi.
+
+Per `06-PROFILE.md`'s attribution, reading buckets instead of raw rows removes `uptime_sweep`
+(29.975%), `row_grouping` (5.083%) and most of `sql_fetch` (15.620%) outright, because the route stops
+fetching raw rows at all — and the remainder becomes O(services x 168) rather than O(rows), so it
+stops degrading as history grows.
+
+**The part that needs thought, not assumption.** `maintenance_coverage` (29.649%) needs offline
+*intervals*, not per-bucket totals, because attribution splits each interval at maintenance-window
+boundaries. Rollups do not carry interval boundaries. Do the uptime half first, measure, then decide —
+designing both halves up front is the mistake the last two rounds made.
+
+**Open question blocking the scope.** Whether `--concurrency 8` for 600s is representative of real use
+for a single-operator Pi dashboard. If it is not, the budget is testing a load the deployment does not
+serve, and amending the success criterion is a legitimate roadmap decision rather than moving the
+goalposts. This determines whether the rollup work must clear 500ms p95 at 8x or merely be sane.
+
+**What would need to be true to close this entry.** A round that wires `/api/services`' uptime summary
+to `service_rollups`, proves byte-identical output against `06-20`'s three surviving golden fixtures,
+and is measured on hardware — plus a decision on the concurrency question above.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
