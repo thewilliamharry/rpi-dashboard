@@ -39,6 +39,7 @@ bare ``load_app({})`` -- for example
 a run of this module.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -49,6 +50,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+import dashboard.app as _appmod_ref
+import dashboard.beacon.db as _beacon_db_ref
 from dashboard.beacon import repositories
 from dashboard.beacon.config import load_settings
 from tests.helpers import cleanup_db, load_app
@@ -96,6 +99,50 @@ def tearDownModule():
         os.environ.pop('ENABLE_ADVANCED_DIAGNOSTICS', None)
     else:
         os.environ['ENABLE_ADVANCED_DIAGNOSTICS'] = _ORIGINAL_ENABLE_ADVANCED_DIAGNOSTICS
+
+
+class DatabaseWorkCounter:
+    """Counts SQLite connections opened and statements SQLite actually
+    executed over the real `dashboard.beacon.db.connect_db` seam, during a
+    real request served through the real Flask test client (Task 3). This
+    is a measurement, not an inspection: it never asserts that a particular
+    reader was called and does not depend on knowing which reader runs."""
+
+    def __init__(self):
+        self.connections = 0
+        self.statements = 0
+
+    def _on_statement(self, _statement):
+        self.statements += 1
+
+
+@contextlib.contextmanager
+def _counting_connections():
+    """Wrap the real `connect_db` so every connection a request opens,
+    wherever in the call tree it is opened, is counted, and every statement
+    SQLite executes on that connection is counted via
+    `set_trace_callback`.
+
+    Patches BOTH bindings of `connect_db`: the `dashboard.beacon.db` module
+    attribute that `database_access`/`read_transaction`/`write_transaction`
+    resolve internally, AND `dashboard.app`'s own imported alias
+    (`from .beacon.db import connect_db`, which binds a second, independent
+    name at import time and would resolve to the unpatched function if left
+    alone -- this is why `get_db()` and every direct `connect_db(...)` call
+    site in `dashboard/app.py` are also covered).
+    """
+    counter = DatabaseWorkCounter()
+    real_connect_db = _beacon_db_ref.connect_db
+
+    def _wrapped(settings_or_path):
+        conn = real_connect_db(settings_or_path)
+        counter.connections += 1
+        conn.set_trace_callback(counter._on_statement)
+        return conn
+
+    with mock.patch.object(_beacon_db_ref, 'connect_db', _wrapped), \
+         mock.patch.object(_appmod_ref, 'connect_db', _wrapped):
+        yield counter
 
 
 def _asset_sha256():
@@ -275,6 +322,97 @@ class DisabledAdvancedApiTests(_FrozenClockTestCase):
         response = self.client.get('/api/advanced/current?foo=bar')
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_data(as_text=True), '')
+
+    def test_disabled_request_opens_zero_connections_and_executes_zero_statements(self):
+        """Task 3: the claim measured on real connections during a real
+        request, never read out of the source. The statement-count
+        assertion runs before the status-code assertion so a removed gate
+        fails loudly with the real observed statement count, never merely
+        "expected 0" -- see the mutation recorded in the SUMMARY."""
+        with _counting_connections() as counter:
+            response = self.client.get('/api/advanced/current')
+
+        self.assertEqual(
+            counter.statements, 0,
+            f'disabled /api/advanced/current executed {counter.statements} SQLite '
+            f'statement(s) across {counter.connections} connection(s) instead of zero',
+        )
+        self.assertEqual(counter.connections, 0)
+        self.assertEqual(response.status_code, 404)
+
+    def test_disabled_front_page_performs_zero_database_work(self):
+        """Weak on its own -- `/` is a static `send_file` that performs no
+        diagnosis work today even with advanced diagnostics fully enabled --
+        and included as a STANDING guard rather than as evidence for
+        criterion 3: it gains teeth the moment 07-02 gives `/` a conditional
+        branch for the entry point, and it is the reason 07-02 cannot
+        deliver the flag to the front page through a database read. The
+        measurement with independent force is the zero-versus-observed
+        contrast on /api/advanced/current below; 07-03 supplies the
+        front-page cost equality that gives this claim its real weight."""
+        with _counting_connections() as counter:
+            response = self.client.get('/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(counter.connections, 0)
+        self.assertEqual(counter.statements, 0)
+
+    def test_the_counter_fires_on_ordinary_traffic_not_only_the_route_under_test(self):
+        """Sensitivity of the instrument itself: `/api/stats` has a single
+        known read and is never gated by this phase. If this read zero the
+        counter itself would be broken, independent of
+        `api_advanced_current`'s own gate -- this is what makes the
+        disabled-route zero-work measurement above believable rather than
+        an artifact of an inert instrument. Built explicitly enabled via
+        `load_app` because this class has already written '0' into an
+        `os.environ` that `load_app` never clears."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+        try:
+            client = appmod.app.test_client()
+            with _counting_connections() as counter:
+                response = client.get('/api/stats')
+        finally:
+            cleanup_db(db_path)
+
+        self.assertIn(response.status_code, (200, 503))
+        self.assertGreater(counter.statements, 0)
+
+    def test_enabled_measurement_of_the_same_request_is_strictly_greater_than_disabled(self):
+        """The relation off == 0 < on -- never an absolute count, ratio or
+        duration for the enabled side (D-DEBT-06-14's lesson): the enabled
+        figure depends on the dataset and will move as Beacon's readers
+        change, and pinning it would convert a measurement into a brittle
+        constant.
+
+        Built explicitly enabled via `load_app({'ENABLE_ADVANCED_DIAGNOSTICS':
+        '1'})` because this class has already written '0' into an
+        `os.environ` `load_app` never cleans (tests/helpers.py:51-65). If
+        this side were accidentally built disabled it would read zero too,
+        the contrast would collapse to `0 == 0`, and the assertion below
+        would fail loudly rather than pass -- that loudness is by design
+        and the explicit '1' is what keeps it from ever being needed.
+        """
+        with _counting_connections() as off_counter:
+            off_response = self.client.get('/api/advanced/current')
+
+        on_appmod, on_db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+        try:
+            on_client = on_appmod.app.test_client()
+            self._freeze_clock(_GOLDEN_FROZEN_NOW)
+            _SeedingHelpers.seed_three_service_dataset(on_appmod, _GOLDEN_FROZEN_NOW)
+            with _counting_connections() as on_counter:
+                on_response = on_client.get('/api/advanced/current')
+        finally:
+            cleanup_db(on_db_path)
+
+        self.assertEqual(off_response.status_code, 404)
+        self.assertEqual(on_response.status_code, 200)
+        self.assertEqual(off_counter.connections, 0)
+        self.assertEqual(off_counter.statements, 0)
+        self.assertGreater(on_counter.connections, 0)
+        self.assertGreater(on_counter.statements, 0)
+        self.assertLess(off_counter.connections, on_counter.connections)
+        self.assertLess(off_counter.statements, on_counter.statements)
 
 
 class EnabledResponseGoldenTests(_FrozenClockTestCase):
