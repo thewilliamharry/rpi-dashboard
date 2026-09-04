@@ -44,11 +44,16 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+from werkzeug.serving import make_server
 
 import dashboard.app as _appmod_ref
 import dashboard.beacon.db as _beacon_db_ref
@@ -720,6 +725,134 @@ class FrontPageEntryPointTests(unittest.TestCase):
             f'a transform failure must never be served as a 200 page carrying the '
             f'entry point -- observed status {response.status_code}',
         )
+
+
+class FrontPageBootWithoutAdvancedTests(unittest.TestCase):
+    """07-02 Task 3: the services front page still works with its advanced
+    link gone -- proven in real Chromium, not by a source assertion about a
+    null check.
+
+    Assertion hierarchy, stated honestly rather than blurred: the populated
+    services grid is the load-bearing evidence, because populating it
+    requires `DOMContentLoaded` to have run past `dashboard/app.js` line
+    772's lookup and reached the `Promise.allSettled` fetch fifteen
+    statements below it -- this is the only assertion here that can
+    actually fail if the T-07-07 defect is present. The empty collected
+    `pageerror` list is genuine but indirect corroboration: a swallowed
+    error would not appear in it. The theme toggle is exercised as a
+    CONTROL, never as evidence -- it is registered one line above the
+    breaking line-772 lookup, so it would keep responding even with boot
+    broken below it; a passing toggle proves the page is alive, never that
+    boot completed.
+
+    Built through `load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})`, per the
+    module rule, on the same `make_server` plus `sync_playwright` class
+    fixture idiom `tests/test_advanced_ui.py::AdvancedUiTests` uses.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.appmod, cls.db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        # A real seeded row so the services grid has something real to
+        # render -- the assertion below is about the boot sequence
+        # completing, not about an empty state.
+        _SeedingHelpers.seed_service(
+            cls.appmod, 20101, online=1, state_since=int(time.time()) - 900,
+        )
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=cls.playwright.chromium.executable_path,
+        )
+        cls.base_url = f'http://127.0.0.1:{cls.server.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
+
+    def _boot(self, *, theme, seed_scroll):
+        """Navigate a fresh page, seeding theme and (optionally) a digit
+        `sessionStorage[DASHBOARD_SCROLL_KEY]` before the document loads --
+        the literal key ('beacon-dashboard-scroll-position', read from
+        dashboard/app.js line 7 at implementation time; the two must stay
+        in step) is written directly because the init script runs before
+        app.js defines the DASHBOARD_SCROLL_KEY binding. Returns
+        (page, collected pageerror texts)."""
+        page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+        errors = []
+        page.on('pageerror', lambda exc: errors.append(str(exc)))
+        if theme == 'light':
+            page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+        if seed_scroll:
+            page.add_init_script(
+                "sessionStorage.setItem('beacon-dashboard-scroll-position', '0');"
+            )
+        page.goto(self.base_url, wait_until='domcontentloaded')
+        # The focus call (site 762) runs two animation frames after
+        # restore; wait on something that necessarily follows both it and
+        # the initial Promise.allSettled fetch (the populated services
+        # grid), rather than asserting immediately on load.
+        try:
+            page.locator('.svc-title-link').first.wait_for(timeout=5_000)
+        except PlaywrightTimeoutError:
+            pass
+        return page, errors
+
+    def test_ordinary_load_boots_and_renders_seeded_services_with_no_page_error(self):
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page, errors = self._boot(theme=theme, seed_scroll=False)
+                try:
+                    grid_html = page.locator('#services-grid').inner_html()
+                    self.assertGreater(
+                        page.locator('.svc-title-link').count(), 0,
+                        f'services grid never rendered the seeded service -- boot did not '
+                        f'reach Promise.allSettled; observed grid html: {grid_html!r}; '
+                        f'collected pageerror(s): {errors}',
+                    )
+                    self.assertEqual(errors, [], f'unexpected page error(s): {errors}')
+
+                    # CONTROL, not evidence -- registered above the break
+                    # and would pass even with the defect present.
+                    was_light = page.locator('html').evaluate(
+                        '(node) => node.classList.contains("light")'
+                    )
+                    page.locator('#toggle').click()
+                    page.wait_for_timeout(50)
+                    is_light = page.locator('html').evaluate(
+                        '(node) => node.classList.contains("light")'
+                    )
+                    self.assertNotEqual(is_light, was_light)
+
+                    self.assertEqual(page.locator('#advanced-diagnosis-link').count(), 0)
+                finally:
+                    page.close()
+
+    def test_seeded_scroll_position_reaches_restore_dashboard_scrolls_focus_call_with_no_page_error(self):
+        """The only condition that reaches site 762: `restoreDashboardScroll`
+        returns early unless `sessionStorage[DASHBOARD_SCROLL_KEY]` holds a
+        digit string, and a freshly navigated page never has that key."""
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page, errors = self._boot(theme=theme, seed_scroll=True)
+                try:
+                    grid_html = page.locator('#services-grid').inner_html()
+                    self.assertGreater(
+                        page.locator('.svc-title-link').count(), 0,
+                        f'services grid never rendered the seeded service with a seeded '
+                        f'scroll position -- observed grid html: {grid_html!r}; collected '
+                        f'pageerror(s): {errors}',
+                    )
+                    self.assertEqual(errors, [], f'unexpected page error(s): {errors}')
+                finally:
+                    page.close()
 
 
 class SettingsAdvancedDiagnosticsTests(unittest.TestCase):
