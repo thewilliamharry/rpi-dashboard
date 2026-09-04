@@ -923,6 +923,59 @@ and is measured on hardware — plus a decision on the concurrency question abov
 
 ---
 
+### D-DEBT-06-20 — OPS-07's load model was wrong about this deployment; criterion amended, not weakened
+
+| Field | Value |
+|---|---|
+| **Raised by** | The operator, 2026-09-04: "just me on the dashboard, 8 is not realistic" |
+| **Status** | **Decided — criterion amended by the operator; supersedes the scenario, not the evidence.** |
+| **Applies to** | `REQUIREMENTS.md` OPS-07; `ROADMAP.md` Phase 6 criterion 5 |
+
+**What was wrong.** OPS-07 said "representative load" and the harness implemented that as
+`--concurrency 8 --duration 600`: eight closed-loop clients with zero think time for ten minutes.
+Four hardware rounds failed against it. Nobody questioned whether the number described this
+deployment until the operator was asked directly.
+
+**What one operator actually generates**, from `dashboard/app.js`: 5 parallel calls at page load
+(`Promise.allSettled`, line 784), then `loadStats`+`loadScan` every 5s, `loadServices`+`loadEvents`
+every 15s, `loadHistory` every 60s — approximately **0.5 requests per second** from one tab, with at
+most ~5 briefly in flight. The harness's closed-loop model has no think time, so concurrency 3 there
+is already several times that rate. The gate stays conservative.
+
+**The amendment.** Gating run: **concurrency 3**, 600s — the declared ceiling for this deployment.
+Concurrency-8 runs become **optional** evidence and never gate the criterion. Every route budget,
+`assert_response_times`, `assert_resource_budget`, `assert_cadence`, `_routes_for_ports`,
+`_load_worker` and the harness defaults are **unchanged**; the gating run passes `--concurrency 3`
+explicitly.
+
+**Why this is not the move `PROH-OPS-07-01`/`-10` forbid.** Those prohibit reaching a pass by asking
+less of the deployment. The justification here is **usage, not difficulty** — the load model was wrong
+about who uses this. From the outside the two look identical, which is exactly why the reasoning is
+recorded in three places rather than assumed. If a later reader cannot find a usage-based
+justification for a scenario change, it is the forbidden kind.
+
+**Every failing result stands.** Rounds 3, 4 and 5's measurements, `06-LOCK-DIAGNOSTIC.md`,
+`06-LOCK-DIAGNOSTIC-R5A.md`, `06-LOCK-DIAGNOSTIC-R5B.md` and the `ea8689e` revert are not superseded.
+The deployment was measured under 8-way load, it degraded, and that is on the record.
+
+**What this probably means, unverified.** Round 5b's concurrency-1 control pass reported
+`overall_passed: true` with `/api/services` at 300.1ms p95 against a 500ms budget and every other route
+far inside its own. The deployment may already satisfy the amended criterion. **It has not been
+measured at concurrency 3** — 1 is not 3, and asserting a pass from an adjacent measurement is the
+error this phase has made repeatedly. The next acceptance run establishes it or does not.
+
+**What this does NOT retire.** `D-DEBT-06-19`'s finding stands on its own: `/api/services` cost is
+O(stored rows), and the deployment's idle p50 drifted 209ms → 300ms on identical code purely from data
+growth (25,278 → 59,914 rows). Wiring the route to `service_rollups` stops being a blocker and becomes
+future-proofing — worth doing on its merits, not under duress, and still the only change that improves
+as history grows rather than degrading.
+
+**What would need to be true to close this entry.** One uninstrumented hardware run at
+`--concurrency 3 --duration 600` on the current build, reported by an independent verification round
+per the `TEL-06`/`PROH-OPS-07-08` precedent — this round may not promote OPS-07 on its own evidence.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force

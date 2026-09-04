@@ -70,7 +70,7 @@
 - [x] **OPS-04**: Automated tests cover migrations, restart recovery, concurrent web/worker database access, scheduler ownership, and failed background jobs.
 - [x] **OPS-05**: Automated tests cover outbound-target validation, DNS/redirect handling, TLS behavior, and mutation-request protections.
 - [x] **OPS-06**: Both themes have UI-contract or visual-regression coverage for shared capabilities and important states.
-- [ ] **OPS-07**: A Raspberry Pi-class acceptance run verifies responsiveness, resource budgets, recovery, and sampling continuity under representative load.
+- [ ] **OPS-07**: A Raspberry Pi-class acceptance run verifies responsiveness, resource budgets, recovery, and sampling continuity under the load a single operator generates (concurrency 3, the ceiling for this deployment); higher-concurrency runs are optional evidence, never a gate.
 
 ## v2 Requirements
 
