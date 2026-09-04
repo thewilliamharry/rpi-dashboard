@@ -44,14 +44,20 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+from werkzeug.serving import make_server
+
 import dashboard.app as _appmod_ref
 import dashboard.beacon.db as _beacon_db_ref
+from dashboard.beacon import frontpage as beacon_frontpage
 from dashboard.beacon import repositories
 from dashboard.beacon.config import load_settings
 from tests.helpers import cleanup_db, load_app
@@ -500,6 +506,353 @@ class EnabledResponseGoldenTests(_FrozenClockTestCase):
 
     def test_the_static_advanced_assets_match_the_pre_change_golden_digests(self):
         self.assertEqual(_asset_sha256(), self.golden['asset_sha256'])
+
+
+class DisabledAdvancedAssetTests(unittest.TestCase):
+    """07-02 Task 1: the three remaining advanced surfaces (`/advanced`,
+    `/advanced.css`, `/advanced.js`) 404 with the toggle off, mirroring
+    `api_advanced_current`'s gate (D-07-02) -- and the front page's own
+    assets (`/`, `/style.css`, `/app.js`) are never gated, only the advanced
+    bundle is.
+
+    Runs alphabetically after `DisabledAdvancedApiTests`, which has already
+    written '0' into `os.environ['ENABLE_ADVANCED_DIAGNOSTICS']` via
+    `load_app` (never cleared -- tests/helpers.py:51-65). This class's own
+    `setUp` deepens that leak; every enabled-side method below builds its
+    own application through an explicit `'1'`, per the module rule.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.appmod, self.db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        self.client = self.appmod.app.test_client()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+        super().tearDown()
+
+    def test_the_disabled_toggle_gates_only_the_advanced_bundle(self):
+        """Drives the three gated paths and the three ungated front-page
+        paths in one subtest loop so a regression names the path that
+        moved, with its observed status."""
+        cases = [
+            ('/advanced', 404),
+            ('/advanced.css', 404),
+            ('/advanced.js', 404),
+            ('/', 200),
+            ('/style.css', 200),
+            ('/app.js', 200),
+        ]
+        for path, expected_status in cases:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(
+                    response.status_code, expected_status,
+                    f'{path} answered {response.status_code}, expected {expected_status}',
+                )
+                if expected_status == 404:
+                    self.assertEqual(response.get_data(as_text=True), '')
+
+    def test_enabled_advanced_surfaces_are_byte_identical_to_disk(self):
+        """The explicit '1' is required rather than stylistic: this class's
+        own `setUp` above has already written '0' into `os.environ`, and
+        `load_app` never clears it (tests/helpers.py:51-65) -- an implicit
+        build here would compare a 404 body against a file's bytes.
+
+        This assertion is deliberately an invariant rather than a frozen
+        digest: it stays true across any legitimate future edit to these
+        four files and still fails the moment the enabled path starts
+        transforming a document -- the property criterion 4 actually needs,
+        and the property 07-02 Task 2 puts at risk."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+        try:
+            client = appmod.app.test_client()
+            asset_directory = Path(appmod.__file__).resolve().parent
+            for path, filename in [
+                ('/', 'index.html'),
+                ('/advanced', 'advanced.html'),
+                ('/advanced.css', 'advanced.css'),
+                ('/advanced.js', 'advanced.js'),
+            ]:
+                with self.subTest(path=path):
+                    response = client.get(path)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        response.data, (asset_directory / filename).read_bytes(),
+                        f'{path} diverged from {filename} on disk',
+                    )
+        finally:
+            cleanup_db(db_path)
+
+    def test_the_enabled_asset_digests_still_match_07_01s_fixture(self):
+        """Distinct from the invariant above, and deliberately so: this
+        phase must not change a served asset. A later phase legitimately
+        editing one of these files is expected to update the fixture; this
+        assertion failing is that phase's cue to do so, not evidence this
+        assertion is wrong."""
+        golden = json.loads(GOLDEN_PATH.read_text(encoding='utf-8'))
+        self.assertEqual(
+            _asset_sha256(), golden['asset_sha256'],
+            'a served advanced asset moved from the digests captured in '
+            "07-01's fixture -- this phase must not change a served asset; "
+            'a later phase legitimately editing one of these files should '
+            'update the fixture instead',
+        )
+
+
+class FrontPageEntryPointTests(unittest.TestCase):
+    """07-02 Task 2: `/` with the toggle off serves a document that never
+    carried the advanced-diagnosis entry point in its bytes; with the
+    toggle on it serves `dashboard/index.html` verbatim and the transform
+    is never invoked at all.
+
+    Disabled-side members build through
+    `load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})` and enabled-side
+    members through `load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})` --
+    explicit on both sides, per the module rule, because `load_app` leaves
+    `extra_env` in `os.environ` for the rest of the process and an implicit
+    enabled build here would compare the transformed document against
+    `index.html` rather than the raw file.
+    """
+
+    def test_the_markup_invariant_dashboard_index_html_has_exactly_one_entry_point(self):
+        """TRIPWIRE, not evidence: this converts a future edit to
+        dashboard/index.html's anchor markup into a failing test here
+        rather than a failing deployment. The behavioural evidence that the
+        feature actually works is the served body below and Task 3's
+        rendered page -- never this inspection."""
+        document = (DASHBOARD_DIR / 'index.html').read_text(encoding='utf-8')
+        matches = beacon_frontpage._ENTRY_POINT_PATTERN.findall(document)
+        self.assertEqual(
+            len(matches), 1,
+            "TRIPWIRE (not behavioural evidence): dashboard/index.html's "
+            "advanced-diagnosis anchor markup moved away from the shape "
+            'without_advanced_entry_point depends on -- update '
+            'dashboard/beacon/frontpage.py to match the new markup.',
+        )
+
+    def test_disabled_body_omits_the_entry_point_and_keeps_the_rest_of_the_page(self):
+        """Both halves matter: the first three assertions are criterion 2
+        (absent, not hidden); the last two are that the transform excised
+        only what it was aimed at."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        try:
+            client = appmod.app.test_client()
+            response = client.get('/')
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn('id="advanced-diagnosis-link"', body)
+            self.assertNotIn('href="/advanced"', body)
+            self.assertNotIn('Advanced diagnosis', body)
+            self.assertIn('id="services-grid"', body)
+            self.assertIn('id="toggle"', body)
+        finally:
+            cleanup_db(db_path)
+
+    def test_enabled_body_is_byte_identical_to_index_html_and_the_transform_is_unreached(self):
+        """The explicit '1' matters here specifically: an earlier class in
+        this module has already written '0' into `os.environ`
+        (tests/helpers.py:51-65)."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '1'})
+        try:
+            client = appmod.app.test_client()
+            with mock.patch.object(
+                beacon_frontpage, 'without_advanced_entry_point',
+                side_effect=AssertionError('the transform must not be invoked on the enabled path'),
+            ):
+                response = client.get('/')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, (DASHBOARD_DIR / 'index.html').read_bytes())
+        finally:
+            cleanup_db(db_path)
+
+    def test_the_transform_runs_at_most_once_per_process_across_five_disabled_requests(self):
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        appmod._index_document_without_advanced_entry_point_cache = None
+
+        def _cleanup():
+            appmod._index_document_without_advanced_entry_point_cache = None
+            cleanup_db(db_path)
+
+        self.addCleanup(_cleanup)
+
+        client = appmod.app.test_client()
+        real_transform = beacon_frontpage.without_advanced_entry_point
+        calls = []
+
+        def _counting(document):
+            calls.append(1)
+            return real_transform(document)
+
+        with mock.patch.object(beacon_frontpage, 'without_advanced_entry_point', _counting):
+            for _ in range(5):
+                response = client.get('/')
+                self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(
+            len(calls), 1,
+            f'expected exactly 1 transform invocation across 5 disabled GET / '
+            f'requests, observed {len(calls)}',
+        )
+
+    def test_a_transform_failure_propagates_out_of_the_route_rather_than_serving_a_page(self):
+        """Pinning zero-match and duplicate-match raises on the pure
+        function (dashboard/beacon/frontpage.py) proves the *function*
+        refuses; this proves the *server* refuses, which is the property a
+        mismatched deployment actually depends on. The document cache is
+        reset first so the patched function is genuinely reached rather
+        than short-circuited by a value an earlier test already computed."""
+        appmod, db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        appmod._index_document_without_advanced_entry_point_cache = None
+
+        def _cleanup():
+            appmod._index_document_without_advanced_entry_point_cache = None
+            cleanup_db(db_path)
+
+        self.addCleanup(_cleanup)
+
+        client = appmod.app.test_client()
+
+        def _raising(document):
+            raise beacon_frontpage.AdvancedEntryPointNotFound('mutated for this test: forced raise')
+
+        with mock.patch.object(beacon_frontpage, 'without_advanced_entry_point', _raising):
+            response = client.get('/')
+
+        body = response.get_data(as_text=True)
+        self.assertFalse(
+            response.status_code == 200 and 'advanced-diagnosis-link' in body,
+            f'a transform failure must never be served as a 200 page carrying the '
+            f'entry point -- observed status {response.status_code}',
+        )
+
+
+class FrontPageBootWithoutAdvancedTests(unittest.TestCase):
+    """07-02 Task 3: the services front page still works with its advanced
+    link gone -- proven in real Chromium, not by a source assertion about a
+    null check.
+
+    Assertion hierarchy, stated honestly rather than blurred: the populated
+    services grid is the load-bearing evidence, because populating it
+    requires `DOMContentLoaded` to have run past `dashboard/app.js` line
+    772's lookup and reached the `Promise.allSettled` fetch fifteen
+    statements below it -- this is the only assertion here that can
+    actually fail if the T-07-07 defect is present. The empty collected
+    `pageerror` list is genuine but indirect corroboration: a swallowed
+    error would not appear in it. The theme toggle is exercised as a
+    CONTROL, never as evidence -- it is registered one line above the
+    breaking line-772 lookup, so it would keep responding even with boot
+    broken below it; a passing toggle proves the page is alive, never that
+    boot completed.
+
+    Built through `load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})`, per the
+    module rule, on the same `make_server` plus `sync_playwright` class
+    fixture idiom `tests/test_advanced_ui.py::AdvancedUiTests` uses.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.appmod, cls.db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        # A real seeded row so the services grid has something real to
+        # render -- the assertion below is about the boot sequence
+        # completing, not about an empty state.
+        _SeedingHelpers.seed_service(
+            cls.appmod, 20101, online=1, state_since=int(time.time()) - 900,
+        )
+        cls.server = make_server('127.0.0.1', 0, cls.appmod.app, threaded=True)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=cls.playwright.chromium.executable_path,
+        )
+        cls.base_url = f'http://127.0.0.1:{cls.server.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+        cleanup_db(cls.db_path)
+
+    def _boot(self, *, theme, seed_scroll):
+        """Navigate a fresh page, seeding theme and (optionally) a digit
+        `sessionStorage[DASHBOARD_SCROLL_KEY]` before the document loads --
+        the literal key ('beacon-dashboard-scroll-position', read from
+        dashboard/app.js line 7 at implementation time; the two must stay
+        in step) is written directly because the init script runs before
+        app.js defines the DASHBOARD_SCROLL_KEY binding. Returns
+        (page, collected pageerror texts)."""
+        page = self.browser.new_page(viewport={'width': 1280, 'height': 900})
+        errors = []
+        page.on('pageerror', lambda exc: errors.append(str(exc)))
+        if theme == 'light':
+            page.add_init_script("localStorage.setItem('beacon-theme', 'light');")
+        if seed_scroll:
+            page.add_init_script(
+                "sessionStorage.setItem('beacon-dashboard-scroll-position', '0');"
+            )
+        page.goto(self.base_url, wait_until='domcontentloaded')
+        # The focus call (site 762) runs two animation frames after
+        # restore; wait on something that necessarily follows both it and
+        # the initial Promise.allSettled fetch (the populated services
+        # grid), rather than asserting immediately on load.
+        try:
+            page.locator('.svc-title-link').first.wait_for(timeout=5_000)
+        except PlaywrightTimeoutError:
+            pass
+        return page, errors
+
+    def test_ordinary_load_boots_and_renders_seeded_services_with_no_page_error(self):
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page, errors = self._boot(theme=theme, seed_scroll=False)
+                try:
+                    grid_html = page.locator('#services-grid').inner_html()
+                    self.assertGreater(
+                        page.locator('.svc-title-link').count(), 0,
+                        f'services grid never rendered the seeded service -- boot did not '
+                        f'reach Promise.allSettled; observed grid html: {grid_html!r}; '
+                        f'collected pageerror(s): {errors}',
+                    )
+                    self.assertEqual(errors, [], f'unexpected page error(s): {errors}')
+
+                    # CONTROL, not evidence -- registered above the break
+                    # and would pass even with the defect present.
+                    was_light = page.locator('html').evaluate(
+                        '(node) => node.classList.contains("light")'
+                    )
+                    page.locator('#toggle').click()
+                    page.wait_for_timeout(50)
+                    is_light = page.locator('html').evaluate(
+                        '(node) => node.classList.contains("light")'
+                    )
+                    self.assertNotEqual(is_light, was_light)
+
+                    self.assertEqual(page.locator('#advanced-diagnosis-link').count(), 0)
+                finally:
+                    page.close()
+
+    def test_seeded_scroll_position_reaches_restore_dashboard_scrolls_focus_call_with_no_page_error(self):
+        """The only condition that reaches site 762: `restoreDashboardScroll`
+        returns early unless `sessionStorage[DASHBOARD_SCROLL_KEY]` holds a
+        digit string, and a freshly navigated page never has that key."""
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                page, errors = self._boot(theme=theme, seed_scroll=True)
+                try:
+                    grid_html = page.locator('#services-grid').inner_html()
+                    self.assertGreater(
+                        page.locator('.svc-title-link').count(), 0,
+                        f'services grid never rendered the seeded service with a seeded '
+                        f'scroll position -- observed grid html: {grid_html!r}; collected '
+                        f'pageerror(s): {errors}',
+                    )
+                    self.assertEqual(errors, [], f'unexpected page error(s): {errors}')
+                finally:
+                    page.close()
 
 
 class SettingsAdvancedDiagnosticsTests(unittest.TestCase):

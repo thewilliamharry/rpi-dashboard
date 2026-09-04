@@ -33,6 +33,7 @@ try:
     from .beacon import queues as beacon_queues
     from .beacon import worker_main as beacon_worker_main
     from .beacon import lockprofile as beacon_lockprofile
+    from .beacon import frontpage as beacon_frontpage
     from .beacon.db import connect_db, database_access, MaintenanceBusy
     from .beacon.migrations import RECOVERY_MARKER
     from .beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
@@ -49,6 +50,7 @@ except ImportError:  # Gunicorn imports ``app`` from dashboard/ directly.
     from beacon import queues as beacon_queues
     from beacon import worker_main as beacon_worker_main
     from beacon import lockprofile as beacon_lockprofile
+    from beacon import frontpage as beacon_frontpage
     from beacon.db import connect_db, database_access, MaintenanceBusy
     from beacon.migrations import RECOVERY_MARKER
     from beacon.outbound import OutboundPolicy, OutboundPolicyError, OutboundPurpose, OutboundTransport
@@ -2498,13 +2500,49 @@ def add_security_headers(response):
     return response
 
 
+# 07-02 Task 2: computed at most once per process (T-07-06) -- `None` until
+# the first disabled `GET /` request reads and transforms index.html. Never
+# populated on an enabled deployment: `index`'s enabled branch below keeps
+# its `send_file` call untouched and never calls the function that fills
+# this cache (D-07-03).
+_index_document_without_advanced_entry_point_cache = None
+
+
+def _index_document_without_advanced_entry_point():
+    """Return the front page's bytes with its advanced-diagnosis entry point
+    excised, computing the transform at most once per process.
+
+    Any exception `beacon_frontpage.without_advanced_entry_point` raises
+    propagates out of this function and, in turn, out of the `/` route: a
+    deployment whose front-page markup no longer matches must fail loudly
+    rather than serve a page carrying a link to a route that answers 404.
+    """
+    global _index_document_without_advanced_entry_point_cache
+    if _index_document_without_advanced_entry_point_cache is None:
+        index_path = Path(__file__).resolve().parent / 'index.html'
+        document = index_path.read_text(encoding='utf-8')
+        transformed = beacon_frontpage.without_advanced_entry_point(document)
+        _index_document_without_advanced_entry_point_cache = transformed.encode('utf-8')
+    return _index_document_without_advanced_entry_point_cache
+
+
 @app.route("/")
 def index():
+    """07-02: with the toggle off, the entry point never left the disk in
+    the served bytes -- the enabled branch below is left textually
+    untouched, so byte-identity is a property of the code shape, not only
+    of a test (D-07-03)."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return _index_document_without_advanced_entry_point(), 200, {'Content-Type': 'text/html'}
     return send_file("index.html", mimetype="text/html")
 
 
 @app.route('/advanced')
 def advanced_index():
+    """07-02: mirrors api_advanced_current's gate exactly (D-07-02) -- the
+    404 is the handler's first statement."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return '', 404
     return send_file('advanced.html', mimetype='text/html')
 
 
@@ -2515,6 +2553,9 @@ def serve_css():
 
 @app.route('/advanced.css')
 def serve_advanced_css():
+    """07-02: mirrors api_advanced_current's gate exactly (D-07-02)."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return '', 404
     return send_file('advanced.css', mimetype='text/css')
 
 
@@ -2525,6 +2566,9 @@ def serve_js():
 
 @app.route('/advanced.js')
 def serve_advanced_js():
+    """07-02: mirrors api_advanced_current's gate exactly (D-07-02)."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return '', 404
     return send_file('advanced.js', mimetype='application/javascript')
 
 

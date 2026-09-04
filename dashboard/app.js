@@ -759,8 +759,12 @@ function restoreDashboardScroll() {
   if (!Number.isFinite(offset) || offset < 0 || !Number.isInteger(offset)) return;
   requestAnimationFrame(() => requestAnimationFrame(() => {
     window.scrollTo(0, offset);
+    // 07-02: the anchor is optional -- deployments may run with advanced
+    // diagnostics turned off, in which case dashboard/index.html never
+    // served this element. Skipping the focus call on a missing anchor is
+    // load-bearing: this callback has nothing above it to catch a throw.
     const link = $('advanced-diagnosis-link');
-    try { link.focus({preventScroll: true}); } catch (_) { link.focus(); }
+    if (link) { try { link.focus({preventScroll: true}); } catch (_) { link.focus(); } }
   }));
 }
 
@@ -769,7 +773,14 @@ if (typeof document !== 'undefined') {
     applyTheme(localStorage.getItem('beacon-theme') === 'light');
     restoreDashboardScroll();
     $('toggle').addEventListener('click', () => applyTheme(!document.documentElement.classList.contains('light')));
-    $('advanced-diagnosis-link').addEventListener('click', captureDashboardScroll);
+    // 07-02: the anchor is optional -- the deployment may have advanced
+    // diagnostics turned off, in which case it was never in the served
+    // document. Everything below this line depends on the lookup not
+    // raising: an unguarded access here would throw and abort every
+    // statement after it in this handler, including the initial data fetch
+    // and all four polling intervals.
+    const advancedDiagnosisLink = $('advanced-diagnosis-link');
+    if (advancedDiagnosisLink) advancedDiagnosisLink.addEventListener('click', captureDashboardScroll);
     document.querySelector('.btn-scan').addEventListener('click', triggerScan);
     $('meta-form').addEventListener('submit', submitMetaEditor);
     $('meta-cancel').addEventListener('click', closeMetaEditor);
