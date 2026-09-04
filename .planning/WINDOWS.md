@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 16
+open_count: 18
 waived_count: 0
 fixed_count: 5
-total_count: 21
-last_updated: 2026-09-04T08:08:41.000Z
+total_count: 23
+last_updated: 2026-09-04T09:37:12.285Z
 ---
 
 # Broken Windows Ledger
@@ -36,6 +36,8 @@ last_updated: 2026-09-04T08:08:41.000Z
 | 19 | 05 | deviation | tests/test_advanced_ui.py |  | 05-06 reconciled dashboard/advanced.css narrow boundary 719px->720px; two hardcoded assertions in test_advanced_ui.py (lines ~2037, ~2056) still assert the old 719px value and now fail. Owned by parallel plan 05-05; needs a 2-line follow-up fix during wave-4 merge (see 05-06-SUMMARY.md). | open |  | 2026-08-27T15:21:32.497Z |  |
 | 20 | 06 | deviation | tests/test_ui_states.py |  | test_safety_matrix_keeps_recovery_tls_errors_and_narrow_controls_distinct fails deterministically (4/4), confirmed unrelated to 06-12's diff (empty git diff on the test file and dashboard/); see 06 deferred-items.md Entry 1 | open |  | 2026-09-02T13:56:12.629Z |  |
 | 21 | 07 | deviation | .planning/phases/06-workload-resilience-pi-acceptance/06-LOCK-AUDIT.md |  | 07-01's mandated ENABLE_ADVANCED_DIAGNOSTICS module constant and api_advanced_current gate add 4 and 6 lines respectively above/within dashboard/app.py's _db_lock sites, shifting every site below each insertion point and failing tests/test_lock_profile.py::LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit (line numbers only -- same 28 sites, same 26 functions, no scope/safety change). Not fixed: 06-LOCK-AUDIT.md is a Phase-6 artifact and 07-01's scope fence explicitly forbids touching .planning/phases/06-*. Needs a mechanical line-number refresh of 06-LOCK-AUDIT.md's table, owned by whoever next unseals Phase 6. | open |  | 2026-09-04T08:08:41.000Z |  |
+| 22 | 07 | deviation | .planning/phases/06-workload-resilience-pi-acceptance/06-LOCK-AUDIT.md |  | 07-02's mandated three route gates (advanced_index/serve_advanced_css/serve_advanced_js) plus the front-page cache function and beacon_frontpage import add lines above/within dashboard/app.py's _db_lock sites, shifting every site further below each insertion point and re-failing tests/test_lock_profile.py::LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit (line numbers only -- same 28 sites, same 26 functions, LockScopeInvariantTests::test_no_database_access_escapes_the_db_lock still passes). Not fixed: 06-LOCK-AUDIT.md is a Phase-6 artifact and 07-02's scope fence forbids touching .planning/phases/06-*. Compounds WINDOWS.md #21; needs the same mechanical line-number refresh, owned by whoever next unseals Phase 6. | open |  | 2026-09-04T09:37:03.931Z |  |
+| 23 | 07 | deviation | tests/test_history_investigation_ui.py |  | test_advanced_current_request_byte_identical_before_and_after_selection failed once in the plan's own whole-suite verification run (IndexError: recorded[-1], list index out of range -- a Playwright route-recording race under full-suite Chromium contention). Confirmed unrelated to 07-02: passes in isolation and passes when the whole module is re-run alone (144 passed, 27 subtests). File is not in 07-02's declared scope (dashboard/app.py, dashboard/app.js, dashboard/beacon/frontpage.py, tests/test_optional_advanced_diagnostics.py) and 07-02 changed no code this test's flow depends on. Flaky, not a regression. | open |  | 2026-09-04T09:37:12.285Z |  |
 
 ````json
 [
@@ -289,6 +291,30 @@ last_updated: 2026-09-04T08:08:41.000Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-04T08:08:41.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 22,
+    "kind": "deviation",
+    "phase": "07",
+    "file": ".planning/phases/06-workload-resilience-pi-acceptance/06-LOCK-AUDIT.md",
+    "line": null,
+    "description": "07-02's mandated three route gates (advanced_index/serve_advanced_css/serve_advanced_js) plus the front-page cache function and beacon_frontpage import add lines above/within dashboard/app.py's _db_lock sites, shifting every site further below each insertion point and re-failing tests/test_lock_profile.py::LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit (line numbers only -- same 28 sites, same 26 functions, LockScopeInvariantTests::test_no_database_access_escapes_the_db_lock still passes). Not fixed: 06-LOCK-AUDIT.md is a Phase-6 artifact and 07-02's scope fence forbids touching .planning/phases/06-*. Compounds WINDOWS.md #21; needs the same mechanical line-number refresh, owned by whoever next unseals Phase 6.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-04T09:37:03.931Z",
+    "resolved_at": null
+  },
+  {
+    "id": 23,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "tests/test_history_investigation_ui.py",
+    "line": null,
+    "description": "test_advanced_current_request_byte_identical_before_and_after_selection failed once in the plan's own whole-suite verification run (IndexError: recorded[-1], list index out of range -- a Playwright route-recording race under full-suite Chromium contention). Confirmed unrelated to 07-02: passes in isolation and passes when the whole module is re-run alone (144 passed, 27 subtests). File is not in 07-02's declared scope (dashboard/app.py, dashboard/app.js, dashboard/beacon/frontpage.py, tests/test_optional_advanced_diagnostics.py) and 07-02 changed no code this test's flow depends on. Flaky, not a regression.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-04T09:37:12.285Z",
     "resolved_at": null
   }
 ]
