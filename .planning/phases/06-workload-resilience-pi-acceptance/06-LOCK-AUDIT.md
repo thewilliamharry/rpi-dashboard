@@ -32,34 +32,34 @@ below `api_services` shifted by +14 as a direct consequence of that edit (lines 
 
 | # | Function | Line | Form | Read/Write | Non-DB work held under the lock | Narrowed this round |
 |---|----------|------|------|------------|----------------------------------|----------------------|
-| 1 | `init_db` | 177 | bare | write | `prepare_database` migration run plus the legacy `state_since` backfill `UPDATE` | no |
-| 2 | `update_worker_heartbeat` | 236 | bare | write | none | no |
-| 3 | `recover_worker_state` | 244 | combined | read+write | JSON serialization of the `monitoring_gap` event's `details` payload | no |
-| 4 | `_mutation_write_transaction` | 302 | combined | write (caller-defined body) | none — a generic transaction wrapper; whatever the caller's `yield conn` body does | no |
-| 5 | `_update_scan_state` | 385 | combined | read+write | dict merge of the scan-state `changes` | no |
-| 6 | `_legacy_record_event` | 850 | combined | write | none | no |
-| 7 | `_legacy_should_send_alert` | 867 | combined | read | none | no |
-| 8 | `_legacy_collect_system_stats` | 1301 | combined | read+write | none — the `sample` dict is built before the lock is taken | no |
-| 9 | `_legacy_cleanup_history` | 1326 | combined | write | none | no |
-| 10 | `_legacy_do_discovery` | 1366 | combined | read | none — `existing_probe_urls` is built after the block closes | no |
-| 11 | `_legacy_do_uptime_check` | 1565 | combined | read | none — per-row probing and the follow-up `_mutation_write_transaction` calls run after this block closes | no |
-| 12 | `process_preview_requests` | 2265 | combined | read | none | no |
-| 13 | `process_preview_requests` | 2273 | combined | read+write | none | no |
-| 14 | `_check_scan_rate_limit` | 2387 | combined | read+write | small rate-limit arithmetic (`retry_after`) | no |
-| 15 | `api_stats` | 2573 | combined | read | none | no |
-| 16 | `api_history` | 2585 | combined | read | none | no |
-| 17 | `api_telemetry_history` | 2655 | combined | read | none — every call inside the block is itself a DB read (`get_host_telemetry`/`get_service_telemetry`/`get_telemetry_coverage`/`get_pending_aggregation`); response composition happens after | no |
-| 18 | `api_events_history` | 2783 | combined | read | none — `read_events_in_range`/`read_episode_state_changes`/`anchor_candidate_ports`/`read_open_episode_anchors` are all DB reads; response composition happens after | no |
-| 19 | `api_services` | 2831 | combined | read | none — narrowed in `06-20`. Was: `_uptime_summary`, `beacon_maintenance.coverage`, `beacon_maintenance.attributed_downtime_seconds`, `beacon_repositories.offline_intervals_from_points_by_port`, and the per-service `result` dict construction, measured **25.0% of this route's held region** under concurrency-8 load (`06-LOCK-DIAGNOSTIC.md` §4, `beacon-lockdiag-c8.json`) before the narrowing. All four now execute after the block closes, over rows materialized into plain dicts inside it (`D-DEBT-06-01`, `PROH-OPS-04-06`). | **yes (landed)** |
-| 20 | `api_events` | 3005 | combined | read | none | no |
-| 21 | `api_service_meta` (GET) | 3038 | combined | read | none — delegates to `beacon_web.metadata_response`, itself DB reads only | no |
-| 22 | `api_service_meta` (PUT) | 3079 | combined | read+write | field validation, URL normalization (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning (`_outbound_policy().plan(...)`) — see "Future narrowing candidates" below | no |
-| 23 | `api_thumbnail` | 3154 | combined | read | none | no |
-| 24 | `api_thumbnail_status` | 3169 | combined | read | none — `thumb_state` derivation happens after the block closes | no |
-| 25 | `api_scan_status` | 3233 | combined | read | none — freshness/staleness classification happens after the block closes | no |
-| 26 | `healthz` | 3303 | combined | read | none (`SELECT 1`) | no |
-| 27 | `readyz` | 3313 | bare | read | none — readiness classification happens after the block closes | no |
-| 28 | `prometheus_metrics` | 3324 | combined | read | none | no |
+| 1 | `init_db` | 179 | bare | write | `prepare_database` migration run plus the legacy `state_since` backfill `UPDATE` | no |
+| 2 | `update_worker_heartbeat` | 238 | bare | write | none | no |
+| 3 | `recover_worker_state` | 246 | combined | read+write | JSON serialization of the `monitoring_gap` event's `details` payload | no |
+| 4 | `_mutation_write_transaction` | 304 | combined | write (caller-defined body) | none — a generic transaction wrapper; whatever the caller's `yield conn` body does | no |
+| 5 | `_update_scan_state` | 387 | combined | read+write | dict merge of the scan-state `changes` | no |
+| 6 | `_legacy_record_event` | 852 | combined | write | none | no |
+| 7 | `_legacy_should_send_alert` | 869 | combined | read | none | no |
+| 8 | `_legacy_collect_system_stats` | 1303 | combined | read+write | none — the `sample` dict is built before the lock is taken | no |
+| 9 | `_legacy_cleanup_history` | 1328 | combined | write | none | no |
+| 10 | `_legacy_do_discovery` | 1368 | combined | read | none — `existing_probe_urls` is built after the block closes | no |
+| 11 | `_legacy_do_uptime_check` | 1567 | combined | read | none — per-row probing and the follow-up `_mutation_write_transaction` calls run after this block closes | no |
+| 12 | `process_preview_requests` | 2267 | combined | read | none | no |
+| 13 | `process_preview_requests` | 2275 | combined | read+write | none | no |
+| 14 | `_check_scan_rate_limit` | 2389 | combined | read+write | small rate-limit arithmetic (`retry_after`) | no |
+| 15 | `api_stats` | 2617 | combined | read | none | no |
+| 16 | `api_history` | 2629 | combined | read | none | no |
+| 17 | `api_telemetry_history` | 2699 | combined | read | none — every call inside the block is itself a DB read (`get_host_telemetry`/`get_service_telemetry`/`get_telemetry_coverage`/`get_pending_aggregation`); response composition happens after | no |
+| 18 | `api_events_history` | 2827 | combined | read | none — `read_events_in_range`/`read_episode_state_changes`/`anchor_candidate_ports`/`read_open_episode_anchors` are all DB reads; response composition happens after | no |
+| 19 | `api_services` | 2875 | combined | read | none — narrowed in `06-20`. Was: `_uptime_summary`, `beacon_maintenance.coverage`, `beacon_maintenance.attributed_downtime_seconds`, `beacon_repositories.offline_intervals_from_points_by_port`, and the per-service `result` dict construction, measured **25.0% of this route's held region** under concurrency-8 load (`06-LOCK-DIAGNOSTIC.md` §4, `beacon-lockdiag-c8.json`) before the narrowing. All four now execute after the block closes, over rows materialized into plain dicts inside it (`D-DEBT-06-01`, `PROH-OPS-04-06`). | **yes (landed)** |
+| 20 | `api_events` | 3049 | combined | read | none | no |
+| 21 | `api_service_meta` (GET) | 3082 | combined | read | none — delegates to `beacon_web.metadata_response`, itself DB reads only | no |
+| 22 | `api_service_meta` (PUT) | 3123 | combined | read+write | field validation, URL normalization (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning (`_outbound_policy().plan(...)`) — see "Future narrowing candidates" below | no |
+| 23 | `api_thumbnail` | 3198 | combined | read | none | no |
+| 24 | `api_thumbnail_status` | 3213 | combined | read | none — `thumb_state` derivation happens after the block closes | no |
+| 25 | `api_scan_status` | 3277 | combined | read | none — freshness/staleness classification happens after the block closes | no |
+| 26 | `healthz` | 3347 | combined | read | none (`SELECT 1`) | no |
+| 27 | `readyz` | 3357 | bare | read | none — readiness classification happens after the block closes | no |
+| 28 | `prometheus_metrics` | 3368 | combined | read | none | no |
 
 **Row count: 28. Distinct function count: 26** (`process_preview_requests` and `api_service_meta`
 each contribute two rows). `LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit`
