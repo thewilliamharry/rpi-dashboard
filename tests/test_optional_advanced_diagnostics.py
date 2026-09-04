@@ -50,6 +50,7 @@ from pathlib import Path
 from unittest import mock
 
 from dashboard.beacon import repositories
+from dashboard.beacon.config import load_settings
 from tests.helpers import cleanup_db, load_app
 
 
@@ -239,6 +240,43 @@ def generate_enabled_response_golden():
         cleanup_db(db_path)
 
 
+class DisabledAdvancedApiTests(_FrozenClockTestCase):
+    """Task 2: with ENABLE_ADVANCED_DIAGNOSTICS='0', /api/advanced/current
+    answers 404 having done nothing -- Task 3 extends this class with the
+    connection/statement measurement over the same disabled request, plus
+    the counter's own sensitivity checks.
+
+    Runs alphabetically BEFORE EnabledResponseGoldenTests and writes '0'
+    into os.environ['ENABLE_ADVANCED_DIAGNOSTICS'] via `load_app`, which
+    never clears it (tests/helpers.py:51-65) -- this class is why the
+    module rule at the top of this file exists, and why
+    EnabledResponseGoldenTests must never leave its own `load_app` call
+    implicit.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.appmod, self.db_path = load_app({'ENABLE_ADVANCED_DIAGNOSTICS': '0'})
+        self.client = self.appmod.app.test_client()
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+        super().tearDown()
+
+    def test_the_disabled_route_answers_404_with_an_empty_body(self):
+        response = self.client.get('/api/advanced/current')
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_data(as_text=True), '')
+
+    def test_the_disabled_route_answers_404_even_with_a_query_string(self):
+        """A disabled route reports absence, never the 400 the enabled
+        handler reserves for an unexpected query string -- confirms the
+        gate is the handler's first statement, ahead of `request.args`."""
+        response = self.client.get('/api/advanced/current?foo=bar')
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_data(as_text=True), '')
+
+
 class EnabledResponseGoldenTests(_FrozenClockTestCase):
     """Task 1: the pre-change `/api/advanced/current` response, captured
     from the tree at `CAPTURED_AT_COMMIT`, byte-for-byte. Failure messages
@@ -290,6 +328,44 @@ class EnabledResponseGoldenTests(_FrozenClockTestCase):
 
     def test_the_static_advanced_assets_match_the_pre_change_golden_digests(self):
         self.assertEqual(_asset_sha256(), self.golden['asset_sha256'])
+
+
+class SettingsAdvancedDiagnosticsTests(unittest.TestCase):
+    """Task 2: the parse vocabulary at the settings layer, driven through
+    `load_settings` with an explicit mapping -- never through `load_app`.
+
+    `test_an_unset_value_defaults_to_enabled` is the ONLY place in this
+    phase's test suite that establishes criterion 1's unset default. It
+    calls `load_settings({})` directly, reading the literal default in the
+    parser rather than an environment any earlier `load_app` call may have
+    polluted (tests/helpers.py:51-65). No `load_app` call anywhere in this
+    phase may be cited as evidence for the default.
+    """
+
+    def test_an_unset_value_defaults_to_enabled(self):
+        self.assertTrue(load_settings({}).enable_advanced_diagnostics)
+
+    def test_the_enabled_vocabulary_matches_the_existing_enabled_helper(self):
+        """`_enabled`'s existing vocabulary (dashboard/beacon/config.py:119),
+        inherited rather than reinvented."""
+        for value in ('0', 'false', 'no', 'off', ''):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    load_settings({'ENABLE_ADVANCED_DIAGNOSTICS': value}).enable_advanced_diagnostics,
+                )
+        for value in ('1', 'true', 'yes', 'on'):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    load_settings({'ENABLE_ADVANCED_DIAGNOSTICS': value}).enable_advanced_diagnostics,
+                )
+
+    def test_an_out_of_vocabulary_value_is_treated_as_disabled(self):
+        """The one place a default-on toggle behaves differently from the
+        two default-off toggles sharing `_enabled`: a typo degrades to
+        disabled rather than to the default. Recorded in 07-DECISIONS.md
+        by 07-03."""
+        settings = load_settings({'ENABLE_ADVANCED_DIAGNOSTICS': 'enabled'})
+        self.assertFalse(settings.enable_advanced_diagnostics)
 
 
 if __name__ == '__main__':

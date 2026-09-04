@@ -97,6 +97,10 @@ ENABLE_PROMETHEUS = SETTINGS.enable_prometheus
 # beacon_lockprofile.InstrumentedLock; see the conditional rebinding at its
 # declaration for the D-01 / PROH-OPS-04-02 / T-06-24 scope note.
 ENABLE_LOCK_PROFILE = SETTINGS.enable_lock_profile
+# 07-01/D-07-01: default-on. Governs whether the advanced workspace's routes
+# (this one and the three 07-02 gates) answer at all; see
+# api_advanced_current's guard below for the T-07-01 scope note.
+ENABLE_ADVANCED_DIAGNOSTICS = SETTINGS.enable_advanced_diagnostics
 
 DEFAULT_TRUSTED_HOSTS = (
     "raspi.local,raspi,localhost,127.0.0.1,::1,"
@@ -2526,6 +2530,12 @@ def serve_advanced_js():
 
 @app.route('/api/advanced/current')
 def api_advanced_current():
+    """T-07-01: the gate is the handler's first statement, ahead of the
+    `request.args` check below, so a disabled deployment cannot be probed
+    for the difference between 400 and 404 to learn the route exists.
+    Mirrors prometheus_metrics and lock_profile_snapshot exactly (D-07-02)."""
+    if not ENABLE_ADVANCED_DIAGNOSTICS:
+        return '', 404
     if request.args:
         return jsonify({'error': 'unexpected query parameters'}), 400
     try:

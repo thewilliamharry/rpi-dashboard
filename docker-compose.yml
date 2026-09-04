@@ -32,6 +32,7 @@ x-beacon-common: &beacon-common
     ALERT_ONLY_CRITICAL: "0"
     ENABLE_PROMETHEUS: "0"
     ENABLE_LOCK_PROFILE: "${BEACON_LOCK_PROFILE:-0}"
+    ENABLE_ADVANCED_DIAGNOSTICS: "${BEACON_ADVANCED_DIAGNOSTICS:-1}"
 
 services:
   data-init:
