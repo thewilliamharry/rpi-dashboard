@@ -742,4 +742,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
 | 5. Theme-Parity Analytics Experience | 7/7 | Complete    | 2026-08-28 |
 | 6. Workload Resilience & Pi Acceptance | 10/10 | In Progress|  |
-| 7. Optional Advanced Diagnostics | 0/3 | Planned     |  |
+| 7. Optional Advanced Diagnostics | 3/3 | Executed    | DIA-09 stays Pending — promotion belongs to an independent verification round (TEL-06 / PROH-OPS-07-08 precedent) |
