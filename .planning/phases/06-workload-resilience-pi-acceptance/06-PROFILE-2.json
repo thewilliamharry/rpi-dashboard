@@ -1,0 +1,73 @@
+{
+  "attributed_pct": 96.376,
+  "caveat": "Every absolute millisecond figure below was measured on this run's own host_machine/host_node -- it is NOT Raspberry Pi latency evidence. The authority on absolute /api/services cost remains the 289.0ms p50 measured on the Pi control pass at concurrency 1. Only the proportional attribution (share_pct/attributed_pct) and the growth ratios below may be carried into a decision. cProfile itself adds per-call overhead that inflates Python-heavy buckets relative to SQL-bound ones -- wall_ms_unprofiled is reported alongside wall_ms_profiled for exactly that reason.",
+  "host_machine": "arm64",
+  "host_node": "Williams-MacBook-Pro-635.local",
+  "phases": {
+    "attributed_downtime": {
+      "calls": 35645,
+      "share_pct": 6.629,
+      "tottime_ms": 37.032
+    },
+    "covering_boundaries": {
+      "calls": 16860,
+      "share_pct": 1.591,
+      "tottime_ms": 8.886
+    },
+    "json_serialization": {
+      "calls": 85,
+      "share_pct": 0.175,
+      "tottime_ms": 0.977
+    },
+    "maintenance_coverage": {
+      "calls": 156345,
+      "share_pct": 5.479,
+      "tottime_ms": 30.607
+    },
+    "maintenance_windows_read": {
+      "calls": 30,
+      "share_pct": 0.011,
+      "tottime_ms": 0.06
+    },
+    "monitoring_operations_binding": {
+      "calls": 120,
+      "share_pct": 0.377,
+      "tottime_ms": 2.107
+    },
+    "offline_intervals_read": {
+      "calls": 230025,
+      "share_pct": 7.415,
+      "tottime_ms": 41.425
+    },
+    "other": {
+      "calls": 54906,
+      "share_pct": 3.624,
+      "tottime_ms": 20.244
+    },
+    "row_grouping": {
+      "calls": 226837,
+      "share_pct": 16.083,
+      "tottime_ms": 89.844
+    },
+    "sql_execute": {
+      "calls": 45,
+      "share_pct": 0.644,
+      "tottime_ms": 3.597
+    },
+    "sql_fetch": {
+      "calls": 30,
+      "share_pct": 14.246,
+      "tottime_ms": 79.584
+    },
+    "uptime_sweep": {
+      "calls": 1131112,
+      "share_pct": 43.727,
+      "tottime_ms": 244.276
+    }
+  },
+  "pi_control_pass_p50_ms": 289.0,
+  "repeats": 5,
+  "total_tottime_ms": 558.64,
+  "wall_ms_profiled": 111.616,
+  "wall_ms_unprofiled": 58.533
+}
