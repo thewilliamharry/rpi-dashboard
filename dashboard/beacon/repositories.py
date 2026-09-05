@@ -1224,6 +1224,218 @@ def read_service_offline_intervals_by_port(conn, *, ports, start_ts, end_ts):
     )
 
 
+# 06-25 (OPS-07 gap closure): the bulk all-ports replacement for
+# `_legacy_uptime_summary`'s per-port Python sweep. A template, not a
+# ready-to-execute statement -- `{placeholders}` and `{port_values}` are
+# filled in by `read_uptime_strips_by_port` with as many `?` marks as the
+# caller's port list needs, exactly like every other bulk-by-port reader in
+# this module (`read_maintenance_windows_by_port`,
+# `read_service_offline_interval_boundaries_by_port`). Kept as a bare SQL
+# string with no comment or docstring inside it, so a static test can read
+# this constant's own text and assert it carries no division and no
+# rounding (06-PREMISE-C.md mismatch 1 and 2; PROH-OPS-07-15): every ratio
+# and every `round()` call happens in Python, over the integer second
+# totals this query returns, because SQLite's `ROUND()` rounds half away
+# from zero while Python's `round()` rounds half to even -- moving the
+# division into SQL would change rendered values while every shape-checking
+# test stayed green.
+UPTIME_STRIP_QUERY = (
+    "WITH RECURSIVE "
+    "admitted AS ("
+    "SELECT port, ts, online FROM service_checks "
+    "WHERE port IN ({placeholders}) AND ts >= ? AND ts <= ?"
+    "), "
+    "boundary AS ("
+    "SELECT port, online FROM ("
+    "SELECT port, online, ROW_NUMBER() OVER (PARTITION BY port ORDER BY ts DESC) AS rn "
+    "FROM admitted WHERE ts < ?"
+    ") WHERE rn = 1"
+    "), "
+    "in_window AS ("
+    "SELECT port, ts, online FROM admitted WHERE ts >= ?"
+    "), "
+    "points AS ("
+    "SELECT port, ? AS effective_ts, online AS online, 0 AS sort_key FROM boundary "
+    "UNION ALL "
+    "SELECT port, ts AS effective_ts, online, 1 AS sort_key FROM in_window"
+    "), "
+    "ordered_points AS ("
+    "SELECT port, effective_ts, online, "
+    "LEAD(effective_ts, 1, ?) OVER (PARTITION BY port ORDER BY effective_ts, sort_key, online) AS end_ts "
+    "FROM points"
+    "), "
+    "requested_ports(port) AS ("
+    "VALUES {port_values}"
+    "), "
+    "buckets(idx, bucket_start) AS ("
+    "SELECT 0, ? "
+    "UNION ALL "
+    "SELECT idx + 1, bucket_start + ? FROM buckets WHERE idx + 1 < ?"
+    "), "
+    "null_counts AS ("
+    "SELECT port, COUNT(*) AS null_count FROM admitted WHERE online IS NULL GROUP BY port"
+    "), "
+    "bucket_totals AS ("
+    "SELECT rp.port AS port, bk.idx AS idx, "
+    "SUM(CASE WHEN sg.online IS NOT NULL AND sg.online <> 0 THEN "
+    "MAX(0, MIN(sg.end_ts, bk.bucket_start + ?, ?) - MAX(sg.effective_ts, bk.bucket_start, ?)) "
+    "ELSE 0 END) AS online_seconds, "
+    "SUM(CASE WHEN sg.online IS NOT NULL AND sg.online = 0 THEN "
+    "MAX(0, MIN(sg.end_ts, bk.bucket_start + ?, ?) - MAX(sg.effective_ts, bk.bucket_start, ?)) "
+    "ELSE 0 END) AS offline_seconds "
+    "FROM requested_ports rp "
+    "CROSS JOIN buckets bk "
+    "LEFT JOIN ordered_points sg "
+    "ON sg.port = rp.port AND sg.effective_ts < bk.bucket_start + ? AND sg.end_ts > bk.bucket_start "
+    "GROUP BY rp.port, bk.idx"
+    ") "
+    "SELECT bt.port, bt.idx, bt.online_seconds, bt.offline_seconds, COALESCE(nc.null_count, 0) AS null_count "
+    "FROM bucket_totals bt LEFT JOIN null_counts nc ON nc.port = bt.port "
+    "ORDER BY bt.port ASC, bt.idx ASC"
+)
+
+
+def read_uptime_strips_by_port(conn, *, ports, now, window_seconds, bucket_count, retention_seconds):
+    """Return each requested port's (uptime_pct, 168-value strip) pair.
+
+    The bulk, all-ports replacement for calling `_legacy_uptime_summary`
+    once per service. One statement for any number of ports -- never one
+    per port -- built from `UPTIME_STRIP_QUERY` with as many `?` marks as
+    `ports` needs, the same `','.join('?' * len(ports))` idiom every other
+    bulk-by-port reader in this module uses. Never string-interpolates a
+    port value: every port reaches SQL as a bound parameter.
+
+    Returns a mapping with an entry for **every requested port**,
+    including a port with no rows, which maps to `(None, [-1] *
+    bucket_count)`. This deliberately differs from
+    `read_service_offline_intervals_by_port`'s absent-means-empty
+    convention: the strip is a fixed-shape rendered contract an operator's
+    browser always iterates over 168 times, and pushing sentinel
+    construction into the caller would put that contract in two places.
+
+    **The retention floor (`retention_seconds`, required, keyword-only, no
+    default).** `/api/services` does not feed the producer this replaces
+    every stored row for a port -- it feeds it rows no older than
+    `now - CHECK_RETENTION_SECONDS` (`dashboard/app.py:2896`). A row older
+    than that has never been visible to the route. This reader's `admitted`
+    CTE applies `retention_seconds` as a floor on `ts` for BOTH the
+    in-window scan and the boundary lookup, because both `boundary` and
+    `in_window` below are drawn from `admitted`. Flooring only the in-window
+    scan (an easy mistake, since the in-window rows are naturally >=
+    `start` and so already inside any reasonable retention floor) would
+    still let the boundary sub-select reach past retention and establish a
+    state HEAD has never rendered -- silently moving a rendered contract
+    under a cost-only edit. See `06-PREMISE-C.md` and `PROH-OPS-07-22`.
+
+    **NULL `online`.** `service_checks.online` carries no `NOT NULL`
+    constraint (`dashboard/beacon/migrations.py:119-120`), even though both
+    production writers always bind an integer. A SQL truthiness coercion
+    of a NULL is neither online nor offline -- it would silently drop out
+    of `observed` and let a plausible number render. This reader instead
+    counts admitted NULL-`online` rows per port (`null_counts`) and raises
+    `ValueError` naming the port when that count is non-zero, so this
+    producer refuses exactly where `_legacy_uptime_summary`'s
+    `1 if int(online) else 0` would raise on the same input -- the two
+    producers fail together rather than one of them inventing an answer.
+
+    **Segment ordering (`ORDER BY effective_ts, sort_key, online`).** Two
+    rows at one timestamp for one port are schema-impossible
+    (`service_checks` declares `PRIMARY KEY (ts, port)`), so `online` as a
+    final tiebreak can never discriminate between two REAL rows -- this is
+    defensive, and deliberately unobservable, kept only so a future
+    widening of that primary key does not silently start carrying the
+    wrong state forward. `sort_key` (0 for the synthetic boundary point, 1
+    for a genuine in-window row) resolves the one tie that IS reachable: a
+    real check landing exactly at `start`, colliding with the boundary
+    sample's synthetic position there. Placing the boundary point first
+    reproduces `_legacy_uptime_summary`'s own `if ts > cursor` skip, which
+    silently discards a zero-width boundary segment in exactly this case.
+
+    **Boundedness.** No `LIMIT`, no `_checked_rows`. The result is bounded
+    by construction at `len(ports) * bucket_count` rows -- `requested_ports
+    CROSS JOIN buckets`, left-joined onto matching segments -- regardless
+    of how many rows `service_checks` holds for any port (`PROH-OPS-07-17`;
+    `D-DEBT-06-10`'s defect class checked at this new door).
+
+    Raises `ValueError` if `window_seconds` is not evenly divisible by
+    `bucket_count`, so a future constant change fails loudly instead of
+    silently shifting bucket boundaries. `retention_seconds` has no
+    default: a caller that forgets it gets a `TypeError`, not a silently
+    unfloored read.
+    """
+    ports = list(ports)
+    if not ports:
+        return {}
+    if int(window_seconds) % int(bucket_count) != 0:
+        raise ValueError(
+            'window_seconds must be evenly divisible by bucket_count '
+            f'(got window_seconds={window_seconds}, bucket_count={bucket_count})',
+        )
+    now = int(now)
+    window_seconds = int(window_seconds)
+    bucket_count = int(bucket_count)
+    retention_seconds = int(retention_seconds)
+    bucket_seconds = window_seconds // bucket_count
+    start = now - window_seconds
+    retention_floor = now - retention_seconds
+
+    placeholders = ','.join('?' * len(ports))
+    port_values = ','.join('(?)' for _ in ports)
+    query = UPTIME_STRIP_QUERY.format(placeholders=placeholders, port_values=port_values)
+    params = (
+        *ports, retention_floor, now,
+        start,
+        start,
+        start,
+        now,
+        *ports,
+        start,
+        bucket_seconds,
+        bucket_count,
+        bucket_seconds, now, start,
+        bucket_seconds, now, start,
+        bucket_seconds,
+    )
+    rows = conn.execute(query, params).fetchall()
+
+    buckets_by_port = {port: [-1] * bucket_count for port in ports}
+    observed_total = {port: 0 for port in ports}
+    online_total = {port: 0 for port in ports}
+    null_count_by_port = {port: 0 for port in ports}
+
+    for row in rows:
+        port = row['port']
+        idx = row['idx']
+        online_seconds = row['online_seconds']
+        offline_seconds = row['offline_seconds']
+        null_count_by_port[port] = row['null_count']
+        observed = online_seconds + offline_seconds
+        if observed > 0:
+            buckets_by_port[port][idx] = round(online_seconds / observed, 3)
+            observed_total[port] += observed
+            online_total[port] += online_seconds
+
+    for port in ports:
+        if null_count_by_port[port]:
+            raise ValueError(
+                f'port {port} has a NULL service_checks.online value within the '
+                'retention-floored window -- refusing to render a strip for it',
+            )
+
+    result = {}
+    for port in ports:
+        observed = observed_total[port]
+        if observed > 0:
+            raw_uptime = (online_total[port] / observed) * 100
+            uptime = round(raw_uptime, 3)
+            if raw_uptime < 100 and uptime == 100:
+                uptime = 99.999
+        else:
+            uptime = None
+        result[port] = (uptime, buckets_by_port[port])
+    return result
+
+
 def get_runtime_state(conn, key, default=None):
     row = conn.execute('SELECT value FROM runtime_state WHERE key=?', (key,)).fetchone()
     if not row:
