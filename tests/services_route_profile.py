@@ -122,6 +122,22 @@ PROFILE_PHASES = {
     'uptime_sweep': [
         ('app.py', '_legacy_uptime_summary'),
     ],
+    # 06-25 replaced the per-service Python sweep above with one bulk SQL
+    # aggregation (beacon/repositories.py:read_uptime_strips_by_port); left
+    # 'uptime_sweep' registered above so a reading of (near) zero there is
+    # itself the evidence the route stopped calling it, rather than a
+    # bucket that silently disappeared from the table. This new bucket
+    # captures ONLY the reader's Python wrapper -- argument coercion, SQL
+    # string assembly, and result-row grouping into the returned dict. The
+    # aggregation's actual cost is spent inside SQLite, which cProfile
+    # attributes to the 'sql_execute' bucket's builtin `execute` entry, not
+    # to this one. A small uptime_strip_sql figure is therefore EXPECTED
+    # and is not a measurement of the SQL work itself -- see 06-PROFILE-3.md
+    # for why wall_ms_unprofiled, not this bucket's share, is the headline
+    # (PROH-OPS-07-19).
+    'uptime_strip_sql': [
+        ('beacon/repositories.py', 'read_uptime_strips_by_port'),
+    ],
     'monitoring_operations_binding': [
         ('app.py', '_monitoring_operations'),
         ('beacon/monitoring.py', 'uptime_summary'),
