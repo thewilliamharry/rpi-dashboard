@@ -83,6 +83,24 @@ C targets `uptime_sweep` (29.975%). Against 679.3ms, removing all of it lands at
 500ms budget by 25ms, with **no margin**, and only if the SQL path costs nothing. `06-PREMISE-C.md`
 already corrected C's payoff from ~35% to ~30% and found the existing shape is not reusable as-is.
 
-`maintenance_coverage` is 29.649% with the profile's fastest growth ratio (7.564). C plus that
-bucket would target ~60%, landing near 272ms with real margin. On this evidence C alone looks
-insufficient rather than merely tight.
+**CORRECTION — do not scope a round against `06-PROFILE.md`'s percentages.** They describe a build
+that predates a landed optimization aimed at one of them.
+
+`06-PROFILE.md` is plan 12, created 2026-09-02, profiling a 289.0ms route. The
+`maintenance_occurrence_cache` memo that targets `maintenance_coverage` specifically landed in
+**06-13** (`4352198`), after that profile, and **survives in HEAD** (`dashboard/app.py:2976`; the
+round-5 revert `ea8689e` backed out a different memo, `afff388` on `get_current_diagnosis`).
+The 679.3ms measured here therefore **already includes** that win.
+
+Consequence in both directions:
+
+- Scoping a round at "uptime_sweep 29.975% + maintenance_coverage 29.649% = ~60%" **double-counts an
+  already-banked optimization**. That arithmetic was proposed in this session and is withdrawn.
+- If `maintenance_coverage` is genuinely gone, `uptime_sweep`'s *share* of the remaining cost is
+  larger than the profile states — roughly 29.975 / (100 - 29.649) = ~43%, which would put option C
+  alone near 390ms with real margin.
+
+Neither figure may be acted on: both are inferences over a stale profile, and the second repeats the
+error of the first. **`06-PROFILE.md` must be re-run against the current build before any
+optimization round is scoped.** That also answers a question nothing currently does — whether
+06-13's memo banked what it was written to bank.
