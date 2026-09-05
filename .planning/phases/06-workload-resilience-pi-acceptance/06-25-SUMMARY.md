@@ -203,6 +203,10 @@ None - no external service configuration required.
 - `.planning/REQUIREMENTS.md` is unedited: OPS-07 stays Pending pending an independent verification round (`PROH-OPS-07-08`).
 - `06-28` inherits: the `(function, ordinal)` vs `(function, line)` audit-pinning decision this plan deferred, and `T-06-24`'s register re-closure once `06-26`/`06-27` land.
 
+## Self-Check: PASSED
+
+All modified files confirmed present on disk; all four commit hashes (`87fa3ae`, `d127158`, `aef7b50`, `c01be24`) confirmed in `git log`.
+
 ---
 *Phase: 06-workload-resilience-pi-acceptance*
 *Completed: 2026-09-05*
