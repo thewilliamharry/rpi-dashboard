@@ -14,6 +14,7 @@ waiting for the next hardware run.
 
 import math
 import random
+import sqlite3
 import time
 import unittest
 from contextlib import contextmanager
@@ -888,3 +889,477 @@ class ServicesRouteProfilerGuardTests(unittest.TestCase):
             f"maintenance_coverage's large-shape cost regressed toward the unmemoized "
             f"baseline (1322.387ms): {bucket}",
         )
+
+
+# ---------------------------------------------------------------------------
+# 06-25 (OPS-07 gap closure): the agreement invariant PROH-OPS-07-16
+# requires between the new bulk SQL uptime-strip reader
+# (beacon_repositories.read_uptime_strips_by_port) and the two existing
+# Python producers it replaces inside api_services -- _legacy_uptime_summary
+# (the current sweep) and _reference_uptime_summary (the pinned
+# pre-optimization nested-loop oracle above). PROH-OPS-07-22: every oracle
+# call in this file goes through _route_input_rows, never the full inserted
+# set -- an oracle fed a superset agrees by construction and proves nothing
+# about the retention floor. Mutation (e) below demonstrates this directly.
+# ---------------------------------------------------------------------------
+
+class UptimeStripSqlDifferentialTests(unittest.TestCase):
+    """The bulk SQL uptime-strip reader must agree with both existing
+    producers on exactly the input the route itself would have passed --
+    the ``ts >= now - CHECK_RETENTION_SECONDS`` subset -- never the full
+    inserted set (PROH-OPS-07-22).
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_checks(self, port, rows):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for ts, online in rows:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+    def _route_input_rows(self, inserted, port, now):
+        """The route's own retention-floored input subset (PROH-OPS-07-22):
+        exactly the predicate ``all_checks`` applies at
+        ``dashboard/app.py:2896`` (``ts >= now - CHECK_RETENTION_SECONDS``).
+        Every oracle call in this class MUST be routed through this helper
+        -- an oracle fed the full inserted set agrees by construction and
+        proves nothing about the retention floor; mutation (e) in
+        06-25-SUMMARY.md demonstrates exactly that. The constant is read
+        off the app module rather than restated here.
+        """
+        floor = now - self.appmod.CHECK_RETENTION_SECONDS
+        return [(ts, online) for ts, online in inserted.get(port, []) if ts >= floor]
+
+    def _read_strips(self, ports, now):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            result = beacon_repositories.read_uptime_strips_by_port(
+                conn, ports=ports, now=now, window_seconds=UPTIME_WINDOW_SECONDS,
+                bucket_count=UPTIME_BUCKETS, retention_seconds=self.appmod.CHECK_RETENTION_SECONDS,
+            )
+            conn.close()
+        return result
+
+    def test_randomized_histories_agree_with_the_legacy_sweep_on_the_route_subset(self):
+        # Fresh seed (not 20260901 -- that seed belongs to
+        # UptimeSummaryDifferentialTests above and reusing it here would
+        # make a failure ambiguous about which class's fixture produced it).
+        rng = random.Random(20260925)
+        base_now = 1_700_000_000
+        crossed_retention_count = 0
+        total_histories = 0
+
+        for trial in range(400):
+            now = base_now + rng.randint(-10_000, 10_000)
+            port_count = rng.randint(1, 8)
+            port_base = 40000 + trial * 10
+            ports = list(range(port_base, port_base + port_count))
+            inserted = {}
+            for port in ports:
+                total_histories += 1
+                window_start = now - UPTIME_WINDOW_SECONDS
+                sample_count = rng.randint(0, 40)
+                checks = []
+                state = rng.randint(0, 1)
+                if rng.random() < 0.25:
+                    # Deliberately starts before the retention floor, so at
+                    # least one in four histories crosses it under
+                    # randomized pressure (06-25-PLAN.md Task 2 behaviour),
+                    # not only the enumerated beyond-retention cases below.
+                    ts = now - self.appmod.CHECK_RETENTION_SECONDS - rng.randint(1, UPTIME_WINDOW_SECONDS)
+                else:
+                    ts = window_start - rng.randint(0, UPTIME_WINDOW_SECONDS // 2)
+                for _ in range(sample_count):
+                    if rng.random() < 0.5:
+                        state = 1 - state
+                    checks.append((ts, state))
+                    choice = rng.random()
+                    if choice < 0.1:
+                        idx = rng.randint(0, UPTIME_BUCKETS)
+                        ts = int(window_start + idx * (UPTIME_WINDOW_SECONDS / UPTIME_BUCKETS))
+                    elif choice < 0.2:
+                        ts += rng.randint(1, UPTIME_WINDOW_SECONDS // 4 + 1)
+                    else:
+                        ts += rng.randint(1, UPTIME_WINDOW_SECONDS // 40 + 1)
+                # De-duplicate timestamps for this port -- PRIMARY KEY
+                # (ts, port) makes a genuine duplicate schema-impossible, so
+                # the generator must not attempt to produce one.
+                seen = set()
+                deduped = []
+                for ts_i, state_i in checks:
+                    if ts_i not in seen:
+                        seen.add(ts_i)
+                        deduped.append((ts_i, state_i))
+                inserted[port] = deduped
+                if any(ts_i < now - self.appmod.CHECK_RETENTION_SECONDS for ts_i, _ in deduped):
+                    crossed_retention_count += 1
+                self._insert_checks(port, deduped)
+
+            actual = self._read_strips(ports, now)
+            for port in ports:
+                route_rows = self._route_input_rows(inserted, port, now)
+                expected = self.appmod._legacy_uptime_summary(route_rows, now)
+                self.assertEqual(
+                    actual[port], expected,
+                    f'trial {trial} port {port}: SQL reader diverged from '
+                    f'_legacy_uptime_summary on the route-input subset',
+                )
+
+        self.assertGreaterEqual(
+            crossed_retention_count, 100,
+            f'expected at least 100 of {total_histories} randomized histories to cross '
+            f'the retention floor, got {crossed_retention_count} -- the floor is not '
+            f'under enough randomized pressure',
+        )
+
+    def test_bulk_call_equals_the_single_port_call_per_port(self):
+        now = 1_700_000_000
+        ports = list(range(41000, 41008))
+        for i, port in enumerate(ports):
+            self._insert_checks(port, [(now - 1000 - i * 100, i % 2), (now - 100, 1)])
+        bulk = self._read_strips(ports, now)
+        for port in ports:
+            single = self._read_strips([port], now)
+            self.assertEqual(
+                bulk[port], single[port],
+                f'port {port}: bulk-call result diverged from the single-port call',
+            )
+
+    def test_no_checks_at_all(self):
+        now = 10_000_000
+        port = 42001
+        actual = self._read_strips([port], now)
+        self.assertEqual(actual[port], (None, [-1] * UPTIME_BUCKETS))
+        expected = self.appmod._legacy_uptime_summary(
+            self._route_input_rows({}, port, now), now,
+        )
+        self.assertEqual(actual[port], expected)
+        self.assertEqual(actual[port], _reference_uptime_summary(
+            self._route_input_rows({}, port, now), now,
+        ))
+
+    def test_boundary_sample_establishes_state_across_the_whole_window(self):
+        now = 20_000_000
+        start = now - UPTIME_WINDOW_SECONDS
+        port = 42002
+        # Inside retention, strictly before the window, and nothing inside
+        # the window at all.
+        rows = [(start - 500, 1)]
+        self._insert_checks(port, rows)
+        actual = self._read_strips([port], now)
+        route_rows = self._route_input_rows({port: rows}, port, now)
+        expected = self.appmod._legacy_uptime_summary(route_rows, now)
+        self.assertEqual(actual[port], expected)
+        self.assertEqual(actual[port], _reference_uptime_summary(route_rows, now))
+        pct, buckets = actual[port]
+        self.assertEqual(pct, 100.0)
+        self.assertTrue(all(value == 1.0 for value in buckets))
+
+    def test_first_check_mid_window_with_no_earlier_boundary(self):
+        now = 20_000_000
+        start = now - UPTIME_WINDOW_SECONDS
+        port = 42003
+        rows = [(start + 3600, 1)]
+        self._insert_checks(port, rows)
+        actual = self._read_strips([port], now)
+        route_rows = self._route_input_rows({port: rows}, port, now)
+        expected = self.appmod._legacy_uptime_summary(route_rows, now)
+        self.assertEqual(actual[port], expected)
+        self.assertEqual(actual[port], _reference_uptime_summary(route_rows, now))
+        # Observation starts at the first check, not the window start.
+        _, buckets = actual[port]
+        self.assertEqual(buckets[0], -1)
+
+    def test_a_24_hour_observation_gap(self):
+        """A "24-hour observation gap" in this algorithm is the unobserved
+        PREFIX before the first established state -- there is no concept of
+        a mid-stream unknown region once a boundary or first check
+        establishes coverage, because every subsequent interval is
+        contiguous through to `now` (read off `_legacy_uptime_summary`:
+        once `cursor` is set, either at `start` via a boundary sample or at
+        the first in-window check, every later point falls inside some
+        interval). A first attempt at this test placed the "gap" in the
+        middle of an otherwise-covered history and asserted -1 there; that
+        assertion was wrong about what the algorithm computes (confirmed by
+        running it against both oracles, which agreed with each other and
+        disagreed with the wrong assertion) rather than a property either
+        producer has ever had.
+        """
+        now = 30_000_000
+        start = now - UPTIME_WINDOW_SECONDS
+        port = 42004
+        bucket_seconds = UPTIME_WINDOW_SECONDS // UPTIME_BUCKETS
+        gap_bucket_count = 24
+        first_check_ts = start + gap_bucket_count * bucket_seconds + 5
+        rows = [(first_check_ts, 1), (now - 100, 0)]
+        self._insert_checks(port, rows)
+        actual = self._read_strips([port], now)
+        route_rows = self._route_input_rows({port: rows}, port, now)
+        expected = self.appmod._legacy_uptime_summary(route_rows, now)
+        self.assertEqual(actual[port], expected)
+        self.assertEqual(actual[port], _reference_uptime_summary(route_rows, now))
+        _, buckets = actual[port]
+        self.assertEqual(buckets[:gap_bucket_count], [-1] * gap_bucket_count)
+        for idx in range(gap_bucket_count, UPTIME_BUCKETS):
+            self.assertNotEqual(buckets[idx], -1, f'bucket {idx} unexpectedly unobserved')
+
+    def test_one_second_offline_yields_the_99_999_clamp(self):
+        now = 20_000_000
+        start = now - UPTIME_WINDOW_SECONDS
+        port = 42005
+        rows = [(start - 1, 1), (now - 2, 0), (now - 1, 1)]
+        self._insert_checks(port, rows)
+        actual = self._read_strips([port], now)
+        route_rows = self._route_input_rows({port: rows}, port, now)
+        expected = self.appmod._legacy_uptime_summary(route_rows, now)
+        self.assertEqual(actual[port], expected)
+        self.assertEqual(actual[port], _reference_uptime_summary(route_rows, now))
+        pct, _ = actual[port]
+        self.assertEqual(pct, 99.999)
+
+    def test_beyond_retention_sole_row_renders_the_pre_change_sentinel(self):
+        """A port whose only check is older than CHECK_RETENTION_SECONDS
+        establishes no boundary -- exactly what HEAD renders today, because
+        all_checks (dashboard/app.py:2896) has never been able to see that
+        row. Asserted as a literal expected strip, not merely as agreement
+        with an oracle, so this case still fails if a future change feeds
+        the oracle the wrong subset (PROH-OPS-07-22).
+        """
+        now = 1_700_000_000
+        port = 42006
+        rows = [(now - 10 * 86400, 1)]
+        self._insert_checks(port, rows)
+        actual = self._read_strips([port], now)
+        self.assertEqual(actual[port], (None, [-1] * UPTIME_BUCKETS))
+
+    def test_beyond_retention_plus_mid_window_rows_establishes_no_boundary(self):
+        """A port with an out-of-retention row PLUS in-window rows behaves
+        exactly as if the out-of-retention row did not exist: every bucket
+        wholly before the first in-window check is -1, and observation
+        starts there, not at the window start.
+        """
+        now = 1_700_000_000
+        start = now - UPTIME_WINDOW_SECONDS
+        port = 42007
+        first_in_window_ts = now - 3 * 86400
+        rows = [(now - 10 * 86400, 1), (first_in_window_ts, 0), (first_in_window_ts + 100, 1)]
+        self._insert_checks(port, rows)
+        actual = self._read_strips([port], now)
+        route_rows = self._route_input_rows({port: rows}, port, now)
+        expected = self.appmod._legacy_uptime_summary(route_rows, now)
+        self.assertEqual(actual[port], expected)
+        self.assertEqual(actual[port], _reference_uptime_summary(route_rows, now))
+
+        bucket_seconds = UPTIME_WINDOW_SECONDS // UPTIME_BUCKETS
+        first_in_window_bucket = (first_in_window_ts - start) // bucket_seconds
+        _, buckets = actual[port]
+        self.assertEqual(
+            buckets[:first_in_window_bucket], [-1] * first_in_window_bucket,
+            'buckets wholly before the first in-window check must be unobserved',
+        )
+        self.assertNotEqual(
+            buckets[first_in_window_bucket], -1,
+            'observation must start at the first in-window check',
+        )
+
+    def test_duplicate_timestamps_are_rejected_by_the_schema(self):
+        """``service_checks`` declares ``PRIMARY KEY (ts, port)``
+        (``dashboard/beacon/migrations.py:119-120``), so two rows at one
+        timestamp for one port cannot be stored -- the reader's
+        ``(ts, online)`` segment ordering tiebreak this schema makes
+        unreachable through the route is therefore defensive against a
+        future primary-key widening, not a property any input can exercise
+        today. A plain ``INSERT`` (no ``OR IGNORE``, no ``OR REPLACE``) is
+        the correct way to pin this: either recovery mechanism would yield
+        a single stored row and a test that passes vacuously while reading
+        as though it exercised the tie-break.
+        """
+        port = 42008
+        ts = 1_700_000_000
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)', (ts, port, 1),
+            )
+            conn.commit()
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)', (ts, port, 0),
+                )
+            conn.close()
+
+    def test_null_online_makes_both_producers_raise(self):
+        now = 1_700_000_000
+        port = 42009
+        rows = [(now - 100, None)]
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)', (now - 100, port, None),
+            )
+            conn.commit()
+            conn.close()
+        with self.assertRaises(ValueError):
+            self._read_strips([port], now)
+        route_rows = self._route_input_rows({port: rows}, port, now)
+        with self.assertRaises(TypeError):
+            # _legacy_uptime_summary's `1 if int(online) else 0` raises
+            # TypeError on a None -- the two producers refuse the same
+            # input, even though the exception type each raises differs
+            # (ValueError naming the port here vs. int(None)'s TypeError
+            # there). Both refuse; neither renders a number.
+            self.appmod._legacy_uptime_summary(route_rows, now)
+
+    def test_float_now_matches_int_now_truncation(self):
+        """/api/services passes int(time.time()), but _legacy_calc_uptime_pct
+        passes an unrounded float, so a float `now` is a real input this
+        reader must define behaviour for. Settled by measurement: the
+        reader truncates via int(now), matching _legacy_uptime_summary's
+        own int(now) truncation, rather than raising.
+        """
+        now_int = 1_700_000_123
+        port = 42010
+        rows = [(now_int - 1000, 1), (now_int - 10, 0)]
+        self._insert_checks(port, rows)
+        with_int = self._read_strips([port], now_int)
+        with_float = self._read_strips([port], now_int + 0.9)
+        self.assertEqual(with_int[port], with_float[port])
+
+
+class UptimeStripBoundednessTests(unittest.TestCase):
+    """The cost-model and safety properties PROH-OPS-07-17 requires: one
+    query regardless of port count, and a materialized row count
+    independent of stored check volume.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_checks(self, port, rows):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for ts, online in rows:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+    def _query_count(self, ports, now):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            statements = []
+            conn.set_trace_callback(lambda sql: statements.append(sql))
+            beacon_repositories.read_uptime_strips_by_port(
+                conn, ports=ports, now=now, window_seconds=UPTIME_WINDOW_SECONDS,
+                bucket_count=UPTIME_BUCKETS, retention_seconds=self.appmod.CHECK_RETENTION_SECONDS,
+            )
+            conn.set_trace_callback(None)
+            conn.close()
+        return len(statements)
+
+    def test_one_query_regardless_of_port_count(self):
+        now = 1_700_000_000
+        self.assertEqual(self._query_count([50000], now), 1)
+        self.assertEqual(self._query_count(list(range(50000, 50008)), now), 1)
+
+    def _materialized_row_count(self, ports, now):
+        # sqlite3.Cursor is a C-extension type -- its `fetchall` attribute
+        # cannot be monkeypatched per-instance (`AttributeError: ...
+        # attribute 'fetchall' is read-only`). A thin Python-level proxy
+        # around the real cursor, returned in place of it, is what makes
+        # counting `.fetchall()`'s result length possible without changing
+        # `read_uptime_strips_by_port` itself.
+        class _CountingCursor:
+            def __init__(self, cursor, counts):
+                self._cursor = cursor
+                self._counts = counts
+
+            def fetchall(self):
+                rows = self._cursor.fetchall()
+                self._counts.append(len(rows))
+                return rows
+
+            def __getattr__(self, name):
+                return getattr(self._cursor, name)
+
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            original_execute = conn.execute
+            counts = []
+
+            def spy_execute(*args, **kwargs):
+                return _CountingCursor(original_execute(*args, **kwargs), counts)
+
+            conn.execute = spy_execute
+            beacon_repositories.read_uptime_strips_by_port(
+                conn, ports=ports, now=now, window_seconds=UPTIME_WINDOW_SECONDS,
+                bucket_count=UPTIME_BUCKETS, retention_seconds=self.appmod.CHECK_RETENTION_SECONDS,
+            )
+            conn.execute = original_execute
+            conn.close()
+        return sum(counts)
+
+    def test_materialized_row_count_is_independent_of_stored_check_volume(self):
+        now = 1_700_000_000
+        ports = list(range(51000, 51003))
+        for port in ports:
+            for i in range(200):
+                self._insert_checks(port, [(now - i * 30, i % 2)])
+        small_count = self._materialized_row_count(ports, now)
+
+        cleanup_db(self.db_path)
+        self.appmod, self.db_path = load_app({})
+        for port in ports:
+            for i in range(800):
+                self._insert_checks(port, [(now - i * 30, i % 2)])
+        large_count = self._materialized_row_count(ports, now)
+
+        expected = len(ports) * UPTIME_BUCKETS
+        self.assertEqual(small_count, expected)
+        self.assertEqual(large_count, expected)
+
+    def test_a_port_exceeding_the_offline_intervals_row_limit_still_returns_an_untruncated_strip(self):
+        """PROH-OPS-07-17's falsifier: this reader must never reuse
+        _OFFLINE_INTERVALS_BULK_ROW_LIMIT (D-DEBT-06-10's defect class
+        checked at this new door). The limit is patched down to a small
+        value so the test seeds a fast, small-but-over-cap history rather
+        than the literal 20,000+ rows the production constant would
+        require, matching the existing at-limit test idiom in this file
+        (OfflineIntervalsBulkReadTests.test_the_bulk_read_is_bounded).
+        """
+        now = 1_700_000_000
+        port = 52000
+        with mock.patch.object(beacon_repositories, '_OFFLINE_INTERVALS_BULK_ROW_LIMIT', 50):
+            rows = [(now - i * 30, i % 3 != 0) for i in range(51)]
+            int_rows = [(ts, int(online)) for ts, online in rows]
+            self._insert_checks(port, int_rows)
+            with self.appmod._db_lock:
+                conn = self.appmod.get_db()
+                actual = beacon_repositories.read_uptime_strips_by_port(
+                    conn, ports=[port], now=now, window_seconds=UPTIME_WINDOW_SECONDS,
+                    bucket_count=UPTIME_BUCKETS, retention_seconds=self.appmod.CHECK_RETENTION_SECONDS,
+                )
+                conn.close()
+        expected = self.appmod._legacy_uptime_summary(int_rows, now)
+        self.assertEqual(
+            actual[port][0], expected[0],
+            'uptime_pct must be unaffected by _OFFLINE_INTERVALS_BULK_ROW_LIMIT -- that '
+            'constant belongs only to offline-interval reconstruction, never to the '
+            'uptime strip (D-DEBT-06-10)',
+        )
+        self.assertEqual(len(actual[port][1]), UPTIME_BUCKETS)
