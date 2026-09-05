@@ -1886,15 +1886,24 @@ class LockScopePreservationTests(unittest.TestCase):
     established for D-DEBT-06-07.
 
     The lock WAS narrowed by `06-20`, under the user's `fix-now` decision at
-    `06-18` Task 3 -- `api_services` now holds `_db_lock` across database
-    reads only. This class pins THAT narrowed shape. A failure here means
-    the shape moved again -- most likely one of the four computations
-    `06-20` moved out (`_uptime_summary`, `beacon_maintenance.coverage`,
+    `06-18` Task 3 -- for a time, `api_services` held `_db_lock` across
+    database reads only. That narrowing was reverted (`ea8689e`) after
+    round 5's hardware measurement showed it made the deployment materially
+    worse (`06-LOCK-DIAGNOSTIC-R5B.md`). This class pins the PRE-NARROWING
+    containment shape, which is what HEAD carries again: all four
+    computations execute INSIDE the `with _db_lock` block, not after it. A
+    failure here means the shape moved again -- most likely one of the four
+    computations (`beacon_repositories.read_uptime_strips_by_port` since
+    `06-25`, `beacon_maintenance.coverage`,
     `beacon_maintenance.attributed_downtime_seconds`,
     `beacon_repositories.offline_intervals_from_points_by_port`) got moved
-    back in, silently undoing the fix without changing output (`T-06-101`).
-    Go to `D-DEBT-06-01` and `PROH-OPS-04-06` before editing an assertion in
-    this class.
+    back out, silently reintroducing the narrowing round 5 already measured
+    as worse (`T-06-101`). `06-25` changed WHICH producer is contained
+    (`_uptime_summary`, a Python helper, became
+    `beacon_repositories.read_uptime_strips_by_port`, a repository reader)
+    -- it did not change WHETHER it is contained, and did not touch the
+    lock's scope (`PROH-OPS-04-02`). Go to `D-DEBT-06-01` and
+    `PROH-OPS-04-06` before editing an assertion in this class.
     """
 
     def setUp(self):
@@ -1940,7 +1949,18 @@ class LockScopePreservationTests(unittest.TestCase):
         three mutations that matter: deleting a call site, dedenting one
         statement out of the block, and moving one of the four expensive
         computations outside the with-block (the round-5 narrowing shape
-        this pin exists to catch)."""
+        this pin exists to catch).
+
+        06-25 (OPS-07 gap closure) moved the uptime strip's producer from
+        the Python helper `_uptime_summary` to the bulk SQL reader
+        `beacon_repositories.read_uptime_strips_by_port` -- the route no
+        longer calls `_uptime_summary` at all, so `required_calls` names
+        the new producer instead. The lock's SCOPE did not move: this pin
+        still fails on all three mutations it was mutation-verified against
+        in 06-15 (deleting a call site, dedenting a statement out of the
+        block, moving a computation outside it) -- what changed is which
+        producer is named, never whether one is contained.
+        """
         func = _find_function_def(self.tree, 'api_services')
         self.assertIsNotNone(func, 'api_services function not found in dashboard/app.py')
 
@@ -1961,7 +1981,7 @@ class LockScopePreservationTests(unittest.TestCase):
             if isinstance(node, ast.Call)
         }
         required_calls = {
-            '_uptime_summary',
+            'beacon_repositories.read_uptime_strips_by_port',
             'beacon_maintenance.coverage',
             'beacon_maintenance.attributed_downtime_seconds',
             'beacon_repositories.offline_intervals_from_points_by_port',
@@ -1972,7 +1992,11 @@ class LockScopePreservationTests(unittest.TestCase):
             f"_db_lock's SCOPE changed: {sorted(missing)} no longer execute inside "
             "api_services' _db_lock with-block (bounded by end_lineno "
             f'{with_node.end_lineno}). D-01 and PROH-OPS-04-02 fence exactly this '
-            'scope. See D-DEBT-06-01 before editing this assertion.',
+            'scope. See D-DEBT-06-01 before editing this assertion. (06-25 renamed '
+            "this set's uptime entry from `_uptime_summary` to "
+            '`beacon_repositories.read_uptime_strips_by_port` when the producer moved '
+            'from a Python helper to a repository reader -- the lock scope itself did '
+            'not move.)',
         )
 
         # Nothing escaped: the only function-level statement after the
