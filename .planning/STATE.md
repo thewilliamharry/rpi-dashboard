@@ -4,11 +4,11 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 06
 current_phase_name: workload-resilience-pi-acceptance
-status: paused
-stopped_at: Phase 06 OPS-07 awaiting operator direction
+status: executing
+stopped_at: Option D executed; deciding whether option C alone can close OPS-07
 last_updated: "2026-09-05T10:09:03.203Z"
 last_activity: 2026-09-05
-last_activity_desc: Round 6 refuted before planning; Phase 06 OPS-07 awaiting operator direction
+last_activity_desc: Option D acceptance run recorded — route structurally over budget at concurrency 3
 progress:
   total_phases: 8
   completed_phases: 6
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 — OPS-07: one route over budget at concurrency 3; rollup path refuted (D-DEBT-06-21), awaiting direction
+**Current focus:** Phase 06 — OPS-07: /api/services over budget at concurrency 3 on TWO independent runs (679.3ms vs 500ms, 36% over); confound resolved and was not the cause; option C's sufficiency now in question
 
 ## Current Position
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
 Plan: 22 of 24 — 06-23 and 06-24 are superseded by the ea8689e revert; do not execute them
-Status: Paused — OPS-07 awaiting operator direction; see .planning/HANDOFF.json and 06/.continue-here.md
-Last activity: 2026-09-05 — round 6 not planned; the planner refuted its premise (D-DEBT-06-21) and returned PLANNING INCONCLUSIVE
+Status: In progress — option D executed 2026-09-05 (06-ACCEPTANCE-C3-RUN2.md); option C scoped but its premise and sufficiency both need settling
+Last activity: 2026-09-05 — option D run: confound resolved, /api/services degraded to p95 679.3ms; route is structurally over budget
 
 Progress: [███████░░░] 75%
 
@@ -279,6 +279,9 @@ None yet.
 - Before Phase 1 planning, inventory representative production database variants and verify backup/restore outcomes.
 - Before Phase 2 planning, validate legacy service identity, retention resolution, capacity limits, and SQLite query plans on target storage.
 - Before Phase 6 planning, measure Chromium and representative-load resource budgets on Raspberry Pi-class hardware.
+- OPS-07: /api/services fails the concurrency-3 budget on two independent runs (635.6ms confounded, 679.3ms clean, vs 500ms). Option C's corrected ~30% lands at ~475ms with no margin; maintenance_coverage (29.649%, growth ratio 7.564) is untouched by C. See 06-ACCEPTANCE-C3-RUN2.md.
+- Unresolved: web-tier CPU measured 143.5% mean on a 4-core Pi, above what one GIL-bound process can spend on Python bytecode. If the sampled tree is a single process, 06-PROFILE.md's Python-side attribution — and option C's rationale — is in doubt.
+- Unrecorded runbook: how the acceptance harness reaches the live DB on the Pi was not written down and cost two cycles to rediscover (uv sync as pi, then sudo dashboard/.venv/bin/python with --db pointing at the named volume's _data path).
 - Second unsatisfiable acceptance criterion in phase 03: plan 03-16's 'pytest -k attach' selector deselects all tests and exits 5 (after 03-13's arithmetically unsatisfiable grep gate). Instance closed in-round by adding a real regression; the plan-defect class is open for the next planning round and recorded in .planning/WINDOWS.md.
 
 ### Quick Tasks Completed
