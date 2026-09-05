@@ -280,7 +280,6 @@ None yet.
 - Before Phase 2 planning, validate legacy service identity, retention resolution, capacity limits, and SQLite query plans on target storage.
 - Before Phase 6 planning, measure Chromium and representative-load resource budgets on Raspberry Pi-class hardware.
 - OPS-07: /api/services fails the concurrency-3 budget on two independent runs (635.6ms confounded, 679.3ms clean, vs 500ms). Option C's corrected ~30% lands at ~475ms with no margin; maintenance_coverage (29.649%, growth ratio 7.564) is untouched by C. See 06-ACCEPTANCE-C3-RUN2.md.
-- Unresolved: web-tier CPU measured 143.5% mean on a 4-core Pi, above what one GIL-bound process can spend on Python bytecode. If the sampled tree is a single process, 06-PROFILE.md's Python-side attribution — and option C's rationale — is in doubt.
 - Unrecorded runbook: how the acceptance harness reaches the live DB on the Pi was not written down and cost two cycles to rediscover (uv sync as pi, then sudo dashboard/.venv/bin/python with --db pointing at the named volume's _data path).
 - Second unsatisfiable acceptance criterion in phase 03: plan 03-16's 'pytest -k attach' selector deselects all tests and exits 5 (after 03-13's arithmetically unsatisfiable grep gate). Instance closed in-round by adding a real regression; the plan-defect class is open for the next planning round and recorded in .planning/WINDOWS.md.
 
