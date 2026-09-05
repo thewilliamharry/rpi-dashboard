@@ -487,8 +487,8 @@ Plans:
 - [x] 06-20-PLAN.md — Tracer: narrow `api_services`' critical section to database reads only, output proven byte-identical
 - [x] 06-21-PLAN.md — Measurement A: the narrowing's effect on real Pi hardware (human-gated)
 - [x] 06-22-PLAN.md — The `/api/advanced/current` remedy: a one-way-door decision and the chosen fix
-- [ ] 06-23-PLAN.md — Measurement B and the round-5 uninstrumented acceptance run (human-gated)
-- [ ] 06-24-PLAN.md — Re-close the security boundary (`/gsd-secure-phase 06`) and record what round 5 changed
+- [~] 06-23-PLAN.md — Measurement B and the round-5 uninstrumented acceptance run (human-gated) — **SUPERSEDED by `ea8689e`; not executed**
+- [~] 06-24-PLAN.md — Re-close the security boundary (`/gsd-secure-phase 06`) and record what round 5 changed — **SUPERSEDED by `ea8689e`; intent re-expressed in `06-28`; not executed**
 - [ ] 06-25-PLAN.md — Tracer: the bulk all-ports SQL uptime aggregation, wired through `/api/services`, strip proven byte-identical
 - [ ] 06-26-PLAN.md — Local before/after at a fixed shape (`06-PROFILE-3.md`) and the cost-model guard that is actually true
 - [ ] 06-27-PLAN.md — Pi-class cost gate, then the gating concurrency-3 acceptance run, plus the runbook (human-gated)
