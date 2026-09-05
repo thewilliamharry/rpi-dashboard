@@ -79,3 +79,35 @@ at the median, and `D-DEBT-06-19`'s cost model is the reason.
 
 The same underlying data, served two ways, differing by 33x on the same hardware in the same
 window. That is the case for the rollup work stated in one line.
+
+
+---
+
+## CORRECTION — 2026-09-05. The 33x comparison above is WRONG. Do not cite it.
+
+The section headed "The 33x comparison" claims `/api/history` reads `service_rollups` and that the
+two routes serve "the same underlying data, two ways". Both halves are false, verified against
+source:
+
+- **`/api/history` does not read `service_rollups`.** It runs
+  `SELECT ts, cpu, ram, disk, temp FROM stats_history WHERE ts >= ?` over a 24-hour window
+  (`dashboard/app.py:2626`) — one flat indexed scan of a *host-metrics* table, no aggregation, no
+  per-service loop, no maintenance attribution. The rollup-reading route is
+  `/api/telemetry/history` (`app.py:2672`), which `_routes_for_ports`
+  (`tests/pi_load_acceptance.py:410`) does not exercise at all.
+- **The two routes do not serve the same data.** Different table, different window, different shape.
+  17.3ms against 577.3ms compares a 24h host-metric scan with a 7-day per-service uptime
+  reconstruction.
+
+**What the numbers do support**, on a per-row basis: `/api/history` moves ~17,280 rows in 17.3ms
+(~1us/row); `/api/services` moves 61,502 rows in 577.3ms (~9.4us/row). Same SQLite, same Pi, same
+window. The ~9x per-row gap is **Python per-row work, not SQL volume** — consistent with
+`06-PROFILE.md`'s `uptime_sweep` 29.975% plus `row_grouping` 5.083%. That points at where the
+bucketing runs, not at what it reads.
+
+Written by the orchestrator, who made the error, asserted it twice with confidence to the operator,
+and committed it here. Found by the round-6 planner, which verified the premise before decomposing
+it and returned `PLANNING INCONCLUSIVE` rather than building on it. See `D-DEBT-06-21`.
+
+The rest of this document — the run's figures, the confound, the p50 reading — stands unchanged and
+was independently measured.

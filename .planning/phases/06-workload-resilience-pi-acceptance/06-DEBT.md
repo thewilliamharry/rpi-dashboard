@@ -976,6 +976,74 @@ per the `TEL-06`/`PROH-OPS-07-08` precedent — this round may not promote OPS-0
 
 ---
 
+### D-DEBT-06-21 — the rollup remediation path rests on a refuted premise
+
+| Field | Value |
+|---|---|
+| **Raised by** | The round-6 planner, which verified the premise before decomposing it and returned `PLANNING INCONCLUSIVE` |
+| **Status** | **Deferred — blocks `D-DEBT-06-19`'s remediation path until a direction is chosen.** |
+| **Severity** | High for planning; no code defect |
+
+**What was claimed, by the orchestrator, twice and with confidence.** That `service_rollups` already
+stores the 168 hourly buckets `/api/services` recomputes, is already populated, and that wiring the
+route to it is largely a matter of reading what exists — with `/api/history` cited as proof, at 17.3ms
+against `/api/services`' 577.3ms in the same run, "the same data served two ways, 33x".
+
+**All three claims are false. Verified against source.**
+
+1. **`service_rollups` contains zero buckets inside the uptime window, by construction.**
+   `UPTIME_WINDOW_SECONDS = 7 * 86400` (`dashboard/app.py:90`) and `telemetry_raw_days: int = 7`
+   (`dashboard/beacon/config.py:83`) are the same duration. `_raw_candidates`
+   (`dashboard/beacon/telemetry.py:809`) only admits source buckets where
+   `bucket_start + bucket_seconds <= now - raw_days * 86400`. Rollups therefore *begin* where the
+   uptime window *ends*. Not partial overlap — none. Measured at the acceptance run's shape
+   (7 services, 8 days, 21,796 checks, retention drained): **0 buckets inside the window, 2016
+   outside**, newest bucket 7.00 days old. Re-probed at 3 services / 40 days: 8,615 buckets, still 0
+   inside.
+2. **Hourly buckets do not exist at this deployment's data age at all.** 300s→3600s promotion is
+   gated on `telemetry_five_minute_days = 30`. At 8 days the 3600s group count is **0**. The route
+   renders 168 *hourly* buckets; the only rollups reachable inside a 30-day horizon are 300s, needing
+   12:1 aggregation.
+3. **`/api/history` does not read `service_rollups`.** It scans `stats_history` over 24 hours
+   (`app.py:2626`) — host metrics, no aggregation, no per-service loop. The rollup route is
+   `/api/telemetry/history`, which the harness does not exercise.
+
+**Consequence for the tiering pattern.** `_tier_ranges(now-7d, now, cutoffs)` yields hourly empty,
+five-minute empty, raw = the entire window. Following the `/api/history` pattern faithfully would
+route 100% of the uptime window to `SERVICE_QUERY_SHAPES['raw']` and read zero rollup rows.
+
+**Why the golden-fixture oracle would have hidden it rather than caught it.** A rollup-backed route
+that falls back to raw for 100% of the window reproduces `06-20`'s golden bytes trivially and proves
+nothing. That is a **ninth** instance of this project's recurring defect — a guard asserting something
+it cannot detect — and the first found in an orchestrator's own analysis rather than in a test. It was
+caught before being written only because the planner checked a premise it had been handed as
+established fact.
+
+**Two corrections to the surrounding record.** `06-ACCEPTANCE-C3.md`'s "33x comparison" section is
+annotated as wrong in place. And `D-DEBT-06-19`'s "O(stored rows) while stored rows more than doubled"
+overstates: `service_checks` is pruned at `CHECK_RETENTION_SECONDS` = 8 days
+(`app.py:1330`, `:92`), so the route's cost is bounded — it scales with service count and check
+cadence, not unboundedly with retained history.
+
+**What the evidence actually points at.** Per-row: `/api/history` ~1us/row, `/api/services`
+~9.4us/row, same SQLite and hardware. The ~9x gap is Python per-row work, not SQL volume —
+`uptime_sweep` 29.975% + `row_grouping` 5.083% in `06-PROFILE.md`.
+
+**Options recorded, none chosen — this is a decision for the operator.**
+
+| | Option | Cost | Reversibility |
+|---|---|---|---|
+| A | A live rollup tier covering the recent window | Delivers the stated cost model; contradicts "the infrastructure already exists"; schema + write path + backfill | **one-way**, needs a blocking `checkpoint:decision` |
+| B | Shorten `telemetry_raw_days` | Cheap | Perturbs the deliberate tier ladder (`04-01-PLAN.md` calls those boundaries intentional), degrades `/api/telemetry/history` fidelity, still leaves days 0..N uncovered — the shape `PROH-OPS-07-10` exists to catch |
+| C | Move the 168-bucket computation into SQL via the existing `SERVICE_QUERY_SHAPES['raw']` | No new infrastructure, no schema change; targets ~35% of the profiled residual | reversible; does not change the cost *model* |
+| D | A second acceptance run before optimizing | 11 minutes of Pi time | n/a — `06-ACCEPTANCE-C3.md` already calls for one and its confound is unresolved |
+
+**What would need to be true to close this entry.** A direction chosen by the operator on this
+corrected evidence, and — whichever is chosen — a planning premise that was verified rather than
+inherited.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
