@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 — OPS-07: /api/services over budget at concurrency 3 on TWO independent runs (679.3ms vs 500ms, 36% over); confound resolved and was not the cause; option C's sufficiency now in question
+**Current focus:** Phase 06 — OPS-07: option C landed (06-25) and was REFUTED by the local predictor (06-26): /api/services went 56.820ms -> 236.265ms on the dev host, +315.8%. 06-27 is BLOCKED from running against this build by 06-26's own stop condition.
 
 ## Current Position
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
-Plan: 22 of 24 — 06-23 and 06-24 are superseded by the ea8689e revert; do not execute them
-Status: In progress — option D executed 2026-09-05 (06-ACCEPTANCE-C3-RUN2.md); option C scoped but its premise and sufficiency both need settling
-Last activity: 2026-09-05 — option D run: confound resolved, /api/services degraded to p95 679.3ms; route is structurally over budget
+Plan: 24 of 26 executable — 28 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked `do_not_execute` in their frontmatter as of 79e051e). 06-25 and 06-26 executed 2026-09-05. 06-27 and 06-28 remain.
+Status: BLOCKED — option C is refuted on the dev host. 06-25 landed the bulk SQL uptime aggregation; 06-26's before/after measured a +315.8% regression, not the projected improvement. Do not run 06-27 (Pi time) against this build.
+Last activity: 2026-09-05 — 06-26 REFUTED option C locally before any Pi time was spent; root cause recorded in 06-PROFILE-3.md
 
 Progress: [███████░░░] 75%
 
@@ -278,7 +278,8 @@ None yet.
 - Before Phase 1 planning, inventory representative production database variants and verify backup/restore outcomes.
 - Before Phase 2 planning, validate legacy service identity, retention resolution, capacity limits, and SQLite query plans on target storage.
 - Before Phase 6 planning, measure Chromium and representative-load resource budgets on Raspberry Pi-class hardware.
-- OPS-07: /api/services fails the concurrency-3 budget on two independent runs (635.6ms confounded, 679.3ms clean, vs 500ms). Scoping is BLOCKED on a fresh profile: 06-PROFILE.md predates 06-13's maintenance memo, which is still in HEAD, so its percentages describe a build two rounds old and cannot size any optimization. See the CORRECTION in 06-ACCEPTANCE-C3-RUN2.md.
+- **OPS-07 (BLOCKING, 2026-09-05): option C is refuted.** `06-25` landed the bulk SQL uptime aggregation; `06-26`'s local before/after measured `/api/services` at **236.265ms mean vs 56.820ms** on the dev host (same seed 20260902, same 8-service/8-day shape, 3 repetitions each) — **+315.8%**, a regression, not the projected improvement. Root cause in `06-PROFILE-3.md`: `UPTIME_STRIP_QUERY`'s `bucket_totals` CTE joins on a range predicate SQLite cannot index-seek, so cost scales with `buckets x ports x segments_per_port`. `06-26`'s stop condition forbids running `06-27` (Pi time) against this build. The route remains 679.3ms p95 vs a 500ms budget on two independent concurrency-3 runs. Next decision: fix the CTE's join shape, revert `06-25`, or re-scope the remedy — not yet taken.
+- Note: `06-PROFILE-3.md` reproduced `06-PROFILE-2.md`'s 43.727% `uptime_sweep` share (43.942% mean), so the attribution that motivated option C was sound; what failed is the chosen implementation shape, not the target.
 - Unrecorded runbook: how the acceptance harness reaches the live DB on the Pi was not written down and cost two cycles to rediscover (uv sync as pi, then sudo dashboard/.venv/bin/python with --db pointing at the named volume's _data path).
 - Second unsatisfiable acceptance criterion in phase 03: plan 03-16's 'pytest -k attach' selector deselects all tests and exits 5 (after 03-13's arithmetically unsatisfiable grep gate). Instance closed in-round by adding a real regression; the plan-defect class is open for the next planning round and recorded in .planning/WINDOWS.md.
 
