@@ -1363,3 +1363,168 @@ class UptimeStripBoundednessTests(unittest.TestCase):
             'uptime strip (D-DEBT-06-10)',
         )
         self.assertEqual(len(actual[port][1]), UPTIME_BUCKETS)
+
+
+# ---------------------------------------------------------------------------
+# 06-26 (OPS-07 gap closure, Task 2): pin the cost-model claim that is
+# actually true about read_uptime_strips_by_port. 06-25 did NOT stop SQLite
+# scanning service_checks -- the aggregation still scans the same
+# retention-floored rows, and api_services still reads a second, independent
+# set of rows for points_by_port (unaffected by this plan). What changed is
+# that the uptime path's PYTHON-SIDE row count and statement count became
+# independent of stored check volume. Built relationally (D-DEBT-06-14):
+# every assertion below compares two measurements taken inside one test
+# run against each other, never against a literal row count or millisecond
+# figure, because an absolute-band prediction calibrated to today's seeded
+# dataset size is a mechanism-shaped commitment that fails for reasons
+# unrelated to whether the property it names is still true the moment the
+# suite's fixtures grow.
+# ---------------------------------------------------------------------------
+
+class UptimeStripCostModelTests(unittest.TestCase):
+    """The true half of 06-25's cost-model claim, pinned relationally.
+
+    SQLite still scans every `service_checks` row `read_uptime_strips_by_port`
+    admits -- this class asserts nothing to the contrary, and a later reader
+    must not mistake a green run here for "the route stopped scanning rows".
+    What this class pins is narrower and true: the reader always
+    materializes exactly `len(ports) * UPTIME_BUCKETS` rows into Python and
+    always executes exactly one SQL statement to do it, regardless of how
+    many rows are stored for those ports. Both measurements are taken at two
+    different stored-check volumes over the SAME ports inside one test
+    method, and compared to each other -- never against a literal number of
+    rows or a wall-clock duration. The wall-time question this cost model
+    cannot answer belongs to `06-PROFILE-3.md` (a dev-host measurement) and
+    to `06-27`'s Pi run, never to this suite: a timing assertion here would
+    be a flaky guard on a shared runner (`deferred-items.md` Entry 2 records
+    what that already cost once).
+    """
+
+    def _insert_checks(self, appmod, port, rows):
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            for ts, online in rows:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+    def _service_checks_count(self, appmod):
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            count = conn.execute('SELECT COUNT(*) AS c FROM service_checks').fetchone()['c']
+            conn.close()
+        return count
+
+    def _measure(self, appmod, ports, now):
+        """Return (materialized_row_count, statement_count) for one call to
+        read_uptime_strips_by_port against appmod's live connection.
+
+        sqlite3.Cursor.fetchall cannot be monkeypatched per-instance (a
+        read-only C-extension attribute) -- the same constraint
+        UptimeStripBoundednessTests._materialized_row_count documents --
+        so a thin Python-level proxy wraps the real cursor exactly as it
+        does there. Statement count is read from set_trace_callback,
+        matching UptimeStripBoundednessTests._query_count.
+        """
+        class _CountingCursor:
+            def __init__(self, cursor, counts):
+                self._cursor = cursor
+                self._counts = counts
+
+            def fetchall(self):
+                rows = self._cursor.fetchall()
+                self._counts.append(len(rows))
+                return rows
+
+            def __getattr__(self, name):
+                return getattr(self._cursor, name)
+
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            row_counts = []
+            statements = []
+            conn.set_trace_callback(lambda sql: statements.append(sql))
+            original_execute = conn.execute
+
+            def spy_execute(*args, **kwargs):
+                return _CountingCursor(original_execute(*args, **kwargs), row_counts)
+
+            conn.execute = spy_execute
+            beacon_repositories.read_uptime_strips_by_port(
+                conn, ports=ports, now=now, window_seconds=UPTIME_WINDOW_SECONDS,
+                bucket_count=UPTIME_BUCKETS, retention_seconds=appmod.CHECK_RETENTION_SECONDS,
+            )
+            conn.execute = original_execute
+            conn.set_trace_callback(None)
+            conn.close()
+        return sum(row_counts), len(statements)
+
+    def test_python_side_row_and_statement_counts_are_independent_of_stored_check_volume(self):
+        now = 1_700_000_000
+        ports = list(range(53000, 53003))
+
+        # Small volume: a 2-day, 5-minute-cadence history per port.
+        small_appmod, small_db_path = load_app({})
+        for port in ports:
+            self._insert_checks(
+                small_appmod, port,
+                [(now - i * 300, i % 2) for i in range(2 * 288)],
+            )
+        small_stored = self._service_checks_count(small_appmod)
+        small_rows, small_statements = self._measure(small_appmod, ports, now)
+        cleanup_db(small_db_path)
+
+        # Large volume: the SAME ports, the SAME cadence, 4x the retained days.
+        large_appmod, large_db_path = load_app({})
+        for port in ports:
+            self._insert_checks(
+                large_appmod, port,
+                [(now - i * 300, i % 2) for i in range(8 * 288)],
+            )
+        large_stored = self._service_checks_count(large_appmod)
+        large_rows, large_statements = self._measure(large_appmod, ports, now)
+        cleanup_db(large_db_path)
+
+        # Vacuity guard: a seeding failure must fail the test outright, not
+        # pass it by comparing two zeros.
+        self.assertGreater(small_rows, 0, 'small-volume run materialized zero rows -- seeding failed')
+        self.assertGreater(large_rows, 0, 'large-volume run materialized zero rows -- seeding failed')
+
+        # The growth factor this test method actually achieved, measured
+        # from the stored service_checks counts it just read back -- never
+        # assumed from the 2-vs-8 day multiplier used to seed it.
+        growth_factor = large_stored / small_stored
+        self.assertGreater(
+            growth_factor, 1.0,
+            f'test fixture did not actually grow the stored dataset: '
+            f'small_stored={small_stored}, large_stored={large_stored}',
+        )
+
+        self.assertEqual(
+            small_rows, large_rows,
+            f'Python-side materialized row count moved with stored check volume (measured '
+            f'{growth_factor:.3f}x growth in stored service_checks rows: small_stored='
+            f'{small_stored}, large_stored={large_stored}) -- small_rows={small_rows}, '
+            f'large_rows={large_rows}. read_uptime_strips_by_port must materialize exactly '
+            f'len(ports) * UPTIME_BUCKETS rows regardless of how many rows are stored; SQLite '
+            f'itself still scans the stored rows to build the aggregation -- only the '
+            f'Python-side count is claimed to be bounded here.',
+        )
+        expected_rows = len(ports) * UPTIME_BUCKETS
+        self.assertEqual(
+            small_rows, expected_rows,
+            f'materialized row count is not len(ports) * UPTIME_BUCKETS: '
+            f'expected {expected_rows}, got {small_rows}',
+        )
+
+        self.assertEqual(
+            small_statements, large_statements,
+            f'statement count moved with stored check volume (measured {growth_factor:.3f}x '
+            f'growth in stored service_checks rows): small={small_statements}, '
+            f'large={large_statements} -- read_uptime_strips_by_port must issue exactly one '
+            f'statement regardless of stored volume',
+        )
+        self.assertEqual(small_statements, 1)
