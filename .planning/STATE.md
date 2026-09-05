@@ -4,9 +4,9 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 07
 current_phase_name: optional-advanced-diagnostics
-status: executing
+status: planning
 stopped_at: Phase 4 UI-SPEC approved
-last_updated: "2026-09-04T10:26:43.051Z"
+last_updated: "2026-09-05T10:09:03.203Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 07 execution started
 progress:
@@ -23,13 +23,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 07 — optional-advanced-diagnostics
+**Current focus:** Phase 06 — OPS-07: one route over budget at concurrency 3; rollup path refuted (D-DEBT-06-21), awaiting direction
 
 ## Current Position
 
 Phase: 07 (optional-advanced-diagnostics) — EXECUTING
 Plan: 1 of 3
-Status: Ready to execute
+Status: Awaiting direction — see .planning/HANDOFF.json
 Last activity: 2026-09-04 — Phase 07 execution started
 
 Progress: [██████████] 100%

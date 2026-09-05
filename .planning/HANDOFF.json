@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-09-05T10:07:48.417Z",
+  "phase": "06",
+  "phase_name": "workload-resilience-pi-acceptance",
+  "phase_dir": ".planning/phases/06-workload-resilience-pi-acceptance",
+  "plan": null,
+  "task": null,
+  "status": "paused",
+  "context_summary": "Phase 6 is 4/5 truths with OPS-07 the only gap. Its criterion was amended to single-operator load (concurrency 3) and the first gating run failed on exactly one route: /api/services p95 635.6ms vs a 500ms budget, p50 577.3ms. Round 6 was planned to fix that by wiring the route to service_rollups — and the planner REFUTED that premise before writing anything. Phase 7 (optional advanced diagnostics) is executed, 3/3. Nothing is mid-flight; no worktrees, no running agents, suite green at 966.",
+  "read_first_before_acting": [
+    ".planning/phases/06-workload-resilience-pi-acceptance/06-DEBT.md — D-DEBT-06-21 FIRST, then -06-19 and -06-20",
+    ".planning/phases/06-workload-resilience-pi-acceptance/06-ACCEPTANCE-C3.md — including the CORRECTION section at the end",
+    ".planning/phases/06-workload-resilience-pi-acceptance/06-PROFILE.md — the cost attribution that still stands"
+  ],
+  "completed_recently": [
+    {"id": "phase-07", "name": "Optional Advanced Diagnostics — BEACON_ADVANCED_DIAGNOSTICS toggle", "status": "executed 3/3", "note": "DIA-09 stays Pending; promotion belongs to an independent verification round"},
+    {"id": "06-round-5", "name": "lock narrowing + memo", "status": "REVERTED at ea8689e", "note": "both measured worse on hardware; test infrastructure retained"},
+    {"id": "ops-07-amendment", "name": "criterion amended to concurrency 3", "status": "done", "commit": "63db9ef", "note": "D-DEBT-06-20; justification is usage, not difficulty"},
+    {"id": "06-acceptance-c3", "name": "first gating run under the amended criterion", "status": "FAILED — one route", "commit": "0b86550"}
+  ],
+  "blockers": [
+    {
+      "description": "D-DEBT-06-19 still names service_rollups as the remediation path for /api/services. That path is REFUTED by D-DEBT-06-21. Do not act on D-DEBT-06-19 without reading D-DEBT-06-21 first.",
+      "type": "technical",
+      "workaround": "The four options are enumerated in D-DEBT-06-21. Recommended: D then C."
+    }
+  ],
+  "human_actions_pending": [
+    {
+      "action": "Run one more acceptance pass at --concurrency 3 --duration 600, uninstrumented, on the Pi (option D)",
+      "context": "The 2026-09-04 run carried a confound: worker peak RSS 786.9MB and peak CPU 71% (~54.9MB / ~8.9% in every prior run), almost certainly a Chromium preview job inside the window. It passed the resource assertion because the worker limit is 1GB, so nothing gated on it. No optimization can be attributed against a single confounded baseline. Record whatever the second run gives — both runs — per PROH-OPS-07-01. Do not re-run selectively hoping for a better number.",
+      "blocking": true
+    }
+  ],
+  "decisions": [
+    {"decision": "OPS-07's criterion amended to concurrency 3, the ceiling; concurrency-8 runs optional", "rationale": "The operator is the sole user. app.js generates ~0.5 req/s from one tab; 8 closed-loop clients with zero think time was never representative. Justification is usage, not difficulty — recorded in three places so the distinction survives.", "phase": "06"},
+    {"decision": "Round 5's narrowing and memo reverted", "rationale": "Measured worse on hardware: acceptance p95 up 68%/188%/38% vs round 3. Released work contended for the GIL instead of being serialized behind the lock.", "phase": "06"},
+    {"decision": "Round 6 not planned; premise refuted first", "rationale": "The planner verified the premise it was handed and found service_rollups covers none of the uptime window. Returned PLANNING INCONCLUSIVE rather than decomposing a false claim.", "phase": "06"}
+  ],
+  "uncommitted_files": [],
+  "next_action": "Read D-DEBT-06-21 in full. Then option D: ask the operator to run one uninstrumented acceptance pass at --concurrency 3 --duration 600 on the Pi against the current build, to get an unconfounded baseline. Then plan option C — move the 168-bucket uptime computation into SQL via the existing SERVICE_QUERY_SHAPES['raw'] shape. Do NOT plan a service_rollups-backed route without re-reading D-DEBT-06-21.",
+  "context_notes": "The orchestrator asserted twice, with confidence, that service_rollups already stored the buckets /api/services recomputes and that /api/history proved it at 33x. All of it was wrong: UPTIME_WINDOW_SECONDS (7d) and telemetry_raw_days (7) are the same duration so rollups begin where the window ends (0 buckets inside, 2016 outside, measured); hourly buckets need 30 days and do not exist at 8; and /api/history reads stats_history over 24h, not rollups. The golden fixtures that were called 'the thing that makes this safe' would have HIDDEN it — a route falling back to raw for 100% of the window reproduces those bytes trivially. This is the ninth instance in this project of a guard or claim asserting something it cannot detect, and the first in analysis rather than in a test. The generalizable rule, now earned nine times: verify a premise before decomposing it, especially one handed over as established fact."
+}
