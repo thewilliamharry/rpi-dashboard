@@ -2,18 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 07
-current_phase_name: optional-advanced-diagnostics
-status: planning
-stopped_at: Phase 4 UI-SPEC approved
+current_phase: 06
+current_phase_name: workload-resilience-pi-acceptance
+status: paused
+stopped_at: Phase 06 OPS-07 awaiting operator direction
 last_updated: "2026-09-05T10:09:03.203Z"
-last_activity: 2026-09-04
-last_activity_desc: Phase 07 execution started
+last_activity: 2026-09-05
+last_activity_desc: Round 6 refuted before planning; Phase 06 OPS-07 awaiting operator direction
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 121
   completed_plans: 116
+  percent: 75
 ---
 
 # Project State
@@ -27,12 +28,14 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 ## Current Position
 
-Phase: 07 (optional-advanced-diagnostics) — EXECUTING
-Plan: 1 of 3
-Status: Awaiting direction — see .planning/HANDOFF.json
-Last activity: 2026-09-04 — Phase 07 execution started
+Phase: 06 of 08 (workload-resilience-pi-acceptance)
+Plan: 22 of 24 — 06-23 and 06-24 are superseded by the ea8689e revert; do not execute them
+Status: Paused — OPS-07 awaiting operator direction; see .planning/HANDOFF.json and 06/.continue-here.md
+Last activity: 2026-09-05 — round 6 not planned; the planner refuted its premise (D-DEBT-06-21) and returned PLANNING INCONCLUSIVE
 
-Progress: [██████████] 100%
+Progress: [███████░░░] 75%
+
+Phase 07 (optional-advanced-diagnostics) is executed 3/3; DIA-09 stays Pending until an independent verification round.
 
 ## Performance Metrics
 
@@ -296,6 +299,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-25T18:23:11.377Z
-Stopped at: Phase 4 UI-SPEC approved
-Resume file: .planning/phases/04-historical-investigation/04-UI-SPEC.md
+Last session: 2026-09-05T10:07:48.417Z
+Stopped at: Session resumed — Phase 06 OPS-07 awaiting operator direction (D-DEBT-06-21 read; rollup path refuted)
+Resume file: .planning/phases/06-workload-resilience-pi-acceptance/.continue-here.md
