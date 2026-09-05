@@ -56,13 +56,26 @@ and no assertion covers it. Not investigated here; recorded so a later reader do
 54.9 MB as the only baseline.
 
 **2. Web-tier CPU is 143.5% mean / 164.3% peak** across 593 samples on a 4-core Pi — roughly 1.4
-cores sustained. The web tier runs `--workers 1 --threads 8` behind one GIL, where pure Python
-bytecode in a single process cannot exceed ~100%. Either the sampled process tree spans more than
-one process, or a material share of the time is inside SQLite's C code with the GIL released.
-**This is unresolved and it bears directly on option C**: `06-PROFILE.md` attributes the residual to
-Python-side per-row work, and a figure above 100% is at least consistent with real SQL cost
-instead. The sampler sums the container's whole process tree, so the multi-process reading is not
-excluded and must be settled before C's premise is trusted further.
+cores sustained. RESOLVED, and it does NOT undercut `06-PROFILE.md`.
+
+The sampled set is `web: n_pids=2 [3356456, 3356517]`, `sampled_set_changed=False` — a gunicorn
+master plus one worker, stable for the whole run. A master is effectively idle, so nearly all of
+that 143.5% belongs to the single worker process, which runs `--workers 1 --threads 8` behind one
+GIL. A single Python process cannot exceed ~100% on bytecode, so roughly 43 points of it is in C
+code with the GIL released.
+
+**That is not attributable to `/api/services`.** The run issued **8,929 `/api/thumbnail/<port>`
+requests** — each reading an image BLOB out of SQLite, precisely the GIL-released C work that pushes
+a process past 100%, and unrelated to the route under investigation. The 143.5% figure is
+container-wide across six route families and cannot be apportioned to any one of them.
+
+`06-PROFILE.md` remains the better instrument here: it is route-scoped instrumentation of
+`/api/services` itself, where this is a coarse whole-container aggregate. **Option C's target
+stands.** Recorded because the raw number invites the opposite conclusion, and a later reader
+should find the reasoning rather than repeat it.
+
+The worker's `n_pids=7` (also `changed=False`) is consistent with observation 1 — a resident
+Chromium process tree rather than a transient job.
 
 ## What this does to option C's arithmetic
 
