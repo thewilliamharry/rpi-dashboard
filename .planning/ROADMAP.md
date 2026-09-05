@@ -463,7 +463,7 @@ Plans:
 > by this amendment. The deployment was measured under 8-way load, it degraded, and that is on the
 > record.
 
-**Plans**: 18/24 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added and executed 2026-09-02; **6 fix-round plans added 2026-09-03**). Phase does NOT seal. Round 4's hardware diagnostic returned INCONCLUSIVE with 4 of 5 checks holding; the user chose `fix-now` at `06-18`'s blocking checkpoint, reversing `D-DEBT-06-01`'s three-round deferral. Round 5 lands both halves of the fix in sequence with a hardware measurement between them. OPS-07 remains Pending — `PROH-OPS-07-08` scopes promotion to an independent verification round.
+**Plans**: 22/28 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added and executed 2026-09-02; 6 fix-round plans added 2026-09-03, of which `06-19`–`06-22` executed and were then reverted by `ea8689e`; **4 cost-model plans added 2026-09-05**). `06-23` and `06-24` are superseded by that revert and are not executed. Phase does NOT seal. Round 4's hardware diagnostic returned INCONCLUSIVE with 4 of 5 checks holding; the user chose `fix-now` at `06-18`'s blocking checkpoint, reversing `D-DEBT-06-01`'s three-round deferral. Round 5 lands both halves of the fix in sequence with a hardware measurement between them. OPS-07 remains Pending — `PROH-OPS-07-08` scopes promotion to an independent verification round.
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -489,6 +489,10 @@ Plans:
 - [x] 06-22-PLAN.md — The `/api/advanced/current` remedy: a one-way-door decision and the chosen fix
 - [ ] 06-23-PLAN.md — Measurement B and the round-5 uninstrumented acceptance run (human-gated)
 - [ ] 06-24-PLAN.md — Re-close the security boundary (`/gsd-secure-phase 06`) and record what round 5 changed
+- [ ] 06-25-PLAN.md — Tracer: the bulk all-ports SQL uptime aggregation, wired through `/api/services`, strip proven byte-identical
+- [ ] 06-26-PLAN.md — Local before/after at a fixed shape (`06-PROFILE-3.md`) and the cost-model guard that is actually true
+- [ ] 06-27-PLAN.md — Pi-class cost gate, then the gating concurrency-3 acceptance run, plus the runbook (human-gated)
+- [ ] 06-28-PLAN.md — Re-close the security boundary against HEAD and consolidate the round-6 record
 
 **Wave 1**
 
@@ -673,6 +677,74 @@ because it audits a change that must already exist. Three new prohibitions are m
 may), `PROH-OPS-07-13` (`evaluate_narrowing_outcome` is diagnostic-only), and `PROH-OPS-07-14`
 (`/api/advanced/current`'s payload must be byte-identical for the same input). OPS-07 is again
 deliberately NOT promoted (`PROH-OPS-07-08`, `D-DEBT-06-08`).*
+
+### Fifth gap-closure round — THE COST MODEL (added 2026-09-05, waves continue from 19)
+
+**Round 5 was reverted.** `ea8689e` backed out `06-20`'s `_db_lock` narrowing and `06-22`'s
+`get_current_diagnosis` memo: both were measured on real hardware and both made the deployment
+materially worse (`/api/services` +68.4%, `/api/scan-status` +188.3%). All round-5 test
+infrastructure is retained. **`06-23` and `06-24` are superseded by that revert and are not
+executed** — `06-28` below re-expresses `06-24`'s intent against this round's change, so the
+supersession record stays coherent.
+
+**Criterion 5 was then amended** (`D-DEBT-06-20`) to single-operator load — gating run concurrency 3
+/ 600s, concurrency 8 optional. The justification is usage, not difficulty, and it is recorded in
+three places for exactly that reason. Two gating runs followed and **both failed on the same one
+route**: `06-ACCEPTANCE-C3.md` at p95 635.6ms (confounded) and `06-ACCEPTANCE-C3-RUN2.md` at p95
+679.3ms (option D, the unconfounded baseline) against a 500ms budget. The confound was resolved and
+was not the explanation, so `/api/services` is structurally over budget on two independent runs and
+the shortfall to close is **179.3ms**.
+
+**Round 6 attacks the cost model, not the serialization.** Four rounds asked *where* work happens;
+`D-DEBT-06-19`'s reframe and `06-PROFILE-2.md`'s re-measurement both point at *how much*. That
+re-measurement was necessary because `06-PROFILE.md` predates `06-13`'s memo, which is still in HEAD:
+`maintenance_coverage` has collapsed 29.649% → 5.479% (the memo banked it, which nothing had
+confirmed) and `uptime_sweep` is now **43.727%**, the dominant bucket. This is `D-DEBT-06-21`'s
+**option C**, chosen by the operator. Options A and B are not taken: A is one-way and unneeded unless
+C misses; B perturbs the deliberate tier ladder and is the shape `PROH-OPS-07-10` exists to catch.
+The rollup path stays **refuted** — `service_rollups` holds zero buckets inside the uptime window by
+construction.
+
+**Wave 20** *(tracer; blocked on Wave 19)*
+
+- `06-25` — A bulk all-ports SQL uptime aggregation replacing the per-port Python sweep, wired
+  through `/api/services`. Not a reuse of `SERVICE_QUERY_SHAPES['raw']`: `06-PREMISE-C.md`'s three
+  mismatches (per-port binding, epoch-modulo bucket origin, dropped zero-observation buckets) are each
+  resolved explicitly. Strip proven byte-identical against three unregenerated golden fixtures and a
+  randomized differential oracle; the scope pin fails by design and is rewritten in the same commit
+
+**Wave 21** *(blocked on Wave 20)*
+
+- `06-26` — The local before/after at a fixed host, seed and shape (`06-PROFILE-3.md`), with an
+  explicit REFUTED branch written before the measurement, plus the one cost-model property that is
+  actually true: the uptime path's Python-side row count is now independent of stored check volume
+
+**Wave 22** *(blocked on Wave 21; contains two blocking human checkpoints)*
+
+- `06-27` — Segment A, a Pi-class cost measurement at both builds that gates whether segment B runs
+  at all; segment B, the uninstrumented gating acceptance run at `--concurrency 3 --duration 600`;
+  and `06-ACCEPTANCE-RUNBOOK.md`, closing the `STATE.md` blocker that records the harness command
+  path as having cost two cycles to rediscover
+
+**Wave 23** *(blocked on Wave 22)*
+
+- `06-28` — `PROH-OPS-04-05` prerequisite 4 against this round's change, correcting `06-SECURITY.md`'s
+  `T-06-24` row, which is currently closed on a test the revert removed; plus the round-6 debt,
+  roadmap and state consolidation
+
+*Strictly sequential, and each dependency is load-bearing. `06-26` cannot precede `06-25` because
+there is nothing to measure. `06-27` cannot precede `06-26` because a hardware round spent on a build
+that measured worse locally is round 5 repeated. Within `06-27`, segment B cannot precede segment A
+for the same reason at Pi scale — this is `PROH-OPS-07-20`, minted from round 5's own cost. `06-28`
+cannot run earlier because it audits a change that must already exist. Seven prohibitions are minted:
+`PROH-OPS-07-15` (the strip's bucket boundaries are a rendered contract, never moved for
+implementation convenience), `-16` (exactly one production producer of the strip, with an agreement
+invariant), `-17` (the uptime aggregation may never carry a row cap — `D-DEBT-06-10`'s defect class at
+a new door), `-18` (no share compared across a changed shape), `-19` (a collapsed cProfile bucket is
+never by itself evidence of a saving), `-20` (no acceptance run on a build whose own cheap predictor
+measured worse), and `-21` (a security register may never cite evidence absent from the tree it
+describes). OPS-07 is again deliberately NOT promoted (`PROH-OPS-07-08`, `D-DEBT-06-08`): promotion
+belongs to an independent verification round, following the `TEL-06` precedent.*
 
 ### Phase 7: Optional Advanced Diagnostics
 
