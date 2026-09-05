@@ -981,7 +981,7 @@ per the `TEL-06`/`PROH-OPS-07-08` precedent — this round may not promote OPS-0
 | Field | Value |
 |---|---|
 | **Raised by** | The round-6 planner, which verified the premise before decomposing it and returned `PLANNING INCONCLUSIVE` |
-| **Status** | **Deferred — blocks `D-DEBT-06-19`'s remediation path until a direction is chosen.** |
+| **Status** | **Direction chosen 2026-09-05 — option D executed, option C selected on re-measured evidence.** Option D ran (`06-ACCEPTANCE-C3-RUN2.md`): the confound resolved and the route still failed, worse — p95 679.3ms, so it is structurally over budget on two independent runs. The attribution was then re-measured (`06-PROFILE-2.md`) because this entry's own options were sized against a profile predating 06-13's memo: `maintenance_coverage` has collapsed 29.649% → 5.479% (that memo banked) and `uptime_sweep` is now 43.727%. **Option C is the chosen path and is now plausibly sufficient alone** (~382-475ms projected against a 500ms budget). Option A remains unneeded unless C lands and the route still misses. `D-DEBT-06-19`'s rollup remediation stays refuted. |
 | **Severity** | High for planning; no code defect |
 
 **What was claimed, by the orchestrator, twice and with confidence.** That `service_rollups` already
