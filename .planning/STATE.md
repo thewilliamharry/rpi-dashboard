@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 06
 current_phase_name: workload-resilience-pi-acceptance
 status: executing
-stopped_at: 06-32 measured 06-31's build at 34.927ms against the 56.820ms bar (PASS); 06-27/06-28 remain, each needing the amendment D-DEBT-06-26 enumerates
-last_updated: "2026-09-06T12:38:52Z"
+stopped_at: Round 7 hardware complete — segment A IMPROVED (-45.07%), segment B FAILED (/api/services p95 662.3ms vs 500ms, third consecutive miss). OPS-07 disposition is an open operator decision with three costed options in 06-ACCEPTANCE-C3-RUN3.md
+last_updated: "2026-09-06T15:56:02Z"
 last_activity: 2026-09-06
-last_activity_desc: Round 7 (06-31, 06-32) shipped and measured — service_rollups re-refuted a second time ("not reconstructible"), the reduce-producer-input remedy PASSES the 56.820ms bar at 34.927ms
+last_activity_desc: 06-27 executed on real Pi hardware — per-request cost fell 45.07%, concurrency-3 p95 moved 2.5%; selective 6.9x inflation on two routes recorded as a contention hypothesis
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 127
-  completed_plans: 118
+  completed_plans: 119
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 — OPS-07's route-level cost is resolved for the first time this phase: 06-31 reverted the SQL aggregation back to the Python producer, reduced to state-change-only input, and 06-32 measured it at 34.927ms against the 56.820ms bar (PASS). service_rollups is now refuted twice, independently, and shown "not reconstructible" (not merely unpopulated) at any retention level. Two plans remain unexecuted: 06-27 (Pi-class acceptance run, now unblocked under PROH-OPS-07-20 but needing its build SHAs amended) and 06-28 (security re-audit, needing round-7's threats registered). OPS-07 stays Pending pending an independent verification round.
+**Current focus:** Phase 06 — round 7's hardware evidence is in. Segment A: /api/services per-request cost fell 45.07% on the Pi (140.3ms -> 77.1ms), beating the dev-host 38.53%. Segment B: the concurrency-3 acceptance run FAILED — p95 662.3ms vs a 500ms budget, the third consecutive miss (635.6 / 679.3 / 662.3). Removing 45% of per-request cost moved the p95 by 2.5%, so per-request computation was never what the p95 was made of. OPS-07's disposition is now an explicit open decision for the operator: (a) accept the deviation, (b) re-derive the gate's load model on realistic usage, (c) a round 8 on the contention hypothesis. No option is chosen; no budget moved.
 
 ## Current Position
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
 Plan: 28 of 30 executable — 32 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked do_not_execute in their frontmatter). 06-01 through 06-22, 06-25, 06-26, 06-29, 06-30, 06-31 and 06-32 have all executed. 06-27 and 06-28 remain, each blocked on the amendment D-DEBT-06-26 enumerates.
-Status: Round 7 complete. 06-31 reverted 06-25's SQL wiring back to the Python producer, feeding it a state-change-only reduction (proven exact, NULL-preserving, detectable by absence) in one commit. 06-32 measured that build at 34.927ms against the 56.820ms bar — PASS, projection confirmed — and closed the round's debt and security records.
-Last activity: 2026-09-06 — 06-32 measured 06-31's build (34.927ms, PASS), re-refuted the service_rollups premise a second time ("not reconstructible"), closed the 06-LOCK-AUDIT.md pinning recurrence, and enumerated 06-27/06-28's amendments without editing either.
+Status: BLOCKED on an operator decision. 06-27 executed (both hardware segments run by the operator, artifacts written). 06-28 remains. OPS-07 stays Pending — three failing acceptance runs stand, none superseded, and no budget, threshold or harness default was edited in response to any of them.
+Last activity: 2026-09-06 — 06-27 complete: 06-PI-PROFILE-C.md (IMPROVED), 06-ACCEPTANCE-C3-RUN3.md (FAILED + the selective-inflation finding + three costed disposition options), 06-ACCEPTANCE-RUNBOOK.md, D-DEBT-06-27
 
 Progress: [█████████░] 93%
 

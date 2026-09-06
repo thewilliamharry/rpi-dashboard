@@ -492,7 +492,8 @@ Plans:
 - [x] 06-25-PLAN.md — Tracer: the bulk all-ports SQL uptime aggregation, wired through `/api/services`, strip proven byte-identical
 - [x] 06-26-PLAN.md — Local before/after at a fixed shape (`06-PROFILE-3.md`) and the cost-model guard that is actually true
   - **REFUTED 2026-09-05** — measured +315.8% on the dev host (236.265ms vs 56.820ms); `06-27` is blocked from running against this build. See `06-PROFILE-3.md`.
-- [ ] 06-27-PLAN.md — Pi-class cost gate, then the gating concurrency-3 acceptance run, plus the runbook (human-gated)
+- [x] 06-27-PLAN.md — Pi-class cost gate, then the gating concurrency-3 acceptance run, plus the runbook (human-gated)
+  - **Segment A IMPROVED, Segment B FAILED 2026-09-06** — per-request cost -45.07% on Pi hardware, but concurrency-3 p95 662.3ms vs the 500ms budget: a third consecutive miss (635.6 / 679.3 / 662.3). Cutting 45% of per-request cost moved the p95 2.5%. OPS-07 disposition is an open operator decision — see `06-ACCEPTANCE-C3-RUN3.md`.
 - [ ] 06-28-PLAN.md — Re-close the security boundary against HEAD and consolidate the round-6 record
 - [x] 06-29-PLAN.md — Tracer: invert the `bucket_totals` join to bucket-index arithmetic, narrow the rounding guard that `06-25` never shipped, and re-measure against the 56.820ms bar
   - **FAIL-BUT-IMPROVED 2026-09-06** — 236.265ms -> 69.191ms (-70.71%) but +12.371ms (+21.8%) over the 56.820ms bar. Projection confirmed. See `06-PROFILE-4.md`.
