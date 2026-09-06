@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 06
 current_phase_name: workload-resilience-pi-acceptance
 status: executing
-stopped_at: Option D executed; deciding whether option C alone can close OPS-07
-last_updated: "2026-09-05T18:44:13.276Z"
-last_activity: 2026-09-05
-last_activity_desc: Option D acceptance run recorded — route structurally over budget at concurrency 3
+stopped_at: 06-32 measured 06-31's build at 34.927ms against the 56.820ms bar (PASS); 06-27/06-28 remain, each needing the amendment D-DEBT-06-26 enumerates
+last_updated: "2026-09-06T12:38:52Z"
+last_activity: 2026-09-06
+last_activity_desc: Round 7 (06-31, 06-32) shipped and measured — service_rollups re-refuted a second time ("not reconstructible"), the reduce-producer-input remedy PASSES the 56.820ms bar at 34.927ms
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 125
-  completed_plans: 116
+  total_plans: 127
+  completed_plans: 118
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 — OPS-07 re-scoped. Six rounds of making per-request computation cheaper have failed; the measured SQL cost floor (ordered_points' LEAD window alone ≈ the whole Python sweep) says the approach cannot reach the budget. Operator decided 2026-09-06: revert the route wiring, then move the 168-bucket strip off the request path into a worker-precomputed rollup. NEITHER is executed yet — /api/services is still wired to the SQL reader at 69.191ms.
+**Current focus:** Phase 06 — OPS-07's route-level cost is resolved for the first time this phase: 06-31 reverted the SQL aggregation back to the Python producer, reduced to state-change-only input, and 06-32 measured it at 34.927ms against the 56.820ms bar (PASS). service_rollups is now refuted twice, independently, and shown "not reconstructible" (not merely unpopulated) at any retention level. Two plans remain unexecuted: 06-27 (Pi-class acceptance run, now unblocked under PROH-OPS-07-20 but needing its build SHAs amended) and 06-28 (security re-audit, needing round-7's threats registered). OPS-07 stays Pending pending an independent verification round.
 
 ## Current Position
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
-Plan: 24 of 26 executable — 28 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked `do_not_execute` in their frontmatter as of 79e051e). 06-25 and 06-26 executed 2026-09-05. 06-27 and 06-28 remain.
-Status: Decision taken, work outstanding. 06-29 and 06-30 executed and merged. TWO plans are now owed and neither is written: (1) the route-wiring revert — restore _uptime_summary + checks_by_port in api_services, rewrite LockScopePreservationTests' scope pin a 2nd time, realign 06-LOCK-AUDIT.md a 4th time (fold in 06-28's (function, ordinal) re-pinning rather than paying line numbers again); (2) the stored-rollup remedy for OPS-07. 06-27 and 06-28 remain blocked and need the amendments 06-30 §7 enumerates.
-Last activity: 2026-09-06 — 06-30 recorded the revert-route-wiring decision, 06-25's unmet criterion, the guard narrowing, and the SQL cost floor (06-GUARD-DECISION.md, D-DEBT-06-22/-23)
+Plan: 28 of 30 executable — 32 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked do_not_execute in their frontmatter). 06-01 through 06-22, 06-25, 06-26, 06-29, 06-30, 06-31 and 06-32 have all executed. 06-27 and 06-28 remain, each blocked on the amendment D-DEBT-06-26 enumerates.
+Status: Round 7 complete. 06-31 reverted 06-25's SQL wiring back to the Python producer, feeding it a state-change-only reduction (proven exact, NULL-preserving, detectable by absence) in one commit. 06-32 measured that build at 34.927ms against the 56.820ms bar — PASS, projection confirmed — and closed the round's debt and security records.
+Last activity: 2026-09-06 — 06-32 measured 06-31's build (34.927ms, PASS), re-refuted the service_rollups premise a second time ("not reconstructible"), closed the 06-LOCK-AUDIT.md pinning recurrence, and enumerated 06-27/06-28's amendments without editing either.
 
-Progress: [███████░░░] 75%
+Progress: [█████████░] 93%
 
 Phase 07 (optional-advanced-diagnostics) is executed 3/3; DIA-09 stays Pending until an independent verification round.
 
@@ -123,6 +123,10 @@ Phase 07 (optional-advanced-diagnostics) is executed 3/3; DIA-09 stays Pending u
 ## Accumulated Context
 
 ### Decisions
+- [Phase 6, round 7]: `reduce-producer-input` chosen over rebuilding rollup infrastructure — service_rollups is refuted a second time, independently, and shown "not reconstructible" at any retention level (168/168 rendered buckets straddle an epoch hour, worst apportioning error 0.461).
+- [Phase 6, round 7]: A premise recorded as refuted in the debt register must be re-verified against source before a later round inherits it (`PROH-OPS-07-29`) — round 7 was scoped on exactly the `service_rollups` premise round 6 had already refuted.
+- [Phase 6, round 7]: A differential can prove a reduction correct but never prove it is present — `06-31`'s input-count guard class exists because the correctness differential measured 0 divergences when the reduction was removed entirely (`PROH-OPS-07-28`).
+- [Phase 6, round 7]: The `06-LOCK-AUDIT.md` `(function, line)` vs `(function, ordinal)` pinning recurrence is closed with a decision (retain `(function, line)`) — `D-DEBT-06-25`.
 
 Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecting current work:
 
@@ -278,8 +282,7 @@ None yet.
 - Before Phase 1 planning, inventory representative production database variants and verify backup/restore outcomes.
 - Before Phase 2 planning, validate legacy service identity, retention resolution, capacity limits, and SQLite query plans on target storage.
 - Before Phase 6 planning, measure Chromium and representative-load resource budgets on Raspberry Pi-class hardware.
-- **OPS-07 (BLOCKING, 2026-09-05): option C is refuted.** `06-25` landed the bulk SQL uptime aggregation; `06-26`'s local before/after measured `/api/services` at **236.265ms mean vs 56.820ms** on the dev host (same seed 20260902, same 8-service/8-day shape, 3 repetitions each) — **+315.8%**, a regression, not the projected improvement. Root cause in `06-PROFILE-3.md`: `UPTIME_STRIP_QUERY`'s `bucket_totals` CTE joins on a range predicate SQLite cannot index-seek, so cost scales with `buckets x ports x segments_per_port`. `06-26`'s stop condition forbids running `06-27` (Pi time) against this build. The route remains 679.3ms p95 vs a 500ms budget on two independent concurrency-3 runs. Next decision: fix the CTE's join shape, revert `06-25`, or re-scope the remedy — not yet taken.
-- Note: `06-PROFILE-3.md` reproduced `06-PROFILE-2.md`'s 43.727% `uptime_sweep` share (43.942% mean), so the attribution that motivated option C was sound; what failed is the chosen implementation shape, not the target.
+- **OPS-07 (round 7 complete, 2026-09-06): route-level cost is resolved; independent verification is the only remaining gate.** `06-25`'s SQL aggregation was refuted at the route level twice (+315.8%, then +21.78% over the 56.820ms bar even after `06-29`'s reshape). `06-30` measured the reshaped query's own cost floor already equalled the Python sweep it replaced and the operator chose `revert-route-wiring`. `06-31` reverted the route wiring and fed the Python producer a state-change-only reduction (proven exact); `06-32` measured **34.927ms against the 56.820ms bar — PASS** (-38.53%), the first round of this phase to beat the pre-`06-25` baseline. `service_rollups` is refuted for the SECOND time, independently — the population gap `D-DEBT-06-21` recorded, plus a new finding: the rollup's fixed hour-aligned grid cannot losslessly render this strip's sliding-window boundaries at ANY retention setting (168/168 buckets straddle an epoch hour, worst error 0.461) — "not reconstructible", not merely "not currently populated". **Next step:** `06-27` is unblocked under `PROH-OPS-07-20` by this PASS but cannot run as written — its build SHAs reference a build that no longer exists at HEAD; `D-DEBT-06-26` enumerates the amendment. `06-28` needs round 7's seven threats registered. A premise recorded as refuted in the debt register must be re-verified before it is inherited (`PROH-OPS-07-29`) — round 7's most transferable finding, independent of the milliseconds.
 - Unrecorded runbook: how the acceptance harness reaches the live DB on the Pi was not written down and cost two cycles to rediscover (uv sync as pi, then sudo dashboard/.venv/bin/python with --db pointing at the named volume's _data path).
 - Second unsatisfiable acceptance criterion in phase 03: plan 03-16's 'pytest -k attach' selector deselects all tests and exits 5 (after 03-13's arithmetically unsatisfiable grep gate). Instance closed in-round by adding a real regression; the plan-defect class is open for the next planning round and recorded in .planning/WINDOWS.md.
 
@@ -301,6 +304,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-05T10:07:48.417Z
-Stopped at: Session resumed — Phase 06 OPS-07 awaiting operator direction (D-DEBT-06-21 read; rollup path refuted)
-Resume file: .planning/phases/06-workload-resilience-pi-acceptance/.continue-here.md
+Last session: 2026-09-06T12:39:10Z
+Stopped at: 06-32 complete — 06-31's build measured at 34.927ms against the 56.820ms bar (PASS); 06-27 and 06-28 remain, each needing the amendment D-DEBT-06-26 enumerates before either can run
+Resume file: None

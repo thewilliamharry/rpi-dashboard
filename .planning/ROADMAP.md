@@ -498,10 +498,11 @@ Plans:
   - **FAIL-BUT-IMPROVED 2026-09-06** — 236.265ms -> 69.191ms (-70.71%) but +12.371ms (+21.8%) over the 56.820ms bar. Projection confirmed. See `06-PROFILE-4.md`.
 - [x] 06-30-PLAN.md — Record the unmet `06-25` criterion and the guard narrowing, and decide keep-vs-revert on the measured verdict (human-gated)
   - **Decision 2026-09-06: `revert-route-wiring`** — the revert itself is a separate, as-yet-unwritten plan; OPS-07 re-scoped to a worker-precomputed rollup. See `06-GUARD-DECISION.md`.
-- [ ] 06-31-PLAN.md — Revert `06-25`'s wiring and feed the strip producer state-change points only, in one commit, with the reduction proven exact, NULL-preserving and detectable by absence (human-gated)
+- [x] 06-31-PLAN.md — Revert `06-25`'s wiring and feed the strip producer state-change points only, in one commit, with the reduction proven exact, NULL-preserving and detectable by absence (human-gated)
   - **The §8 rollup re-scope is refuted, and this plan opens on that** — `service_rollups` holds **0 rows at `bucket_seconds=3600`** and 0 rows of any tier inside the strip window, because the rollup ladder begins where the strip ends. `D-DEBT-06-21` recorded the same finding in round 6. Additionally, `604800 == 168 * 3600` puts every rendered boundary at offset `now % 3600` from the epoch-hour grid, so **168 of 168** buckets straddle an hour and apportioning changes 150-157 rendered values (worst error 0.461) — an hour-aligned rollup could not render this strip even if populated (`PROH-OPS-07-15`). Task 1 is a blocking `checkpoint:decision` on that.
   - **Planner-measured on the shipping shape: 36.943ms vs the 56.820ms bar (-34.98%)**, 986 tests passing with the three golden fixtures byte-matching unregenerated. `uptime_sweep` 236.666ms -> 12.291ms tottime (19.3x); 25,278 route-input points carry the information of 72.
-- [ ] 06-32-PLAN.md — Measure against a pass condition committed before the run, then record the round: the re-refuted premise, the retained unreferenced reader, and the closed lock-audit pinning recurrence
+- [x] 06-32-PLAN.md — Measure against a pass condition committed before the run, then record the round: the re-refuted premise, the retained unreferenced reader, and the closed lock-audit pinning recurrence
+  - **PASS 2026-09-06** — 34.927ms against the 56.820ms bar (-38.53%), inside the pre-registered 34-42ms band. First round of this phase to beat the pre-`06-25` baseline. `06-27` is unblocked under `PROH-OPS-07-20` but needs the build-SHA amendment `D-DEBT-06-26` enumerates. See `06-PROFILE-5.md`.
 
 **Wave 1**
 
