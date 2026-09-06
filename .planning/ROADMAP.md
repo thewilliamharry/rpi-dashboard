@@ -463,7 +463,7 @@ Plans:
 > by this amendment. The deployment was measured under 8-way load, it degraded, and that is on the
 > record.
 
-**Plans**: 22/28 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added and executed 2026-09-02; 6 fix-round plans added 2026-09-03, of which `06-19`–`06-22` executed and were then reverted by `ea8689e`; **4 cost-model plans added 2026-09-05**). `06-23` and `06-24` are superseded by that revert and are not executed. Phase does NOT seal. Round 4's hardware diagnostic returned INCONCLUSIVE with 4 of 5 checks holding; the user chose `fix-now` at `06-18`'s blocking checkpoint, reversing `D-DEBT-06-01`'s three-round deferral. Round 5 lands both halves of the fix in sequence with a hardware measurement between them. OPS-07 remains Pending — `PROH-OPS-07-08` scopes promotion to an independent verification round.
+**Plans**: 22/30 plans executed (6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added and executed 2026-09-02; 6 fix-round plans added 2026-09-03, of which `06-19`–`06-22` executed and were then reverted by `ea8689e`; **4 cost-model plans added 2026-09-05**; **2 join-reshape plans added 2026-09-06 after `06-26` REFUTED option C** — `06-29` at wave 24 and `06-30` at wave 25, both sequenced AFTER `06-27`/`06-28`'s waves 22/23 by number but gating them in practice: `06-26`'s stop condition blocks `06-27` until `06-PROFILE-4.md` reads PASS, so the runnable order is `06-29` -> `06-30` -> (only on PASS) `06-27` -> `06-28`). `06-23` and `06-24` are superseded by that revert and are not executed. Phase does NOT seal. Round 4's hardware diagnostic returned INCONCLUSIVE with 4 of 5 checks holding; the user chose `fix-now` at `06-18`'s blocking checkpoint, reversing `D-DEBT-06-01`'s three-round deferral. Round 5 lands both halves of the fix in sequence with a hardware measurement between them. OPS-07 remains Pending — `PROH-OPS-07-08` scopes promotion to an independent verification round.
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -494,6 +494,8 @@ Plans:
   - **REFUTED 2026-09-05** — measured +315.8% on the dev host (236.265ms vs 56.820ms); `06-27` is blocked from running against this build. See `06-PROFILE-3.md`.
 - [ ] 06-27-PLAN.md — Pi-class cost gate, then the gating concurrency-3 acceptance run, plus the runbook (human-gated)
 - [ ] 06-28-PLAN.md — Re-close the security boundary against HEAD and consolidate the round-6 record
+- [ ] 06-29-PLAN.md — Tracer: invert the `bucket_totals` join to bucket-index arithmetic, narrow the rounding guard that `06-25` never shipped, and re-measure against the 56.820ms bar
+- [ ] 06-30-PLAN.md — Record the unmet `06-25` criterion and the guard narrowing, and decide keep-vs-revert on the measured verdict (human-gated)
 
 **Wave 1**
 
