@@ -981,7 +981,7 @@ per the `TEL-06`/`PROH-OPS-07-08` precedent — this round may not promote OPS-0
 | Field | Value |
 |---|---|
 | **Raised by** | The round-6 planner, which verified the premise before decomposing it and returned `PLANNING INCONCLUSIVE` |
-| **Status** | **Closed 2026-09-06 (`06-32`) — option C is refuted twice at the route level; the reduced-producer remedy PASSES the bar; the rollup path is re-refuted independently one round after this entry's original refutation, with a strengthening geometry finding added.** Option D ran (`06-ACCEPTANCE-C3-RUN2.md`): the confound resolved and the route still failed, worse — p95 679.3ms, so it is structurally over budget on two independent runs. The attribution was then re-measured (`06-PROFILE-2.md`) because this entry's own options were sized against a profile predating 06-13's memo: `maintenance_coverage` has collapsed 29.649% → 5.479% (that memo banked) and `uptime_sweep` is now 43.727%. Option C (the SQL reshape) was chosen, implemented (`06-25`, `06-29`) and refuted at the route level twice (+315.8%, then +21.78% over the bar). The operator then chose `revert-route-wiring` (`06-30`) and, at `06-31`'s blocking checkpoint, the cheaper `reduce-producer-input` remedy over rebuilding rollup infrastructure — on evidence that included round 7's own independent re-refutation of the rollup premise (below) plus a new geometry finding that upgrades the rejection from "not currently populated" to "not reconstructible". `06-PROFILE-5.md` measured the shipped remedy at **32.066ms against the 56.820ms bar — PASS** (`06-32`). See "Round 7 re-proposed this entry's own refuted premise, then independently re-refuted it" below for the full record. |
+| **Status** | **Closed 2026-09-06 (`06-32`) — option C is refuted twice at the route level; the reduced-producer remedy PASSES the bar; the rollup path is re-refuted independently one round after this entry's original refutation, with a strengthening geometry finding added.** Option D ran (`06-ACCEPTANCE-C3-RUN2.md`): the confound resolved and the route still failed, worse — p95 679.3ms, so it is structurally over budget on two independent runs. The attribution was then re-measured (`06-PROFILE-2.md`) because this entry's own options were sized against a profile predating 06-13's memo: `maintenance_coverage` has collapsed 29.649% → 5.479% (that memo banked) and `uptime_sweep` is now 43.727%. Option C (the SQL reshape) was chosen, implemented (`06-25`, `06-29`) and refuted at the route level twice (+315.8%, then +21.78% over the bar). The operator then chose `revert-route-wiring` (`06-30`) and, at `06-31`'s blocking checkpoint, the cheaper `reduce-producer-input` remedy over rebuilding rollup infrastructure — on evidence that included round 7's own independent re-refutation of the rollup premise (below) plus a new geometry finding that upgrades the rejection from "not currently populated" to "not reconstructible". `06-PROFILE-5.md` measured the shipped remedy at **34.927ms against the 56.820ms bar — PASS** (`06-32`). See "Round 7 re-proposed this entry's own refuted premise, then independently re-refuted it" below for the full record. |
 | **Severity** | High for planning; no code defect |
 
 **What was claimed, by the orchestrator, twice and with confidence.** That `service_rollups` already
@@ -1101,7 +1101,7 @@ rather than merely citing this entry:
   (`reduce-producer-input`, feeding the same Python producer only its state-change points) was chosen
   over rebuilding the rollup infrastructure at `06-31`'s Task 1 blocking checkpoint, on this same
   corrected evidence plus the "not reconstructible" finding. `06-PROFILE-5.md` measured the chosen
-  path at **32.066ms against the 56.820ms bar — PASS** (`06-32`). The `service_rollups` remedy is
+  path at **34.927ms against the 56.820ms bar — PASS** (`06-32`). The `service_rollups` remedy is
   therefore refuted twice, independently, one round apart, and the second refutation is strictly
   stronger than the first.
 - **What this means for an eighth round.** Should a future round need more than `06-31`'s reduction
@@ -1213,7 +1213,7 @@ is measured, superseding the per-request cost-model question this entry poses.
 took a third path this entry did not anticipate: abandon the SQL formulation entirely (revert to the
 Python producer `_uptime_summary`) and reduce what that Python producer is fed, rather than either
 restructuring the SQL query (`ordered_points`) or moving the computation off the request path onto a
-worker cadence. `06-PROFILE-5.md` measured the result at 32.066ms against the 56.820ms bar — PASS,
+worker cadence. `06-PROFILE-5.md` measured the result at 34.927ms against the 56.820ms bar — PASS,
 comfortably clearing the bar this entry's own SQL-path finding said per-request SQL computation could
 not clear.
 
@@ -1364,7 +1364,7 @@ list with what round 7 additionally changed, rather than restating what §7 alre
 
 1. **`06-PROFILE-5.md`'s verdict is PASS — `06-27`'s `PROH-OPS-07-20` stop condition is lifted for
    the first time this phase.** §7 recorded `06-PROFILE-4.md`'s FAIL-BUT-IMPROVED verdict as leaving
-   `06-27` blocked. `06-32` supersedes that: `06-PROFILE-5.md` measured 32.066ms against the 56.820ms
+   `06-27` blocked. `06-32` supersedes that: `06-PROFILE-5.md` measured 34.927ms against the 56.820ms
    bar, a PASS. Any re-planning round must have segment A's decision gate reference `06-PROFILE-5.md`,
    not `06-PROFILE-4.md`, as the local predictor `PROH-OPS-07-20` gates on.
 2. **Both build references in `06-27-PLAN.md`'s `user_setup` segment A must be restated a second
