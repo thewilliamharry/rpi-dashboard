@@ -1402,6 +1402,23 @@ before another `app.py` edit lands near or above a pinned site, a fifth realignm
 bounded cost of Option A — reduced in practice by the single-commit discipline this entry records,
 not eliminated by it.
 
+**`06-28`'s own scope decision, added 2026-09-06 — Option A retained for this round too; the
+re-pinning is recommended, not executed.** `06-28` (this phase's final plan) is the round this entry
+handed the `(function, ordinal)` decision back to. Its own `files_modified` names four Markdown
+planning documents only; `06-28`'s own acceptance criteria require `git diff -- dashboard/ tests/` to
+stay empty. Executing the re-pinning would rewrite `06-LOCK-AUDIT.md`'s identity column AND
+`tests/test_lock_profile.py::test_every_db_lock_site_is_covered_by_the_audit`'s comparison mechanism —
+a source change squarely outside that scope, and against the very file (`test_lock_profile.py`)
+carrying `T-06-24`'s closure evidence. **Decision: decline for this round** — retain
+`(function, line)` pinning, the only option `06-28` can execute given its own file scope. This is the
+recurrence's **fourth** realignment paid this phase (`06-19`, `06-20`, `06-25`, `06-31`), not a fifth:
+`06-28` itself changes no `app.py` line and therefore pays no realignment cost at all; it only records
+the standing decision. **Recommendation, stated so it is not blurred with an execution:** a future
+round should adopt `(function, ordinal)` pinning if `app.py` continues to see edits near or above
+pinned `_db_lock` sites at this phase's observed rate (four realignments across eight rounds) — the
+one-time rewrite cost is now smaller than a fifth realignment's recurring cost, but adopting it is a
+source-code decision for a plan scoped to make it, not this record-only one.
+
 ---
 
 ### D-DEBT-06-26 — the amendments `06-27` and `06-28` now need, enumerated without editing either
