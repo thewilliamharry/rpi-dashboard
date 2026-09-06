@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 — OPS-07: the 06-29 CTE reshape recovered most of 06-25's regression (236.265ms -> 69.191ms, -70.71%) but still misses the 56.820ms pre-option-C bar by +12.371ms (+21.8%). Verdict FAIL-BUT-IMPROVED. 06-30's blocking checkpoint (keep vs revert) is the open decision; 06-27 stays blocked.
+**Current focus:** Phase 06 — OPS-07 re-scoped. Six rounds of making per-request computation cheaper have failed; the measured SQL cost floor (ordered_points' LEAD window alone ≈ the whole Python sweep) says the approach cannot reach the budget. Operator decided 2026-09-06: revert the route wiring, then move the 168-bucket strip off the request path into a worker-precomputed rollup. NEITHER is executed yet — /api/services is still wired to the SQL reader at 69.191ms.
 
 ## Current Position
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
 Plan: 24 of 26 executable — 28 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked `do_not_execute` in their frontmatter as of 79e051e). 06-25 and 06-26 executed 2026-09-05. 06-27 and 06-28 remain.
-Status: BLOCKED on a decision — 06-29's reshape measured 69.191ms vs the 56.820ms bar (FAIL-BUT-IMPROVED, 06-PROFILE-4.md). The planner's pre-registered ~70ms projection was confirmed. 06-30 Task 2 is a blocking operator checkpoint: keep the reshape or revert the route wiring.
-Last activity: 2026-09-06 — 06-29 executed and merged (b3137c6); reshape is 3.4x faster than 06-25 but still 21.8% over the bar
+Status: Decision taken, work outstanding. 06-29 and 06-30 executed and merged. TWO plans are now owed and neither is written: (1) the route-wiring revert — restore _uptime_summary + checks_by_port in api_services, rewrite LockScopePreservationTests' scope pin a 2nd time, realign 06-LOCK-AUDIT.md a 4th time (fold in 06-28's (function, ordinal) re-pinning rather than paying line numbers again); (2) the stored-rollup remedy for OPS-07. 06-27 and 06-28 remain blocked and need the amendments 06-30 §7 enumerates.
+Last activity: 2026-09-06 — 06-30 recorded the revert-route-wiring decision, 06-25's unmet criterion, the guard narrowing, and the SQL cost floor (06-GUARD-DECISION.md, D-DEBT-06-22/-23)
 
 Progress: [███████░░░] 75%
 
