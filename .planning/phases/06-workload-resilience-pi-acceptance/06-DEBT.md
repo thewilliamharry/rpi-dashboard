@@ -1042,6 +1042,127 @@ cadence, not unboundedly with retained history.
 corrected evidence, and — whichever is chosen — a planning premise that was verified rather than
 inherited.
 
+**Option C's measured outcome under the reshape — added 2026-09-06 (`06-30`).** `06-29` implemented
+option C (moving the 168-bucket computation into SQL, via an index-arithmetic-plus-recursive-CTE
+reshape rather than the `SERVICE_QUERY_SHAPES['raw']` route this entry originally sketched) and
+`06-PROFILE-4.md` measured it at the route level. **Verdict: FAIL-BUT-IMPROVED.** Mean
+`wall_ms_unprofiled` **69.191ms** (spread 2.253ms over 3 runs), measured against the pass condition
+fixed before the run — strictly below **56.820ms**, the pre-`06-25` baseline (never `06-25`'s own
+236.265ms regression, per `PROH-OPS-07-26`). 69.191ms is not below 56.820ms: option C, even in its
+best measured version, **remains refuted against the baseline that matters**. Subordinately, it is a
+70.71% reduction from `06-25`'s 236.265ms regression (roughly 3.4x faster), which is real and
+attributed but is not the result.
+
+The planner's pre-registered projection (`06-29-PLAN.md`'s objective: ~70ms, band 55-90ms, projected
+verdict FAIL) is **CONFIRMED, not refuted** — the measured 69.191ms sits almost exactly on the
+projected point estimate and inside the projected band.
+
+**The operator's decision at `06-30`'s Task 2 checkpoint: `revert-route-wiring`.** `/api/services`
+reverts to the Python sweep, restoring the 56.820ms baseline; `read_uptime_strips_by_port` and its
+full test suite (the 1,824-case differential, three golden fixtures, the boundedness suite) stay in
+the tree as a proven-correct implementation with no production caller, per the reasoning recorded
+verbatim in `06-GUARD-DECISION.md` section 8. This entry's original option C is therefore refuted at
+the route level a second time (first `06-25`'s unindexed range join at +315.8%, now `06-29`'s reshape
+at +21.78% over the bar), and OPS-07's remedy is re-scoped by the operator's decision: the next round
+moves the 168-bucket strip off the request path entirely rather than continuing to reduce per-request
+computation cost. See the new `D-DEBT-06-23` for the SQL cost-floor finding that motivates the
+re-scoping. The revert itself is not executed by `06-30` — it is a separate plan.
+
+---
+
+### D-DEBT-06-22 — an executed plan's acceptance criterion was not implemented, and the SUMMARY did not disclose it
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-30-PLAN.md` Task 1, cross-referencing `06-25-PLAN.md` against `06-25-SUMMARY.md` and the tree |
+| **Status** | **Flagged — recorded, not fixed by this round.** New this round. |
+| **Recorded in the plan** | `06-GUARD-DECISION.md` section 1 |
+
+**What happened.** `06-25-PLAN.md` (lines 508-522) specified a static regression guard: a test
+reading the `UPTIME_STRIP_QUERY` constant's value and asserting both `'/' not in query` and
+`'round(' not in query.lower()` hold over it. That test was never written —
+`grep -rn "UPTIME_STRIP_QUERY" tests/` returns nothing both at `9da5e5e` (the commit
+`06-25-SUMMARY.md` describes as landed) and at `8a84139~1` (HEAD immediately before `06-29`'s Task 1,
+i.e. across the whole interval `06-25` through `06-28`). `06-25-SUMMARY.md` reports three of three
+tasks complete, `status: complete`, `Self-Check: PASSED`, and does not mention the omission anywhere
+in its Deviations, Issues Encountered, or Self-Check sections. Full record: `06-GUARD-DECISION.md`
+section 1.
+
+**Classification.** This is not a code bug. It is a gap in the **execute-to-summary verification
+path**: a plan can carry an acceptance criterion, an executor can report the task complete, the
+SUMMARY's own Self-Check can pass, and nothing in that chain checks that the criterion itself was
+actually implemented. The dynamic half of the same `must_haves` truth — mutation (c)'s manual
+demonstration — was implemented and worked; only the static, standing counterpart was skipped, which
+is exactly why it went undetected for the entire `06-25`..`06-28` interval.
+
+**The open question for a human, posed and not answered here.** Does this phase want a mechanical
+acceptance-criteria checker — something that cross-references a plan's stated criteria against the
+tree at SUMMARY time — or is this an isolated miss? This entry does not answer that question. It
+records that **at least one** criterion in **one** plan went unimplemented and undetected across a
+merge and a push, so the base rate for this failure mode in this phase is not zero.
+
+**What would need to be true to close this entry.** A human decision on whether a mechanical checker
+is warranted, and — if so — a plan that builds one; or an explicit decision that this was an isolated
+miss with the reasoning for that conclusion recorded.
+
+---
+
+### D-DEBT-06-23 — the SQL formulation's cost floor exceeds the Python sweep it replaced
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-29-PLAN.md` Task 1's calibration bench and Task 1's query-level A/B, `06-PROFILE-4.md`'s route-level measurement |
+| **Status** | **Flagged — the round's substantive technical finding, held in reserve pending a future round's cost model.** New this round. |
+| **Recorded in the plan** | `06-GUARD-DECISION.md`, `06-PROFILE-4.md` |
+
+**The finding.** `06-29`'s SQL reshape made the bucket aggregation itself nearly free, and the route
+still did not clear the bar it had to beat. The measured components, each labelled with its source:
+
+- **The reshaped query costs ~47ms at the profiled shape against the previous (range-join) shape's
+  ~254ms** — a 5.4x reduction — with exact tuple equality on all 1,344 returned rows. *(Source:
+  `06-29-PLAN.md`'s pre-planning calibration bench.)*
+- **`_legacy_uptime_summary` over the same eight ports — the exact per-service Python work `06-25`
+  removed — costs ~23ms** on the same host and data. *(Source: `06-29-PLAN.md`'s calibration bench.)*
+- **The `ordered_points` LEAD window alone costs ~23ms** — roughly half of the entire reshaped
+  query's cost — before a single bucket is computed. *(Source: `06-29-PLAN.md`'s calibration bench.)*
+  The SQL formulation's floor is therefore already at the Python sweep's total: even a hypothetically
+  free bucket aggregation layered on top of `ordered_points` could not beat what the Python sweep
+  already cost, because `ordered_points` alone already costs as much as the thing it was meant to
+  replace.
+- **`/api/services` reads `service_checks` twice per request, post-`06-25`.** Once into Python for
+  `points_by_port` and the offline-interval path (unavoidable — `D-DEBT-06-10`'s fix requires the
+  uptime path stay unbounded and separate from the capped offline-interval path), and once again
+  inside the SQL aggregation. `06-PROFILE.md` records that this phase had earlier *de-duplicated*
+  exactly this pair of reads (before `06-25`); option C reintroduced the duplication. This is named
+  as the **structural reason the SQL path starts behind**, not as a defect in the reshape itself — the
+  reshape is proven output-identical and is the cheapest known SQL-side implementation of the shape it
+  computes.
+
+**The held-in-reserve option, not taken and not rejected.** A LEAD taken directly off the
+`idx_checks_port_ts`-ordered base table (bypassing the current CTE-plus-UNION-ALL indirection through
+`ordered_points`) measured **12.8ms against 22.9ms** for the equivalent step through the current
+shape — a further ~10ms saving. It was deliberately not taken in `06-29` because it restructures the
+single `admitted` CTE that `06-25` chose specifically so the retention floor could not be applied to
+the in-window scan while silently missing the boundary lookup (`PROH-OPS-07-22`), and ~10ms does not
+close the ~13ms gap between `06-PROFILE-4.md`'s 69.191ms measurement and the 56.820ms bar on its own.
+This option is **held in reserve, not rejected** — taking it in a future round requires re-proving the
+retention-floor invariant against the restructured CTE, not merely re-running the existing
+differential against it unchanged.
+
+**Why this is the round's substantive finding.** A one-word verdict (FAIL-BUT-IMPROVED) can make a
+real, measured architectural finding disappear inside it. The floor finding above is what actually
+determines OPS-07's future direction — per-request SQL computation, however well-formulated, cannot
+beat the Python sweep it replaced on this data shape, because the query's own cheapest necessary
+component (`ordered_points`) already costs what the whole prior approach cost. That is evidence about
+per-request computation as a strategy, independent of any one implementation's quality, and it is why
+the operator's `06-30` checkpoint decision re-scopes the remedy to a precomputed, worker-cadence
+approach rather than continuing to optimize the per-request query (`06-GUARD-DECISION.md` section 8).
+
+**What would need to be true to close this entry.** A future round either takes the held-in-reserve
+`ordered_points` restructure and re-measures (closing this entry only if the route then clears the
+bar), or the operator's re-scoped remedy (moving the strip off the request path entirely) ships and
+is measured, superseding the per-request cost-model question this entry poses.
+
 ---
 
 ## 2. Decided — recorded rationale, no further action needed this phase
