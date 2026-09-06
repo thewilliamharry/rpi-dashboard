@@ -1232,13 +1232,56 @@ def read_service_offline_intervals_by_port(conn, *, ports, start_ts, end_ts):
 # this module (`read_maintenance_windows_by_port`,
 # `read_service_offline_interval_boundaries_by_port`). Kept as a bare SQL
 # string with no comment or docstring inside it, so a static test can read
-# this constant's own text and assert it carries no division and no
-# rounding (06-PREMISE-C.md mismatch 1 and 2; PROH-OPS-07-15): every ratio
-# and every `round()` call happens in Python, over the integer second
+# this constant's own text and assert it carries no rounding call and that
+# every division belongs to an enumerated pair of bucket-index expressions
+# (06-PREMISE-C.md mismatch 1 and 2; PROH-OPS-07-15, PROH-OPS-07-23): every
+# ratio and every `round()` call happens in Python, over the integer second
 # totals this query returns, because SQLite's `ROUND()` rounds half away
 # from zero while Python's `round()` rounds half to even -- moving the
 # division into SQL would change rendered values while every shape-checking
 # test stayed green.
+#
+# 06-29 (OPS-07 gap closure): `bucket_totals` was originally a single CTE
+# that CROSS JOINed `requested_ports x buckets` (ports x 168 rows) onto a
+# LEFT JOIN of `ordered_points` on a RANGE predicate
+# (`sg.effective_ts < bucket_start + bucket_seconds AND sg.end_ts >
+# bucket_start`). `ordered_points` is itself a CTE, so SQLite has no index
+# to seek with on that predicate, and the join's cost scaled as
+# `buckets x ports x segments_per_port` (06-PROFILE-3.md "Root cause"). It
+# is replaced by four CTEs -- `clamped`, `spans`, `expanded`, `bucket_sums`
+# -- that invert the join: each segment's overlapping bucket RANGE is
+# computed once, arithmetically, and only those buckets are expanded
+# through a recursive CTE. `bucket_totals` is reduced to a scaffold that
+# LEFT JOINs the expanded aggregate onto `requested_ports x buckets` by
+# EQUALITY on `(port, idx)`, which SQLite can serve with an automatic index.
+#
+# Non-negativity proof for `spans`' `first_idx`/`last_idx` integer division
+# (why neither needs clamping into `[0, bucket_count - 1]`): `clamped`
+# floors every segment's `seg_start` at `start` (`MAX(effective_ts, start)`)
+# and caps `seg_end` at `now` (`MIN(end_ts, now)`), and `spans` keeps only
+# rows where `seg_end > seg_start`. So `seg_start >= start`, which makes
+# `first_idx = (seg_start - start) / bucket_seconds`'s dividend
+# non-negative; and `seg_end > seg_start >= start` gives
+# `seg_end - 1 >= start`, which makes `last_idx = (seg_end - 1 - start) /
+# bucket_seconds`'s dividend non-negative too. SQLite's integer division
+# truncates toward zero, which equals floor division whenever the dividend
+# is non-negative (the divisor, `bucket_seconds`, is always positive) --
+# so both expressions compute the same bucket index floor division would,
+# on every row this query can produce.
+#
+# The 168-bucket scaffold (`requested_ports CROSS JOIN buckets LEFT JOIN
+# bucket_sums`) stays in SQL rather than moving to a Python reconstruction
+# of the fixed-length array from only the non-empty buckets, even though
+# the alternative measured 4.2ms cheaper on the profiled shape
+# (06-PROFILE-4.md). Emitting only covered buckets would make the
+# materialized row count a function of window coverage instead of the
+# constant `len(ports) * UPTIME_BUCKETS` that
+# `UptimeStripBoundednessTests::test_materialized_row_count_is_independent_of_stored_check_volume`
+# and `UptimeStripCostModelTests::test_python_side_row_and_statement_counts_are_independent_of_stored_check_volume`
+# both assert (PROH-OPS-07-24) -- and it would silently make the
+# `null_counts` left join unreachable for a port whose only row is NULL,
+# reopening the NULL-guard defeat `06-25`'s mutation (b) demonstrated
+# (PROH-OPS-07-25).
 UPTIME_STRIP_QUERY = (
     "WITH RECURSIVE "
     "admitted AS ("
@@ -1275,19 +1318,38 @@ UPTIME_STRIP_QUERY = (
     "null_counts AS ("
     "SELECT port, COUNT(*) AS null_count FROM admitted WHERE online IS NULL GROUP BY port"
     "), "
+    "clamped AS ("
+    "SELECT port, MAX(effective_ts, ?) AS seg_start, MIN(end_ts, ?) AS seg_end, online "
+    "FROM ordered_points"
+    "), "
+    "spans AS ("
+    "SELECT port, seg_start, seg_end, online, "
+    "(seg_start - ?) / ? AS first_idx, "
+    "(seg_end - 1 - ?) / ? AS last_idx "
+    "FROM clamped WHERE seg_end > seg_start"
+    "), "
+    "expanded(port, idx, seg_start, seg_end, online, last_idx) AS ("
+    "SELECT port, first_idx, seg_start, seg_end, online, last_idx FROM spans "
+    "UNION ALL "
+    "SELECT port, idx + 1, seg_start, seg_end, online, last_idx FROM expanded WHERE idx + 1 <= last_idx"
+    "), "
+    "bucket_sums AS ("
+    "SELECT port, idx, "
+    "SUM(CASE WHEN online IS NOT NULL AND online <> 0 THEN "
+    "MAX(0, MIN(seg_end, ? + (idx + 1) * ?) - MAX(seg_start, ? + idx * ?)) "
+    "ELSE 0 END) AS online_seconds, "
+    "SUM(CASE WHEN online IS NOT NULL AND online = 0 THEN "
+    "MAX(0, MIN(seg_end, ? + (idx + 1) * ?) - MAX(seg_start, ? + idx * ?)) "
+    "ELSE 0 END) AS offline_seconds "
+    "FROM expanded GROUP BY port, idx"
+    "), "
     "bucket_totals AS ("
     "SELECT rp.port AS port, bk.idx AS idx, "
-    "SUM(CASE WHEN sg.online IS NOT NULL AND sg.online <> 0 THEN "
-    "MAX(0, MIN(sg.end_ts, bk.bucket_start + ?, ?) - MAX(sg.effective_ts, bk.bucket_start, ?)) "
-    "ELSE 0 END) AS online_seconds, "
-    "SUM(CASE WHEN sg.online IS NOT NULL AND sg.online = 0 THEN "
-    "MAX(0, MIN(sg.end_ts, bk.bucket_start + ?, ?) - MAX(sg.effective_ts, bk.bucket_start, ?)) "
-    "ELSE 0 END) AS offline_seconds "
+    "COALESCE(bs.online_seconds, 0) AS online_seconds, "
+    "COALESCE(bs.offline_seconds, 0) AS offline_seconds "
     "FROM requested_ports rp "
     "CROSS JOIN buckets bk "
-    "LEFT JOIN ordered_points sg "
-    "ON sg.port = rp.port AND sg.effective_ts < bk.bucket_start + ? AND sg.end_ts > bk.bucket_start "
-    "GROUP BY rp.port, bk.idx"
+    "LEFT JOIN bucket_sums bs ON bs.port = rp.port AND bs.idx = bk.idx"
     ") "
     "SELECT bt.port, bt.idx, bt.online_seconds, bt.offline_seconds, COALESCE(nc.null_count, 0) AS null_count "
     "FROM bucket_totals bt LEFT JOIN null_counts nc ON nc.port = bt.port "
@@ -1392,9 +1454,11 @@ def read_uptime_strips_by_port(conn, *, ports, now, window_seconds, bucket_count
         start,
         bucket_seconds,
         bucket_count,
-        bucket_seconds, now, start,
-        bucket_seconds, now, start,
-        bucket_seconds,
+        start, now,
+        start, bucket_seconds,
+        start, bucket_seconds,
+        start, bucket_seconds, start, bucket_seconds,
+        start, bucket_seconds, start, bucket_seconds,
     )
     rows = conn.execute(query, params).fetchall()
 

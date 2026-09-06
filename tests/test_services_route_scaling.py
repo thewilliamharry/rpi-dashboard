@@ -14,6 +14,7 @@ waiting for the next hardware run.
 
 import math
 import random
+import re
 import sqlite3
 import time
 import unittest
@@ -1528,3 +1529,305 @@ class UptimeStripCostModelTests(unittest.TestCase):
             f'statement regardless of stored volume',
         )
         self.assertEqual(small_statements, 1)
+
+
+# ---------------------------------------------------------------------------
+# 06-29 (OPS-07 gap closure, Task 2): guards for the reshaped
+# UPTIME_STRIP_QUERY (Task 1's index-arithmetic + recursive-expansion
+# replacement of the range-join bucket_totals). UptimeStripSqlTextGuardTests
+# is the narrowed rounding guard 06-25 specified but never shipped
+# (PROH-OPS-07-23). UptimeStripRowEmissionTests pins mutation (b)'s finding
+# from 06-25-SUMMARY.md: a row-drop in the aggregation does not only break
+# boundedness, it silently makes the null_counts left join unreachable for a
+# NULL-only port, disabling the NULL guard as a side effect (PROH-OPS-07-25).
+# ---------------------------------------------------------------------------
+
+class UptimeStripSqlTextGuardTests(unittest.TestCase):
+    """The narrowed rounding guard.
+
+    06-25-PLAN.md (lines 505-525) specified, but never shipped, a criterion
+    reading "the query text contains no division character" -- an
+    over-broad proxy for the actual hazard. The actual hazard, demonstrated
+    concretely by 06-25's 400-trial randomized differential (mutation (c),
+    caught at trial 33, port 40331): SQLite computing a rendered ratio in
+    SQL produces `ROUND(1.0 * online_seconds / (online_seconds +
+    offline_seconds), 3) == 0.063` where Python's `round(online_seconds /
+    observed, 3) == 0.062` for a ratio near one sixteenth, because SQLite's
+    ROUND() rounds half away from zero while Python's round() rounds half
+    to even. Banning every division character in the query text ALSO
+    forbids bucket-index arithmetic on values that select an array
+    position and are never rendered -- exactly what this plan's Task 1
+    index-arithmetic reshape needs (`(seg_start - start) / bucket_seconds`
+    and `(seg_end - 1 - start) / bucket_seconds`).
+
+    This guard is narrowed from "no division character anywhere" to "no
+    SQL rounding call, and every division belongs to an enumerated pair of
+    bucket-index expressions" (PROH-OPS-07-23) because the original proxy
+    was WRONG about what it protected, never because the reshaped code
+    could not meet the original criterion. PROH-OPS-07-01 (the
+    differential's own correctness mandate -- SQLite must never compute a
+    rendered value) is unaffected: rounding and the final ratio still
+    happen only in Python, over the integer second totals this query
+    returns; the allowlist below is what the constant's OWN two divisions
+    are permitted to be, not a relaxation of where rounding may occur.
+    Mutations (c), (c-prime) and (c-double-prime) -- run by hand against
+    this narrowed form and reverted before commit -- are recorded verbatim
+    in 06-29-SUMMARY.md and prove the narrowed guard still catches
+    everything the original division ban caught, and nothing it did not.
+    """
+
+    # Declared once, as data (bare expression text, no comment or docstring
+    # -- verbatim substrings of UPTIME_STRIP_QUERY itself). Adding a third
+    # permitted expression requires an explicit edit here.
+    PERMITTED_DIVISION_EXPRESSIONS = (
+        '(seg_start - ?) / ?',    # spans.first_idx
+        '(seg_end - 1 - ?) / ?',  # spans.last_idx
+    )
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def test_no_sql_rounding_call(self):
+        self.assertIsNone(
+            re.search(r'\bround\s*\(', beacon_repositories.UPTIME_STRIP_QUERY, re.IGNORECASE),
+            'UPTIME_STRIP_QUERY must contain no SQL rounding call -- rounding happens '
+            'only in Python, over the integer second totals this query returns '
+            '(SQLite ROUND() rounds half away from zero; Python round() rounds half '
+            'to even, PROH-OPS-07-15/07-23)',
+        )
+
+    def test_every_division_belongs_to_the_permitted_pair(self):
+        query = beacon_repositories.UPTIME_STRIP_QUERY
+        for expr in self.PERMITTED_DIVISION_EXPRESSIONS:
+            self.assertEqual(
+                query.count(expr), 1,
+                f'expected exactly one occurrence of the permitted expression {expr!r} '
+                f'in UPTIME_STRIP_QUERY',
+            )
+        permitted_division_count = sum(
+            expr.count('/') for expr in self.PERMITTED_DIVISION_EXPRESSIONS
+        )
+        self.assertEqual(
+            query.count('/'), permitted_division_count,
+            'a division character exists in UPTIME_STRIP_QUERY outside the enumerated '
+            'first_idx/last_idx bucket-index pair -- a division added anywhere else (a '
+            'projected column, a CASE arm, a join predicate) must fail this assertion',
+        )
+
+    def test_projected_columns_and_value_types(self):
+        """The semantic half of the guard: the text checks above say no
+        rounding and no stray division exist in the query text, and this
+        check says nothing the reader consumes ever arrives as a
+        SQLite-computed real -- read from a live execution's
+        cursor.description and value types, not the query text.
+        """
+        port = 70001
+        now = 1_700_000_000
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            conn.execute(
+                'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                (now - 1000, port, 1),
+            )
+            conn.commit()
+
+            # sqlite3.Cursor.fetchall cannot be monkeypatched per-instance (a
+            # read-only C-extension attribute) -- same constraint documented
+            # by UptimeStripBoundednessTests._materialized_row_count. This
+            # proxy additionally captures cursor.description, which is
+            # populated immediately after execute() and does not require
+            # consuming the cursor.
+            class _CapturingCursor:
+                def __init__(self, cursor, captured):
+                    self._cursor = cursor
+                    self._captured = captured
+                    self._captured['description'] = cursor.description
+
+                def fetchall(self):
+                    rows = self._cursor.fetchall()
+                    self._captured['rows'] = rows
+                    return rows
+
+                def __getattr__(self, name):
+                    return getattr(self._cursor, name)
+
+            captured = {}
+            original_execute = conn.execute
+
+            def spy_execute(*args, **kwargs):
+                return _CapturingCursor(original_execute(*args, **kwargs), captured)
+
+            conn.execute = spy_execute
+            beacon_repositories.read_uptime_strips_by_port(
+                conn, ports=[port], now=now, window_seconds=UPTIME_WINDOW_SECONDS,
+                bucket_count=UPTIME_BUCKETS, retention_seconds=self.appmod.CHECK_RETENTION_SECONDS,
+            )
+            conn.execute = original_execute
+            conn.close()
+
+        column_names = [d[0] for d in captured['description']]
+        self.assertEqual(
+            column_names, ['port', 'idx', 'online_seconds', 'offline_seconds', 'null_count'],
+            'the projected column set must be exactly the five the reader consumes',
+        )
+        self.assertGreater(len(captured['rows']), 0, 'seeding failed -- no rows returned')
+        for row in captured['rows']:
+            for key in ('online_seconds', 'offline_seconds', 'null_count'):
+                value = row[key]
+                self.assertIsInstance(value, int, f'{key} must be int, got {type(value)}')
+                self.assertNotIsInstance(
+                    value, float, f'{key} must never arrive as a SQLite-computed float',
+                )
+
+    def test_no_row_dropping_clause_and_left_join_present(self):
+        query = beacon_repositories.UPTIME_STRIP_QUERY
+        self.assertIsNone(
+            re.search(r'\bhaving\b', query, re.IGNORECASE),
+            'UPTIME_STRIP_QUERY must contain no HAVING clause -- a row-dropping '
+            'predicate on the aggregate breaks boundedness and can silently disable '
+            'the unrelated NULL guard (PROH-OPS-07-25)',
+        )
+        self.assertIn(
+            'LEFT JOIN bucket_sums bs ON bs.port = rp.port AND bs.idx = bk.idx',
+            query,
+            'the scaffold must LEFT JOIN onto bucket_sums, never an inner join '
+            '(PROH-OPS-07-25)',
+        )
+
+
+class UptimeStripRowEmissionTests(unittest.TestCase):
+    """Mutation (b)'s finding, pinned as a standing test
+    (06-25-SUMMARY.md, Mutation Verification (b)): dropping bucket rows
+    from the aggregation does not only break boundedness -- it silently
+    makes the null_counts left join unreachable for a port whose only row
+    is NULL, disabling the NULL guard as a side effect of a mutation aimed
+    at something else entirely. A per-port row-count TALLY, never a
+    total-row assertion, is what catches a mutation that drops one port's
+    rows while another port still supplies the total.
+
+    Deliberately run against a SPARSE four-port fixture (PROH-OPS-07-25):
+    on a dense multi-day dataset every (port, idx) pair already has an
+    aggregate row, so an inner-join mutation of the scaffold's LEFT JOIN
+    returns the full ports x UPTIME_BUCKETS set and falsely appears to
+    pass -- confirmed directly in 06-29-SUMMARY.md's mutation verification,
+    which also records the same mutation collapsing the sparse fixture's
+    row count with the zero-row port vanishing entirely.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _insert_checks(self, port, rows):
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            for ts, online in rows:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+    def _execute_uptime_strip_query_directly(self, ports, now, retention_seconds):
+        """Execute UPTIME_STRIP_QUERY directly over the connection, bypassing
+        read_uptime_strips_by_port's NULL-refusal so a NULL-only port's rows
+        can still be counted -- the reader aborts with ValueError before the
+        caller ever sees them. Mirrors read_uptime_strips_by_port's own
+        param construction (dashboard/beacon/repositories.py) -- intentional
+        duplication so this guard can inspect the raw rows the reader
+        itself never returns.
+        """
+        now = int(now)
+        window_seconds = int(UPTIME_WINDOW_SECONDS)
+        bucket_count = int(UPTIME_BUCKETS)
+        retention_seconds = int(retention_seconds)
+        bucket_seconds = window_seconds // bucket_count
+        start = now - window_seconds
+        retention_floor = now - retention_seconds
+        placeholders = ','.join('?' * len(ports))
+        port_values = ','.join('(?)' for _ in ports)
+        query = beacon_repositories.UPTIME_STRIP_QUERY.format(
+            placeholders=placeholders, port_values=port_values,
+        )
+        params = (
+            *ports, retention_floor, now,
+            start,
+            start,
+            start,
+            now,
+            *ports,
+            start,
+            bucket_seconds,
+            bucket_count,
+            start, now,
+            start, bucket_seconds,
+            start, bucket_seconds,
+            start, bucket_seconds, start, bucket_seconds,
+            start, bucket_seconds, start, bucket_seconds,
+        )
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            rows = conn.execute(query, params).fetchall()
+            conn.close()
+        return rows
+
+    def test_every_requested_port_emits_exactly_uptime_buckets_rows(self):
+        now = 1_700_000_000
+        dense_port = 71001
+        null_port = 71002
+        empty_port = 71003
+        sparse_port = 71004
+        ports = [dense_port, null_port, empty_port, sparse_port]
+
+        self._insert_checks(dense_port, [(now - i * 1800, i % 2) for i in range(300)])
+        self._insert_checks(null_port, [(now - 100, None)])
+        bucket_seconds = UPTIME_WINDOW_SECONDS // UPTIME_BUCKETS
+        self._insert_checks(
+            sparse_port,
+            [(now - 2 * bucket_seconds - 10, 1), (now - bucket_seconds - 5, 0)],
+        )
+        # empty_port has no rows inserted at all.
+
+        rows = self._execute_uptime_strip_query_directly(
+            ports, now, self.appmod.CHECK_RETENTION_SECONDS,
+        )
+
+        tally = {port: 0 for port in ports}
+        null_counts_for_null_port = []
+        for row in rows:
+            tally[row['port']] += 1
+            if row['port'] == null_port:
+                null_counts_for_null_port.append(row['null_count'])
+
+        for port in ports:
+            self.assertEqual(
+                tally[port], UPTIME_BUCKETS,
+                f'port {port} emitted {tally[port]} rows, expected exactly '
+                f'{UPTIME_BUCKETS} -- a per-port tally is required because a '
+                f'mutation can drop one port while another still supplies the total',
+            )
+        self.assertEqual(len(null_counts_for_null_port), UPTIME_BUCKETS)
+        self.assertTrue(
+            all(count > 0 for count in null_counts_for_null_port),
+            'the NULL-only port must carry a non-zero null_count on every one of its rows',
+        )
+
+    def test_reader_raises_naming_the_null_only_port(self):
+        now = 1_700_000_000
+        null_port = 71012
+        self._insert_checks(null_port, [(now - 100, None)])
+        with self.appmod._db_lock:
+            conn = self.appmod.get_db()
+            with self.assertRaises(ValueError) as ctx:
+                beacon_repositories.read_uptime_strips_by_port(
+                    conn, ports=[null_port], now=now, window_seconds=UPTIME_WINDOW_SECONDS,
+                    bucket_count=UPTIME_BUCKETS, retention_seconds=self.appmod.CHECK_RETENTION_SECONDS,
+                )
+            conn.close()
+        self.assertIn(str(null_port), str(ctx.exception))
