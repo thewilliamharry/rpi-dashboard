@@ -56,19 +56,25 @@ cadence PASSED | resources PASSED | response_times FAILED
 `background_job_health` rows read `state: succeeded`, no `error_class`. All four `freshness_by_job`
 states (`J1`-`J4`) read `fresh` (ages 0s, 0s, 200s, 20s).
 
-## The three-run `/api/services` comparison, each with its own row count
+## The three-run `/api/services` comparison, with every row count each prior report actually recorded
 
-| run | measured | p95 | vs budget | count | dataset shape |
-|---|---|---:|---:|---:|---|
-| run 1 (`06-ACCEPTANCE-C3.md`, 2026-09-04) | build `a33af15` | 635.6ms | +27.1% | 1355 | 61,387 → 61,502 `service_checks`; 8 services; confounded by a Chromium job (worker peak_cpu 71.0%, peak_rss 786.9 MB) |
-| run 2 (`06-ACCEPTANCE-C3-RUN2.md`, 2026-09-05) | build `82801cb` (docs-only ahead of `a33af15`) | 679.3ms | +35.9% | 1278 | 7 services; confound resolved (worker peak_cpu 9.9%, peak_rss 513.0 MB flat) |
-| run 3 (this report, 2026-09-06) | build `a7c3ef1`/`06-31`'s revert-plus-reduction | **662.3ms** | **+32.5%** | 1381 | 66,005 → 66,035 `service_checks`; 7 services |
+| run | measured | p95 | vs budget | request count | `service_checks` row count | services |
+|---|---|---:|---:|---:|---|---:|
+| run 1 (`06-ACCEPTANCE-C3.md`, 2026-09-04) | build `a33af15` | 635.6ms | +27.1% | 1355 | 61,387 → 61,502 | 8; confounded by a Chromium job (worker peak_cpu 71.0%, peak_rss 786.9 MB) |
+| run 2 (`06-ACCEPTANCE-C3-RUN2.md`, 2026-09-05) | build `82801cb` (docs-only ahead of `a33af15`) | 679.3ms | +35.9% | 1278 | **not recorded in the source report** | 7; confound resolved (worker peak_cpu 9.9%, peak_rss 513.0 MB flat) |
+| run 3 (this report, 2026-09-06) | build `a7c3ef1`/`06-31`'s revert-plus-reduction | **662.3ms** | **+32.5%** | 1381 | 66,005 → 66,035 | 7 |
 
-No absolute figure above is read across a changed dataset without its own row count alongside it —
-`D-DEBT-06-14`'s lesson. Run 1 and run 2 both predate `06-25`; they measure the pre-optimization Python
-producer under the same load shape this run measures the reduced producer under. This run's build is
-the first of the three carrying `06-31`'s state-change-only reduction, independently measured at
--45.07% on this same Pi's per-request cost in isolation (`06-PI-PROFILE-C.md`).
+Run 2's own report (`06-ACCEPTANCE-C3-RUN2.md`) recorded `services = 7` and a thumbnail-per-rotation
+ratio (8929/1278 = 6.99) as its cross-check against run 1's shape, but did not record a
+`service_checks` before/after row count the way run 1 and this run both do — that gap is disclosed
+here rather than papered over with an inferred number. What run 2 does establish, and what this run's
+own `services = 7` / thumbnail ratio (9646/1381 = 6.99) reproduces, is that runs 2 and 3 share the same
+7-service shape, one fewer than run 1's 8 — so the request-count column and the services/thumbnail-
+ratio check together are what make runs 2 and 3 directly comparable, even without run 2's own
+`service_checks` figure. Run 1 and run 2 both predate `06-25`; they measure the pre-optimization
+Python producer under the same load shape this run measures the reduced producer under. This run's
+build is the first of the three carrying `06-31`'s state-change-only reduction, independently measured
+at -45.07% on this same Pi's per-request cost in isolation (`06-PI-PROFILE-C.md`).
 
 **The route did not clear the budget, and it did not clear run 1's figure either.** 662.3ms sits
 between run 1's 635.6ms and run 2's 679.3ms — worse than the first independent measurement of this
