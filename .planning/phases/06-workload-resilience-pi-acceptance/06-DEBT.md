@@ -87,6 +87,14 @@ independently, and is the one to check OPS-07's box and update its traceability 
 round's `overall_passed` is currently `false` (see `D-DEBT-06-09`), so promotion is not yet even a live
 question — this entry documents the promotion *rule*, not a pending promotion.
 
+**Restated 2026-09-06 (`06-27`).** A third gating run (`06-ACCEPTANCE-C3-RUN3.md`) measured
+`overall_passed: false` on `06-31`'s revert-plus-reduction build — the same route, `/api/services`,
+missing its 500ms p95 budget a third independent time (635.6ms, 679.3ms, 662.3ms). This round does
+not promote OPS-07: `.planning/REQUIREMENTS.md` line 73's checkbox stays unchecked and line 157's
+traceability row stays `Pending`, confirmed by `git diff --quiet -- .planning/REQUIREMENTS.md`. The
+promotion rule this entry states is unchanged; what has changed is that promotion remains not yet a
+live question for a fourth consecutive round, since `overall_passed` is still `false`.
+
 ---
 
 ### D-DEBT-06-09 — round 3's acceptance failure is serialization, attributed to `_db_lock`'s scope
@@ -921,6 +929,23 @@ goalposts. This determines whether the rollup work must clear 500ms p95 at 8x or
 to `service_rollups`, proves byte-identical output against `06-20`'s three surviving golden fixtures,
 and is measured on hardware — plus a decision on the concurrency question above.
 
+**Annotated 2026-09-06 (`06-27`).** This entry's own remediation path — wiring `service_rollups` in —
+stays refuted; `D-DEBT-06-21`'s round-7 addendum re-refutes it independently and upgrades the
+rejection to "not reconstructible" at any retention level. What this entry got right and what
+subsequently happened to it are two different things, worth separating explicitly: the **cost-model
+reframe** this entry made — that `/api/services`' problem is *how much* work happens, not *where* it
+happens — was acted on, but by `06-31`'s state-change-only input reduction to the existing Python
+producer, which `06-PROFILE-5.md` measured passing the pre-`06-25` bar (34.927ms vs 56.820ms,
+-38.53%) and `06-PI-PROFILE-C.md` independently reproduced on Pi-class hardware (-45.07%) — not by
+option C (the SQL reshape this entry itself did not propose but which `06-25`/`06-29` attempted and
+`D-DEBT-06-21`/`D-DEBT-06-23` record as refuted at the route level twice). Segment B's own result
+(`06-ACCEPTANCE-C3-RUN3.md`) shows the reframe's remedy, whichever form it took, was necessary but not
+sufficient under concurrency-3 load: per-request cost fell 45% and the acceptance p95 moved 2.5%. This
+entry's "open question blocking the scope" (whether concurrency 8 was representative) was resolved by
+`D-DEBT-06-20` below before this entry's own remediation shipped; the concurrency question that
+remains open after `06-27`'s third gating miss is a distinct one, recorded in
+`06-ACCEPTANCE-C3-RUN3.md`'s "OPS-07 disposition" section, not reopened here.
+
 ---
 
 ### D-DEBT-06-20 — OPS-07's load model was wrong about this deployment; criterion amended, not weakened
@@ -973,6 +998,26 @@ as history grows rather than degrading.
 **What would need to be true to close this entry.** One uninstrumented hardware run at
 `--concurrency 3 --duration 600` on the current build, reported by an independent verification round
 per the `TEL-06`/`PROH-OPS-07-08` precedent — this round may not promote OPS-07 on its own evidence.
+
+**The third gating run — added 2026-09-06 (`06-27`).** The uninstrumented `--concurrency 3 --duration
+600` run this entry calls for has now happened three times, each on a different build, each
+`overall_passed: false` on the same route:
+
+| run | build | p95 | vs 500ms budget |
+|---|---|---:|---:|
+| run 1 (`06-ACCEPTANCE-C3.md`) | `a33af15` | 635.6ms | +27.1% (confounded by a Chromium job) |
+| run 2 (`06-ACCEPTANCE-C3-RUN2.md`) | `82801cb` | 679.3ms | +35.9% (confound resolved) |
+| run 3 (`06-ACCEPTANCE-C3-RUN3.md`) | `a7c3ef1`/`06-31`'s revert-plus-reduction | 662.3ms | +32.5% |
+
+**Half of this entry's own closure condition is now satisfied; the other half is not.** "One
+uninstrumented hardware run... on the current build" exists — run 3, on `06-31`'s build, the first of
+the three to carry the state-change-only reduction. "Reported by an independent verification round"
+does **not** exist: `06-27` is the plan whose own segment B produced run 3, and `PROH-OPS-07-08`
+forbids a gap-closure round from promoting the requirement its own evidence bears on. This entry
+therefore remains open on its verification half alone, not on its evidence half. `.planning/
+REQUIREMENTS.md` is unedited by `06-27`: OPS-07 stays Pending. See `06-ACCEPTANCE-C3-RUN3.md`'s
+"OPS-07 disposition" section for the options recorded (none chosen) given three consecutive misses
+under a load model measured to run the route at roughly 34.5x its real single-operator request rate.
 
 ---
 
@@ -1112,6 +1157,17 @@ rather than merely citing this entry:
   a permanent constraint on any precomputation strategy. `PROH-OPS-07-29` requires this paragraph — or
   its equivalent — to be read and re-verified against source before either path is proposed a third
   time.
+
+**Pi-class addendum — added 2026-09-06 (`06-27`).** Every figure in this entry above is dev-host
+(`arm64`/laptop). `06-27`'s segment A (`06-PI-PROFILE-C.md`) independently measured `06-31`'s
+revert-plus-reduction build's per-request cost on the Pi this entry's remedy actually has to run on:
+**77.081ms after / 140.323ms before, -45.07%** — a Pi-class reproduction of `06-PROFILE-5.md`'s
+dev-host PASS, and a *larger* margin than the dev host's own 38.53%. This addendum does not reopen
+this entry's own closure or its rollup re-refutation; it adds the one figure this entry's closing
+paragraph did not yet have — confirmation that the chosen remedy's win is not a dev-host artifact.
+Whether that per-request win is sufficient under concurrency-3 load is a separate question, answered
+(negatively, a third time) by `D-DEBT-06-20`'s addendum above and reported in full in
+`06-ACCEPTANCE-C3-RUN3.md`.
 
 ---
 
@@ -1407,6 +1463,64 @@ list with what round 7 additionally changed, rather than restating what §7 alre
    re-pinning `06-28` already held as its own scope decision. If `06-28` executes, this is still its
    decision to make, informed by `D-DEBT-06-25`'s record of a fourth realignment paid at +42 net
    lines.
+
+---
+
+### D-DEBT-06-27 — selective, non-uniform inflation under concurrency-3 load, consistent with lock contention, not yet attributed
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-27-PLAN.md` Task 3, `06-ACCEPTANCE-C3-RUN3.md`'s "A finding this run's own shape produces" section |
+| **Status** | **New — a hypothesis, not a diagnosis. Awaiting a decision on whether round 8 investigates it.** |
+| **Recorded in the plan** | `06-ACCEPTANCE-C3-RUN3.md`, `06-PI-PROFILE-C.md` |
+
+**What was measured.** Segment A (`06-PI-PROFILE-C.md`) measured `/api/services`' uncontended,
+single-threaded per-request cost on this Pi at **77.081ms**. Segment B's concurrency-3 acceptance run
+(`06-ACCEPTANCE-C3-RUN3.md`) measured the same route's p50 at **530.1ms** under load — a **6.9x
+inflation** (530.1 / 77.081 = 6.88) over what the request itself computes. The inflation is
+**selective, not uniform**: `/api/services` (530.1ms p50) and `/api/advanced/current` (508.2ms p50)
+both sit near 500ms, while `/api/history` (17.6ms), `/api/thumbnail-status` (8.5ms),
+`/api/scan-status` (8.1ms), and `/api/thumbnail/<port>` (7.8ms, 9,646 requests — the highest volume of
+any route this run) are two orders of magnitude faster and evidently unaffected.
+
+**What this rules out, measured rather than assumed.** `assertions.cadence` and
+`assertions.resources` both PASSED; worker CPU is 0.74% mean with every one of 12
+`background_job_health` rows `succeeded` and all four `freshness_by_job` states `fresh`; segment A
+already measured this same route's own per-request computation collapsing 45.07% on this hardware,
+and the concurrency-3 p95 barely moved in response (679.3ms → 662.3ms against run 2, a 2.5% shift).
+Four routes untouched by the inflation, `cadence`/`resources` clean, worker idle with no failed work,
+and a 45% per-request cost cut moving the acceptance figure by only 2.5% together rule out a
+per-request computation bottleneck, resource exhaustion, worker starvation, and failed background
+work as sole explanations.
+
+**What this is consistent with, stated as a hypothesis.** A shared serialization point affecting
+specifically `/api/services` and `/api/advanced/current` and not the other four routes — the same
+shape round 5's `_db_lock` instrumentation (`06-LOCK-DIAGNOSTIC.md`, `06-LOCK-DIAGNOSTIC-R5A.md`,
+`06-LOCK-DIAGNOSTIC-R5B.md`) measured directly at concurrency 8, before `06-18`'s `fix-now` decision
+and the six rounds that followed redirected attention to narrowing that lock's held region and then to
+per-request cost attribution instead. **This is not a diagnosis.** `06-ACCEPTANCE-C3-RUN3.md` carries
+no lock instrumentation — `lock_profile: {}` is precisely what makes it admissible OPS-07 evidence
+(`PROH-OPS-07-11`) — so it cannot attribute the inflation to any specific mechanism, `_db_lock` or
+otherwise.
+
+**What would confirm or refute it.** An instrumented concurrency-3 pass using round 4/5's own
+`BEACON_LOCK_PROFILE=1` methodology, reported separately from any acceptance evidence per
+`PROH-OPS-07-11`, would show directly whether `/api/services`' and `/api/advanced/current`'s wait time
+is dominated by a lock held by a concurrent request in the way round 4/5 measured at concurrency 8
+(`D-DEBT-06-09`).
+
+**The transferable lesson this round's own evidence supports, independent of the hypothesis above.**
+`uptime_sweep` genuinely was 43.727% of `/api/services`' own profiled self time
+(`06-PROFILE-2.md`, independently re-measured), and that attribution was correct — round 7's own fix
+against it (`06-31`'s reduction) cut it by 22.5x on this Pi (`06-PI-PROFILE-C.md`). Self time was
+simply never what the concurrency-3 p95 was made of: a 45% per-request cut moved the gating figure
+2.5%. A single-request profiler cannot see a cost that only exists when other requests are in flight.
+
+**What would need to be true to close this entry.** Either an operator decision that this hypothesis
+is not worth a further round's Pi time (see `06-ACCEPTANCE-C3-RUN3.md`'s "OPS-07 disposition" section,
+option (a) or (b)), or a round 8 that runs the instrumented concurrency-3 pass above and reports
+`CONFIRMED`, `REFUTED`, or `INCONCLUSIVE` against a named mechanism, the same three-valued verdict
+`D-DEBT-06-09` established.
 
 ---
 
