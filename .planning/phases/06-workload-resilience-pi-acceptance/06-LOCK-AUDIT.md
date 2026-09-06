@@ -42,6 +42,18 @@ site at all. That change is not made here: this audit carries `T-06-24`'s closur
 re-pinning its identity scheme is a scope decision, not a maintenance edit. `06-28` records it for
 a decision.
 
+**Fourth realignment (06-31), and the last one this phase pays.** `06-31` reverted `06-25`'s route
+wiring — `06-GUARD-DECISION.md` §8's rollup remedy is refuted on evidence (`D-DEBT-06-21`) — and, in
+the SAME commit, reduced the Python producer's input to state-change points only. Folding the revert
+and the reduction into one commit is exactly what kept this from being two more realignments instead
+of one: `api_services` net-added 42 lines (the restored `checks_by_port` two-consumer path plus the
+reduction's own comment recording the partition-additivity argument and the NULL-preservation rule),
+shifting every site's line number from `api_events` (row 20) onward by that same +42. Four
+realignments from four unrelated `app.py` edits in one phase is the recurring cost of pinning
+`(function, line)` rather than `(function, ordinal)` this audit's third-realignment note already
+named; `06-28`'s scope decision on that re-pinning still stands as the way to make this the actual
+last one, not merely the last one this round happened to pay.
+
 | # | Function | Line | Form | Read/Write | Non-DB work held under the lock | Narrowed this round |
 |---|----------|------|------|------------|----------------------------------|----------------------|
 | 1 | `init_db` | 179 | bare | write | `prepare_database` migration run plus the legacy `state_since` backfill `UPDATE` | no |
@@ -63,15 +75,15 @@ a decision.
 | 17 | `api_telemetry_history` | 2699 | combined | read | none — every call inside the block is itself a DB read (`get_host_telemetry`/`get_service_telemetry`/`get_telemetry_coverage`/`get_pending_aggregation`); response composition happens after | no |
 | 18 | `api_events_history` | 2827 | combined | read | none — `read_events_in_range`/`read_episode_state_changes`/`anchor_candidate_ports`/`read_open_episode_anchors` are all DB reads; response composition happens after | no |
 | 19 | `api_services` | 2875 | combined | read | none — narrowed in `06-20`. Was: `_uptime_summary`, `beacon_maintenance.coverage`, `beacon_maintenance.attributed_downtime_seconds`, `beacon_repositories.offline_intervals_from_points_by_port`, and the per-service `result` dict construction, measured **25.0% of this route's held region** under concurrency-8 load (`06-LOCK-DIAGNOSTIC.md` §4, `beacon-lockdiag-c8.json`) before the narrowing. All four now execute after the block closes, over rows materialized into plain dicts inside it (`D-DEBT-06-01`, `PROH-OPS-04-06`). | **yes (landed)** |
-| 20 | `api_events` | 3053 | combined | read | none | no |
-| 21 | `api_service_meta` (GET) | 3086 | combined | read | none — delegates to `beacon_web.metadata_response`, itself DB reads only | no |
-| 22 | `api_service_meta` (PUT) | 3127 | combined | read+write | field validation, URL normalization (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning (`_outbound_policy().plan(...)`) — see "Future narrowing candidates" below | no |
-| 23 | `api_thumbnail` | 3202 | combined | read | none | no |
-| 24 | `api_thumbnail_status` | 3217 | combined | read | none — `thumb_state` derivation happens after the block closes | no |
-| 25 | `api_scan_status` | 3281 | combined | read | none — freshness/staleness classification happens after the block closes | no |
-| 26 | `healthz` | 3351 | combined | read | none (`SELECT 1`) | no |
-| 27 | `readyz` | 3361 | bare | read | none — readiness classification happens after the block closes | no |
-| 28 | `prometheus_metrics` | 3372 | combined | read | none | no |
+| 20 | `api_events` | 3095 | combined | read | none | no |
+| 21 | `api_service_meta` (GET) | 3128 | combined | read | none — delegates to `beacon_web.metadata_response`, itself DB reads only | no |
+| 22 | `api_service_meta` (PUT) | 3169 | combined | read+write | field validation, URL normalization (`_normalize_service_url`, `_service_url_with_path`), and outbound-policy planning (`_outbound_policy().plan(...)`) — see "Future narrowing candidates" below | no |
+| 23 | `api_thumbnail` | 3244 | combined | read | none | no |
+| 24 | `api_thumbnail_status` | 3259 | combined | read | none — `thumb_state` derivation happens after the block closes | no |
+| 25 | `api_scan_status` | 3323 | combined | read | none — freshness/staleness classification happens after the block closes | no |
+| 26 | `healthz` | 3393 | combined | read | none (`SELECT 1`) | no |
+| 27 | `readyz` | 3403 | bare | read | none — readiness classification happens after the block closes | no |
+| 28 | `prometheus_metrics` | 3414 | combined | read | none | no |
 
 **Row count: 28. Distinct function count: 26** (`process_preview_requests` and `api_service_meta`
 each contribute two rows). `LockScopeInvariantTests::test_every_db_lock_site_is_covered_by_the_audit`

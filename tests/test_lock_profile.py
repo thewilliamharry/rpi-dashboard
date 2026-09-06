@@ -1893,17 +1893,25 @@ class LockScopePreservationTests(unittest.TestCase):
     containment shape, which is what HEAD carries again: all four
     computations execute INSIDE the `with _db_lock` block, not after it. A
     failure here means the shape moved again -- most likely one of the four
-    computations (`beacon_repositories.read_uptime_strips_by_port` since
-    `06-25`, `beacon_maintenance.coverage`,
+    computations (`_uptime_summary` again, since `06-31`,
+    `beacon_maintenance.coverage`,
     `beacon_maintenance.attributed_downtime_seconds`,
     `beacon_repositories.offline_intervals_from_points_by_port`) got moved
     back out, silently reintroducing the narrowing round 5 already measured
-    as worse (`T-06-101`). `06-25` changed WHICH producer is contained
-    (`_uptime_summary`, a Python helper, became
-    `beacon_repositories.read_uptime_strips_by_port`, a repository reader)
-    -- it did not change WHETHER it is contained, and did not touch the
-    lock's scope (`PROH-OPS-04-02`). Go to `D-DEBT-06-01` and
-    `PROH-OPS-04-06` before editing an assertion in this class.
+    as worse (`T-06-101`).
+
+    This entry's own name has moved twice, and neither move touched WHETHER
+    it is contained -- only WHICH producer is named. `06-25` (OPS-07 gap
+    closure) changed it from `_uptime_summary` (a Python helper) to
+    `beacon_repositories.read_uptime_strips_by_port` (a repository reader),
+    because it moved the strip's computation into bulk SQL. `06-31`
+    (input-reduction remediation, OPS-07) changed it back to
+    `_uptime_summary`, because `06-GUARD-DECISION.md` §8's rollup path was
+    refuted on evidence (`D-DEBT-06-21`) and the cheaper remedy feeds the
+    same Python producer a reduced, state-change-only input instead. In
+    neither round did the lock's SCOPE move (`PROH-OPS-04-02`). Go to
+    `D-DEBT-06-01` and `PROH-OPS-04-06` before editing an assertion in this
+    class.
     """
 
     def setUp(self):
@@ -1951,15 +1959,21 @@ class LockScopePreservationTests(unittest.TestCase):
         computations outside the with-block (the round-5 narrowing shape
         this pin exists to catch).
 
-        06-25 (OPS-07 gap closure) moved the uptime strip's producer from
-        the Python helper `_uptime_summary` to the bulk SQL reader
-        `beacon_repositories.read_uptime_strips_by_port` -- the route no
-        longer calls `_uptime_summary` at all, so `required_calls` names
-        the new producer instead. The lock's SCOPE did not move: this pin
-        still fails on all three mutations it was mutation-verified against
-        in 06-15 (deleting a call site, dedenting a statement out of the
-        block, moving a computation outside it) -- what changed is which
-        producer is named, never whether one is contained.
+        This entry's history, recorded rather than overwritten: 06-25
+        (OPS-07 gap closure) moved the uptime strip's producer from the
+        Python helper `_uptime_summary` to the bulk SQL reader
+        `beacon_repositories.read_uptime_strips_by_port`, and `required_calls`
+        was renamed to match. 06-31 (input-reduction remediation, OPS-07)
+        reverted the route's wiring -- the rollup path `06-GUARD-DECISION.md`
+        §8 had scoped is refuted on evidence (`D-DEBT-06-21`) -- back onto
+        `_uptime_summary`, now fed a reduced, state-change-only subset of the
+        same rows rather than every one of them, so `required_calls` is
+        renamed back to `_uptime_summary`. In neither round did the lock's
+        SCOPE move: this pin still fails on all three mutations it was
+        mutation-verified against in 06-15 (deleting a call site, dedenting a
+        statement out of the block, moving a computation outside it) -- what
+        changed, twice now, is which producer is named, never whether one is
+        contained.
         """
         func = _find_function_def(self.tree, 'api_services')
         self.assertIsNotNone(func, 'api_services function not found in dashboard/app.py')
@@ -1981,7 +1995,7 @@ class LockScopePreservationTests(unittest.TestCase):
             if isinstance(node, ast.Call)
         }
         required_calls = {
-            'beacon_repositories.read_uptime_strips_by_port',
+            '_uptime_summary',
             'beacon_maintenance.coverage',
             'beacon_maintenance.attributed_downtime_seconds',
             'beacon_repositories.offline_intervals_from_points_by_port',
@@ -1995,8 +2009,9 @@ class LockScopePreservationTests(unittest.TestCase):
             'scope. See D-DEBT-06-01 before editing this assertion. (06-25 renamed '
             "this set's uptime entry from `_uptime_summary` to "
             '`beacon_repositories.read_uptime_strips_by_port` when the producer moved '
-            'from a Python helper to a repository reader -- the lock scope itself did '
-            'not move.)',
+            'from a Python helper to a repository reader; 06-31 renamed it back to '
+            '`_uptime_summary` when the route reverted to the Python producer, now fed '
+            'a reduced input -- in neither round did the lock scope itself move.)',
         )
 
         # Nothing escaped: the only function-level statement after the
