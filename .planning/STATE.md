@@ -4,16 +4,16 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 06
 current_phase_name: workload-resilience-pi-acceptance
-status: executing
-stopped_at: OPS-07 accepted with deviation by operator decision 2026-09-06 — route misses its budget under a ~34.5x-of-real-usage load model but measures 77.1ms at the real rate. 06-28 (record consolidation + security re-audit) is the only unexecuted plan.
-last_updated: "2026-09-06T16:21:50Z"
+status: complete
+stopped_at: Phase 06 closed 2026-09-06. All 30 executable plans done (06-23/06-24 superseded). OPS-07 accepted with deviation; OPS-01..04 Complete.
+last_updated: "2026-09-06T16:53:27Z"
 last_activity: 2026-09-06
-last_activity_desc: Operator decided option (a) — accept the deviation. OPS-07 recorded as Accepted with deviation, not Complete; no budget or criterion amended.
+last_activity_desc: 06-28 closed the phase — security register 42->88 rows, the /gsd-secure-phase re-audit PROH-OPS-04-05 required since round 5 finally performed
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 127
-  completed_plans: 119
+  completed_plans: 120
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 — round 7's hardware evidence is in. Segment A: /api/services per-request cost fell 45.07% on the Pi (140.3ms -> 77.1ms), beating the dev-host 38.53%. Segment B: the concurrency-3 acceptance run FAILED — p95 662.3ms vs a 500ms budget, the third consecutive miss (635.6 / 679.3 / 662.3). Removing 45% of per-request cost moved the p95 by 2.5%, so per-request computation was never what the p95 was made of. OPS-07's disposition is now an explicit open decision for the operator: (a) accept the deviation, (b) re-derive the gate's load model on realistic usage, (c) a round 8 on the contention hypothesis. No option is chosen; no budget moved.
+**Current focus:** Phase 06 is CLOSED. Seven remediation rounds on OPS-07; the route's per-request cost fell 45.07% on Pi hardware and the concurrency-3 p95 moved 2.5%, which is the phase's transferable finding. OPS-07 accepted with deviation on usage grounds, not passed. Next: Phase 08, or revisit OPS-07 only if the real request rate rises — see D-DEBT-06-27.
 
 ## Current Position
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
 Plan: 28 of 30 executable — 32 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked do_not_execute in their frontmatter). 06-01 through 06-22, 06-25, 06-26, 06-29, 06-30, 06-31 and 06-32 have all executed. 06-27 and 06-28 remain, each blocked on the amendment D-DEBT-06-26 enumerates.
-Status: OPS-07 closed by operator decision as Accepted with deviation. Round 7's remedy stands (per-request cost -45.07% on Pi hardware); the concurrency-3 budget miss is accepted on usage grounds and every failing run remains on the record unsuperseded. 06-28 remains — autonomous, no hardware, independent of this decision.
-Last activity: 2026-09-06 — operator accepted the deviation; decision recorded in 06-ACCEPTANCE-C3-RUN3.md, REQUIREMENTS.md and here
+Status: COMPLETE. All 30 executable plans executed (32 exist; 06-23/06-24 superseded by ea8689e and never run). OPS-01..OPS-04 Complete; OPS-07 Accepted with deviation. Three failing acceptance runs stand unsuperseded; no budget, criterion or harness default was ever amended to make them pass.
+Last activity: 2026-09-06 — 06-28 performed the security re-audit PROH-OPS-04-05 has required since round 5 (register 42 -> 88 rows, 45 previously-unregistered threats registered, T-06-172 minted) and closed D-DEBT-06-25's re-pinning decision
 
 Progress: [█████████░] 93%
 
