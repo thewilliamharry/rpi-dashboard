@@ -1466,6 +1466,64 @@ list with what round 7 additionally changed, rather than restating what §7 alre
 
 ---
 
+### D-DEBT-06-27 — selective, non-uniform inflation under concurrency-3 load, consistent with lock contention, not yet attributed
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-27-PLAN.md` Task 3, `06-ACCEPTANCE-C3-RUN3.md`'s "A finding this run's own shape produces" section |
+| **Status** | **New — a hypothesis, not a diagnosis. Awaiting a decision on whether round 8 investigates it.** |
+| **Recorded in the plan** | `06-ACCEPTANCE-C3-RUN3.md`, `06-PI-PROFILE-C.md` |
+
+**What was measured.** Segment A (`06-PI-PROFILE-C.md`) measured `/api/services`' uncontended,
+single-threaded per-request cost on this Pi at **77.081ms**. Segment B's concurrency-3 acceptance run
+(`06-ACCEPTANCE-C3-RUN3.md`) measured the same route's p50 at **530.1ms** under load — a **6.9x
+inflation** (530.1 / 77.081 = 6.88) over what the request itself computes. The inflation is
+**selective, not uniform**: `/api/services` (530.1ms p50) and `/api/advanced/current` (508.2ms p50)
+both sit near 500ms, while `/api/history` (17.6ms), `/api/thumbnail-status` (8.5ms),
+`/api/scan-status` (8.1ms), and `/api/thumbnail/<port>` (7.8ms, 9,646 requests — the highest volume of
+any route this run) are two orders of magnitude faster and evidently unaffected.
+
+**What this rules out, measured rather than assumed.** `assertions.cadence` and
+`assertions.resources` both PASSED; worker CPU is 0.74% mean with every one of 12
+`background_job_health` rows `succeeded` and all four `freshness_by_job` states `fresh`; segment A
+already measured this same route's own per-request computation collapsing 45.07% on this hardware,
+and the concurrency-3 p95 barely moved in response (679.3ms → 662.3ms against run 2, a 2.5% shift).
+Four routes untouched by the inflation, `cadence`/`resources` clean, worker idle with no failed work,
+and a 45% per-request cost cut moving the acceptance figure by only 2.5% together rule out a
+per-request computation bottleneck, resource exhaustion, worker starvation, and failed background
+work as sole explanations.
+
+**What this is consistent with, stated as a hypothesis.** A shared serialization point affecting
+specifically `/api/services` and `/api/advanced/current` and not the other four routes — the same
+shape round 5's `_db_lock` instrumentation (`06-LOCK-DIAGNOSTIC.md`, `06-LOCK-DIAGNOSTIC-R5A.md`,
+`06-LOCK-DIAGNOSTIC-R5B.md`) measured directly at concurrency 8, before `06-18`'s `fix-now` decision
+and the six rounds that followed redirected attention to narrowing that lock's held region and then to
+per-request cost attribution instead. **This is not a diagnosis.** `06-ACCEPTANCE-C3-RUN3.md` carries
+no lock instrumentation — `lock_profile: {}` is precisely what makes it admissible OPS-07 evidence
+(`PROH-OPS-07-11`) — so it cannot attribute the inflation to any specific mechanism, `_db_lock` or
+otherwise.
+
+**What would confirm or refute it.** An instrumented concurrency-3 pass using round 4/5's own
+`BEACON_LOCK_PROFILE=1` methodology, reported separately from any acceptance evidence per
+`PROH-OPS-07-11`, would show directly whether `/api/services`' and `/api/advanced/current`'s wait time
+is dominated by a lock held by a concurrent request in the way round 4/5 measured at concurrency 8
+(`D-DEBT-06-09`).
+
+**The transferable lesson this round's own evidence supports, independent of the hypothesis above.**
+`uptime_sweep` genuinely was 43.727% of `/api/services`' own profiled self time
+(`06-PROFILE-2.md`, independently re-measured), and that attribution was correct — round 7's own fix
+against it (`06-31`'s reduction) cut it by 22.5x on this Pi (`06-PI-PROFILE-C.md`). Self time was
+simply never what the concurrency-3 p95 was made of: a 45% per-request cut moved the gating figure
+2.5%. A single-request profiler cannot see a cost that only exists when other requests are in flight.
+
+**What would need to be true to close this entry.** Either an operator decision that this hypothesis
+is not worth a further round's Pi time (see `06-ACCEPTANCE-C3-RUN3.md`'s "OPS-07 disposition" section,
+option (a) or (b)), or a round 8 that runs the instrumented concurrency-3 pass above and reports
+`CONFIRMED`, `REFUTED`, or `INCONCLUSIVE` against a named mechanism, the same three-valued verdict
+`D-DEBT-06-09` established.
+
+---
+
 ## 2. Decided — recorded rationale, no further action needed this phase
 
 ### D-DEBT-06-01 — narrow `_db_lock`'s scope now that WAL is in force
