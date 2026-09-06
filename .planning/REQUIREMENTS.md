@@ -71,6 +71,7 @@
 - [x] **OPS-05**: Automated tests cover outbound-target validation, DNS/redirect handling, TLS behavior, and mutation-request protections.
 - [x] **OPS-06**: Both themes have UI-contract or visual-regression coverage for shared capabilities and important states.
 - [ ] **OPS-07**: A Raspberry Pi-class acceptance run verifies responsiveness, resource budgets, recovery, and sampling continuity under the load a single operator generates (concurrency 3, the ceiling for this deployment); higher-concurrency runs are optional evidence, never a gate.
+  - **Accepted with deviation, 2026-09-06** — cadence, resources, recovery and sampling continuity all PASS. `/api/services` misses its 500ms p95 budget on three independent hardware runs (635.6 / 679.3 / 662.3ms) under a harness load ~34.5x the real per-route rate; at the deployment's actual 0.067 req/s the route measures 77.1ms. Accepted on usage grounds, not passed. No budget or criterion amended (`PROH-OPS-07-01`, `-10`); not promoted to Complete (`PROH-OPS-07-08`). See `06-ACCEPTANCE-C3-RUN3.md`.
 
 ## v2 Requirements
 
@@ -154,7 +155,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | OPS-04 | Phase 6 | Complete |
 | OPS-05 | Phase 1 | Complete |
 | OPS-06 | Phase 5 | Complete |
-| OPS-07 | Phase 6 | Pending |
+| OPS-07 | Phase 6 | Accepted with deviation |
 
 DIA-08 splits across two phases: the effective-settings view, refresh controls, and
 service filtering half shipped in Phase 3 (recorded in `PROJECT.md`'s Phase 3 Validated

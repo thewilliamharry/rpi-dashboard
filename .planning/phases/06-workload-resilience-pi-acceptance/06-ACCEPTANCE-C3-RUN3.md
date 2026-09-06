@@ -213,3 +213,40 @@ rollup-backed remedy is proposed a third time; this report does not propose one,
 names lock contention, not a rollup rebuild, as its subject.
 
 The deployment ends this run on HEAD, uninstrumented, and running.
+
+
+---
+
+## Operator decision, 2026-09-06: **(a) accept the deviation**
+
+Taken by the operator after reading this report's three options. Recorded here as the decision of
+record; nothing in this section changes a budget, a threshold, a criterion or a harness default.
+
+**The decision.** `/api/services` misses its 500ms p95 budget under this harness's load model, on
+three independent hardware runs (635.6ms / 679.3ms / 662.3ms). The operator accepts that deviation
+rather than pursuing an eighth round.
+
+**The reasoning, on usage grounds.** `ROUTE_BUDGETS_MS['/api/services']`'s own written rationale is
+that the route is "polled by the dashboard on an interactive cadence ... so a slow response here is a
+slow-feeling UI". `dashboard/app.js` polls `loadServices` every 15s — 0.067 req/s for one operator
+with one tab. This harness drove it at 2.30 req/s inside a 27.6 req/s total offered load, closed-loop
+with zero think time: ~34.5x the real per-route rate. At the real rate the route's measured cost is
+segment A's 77.1ms on this hardware, comfortably inside the budget. The budget's stated purpose —
+that the dashboard not feel slow to its operator — is met.
+
+**What this decision explicitly is NOT.** It is not a claim that the route passes its budget under the
+harness's load model; it does not, and all three failing runs stand unsuperseded. It does not amend
+`ROUTE_BUDGETS_MS`, `pi_load_acceptance.py`, or criterion 5. `PROH-OPS-07-01` and `PROH-OPS-07-10`
+remain unweakened and no budget was moved because code could not meet it. Option (b) — re-deriving the
+load model on realistic usage — remains open and unexercised; this decision does not perform it.
+
+**Consequence for OPS-07.** OPS-07 is recorded as **Accepted with deviation**, not as passed.
+`PROH-OPS-07-08` scopes promotion to an independent verification round, which has not occurred, so the
+requirement is not marked Complete on the strength of a failing run. A later reader must be able to
+see that this route was accepted despite missing its gate, and why.
+
+**Left standing for a future reader.** `D-DEBT-06-27`'s selective-inflation finding — two routes
+inflating 6.9x under concurrency 3 while four are unaffected — is untested and remains the leading
+explanation for the gap. It does not matter at 0.067 req/s. It would matter if the deployment's real
+request rate ever rose materially, or if more services were added. That is the condition under which
+this acceptance should be revisited.

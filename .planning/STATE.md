@@ -5,10 +5,10 @@ milestone_name: milestone
 current_phase: 06
 current_phase_name: workload-resilience-pi-acceptance
 status: executing
-stopped_at: Round 7 hardware complete — segment A IMPROVED (-45.07%), segment B FAILED (/api/services p95 662.3ms vs 500ms, third consecutive miss). OPS-07 disposition is an open operator decision with three costed options in 06-ACCEPTANCE-C3-RUN3.md
-last_updated: "2026-09-06T15:56:02Z"
+stopped_at: OPS-07 accepted with deviation by operator decision 2026-09-06 — route misses its budget under a ~34.5x-of-real-usage load model but measures 77.1ms at the real rate. 06-28 (record consolidation + security re-audit) is the only unexecuted plan.
+last_updated: "2026-09-06T16:21:50Z"
 last_activity: 2026-09-06
-last_activity_desc: 06-27 executed on real Pi hardware — per-request cost fell 45.07%, concurrency-3 p95 moved 2.5%; selective 6.9x inflation on two routes recorded as a contention hypothesis
+last_activity_desc: Operator decided option (a) — accept the deviation. OPS-07 recorded as Accepted with deviation, not Complete; no budget or criterion amended.
 progress:
   total_phases: 8
   completed_phases: 6
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
 Plan: 28 of 30 executable — 32 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked do_not_execute in their frontmatter). 06-01 through 06-22, 06-25, 06-26, 06-29, 06-30, 06-31 and 06-32 have all executed. 06-27 and 06-28 remain, each blocked on the amendment D-DEBT-06-26 enumerates.
-Status: BLOCKED on an operator decision. 06-27 executed (both hardware segments run by the operator, artifacts written). 06-28 remains. OPS-07 stays Pending — three failing acceptance runs stand, none superseded, and no budget, threshold or harness default was edited in response to any of them.
-Last activity: 2026-09-06 — 06-27 complete: 06-PI-PROFILE-C.md (IMPROVED), 06-ACCEPTANCE-C3-RUN3.md (FAILED + the selective-inflation finding + three costed disposition options), 06-ACCEPTANCE-RUNBOOK.md, D-DEBT-06-27
+Status: OPS-07 closed by operator decision as Accepted with deviation. Round 7's remedy stands (per-request cost -45.07% on Pi hardware); the concurrency-3 budget miss is accepted on usage grounds and every failing run remains on the record unsuperseded. 06-28 remains — autonomous, no hardware, independent of this decision.
+Last activity: 2026-09-06 — operator accepted the deviation; decision recorded in 06-ACCEPTANCE-C3-RUN3.md, REQUIREMENTS.md and here
 
 Progress: [█████████░] 93%
 
@@ -127,6 +127,7 @@ Phase 07 (optional-advanced-diagnostics) is executed 3/3; DIA-09 stays Pending u
 - [Phase 6, round 7]: A premise recorded as refuted in the debt register must be re-verified against source before a later round inherits it (`PROH-OPS-07-29`) — round 7 was scoped on exactly the `service_rollups` premise round 6 had already refuted.
 - [Phase 6, round 7]: A differential can prove a reduction correct but never prove it is present — `06-31`'s input-count guard class exists because the correctness differential measured 0 divergences when the reduction was removed entirely (`PROH-OPS-07-28`).
 - [Phase 6, round 7]: The `06-LOCK-AUDIT.md` `(function, line)` vs `(function, ordinal)` pinning recurrence is closed with a decision (retain `(function, line)`) — `D-DEBT-06-25`.
+- [Phase 6, round 7]: OPS-07 accepted with deviation rather than passed — `/api/services` misses its 500ms p95 on three hardware runs under a harness load ~34.5x the real per-route rate, but measures 77.1ms at the deployment's actual 0.067 req/s, which is what the budget's own rationale (perceived UI responsiveness) exists to protect. No budget, criterion or harness default amended; `PROH-OPS-07-01`/`-10` unweakened; not promoted to Complete under `PROH-OPS-07-08`. Revisit if the real request rate rises or services are added — see `D-DEBT-06-27`'s untested contention finding.
 
 Decisions are logged in PROJECT.md Key Decisions table. Recent decisions affecting current work:
 
