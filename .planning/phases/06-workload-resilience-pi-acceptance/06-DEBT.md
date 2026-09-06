@@ -981,7 +981,7 @@ per the `TEL-06`/`PROH-OPS-07-08` precedent — this round may not promote OPS-0
 | Field | Value |
 |---|---|
 | **Raised by** | The round-6 planner, which verified the premise before decomposing it and returned `PLANNING INCONCLUSIVE` |
-| **Status** | **Direction chosen 2026-09-05 — option D executed, option C selected on re-measured evidence.** Option D ran (`06-ACCEPTANCE-C3-RUN2.md`): the confound resolved and the route still failed, worse — p95 679.3ms, so it is structurally over budget on two independent runs. The attribution was then re-measured (`06-PROFILE-2.md`) because this entry's own options were sized against a profile predating 06-13's memo: `maintenance_coverage` has collapsed 29.649% → 5.479% (that memo banked) and `uptime_sweep` is now 43.727%. **Option C is the chosen path and is now plausibly sufficient alone** (~382-475ms projected against a 500ms budget). Option A remains unneeded unless C lands and the route still misses. `D-DEBT-06-19`'s rollup remediation stays refuted. |
+| **Status** | **Closed 2026-09-06 (`06-32`) — option C is refuted twice at the route level; the reduced-producer remedy PASSES the bar; the rollup path is re-refuted independently one round after this entry's original refutation, with a strengthening geometry finding added.** Option D ran (`06-ACCEPTANCE-C3-RUN2.md`): the confound resolved and the route still failed, worse — p95 679.3ms, so it is structurally over budget on two independent runs. The attribution was then re-measured (`06-PROFILE-2.md`) because this entry's own options were sized against a profile predating 06-13's memo: `maintenance_coverage` has collapsed 29.649% → 5.479% (that memo banked) and `uptime_sweep` is now 43.727%. Option C (the SQL reshape) was chosen, implemented (`06-25`, `06-29`) and refuted at the route level twice (+315.8%, then +21.78% over the bar). The operator then chose `revert-route-wiring` (`06-30`) and, at `06-31`'s blocking checkpoint, the cheaper `reduce-producer-input` remedy over rebuilding rollup infrastructure — on evidence that included round 7's own independent re-refutation of the rollup premise (below) plus a new geometry finding that upgrades the rejection from "not currently populated" to "not reconstructible". `06-PROFILE-5.md` measured the shipped remedy at **34.927ms against the 56.820ms bar — PASS** (`06-32`). See "Round 7 re-proposed this entry's own refuted premise, then independently re-refuted it" below for the full record. |
 | **Severity** | High for planning; no code defect |
 
 **What was claimed, by the orchestrator, twice and with confidence.** That `service_rollups` already
@@ -1068,6 +1068,51 @@ moves the 168-bucket strip off the request path entirely rather than continuing 
 computation cost. See the new `D-DEBT-06-23` for the SQL cost-floor finding that motivates the
 re-scoping. The revert itself is not executed by `06-30` — it is a separate plan.
 
+**Round 7 re-proposed this entry's own refuted premise, then independently re-refuted it — added
+2026-09-06 (`06-32`).** `06-GUARD-DECISION.md` §8 re-scoped OPS-07's remedy to "the next round moves
+the 168-bucket strip off the request path entirely, precomputed by the worker." Round 7's planner
+(`06-31-PLAN.md`) opened having been scoped on exactly the `service_rollups`-already-holds-the-strip
+premise this entry refuted on 2026-09-05 — a refuted premise reinherited one round later, precisely
+the failure mode `PROH-OPS-07-29` was minted to name. The re-proposal was caught before code moved,
+by the planner re-verifying the premise rather than inheriting it, and it re-refutes independently
+rather than merely citing this entry:
+
+- **The population half, reproduced on the same profiled shape, this time driven to convergence.**
+  Round 6 measured "0 buckets inside the window, 2016 outside" on a smaller probe shape. Round 7
+  drove the worker's own `run_retention_batch` to convergence on the profiled 8-service/8-day shape
+  (73 batches, 2,304 buckets rolled) and measured: `service_rollups` holds **0 rows** at
+  `bucket_seconds=3600` and **0 rows of any tier inside the strip window**; the 2,304 rows that exist
+  are all at `bucket_seconds=300`, every one aged 7.00-8.00 days — outside the window entirely —
+  against `service_checks`' 22,247 rows covering `[now-7d, now]` exactly. Same conclusion, independent
+  measurement, harder shape.
+- **A finding this entry did NOT previously carry, which upgrades the rejection's own strength.**
+  `UPTIME_WINDOW_SECONDS` (`604800`) equals `168 * 3600` exactly, so the sliding window's origin puts
+  every rendered bucket boundary at offset `now % 3600` from the epoch-hour grid. Measured across five
+  random `now` values: **168 of 168 rendered buckets straddle an epoch hour** (not "two partial edge
+  buckets" — every one), and apportioning hour-aligned totals into them changes **150-157 of the 168
+  rendered values**, worst absolute error **0.461** on a 3-decimal fraction. **This means option A
+  could not correctly render this strip even if the hourly tier were fully populated** — the rejection
+  upgrades from "not currently available" (a population/timing problem, potentially fixable by
+  changing retention knobs) to "not reconstructible" (a geometry problem: the rollup ladder's fixed
+  hour-aligned grid cannot losslessly produce the strip's sliding-origin boundaries at any population
+  level, without becoming the rendered-contract change `PROH-OPS-07-15` forbids).
+- **Status change.** This entry's remedy path is no longer "options recorded, none chosen" — the
+  operator chose `revert-route-wiring` at `06-30` (recorded above) and the cheaper alternative
+  (`reduce-producer-input`, feeding the same Python producer only its state-change points) was chosen
+  over rebuilding the rollup infrastructure at `06-31`'s Task 1 blocking checkpoint, on this same
+  corrected evidence plus the "not reconstructible" finding. `06-PROFILE-5.md` measured the chosen
+  path at **34.927ms against the 56.820ms bar — PASS** (`06-32`). The `service_rollups` remedy is
+  therefore refuted twice, independently, one round apart, and the second refutation is strictly
+  stronger than the first.
+- **What this means for an eighth round.** Should a future round need more than `06-31`'s reduction
+  delivers, `service_rollups` is not an available fallback at any retention setting this deployment
+  plausibly runs, for the geometric reason above, not merely a timing one. A future remedy needing a
+  precomputed rollup would need either a new, strip-aligned rollup tier (a genuinely new, one-way
+  infrastructure decision, unlike anything scoped so far) or to accept the sliding-window geometry as
+  a permanent constraint on any precomputation strategy. `PROH-OPS-07-29` requires this paragraph — or
+  its equivalent — to be read and re-verified against source before either path is proposed a third
+  time.
+
 ---
 
 ### D-DEBT-06-22 — an executed plan's acceptance criterion was not implemented, and the SUMMARY did not disclose it
@@ -1112,7 +1157,7 @@ miss with the reasoning for that conclusion recorded.
 | Field | Value |
 |---|---|
 | **Raised by** | `06-29-PLAN.md` Task 1's calibration bench and Task 1's query-level A/B, `06-PROFILE-4.md`'s route-level measurement |
-| **Status** | **Flagged — the round's substantive technical finding, held in reserve pending a future round's cost model.** New this round. |
+| **Status** | **Reframed 2026-09-06 (`06-32`), not superseded — the SQL-formulation cost floor stood and led directly to the fix that closed OPS-07's route-level cost.** See "Round 7's outcome: the sweep's cost fell 19.3x without touching the SQL floor" below for what the measured result changes about this entry's own conclusion. |
 | **Recorded in the plan** | `06-GUARD-DECISION.md`, `06-PROFILE-4.md` |
 
 **The finding.** `06-29`'s SQL reshape made the bucket aggregation itself nearly free, and the route
@@ -1162,6 +1207,206 @@ approach rather than continuing to optimize the per-request query (`06-GUARD-DEC
 `ordered_points` restructure and re-measures (closing this entry only if the route then clears the
 bar), or the operator's re-scoped remedy (moving the strip off the request path entirely) ships and
 is measured, superseding the per-request cost-model question this entry poses.
+
+**Round 7's outcome: the sweep's cost fell 19.3x without touching the SQL floor — added 2026-09-06
+(`06-32`).** Neither of this entry's own two named closure paths is what actually shipped. `06-31`
+took a third path this entry did not anticipate: abandon the SQL formulation entirely (revert to the
+Python producer `_uptime_summary`) and reduce what that Python producer is fed, rather than either
+restructuring the SQL query (`ordered_points`) or moving the computation off the request path onto a
+worker cadence. `06-PROFILE-5.md` measured the result at 34.927ms against the 56.820ms bar — PASS,
+comfortably clearing the bar this entry's own SQL-path finding said per-request SQL computation could
+not clear.
+
+**What this supersedes and what stands, stated explicitly rather than left to inference.** This
+entry's central finding — "the reshaped query's own cheapest necessary component (`ordered_points`)
+already costs what the whole prior [Python sweep] approach cost, so a hypothetically free bucket
+aggregation layered on top of it could not beat the sweep" — **stands, unrefuted, for the query
+formulation it was measured against.** Nothing in round 7 re-measures `ordered_points` or the SQL
+path; that finding is not touched. What **supersedes** is the entry's generalization from that
+finding: "per-request SQL computation, however well-formulated, cannot beat the Python sweep it
+replaced on this data shape" was stated as if the Python sweep's own cost were fixed — a floor the
+SQL path had to clear. Round 7 showed the Python sweep's cost was never fixed: `_legacy_uptime_summary`
+was paying to sweep 25,278 raw points whose information content was 72, and reducing the *input*
+(not the algorithm, not the language) fell its tottime 236.666ms -> 12.291ms, **19.3x**, with every
+other bucket flat within noise (`06-31-SUMMARY.md`'s own mutation-verified measurement). The
+corrected generalization: **per-request computation over the raw point stream cannot reach the
+budget; per-request computation over the reduced, state-change-only stream can, and did, without
+leaving the request path or building new infrastructure.** The held-in-reserve `ordered_points`
+restructure and the worker-precomputed-rollup re-scope are BOTH now unneeded to clear the bar — not
+because either was wrong, but because a cheaper remedy inside the already-existing Python path
+cleared it first. Whether either is still worth pursuing for reasons beyond this one bar (e.g.,
+further headroom before a Pi run) is not answered here; `D-DEBT-06-21`'s "not reconstructible" finding
+above answers it for the rollup path specifically.
+
+---
+
+### D-DEBT-06-24 — `read_uptime_strips_by_port` and `UPTIME_STRIP_QUERY` are retained, deliberately, unreferenced by production
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-31-PLAN.md`'s `artifacts_this_phase_produces`, `06-GUARD-DECISION.md` §8 |
+| **Status** | **Recorded as debt, not rediscovered as dead code.** New this round. |
+| **Severity** | Low — no correctness or security exposure; a maintenance-cost and reader-confusion risk only |
+
+**What is retained.** `dashboard/beacon/repositories.py`'s `UPTIME_STRIP_QUERY` and
+`read_uptime_strips_by_port` — the bulk-SQL uptime-strip reader `06-25` introduced and `06-29`
+reshaped — remain in the tree, fully functional and fully tested, with **zero production callers**
+as of `06-31`'s revert. `dashboard/app.py`'s `api_services` calls `_uptime_summary` (the Python
+producer) again; nothing in `dashboard/` imports or calls `read_uptime_strips_by_port`.
+
+**The operator's rationale, recorded verbatim (`06-GUARD-DECISION.md` §8):**
+
+> `read_uptime_strips_by_port`, its 1,824-case differential, the three golden fixtures and the
+> boundedness suite all STAY in the tree — they are a proven-correct implementation and the
+> evidence base for the next round, not throwaway work.
+
+**The guards that keep passing over unreferenced code, named so their maintenance cost is
+visible rather than invisible.** Every one of these exercises `read_uptime_strips_by_port` and/or
+`UPTIME_STRIP_QUERY` directly, not through `api_services` — they pass regardless of whether the
+route calls the function they test, which is exactly the property that makes them evidence rather
+than route coverage:
+
+- `UptimeStripSqlDifferentialTests` (`tests/test_services_route_scaling.py:907`) — the randomized
+  differential proving the SQL reader's output matches `_legacy_uptime_summary`'s.
+- `UptimeStripBoundednessTests` (`tests/test_services_route_scaling.py:1240`) — the row-count bound
+  proof for the recursive `expanded` CTE (`PROH-OPS-07-17`).
+- `UptimeStripCostModelTests` (`tests/test_services_route_scaling.py:1385`) and
+  `UptimeStripSqlTextGuardTests` (`tests/test_services_route_scaling.py:1545`) — the narrowed
+  rounding/division guard (`06-GUARD-DECISION.md` §4-5) and the query-shape cost-model assertions.
+- `UptimeStripRowEmissionTests` (`tests/test_services_route_scaling.py:1701`) — per-row emission
+  correctness for the reader's projected columns.
+- The three `api_services_pre_narrowing_*_golden.json` fixtures (maintenance-path, over-cap,
+  empty-services) that `06-25` and `06-29` each proved byte-identical output against, still
+  unregenerated since round 5.
+
+**What would need to be true to delete these.** A future round would need to either (a) conclude
+`service_rollups` or another precomputed path supersedes the per-request SQL reader entirely, making
+it genuinely obsolete rather than merely unused, or (b) decide the evidence base is no longer needed
+because no round remains that could plausibly re-adopt the SQL-reader approach. Neither is true
+today: `D-DEBT-06-21`'s round-7 addendum shows the rollup path is not reconstructible at any
+population level, and the SQL reader remains the cheapest known SQL-side implementation of the
+strip's shape (`D-DEBT-06-23`) should a future round need a route-level SQL remedy again for a
+reason unrelated to this bar.
+
+**The risk of leaving them, named rather than left implicit.** A later reader of `dashboard/beacon/
+repositories.py` who does not read this entry, `06-GUARD-DECISION.md` §8, or `06-31-SUMMARY.md`
+could reasonably mistake `read_uptime_strips_by_port` for live production code — it is fully
+implemented, fully tested, and sits beside functions that genuinely are called from `app.py`. The
+guards above do not disclose this by their own presence; without this entry, only careful reading of
+`api_services`'s actual call graph would surface it.
+
+---
+
+### D-DEBT-06-25 — the `06-LOCK-AUDIT.md` pinning recurrence: closed with a decision, not absorbed a fifth time
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-LOCK-AUDIT.md`'s third-realignment note (`06-28`'s open decision since round 6), its fourth-realignment note (`06-31`) |
+| **Status** | **Decided 2026-09-06 (`06-32`) — retain `(function, line)` pinning; do not re-pin to `(function, ordinal)` this round.** |
+| **Severity** | Low — a maintenance-cost decision, not a correctness gap |
+
+**The recurrence.** `06-LOCK-AUDIT.md` pins each of the 28 `with _db_lock` sites by
+`(function, line)`. Four unrelated `app.py` edits in this phase (`06-20`'s narrowing, its `ea8689e`
+revert, `06-25`'s bulk-SQL wiring, `06-31`'s revert-plus-reduction) each shifted every site's line
+number from `api_events` onward, forcing four realignments of the same table. `06-28` has carried
+the re-pinning question — `(function, line)` versus `(function, ordinal)`, the latter surviving any
+edit that does not add or remove a `_db_lock` site at all — as an open decision since round 6,
+without ever being executed, because re-pinning requires editing `tests/test_lock_profile.py`'s
+`test_every_db_lock_site_is_covered_by_the_audit` comparison mechanism and `06-LOCK-AUDIT.md`'s own
+table structure — both outside this task's `<files>` scope (`06-DEBT.md` only) and squarely inside
+`06-28`'s own already-scoped decision to make when it executes.
+
+**The two options `06-28` framed, both stated so neither is silently dropped:**
+
+| | Option | Cost | Reversibility |
+|---|---|---|---|
+| A | Keep `(function, line)` pinning | Cheap now; pays a realignment on every `app.py` edit near or above a pinned site | Reversible at any time; the cost is recurring, not compounding |
+| B | Re-pin to `(function, ordinal)` — the Nth `with _db_lock` occurrence inside a given function, independent of line number | One-time cost: rewrite the audit table's identity column and the AST-comparison test that enforces it | Reversible, but the rewrite itself is a test/code change this debt-record-only plan is not scoped to make |
+
+**The decision taken, and why now rather than deferred again.** This entry closes the standing
+"open decision" itself — ending the indefinite deferral `06-28` has carried since round 6 — by
+choosing **Option A for this round**: `(function, line)` pinning is retained, and the re-pinning to
+`(function, ordinal)` is explicitly NOT executed here. This is a decision, not a further deferral,
+because it is made on stated evidence rather than left unstated: `06-31` demonstrated that the
+recurring cost is bounded by discipline, not solely by pinning scheme. **The specific reason this
+round paid the realignment cost once rather than twice:** the revert (`06-25`'s SQL wiring) and the
+reduction (state-change-only input) landed in ONE commit, per `06-31`'s own explicit instruction, so
+the producer name in `LockScopePreservationTests` and the line numbers in rows 20-28 each moved
+exactly once instead of twice. Net line delta actually applied: **+42** (the restored `checks_by_port`
+two-consumer path plus the reduction's own comment recording the partition-additivity argument and
+the NULL-preservation rule). Rows 1-19 were unaffected, because the edit sits below `api_services`'
+`with _db_lock` at line 2875 — every site above that line never moves regardless of what changes
+inside `api_services`'s body.
+
+**What this decision does and does not close.** It closes the *indefinite deferral* — the recurrence
+now has a stated, reasoned answer for round 7 rather than an open question rolled forward untouched
+a fifth time. It does NOT execute the `(function, ordinal)` re-pinning; that re-pinning, if wanted,
+remains `06-28`'s to make when it executes, per `D-DEBT-06-26` below. If `06-28` never executes
+before another `app.py` edit lands near or above a pinned site, a fifth realignment is the accepted,
+bounded cost of Option A — reduced in practice by the single-commit discipline this entry records,
+not eliminated by it.
+
+---
+
+### D-DEBT-06-26 — the amendments `06-27` and `06-28` now need, enumerated without editing either
+
+| Field | Value |
+|---|---|
+| **Raised by** | `06-32-PLAN.md`, extending `06-GUARD-DECISION.md` §7 |
+| **Status** | **Recorded — awaiting a re-planning round.** New this round. |
+| **Severity** | High for planning continuity; no code defect |
+
+Neither `06-27-PLAN.md` nor `06-28-PLAN.md` is edited by this plan or by `06-31`. This phase's
+append contract forbids modifying an existing PLAN; this entry extends `06-GUARD-DECISION.md` §7's
+list with what round 7 additionally changed, rather than restating what §7 already said.
+
+### `06-27` needs (extending `06-GUARD-DECISION.md` §7)
+
+1. **`06-PROFILE-5.md`'s verdict is PASS — `06-27`'s `PROH-OPS-07-20` stop condition is lifted for
+   the first time this phase.** §7 recorded `06-PROFILE-4.md`'s FAIL-BUT-IMPROVED verdict as leaving
+   `06-27` blocked. `06-32` supersedes that: `06-PROFILE-5.md` measured 34.927ms against the 56.820ms
+   bar, a PASS. Any re-planning round must have segment A's decision gate reference `06-PROFILE-5.md`,
+   not `06-PROFILE-4.md`, as the local predictor `PROH-OPS-07-20` gates on.
+2. **Both build references in `06-27-PLAN.md`'s `user_setup` segment A must be restated a second
+   time.** §7 already named that HEAD moved from `06-25`'s `9da5e5e` to `06-29`'s reshape commit
+   (`8a84139`). HEAD has since moved again: `06-31`'s production commits (`83f9ce5`, `bcfc73f`) are
+   the current HEAD as of `a7c3ef1`. Segment A's "after" side must name this build, not `8a84139` or
+   `9da5e5e`. The "before" side (the pre-`06-25` parent commit) is unaffected — `79e051e` still
+   satisfies that description.
+3. **A PASS still does not make `06-27` runnable as written.** Per `PROH-OPS-07-20`'s own text
+   ("only `unblock-27` requires a PASS, and no verdict recorded here is PASS" — §7, written against
+   `06-PROFILE-4.md`), a PASS is now recorded, which changes that specific sentence's premise. A
+   re-planning round confirms the amendment above before running `06-27`'s Pi time, since Pi time is
+   the resource `PROH-OPS-07-20` exists to protect.
+
+### `06-28` needs (extending `06-GUARD-DECISION.md` §7)
+
+1. **Register round 7's seven new threats.** `06-28-PLAN.md`'s own `must_haves` already requires
+   registering `T-06-120`..`T-06-145` (round 6's 26 threats). Round 7 adds `T-06-158`..`T-06-164`
+   (`06-31-PLAN.md`'s `<threat_model>`) — seven more, closed on `06-32`'s Task 3 in this plan's own
+   `06-SECURITY.md` edit (recorded there, not deferred to `06-28`, since this plan's own security
+   edits must not leave threats it introduces unregistered).
+2. **`06-28`'s fourth threat (the recursive CTE's data-dependent row count) now describes code that
+   is no longer on the request path.** §7 point 1 recorded this threat against `06-29`'s reshape,
+   assuming it would be live at whatever `06-28` eventually audits. `06-31`'s revert means the
+   recursive `expanded` CTE (`read_uptime_strips_by_port`) is retained but unreferenced by production
+   (`D-DEBT-06-24`). `06-28` must re-scope this threat's disposition from "mitigated against the live
+   request path" to "mitigated against a retained, tested, unreferenced code path" — a real but lower
+   materiality distinction that must be stated, not silently carried forward as if the reshape were
+   still wired to `/api/services`.
+3. **`06-28`'s `PROH-OPS-07-21` obligation now extends to `06-31`'s revert as well as `06-29`'s
+   reshape.** §7 point 2 already extended this obligation to `06-29`'s shape. Any `06-SECURITY.md`
+   row whose evidence cites either `06-29`'s reshape-era code shape or `06-25`'s original range-join
+   shape as *live request-path* evidence must be re-closed on `06-31`'s current shape (the Python
+   producer, `_uptime_summary`, fed the state-change reduction) or reopened — this plan's own Task 3
+   performs exactly this re-closure for `T-06-24` and `T-06-101`, which `06-28` should read as the
+   worked example rather than repeat independently when it executes.
+4. **`06-28`'s own scope decision on `(function, ordinal)` re-pinning stands, unexecuted.**
+   `D-DEBT-06-25` above closes this round's indefinite deferral of the pinning-scheme *question* with
+   a decision to retain `(function, line)` for now; it does not execute the `(function, ordinal)`
+   re-pinning `06-28` already held as its own scope decision. If `06-28` executes, this is still its
+   decision to make, informed by `D-DEBT-06-25`'s record of a fourth realignment paid at +42 net
+   lines.
 
 ---
 
