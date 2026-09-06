@@ -31,8 +31,12 @@ All four gating properties (`run_kind`, `lock_profile`, `concurrency`, `duration
 together with `self_test: false` — this run is admissible OPS-07 evidence, `PROH-OPS-07-11`'s
 condition for treating it as such.
 
+Both counts were queried before (step 3) and after (step 6) the run, via Python's stdlib `sqlite3`
+under `sudo` (the CLI binary is not installed on this Pi — see `06-ACCEPTANCE-RUNBOOK.md`):
+
 `service_checks`: **66,005 → 66,035** (before → after, +30 rows over the run's 601s window).
-`services`: **7** — the same shape as run 2 (also 7) and one fewer than run 1 (8).
+`services`: **7 → 7** (unchanged, as expected for a table this run's load does not write to) — the
+same shape as run 2 (also 7) and one fewer than run 1 (8).
 
 ## Result: `overall_passed` FALSE — one route, missing by 162.3ms
 
