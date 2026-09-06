@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 — OPS-07: option C landed (06-25) and was REFUTED by the local predictor (06-26): /api/services went 56.820ms -> 236.265ms on the dev host, +315.8%. 06-27 is BLOCKED from running against this build by 06-26's own stop condition.
+**Current focus:** Phase 06 — OPS-07: the 06-29 CTE reshape recovered most of 06-25's regression (236.265ms -> 69.191ms, -70.71%) but still misses the 56.820ms pre-option-C bar by +12.371ms (+21.8%). Verdict FAIL-BUT-IMPROVED. 06-30's blocking checkpoint (keep vs revert) is the open decision; 06-27 stays blocked.
 
 ## Current Position
 
 Phase: 06 of 08 (workload-resilience-pi-acceptance)
 Plan: 24 of 26 executable — 28 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked `do_not_execute` in their frontmatter as of 79e051e). 06-25 and 06-26 executed 2026-09-05. 06-27 and 06-28 remain.
-Status: BLOCKED — option C is refuted on the dev host. 06-25 landed the bulk SQL uptime aggregation; 06-26's before/after measured a +315.8% regression, not the projected improvement. Do not run 06-27 (Pi time) against this build.
-Last activity: 2026-09-05 — 06-26 REFUTED option C locally before any Pi time was spent; root cause recorded in 06-PROFILE-3.md
+Status: BLOCKED on a decision — 06-29's reshape measured 69.191ms vs the 56.820ms bar (FAIL-BUT-IMPROVED, 06-PROFILE-4.md). The planner's pre-registered ~70ms projection was confirmed. 06-30 Task 2 is a blocking operator checkpoint: keep the reshape or revert the route wiring.
+Last activity: 2026-09-06 — 06-29 executed and merged (b3137c6); reshape is 3.4x faster than 06-25 but still 21.8% over the bar
 
 Progress: [███████░░░] 75%
 

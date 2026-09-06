@@ -494,7 +494,8 @@ Plans:
   - **REFUTED 2026-09-05** — measured +315.8% on the dev host (236.265ms vs 56.820ms); `06-27` is blocked from running against this build. See `06-PROFILE-3.md`.
 - [ ] 06-27-PLAN.md — Pi-class cost gate, then the gating concurrency-3 acceptance run, plus the runbook (human-gated)
 - [ ] 06-28-PLAN.md — Re-close the security boundary against HEAD and consolidate the round-6 record
-- [ ] 06-29-PLAN.md — Tracer: invert the `bucket_totals` join to bucket-index arithmetic, narrow the rounding guard that `06-25` never shipped, and re-measure against the 56.820ms bar
+- [x] 06-29-PLAN.md — Tracer: invert the `bucket_totals` join to bucket-index arithmetic, narrow the rounding guard that `06-25` never shipped, and re-measure against the 56.820ms bar
+  - **FAIL-BUT-IMPROVED 2026-09-06** — 236.265ms -> 69.191ms (-70.71%) but +12.371ms (+21.8%) over the 56.820ms bar. Projection confirmed. See `06-PROFILE-4.md`.
 - [ ] 06-30-PLAN.md — Record the unmet `06-25` criterion and the guard narrowing, and decide keep-vs-revert on the measured verdict (human-gated)
 
 **Wave 1**
