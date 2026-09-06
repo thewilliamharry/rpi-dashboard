@@ -1831,3 +1831,388 @@ class UptimeStripRowEmissionTests(unittest.TestCase):
                 )
             conn.close()
         self.assertIn(str(null_port), str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# 06-31 (input-reduction remediation, OPS-07): 06-GUARD-DECISION.md §8's
+# scoped rollup remedy is refuted on evidence (D-DEBT-06-21, PROH-OPS-07-29)
+# -- service_rollups holds zero rows inside the strip window, and an
+# hour-aligned rollup could not render the strip's sliding boundaries even if
+# populated (PROH-OPS-07-15). The cheaper remedy instead reduces
+# checks_by_port to state-change points only, inside api_services' existing
+# loop (dashboard/app.py, the `for row in all_checks` block around
+# `last_state_by_port`). Two guards below prove this reduction together:
+# UptimeStripCoalescingDifferentialTests proves it is output-identical and
+# never coalesces a NULL row away (PROH-OPS-07-28); UptimeStripInputReduction
+# GuardTests proves the reduction is actually PRESENT, because a differential
+# alone cannot detect its absence -- unreduced input trivially agrees with
+# itself (mutation m3, recorded in 06-31-SUMMARY.md at 0/N divergences).
+# ---------------------------------------------------------------------------
+
+def _reduce_to_state_changes(rows):
+    """Mirrors api_services' checks_by_port reduction rule (dashboard/app.py
+    line ~2968 onward, the `for row in all_checks` loop body around
+    `last_state_by_port`, 06-31) over a single port's `(ts, online)` rows,
+    already ordered by `ts` the way the route's own SQL orders them
+    (`ORDER BY port ASC, ts ASC`).
+
+    Kept as a free function here rather than imported, because the
+    reduction lives inline in api_services' loop body, not as a separate
+    callable -- there is nothing importable to call instead.
+    `UptimeStripCoalescingDifferentialTests.test_mirror_agrees_with_the_route_on_its_own_loop`
+    drives the real route through a real database and proves this mirror
+    matches what api_services actually hands `_uptime_summary`, so a
+    divergence between this function and dashboard/app.py's inline logic
+    cannot silently pass this file's other assertions.
+    """
+    reduced = []
+    last_state = None
+    for ts, online in rows:
+        if online is None:
+            reduced.append((ts, online))
+            last_state = None
+        else:
+            state = 1 if online else 0
+            if last_state != state:
+                reduced.append((ts, online))
+                last_state = state
+    return reduced
+
+
+class UptimeStripCoalescingDifferentialTests(unittest.TestCase):
+    """The reduction is output-identical to `_legacy_uptime_summary`'s own
+    output over the unreduced route-input subset, and never coalesces a NULL
+    row away (`PROH-OPS-07-28`). Every oracle call goes through this class's
+    own `_route_input_rows`, reusing `UptimeStripSqlDifferentialTests`'
+    contract exactly -- the route's own retention-floored subset, never the
+    full inserted set (`PROH-OPS-07-22`); restated here rather than shared
+    across TestCase classes so this class's failures are self-contained.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _route_input_rows(self, inserted, port, now):
+        floor = now - self.appmod.CHECK_RETENTION_SECONDS
+        return [(ts, online) for ts, online in inserted.get(port, []) if ts >= floor]
+
+    def _call_and_capture(self, rows, now):
+        """Both the reduced and raw forms must either return the same tuple
+        or both raise the same exception TYPE -- a raised TypeError is an
+        outcome to be compared, never an error to be swallowed
+        (`PROH-OPS-07-28`'s NULL case surfaces exactly this way).
+        """
+        try:
+            return ('ok', self.appmod._legacy_uptime_summary(rows, now))
+        except TypeError as exc:
+            return ('TypeError', type(exc))
+
+    def test_randomized_histories_agree_between_reduced_and_raw_route_input(self):
+        # Own seed -- not 20260925 (UptimeStripSqlDifferentialTests) and not
+        # 20260901 (UptimeSummaryDifferentialTests) -- so a failure is
+        # unambiguous about which class's fixture produced it.
+        rng = random.Random(20260931)
+        base_now = 1_700_000_000
+        total_cases = 0
+        null_cases = 0
+        total_raw_points = 0
+        total_reduced_points = 0
+
+        for trial in range(400):
+            now = base_now + rng.randint(-10_000, 10_000)
+            port_count = rng.randint(1, 8)
+            port_base = 60000 + trial * 10
+            ports = list(range(port_base, port_base + port_count))
+            inserted = {}
+            for port in ports:
+                total_cases += 1
+                window_start = now - UPTIME_WINDOW_SECONDS
+                sample_count = rng.randint(0, 40)
+                checks = []
+                state = rng.randint(0, 1)
+                if rng.random() < 0.25:
+                    # Deliberately starts before the retention floor, so at
+                    # least one in four histories crosses it under
+                    # randomized pressure, matching the same pressure
+                    # UptimeStripSqlDifferentialTests applies.
+                    ts = now - self.appmod.CHECK_RETENTION_SECONDS - rng.randint(1, UPTIME_WINDOW_SECONDS)
+                else:
+                    ts = window_start - rng.randint(0, UPTIME_WINDOW_SECONDS // 2)
+                for _ in range(sample_count):
+                    if rng.random() < 0.5:
+                        state = 1 - state
+                    checks.append((ts, state))
+                    choice = rng.random()
+                    if choice < 0.1:
+                        idx = rng.randint(0, UPTIME_BUCKETS)
+                        ts = int(window_start + idx * (UPTIME_WINDOW_SECONDS / UPTIME_BUCKETS))
+                    elif choice < 0.2:
+                        ts += rng.randint(1, UPTIME_WINDOW_SECONDS // 4 + 1)
+                    else:
+                        ts += rng.randint(1, UPTIME_WINDOW_SECONDS // 40 + 1)
+                # Roughly one case in twenty seeds a NULL row immediately
+                # after the run, at a guaranteed-unique, guaranteed-later
+                # timestamp, to exercise the NULL-preservation rule under
+                # the same randomized pressure as every other case
+                # (PROH-OPS-07-28).
+                if checks and rng.random() < 0.05:
+                    checks.append((checks[-1][0] + 1, None))
+                    null_cases += 1
+                seen = set()
+                deduped = []
+                for ts_i, state_i in checks:
+                    if ts_i not in seen:
+                        seen.add(ts_i)
+                        deduped.append((ts_i, state_i))
+                inserted[port] = deduped
+
+            for port in ports:
+                route_rows = sorted(self._route_input_rows(inserted, port, now), key=lambda r: r[0])
+                reduced_rows = _reduce_to_state_changes(route_rows)
+                total_raw_points += len(route_rows)
+                total_reduced_points += len(reduced_rows)
+
+                raw_outcome = self._call_and_capture(route_rows, now)
+                reduced_outcome = self._call_and_capture(reduced_rows, now)
+                self.assertEqual(
+                    raw_outcome, reduced_outcome,
+                    f'trial {trial} port {port}: reduced input diverged from raw '
+                    f'route input on _legacy_uptime_summary '
+                    f'(raw={route_rows}, reduced={reduced_rows})',
+                )
+
+        self.assertGreaterEqual(
+            total_cases, 1500,
+            f'expected at least 1,500 cases exercised, got {total_cases} -- a '
+            f'generator change emptied this class',
+        )
+        self.assertGreaterEqual(
+            null_cases, 50,
+            f'expected at least 50 cases carrying a NULL row, got {null_cases} -- '
+            f'a generator change stopped exercising the NULL-preservation rule',
+        )
+        self.assertGreater(total_raw_points, 0, 'no raw points were generated at all -- seeding failed')
+        self.assertLess(
+            total_reduced_points, total_raw_points,
+            'the reduction did not shrink the input at all across this transition-'
+            'dense case space -- something is wrong with either the generator or '
+            'the reduction',
+        )
+
+    def test_null_after_a_same_state_run_is_never_coalesced_away(self):
+        """The specific case the plan calls out: a NULL following an
+        already-offline run. Naive falsy-coalescing drops it and the
+        producer then returns a number where the correct form raises
+        (`PROH-OPS-07-28`).
+        """
+        now = 1_700_000_000
+        rows = [(now - 3000, 0), (now - 2000, 0), (now - 100, None)]
+        reduced = _reduce_to_state_changes(rows)
+        self.assertEqual(
+            len(reduced), 2,
+            f'expected the NULL row to survive reduction alongside one run-'
+            f'starting row, got {reduced}',
+        )
+        self.assertIsNone(reduced[-1][1], 'the NULL row itself must be the last retained row')
+        with self.assertRaises(TypeError):
+            self.appmod._legacy_uptime_summary(reduced, now)
+        with self.assertRaises(TypeError):
+            self.appmod._legacy_uptime_summary(rows, now)
+
+    def test_mirror_agrees_with_the_route_on_its_own_loop(self):
+        """Proves `_reduce_to_state_changes` (this file's mirror) matches
+        what api_services' own inline loop actually hands `_uptime_summary`
+        -- driven through the real database and the real route, not
+        reimplemented a second time. This is the "companion assertion" the
+        plan requires because Task 2 left the reduction inline rather than
+        as an importable function.
+        """
+        appmod = self.appmod
+        port = 91001
+        now = int(time.time())
+        rows = [
+            (now - 6000, 1), (now - 5900, 1), (now - 5800, 1),
+            (now - 5000, 0), (now - 4900, 0),
+            (now - 4000, 1),
+            (now - 2000, 0), (now - 1900, 0),
+        ]
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                "VALUES(?,?,?,?,?,?)",
+                (port, 'Mirror', now - 6000, now, 1, now - 60),
+            )
+            for ts, online in rows:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+        captured = []
+        original = appmod._uptime_summary
+
+        def spy(checks, spy_now):
+            captured.append((spy_now, list(checks)))
+            return original(checks, spy_now)
+
+        with mock.patch.object(appmod, '_uptime_summary', side_effect=spy):
+            response = appmod.app.test_client().get('/api/services')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(captured), 1, 'expected exactly one _uptime_summary call for one seeded service')
+        _route_now, route_checks = captured[0]
+
+        expected = _reduce_to_state_changes(sorted(rows, key=lambda r: r[0]))
+        self.assertEqual(
+            sorted(route_checks, key=lambda r: r[0]), expected,
+            "this file's mirror of the reduction rule diverged from what "
+            'api_services actually handed _uptime_summary',
+        )
+
+
+class UptimeStripInputReductionGuardTests(unittest.TestCase):
+    """Pins that api_services' input to the strip producer is a function of
+    STATE TRANSITIONS, never of stored check volume -- the property a
+    correctness differential cannot detect the absence of (mutation m3 in
+    `UptimeStripCoalescingDifferentialTests`: removing the reduction
+    diverges 0 cases, because unreduced input trivially agrees with
+    itself). Run against both a dense fixture and a fixture whose window is
+    mostly unobserved (`PROH-OPS-07-25`): a row-count guard verified only on
+    a dense dataset can falsely appear to pass.
+    """
+
+    def setUp(self):
+        self.appmod, self.db_path = load_app({})
+
+    def tearDown(self):
+        cleanup_db(self.db_path)
+
+    def _seed_service_and_checks(self, appmod, port, rows, now, title):
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                "VALUES(?,?,?,?,?,?)",
+                (port, title, (rows[0][0] if rows else now - 3600), now, 1, now - 60),
+            )
+            for ts, online in rows:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+    def _measured_input_count(self, appmod):
+        """Return the length of the `checks` list api_services actually
+        hands `_uptime_summary` -- observed by wrapping the real producer
+        through the real route, never re-derived, so a reduction that
+        silently disappeared cannot hide behind a re-implementation of the
+        rule under test.
+        """
+        captured = []
+        original = appmod._uptime_summary
+
+        def spy(checks, now):
+            captured.append(len(checks))
+            return original(checks, now)
+
+        with mock.patch.object(appmod, '_uptime_summary', side_effect=spy):
+            response = appmod.app.test_client().get('/api/services')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            len(captured), 1,
+            'expected exactly one _uptime_summary call for one seeded service',
+        )
+        return captured[0]
+
+    def test_reduced_input_count_tracks_transitions_not_stored_volume(self):
+        # Real wall-clock `now`, not a fixed historical epoch: the route
+        # filters `services` on `last_seen >= now - EXPIRE_DAYS * 86400`
+        # against the CURRENT time at request time, so a seeded `last_seen`
+        # far in the past would silently exclude the service from the
+        # response and this class's own vacuity guard would never fire.
+        now = int(time.time())
+        window_start = now - UPTIME_WINDOW_SECONDS
+        # Six state-schedule points (5 transitions -> 6 retained points),
+        # spread evenly across the window.
+        transition_ts = [
+            int(window_start + frac * UPTIME_WINDOW_SECONDS) + 10
+            for frac in (0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6)
+        ]
+        state_schedule = [1, 0, 1, 0, 1, 0]
+
+        def state_at(ts):
+            state = state_schedule[0]
+            for boundary_ts, boundary_state in zip(transition_ts, state_schedule):
+                if ts >= boundary_ts:
+                    state = boundary_state
+            return state
+
+        sparse_rows = list(zip(transition_ts, state_schedule))
+        # Dense cadence: a check every 5 minutes for the whole window,
+        # following the IDENTICAL online/offline schedule as the sparse
+        # fixture -- same transitions, ~336x the stored volume.
+        dense_rows = [(ts, state_at(ts)) for ts in range(window_start + 60, now, 300)]
+
+        sparse_appmod, sparse_db_path = load_app({})
+        self._seed_service_and_checks(sparse_appmod, 81001, sparse_rows, now, 'Sparse')
+        sparse_count = self._measured_input_count(sparse_appmod)
+        cleanup_db(sparse_db_path)
+
+        dense_appmod, dense_db_path = load_app({})
+        self._seed_service_and_checks(dense_appmod, 81002, dense_rows, now, 'Dense')
+        dense_count = self._measured_input_count(dense_appmod)
+        cleanup_db(dense_db_path)
+
+        dense_stored = len(dense_rows)
+        self.assertGreater(
+            dense_stored, dense_count * 10,
+            f'test fixture did not actually store substantially more rows than '
+            f'the reduced count: dense_stored={dense_stored}, dense_count={dense_count}',
+        )
+        self.assertEqual(
+            sparse_count, dense_count,
+            f"the strip producer's input count moved with stored check volume: "
+            f'sparse_count={sparse_count} (stored={len(sparse_rows)}), '
+            f'dense_count={dense_count} (stored={dense_stored}) -- the strip\'s '
+            f'Python input must be a function of state transitions, and a count '
+            f'that tracks stored volume means the reduction is gone',
+        )
+        self.assertEqual(
+            sparse_count, len(transition_ts),
+            f'expected the reduced count to equal the number of state-change '
+            f'points ({len(transition_ts)}), got {sparse_count}',
+        )
+        self.assertLess(
+            dense_count, dense_stored,
+            f'the reduced count ({dense_count}) is not strictly below the dense '
+            f"fixture's stored row count ({dense_stored}) -- the strip's Python "
+            f'input must be a function of state transitions, and a count that '
+            f'tracks stored volume means the reduction is gone',
+        )
+
+    def test_reduced_input_count_holds_on_a_mostly_unobserved_window(self):
+        """`PROH-OPS-07-25`: a row-count guard verified only on a dense
+        dataset can falsely appear to pass. This fixture's window is mostly
+        unobserved -- three checks in the final 300 seconds of a 7-day
+        window -- so the reduction's floor (transitions + 1) must hold here
+        too, not only on a dense fixture.
+        """
+        now = int(time.time())
+        port = 81003
+        rows = [(now - 300, 1), (now - 200, 0), (now - 100, 0)]
+        self._seed_service_and_checks(self.appmod, port, rows, now, 'Sparse-window')
+        count = self._measured_input_count(self.appmod)
+        self.assertEqual(
+            count, 2,
+            f'expected exactly 2 retained points (the run-starting online point '
+            f'plus the online->offline transition), got {count} -- the reduction '
+            f'must still coalesce the repeated offline check even on a mostly-'
+            f'unobserved window',
+        )
