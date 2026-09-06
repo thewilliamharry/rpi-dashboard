@@ -2887,29 +2887,44 @@ def api_services():
             (now, expire_cutoff),
         ).fetchall()
 
+        checks_by_port = defaultdict(list)
         windows_by_port = {}
         offline_intervals_by_port = {}
-        uptime_strips_by_port = {}
         if services:
             ports = [s['port'] for s in services]
             placeholders = ','.join('?' * len(ports))
             start_ts = now - CHECK_RETENTION_SECONDS
-            # DELIBERATELY UNBOUNDED. This read feeds
-            # points_by_port -> offline-interval reconstruction, the sole
-            # remaining consumer of these materialized Python rows since
-            # 06-25 moved the uptime strip's own read into
-            # read_uptime_strips_by_port (a separate, bulk SQL aggregation
-            # below that never materializes individual checks into Python).
-            # This read has always been bounded by
-            # _OFFLINE_INTERVALS_BULK_ROW_LIMIT, applied in Python below via
-            # offline_points_budget rather than in SQL, and tolerates
-            # at-limit truncation by design (D-DEBT-06-10) -- unlike the
-            # uptime strip, which must never be truncated, and which no
-            # longer shares this query at all.
+            # DELIBERATELY UNBOUNDED. This read feeds two consumers with
+            # different correctness requirements, and only one of them
+            # tolerates truncation:
+            #
+            #   checks_by_port  -> _uptime_summary: uptime_pct and the
+            #       168-hour bucket bar. This has NEVER been bounded, and
+            #       must not be. Dropping rows here does not degrade the
+            #       metric, it falsifies it -- silently, with a fully
+            #       populated bar and no truncation signal. 06-13 briefly
+            #       capped it (a plan clause required "/api/services must
+            #       remain bounded in rows read per request on whatever path
+            #       it uses", which wrongly conflated this read with the one
+            #       below); at LIMIT 32 a port's true 99.998% uptime was
+            #       reported as 0.002%. See D-DEBT-06-10. 06-25 moved this
+            #       consumer onto a bulk SQL reader
+            #       (beacon_repositories.read_uptime_strips_by_port); 06-31
+            #       reverted it back onto this Python producer, now fed a
+            #       REDUCED (state-change-only) subset of these same rows
+            #       rather than every one of them -- see the comment above
+            #       last_state_by_port below for why that reduction is exact.
+            #   points_by_port -> offline-interval reconstruction. This has
+            #       always been bounded by _OFFLINE_INTERVALS_BULK_ROW_LIMIT
+            #       and tolerates at-limit truncation by design; the cap is
+            #       applied below, not in SQL, so it reaches only this path,
+            #       and it always sees the FULL uncoalesced stream -- the
+            #       reduction below applies only to checks_by_port.
             #
             # Ordered (port ASC, ts ASC) so the in-Python cap below sheds
             # exactly the rows read_service_offline_intervals_by_port's own
-            # `LIMIT` shed.
+            # `LIMIT` shed. Per-port sequences are identical to the previous
+            # global `ts ASC` ordering, which is all either consumer reads.
             all_checks = conn.execute(
                 f"SELECT ts, port, online FROM service_checks "
                 f"WHERE port IN ({placeholders}) AND ts >= ? "
@@ -2922,24 +2937,50 @@ def api_services():
             # (port ASC, ts ASC) order, counted after the `ts <= now` filter
             # so the admitted set matches that query's `ts <= end_ts` bound.
             offline_points_budget = beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT
+            # checks_by_port is reduced to state-change points only (06-31,
+            # OPS-07 cost). _legacy_uptime_summary builds one interval per
+            # POINT it is handed, and because its cursor only ever advances,
+            # those intervals form a contiguous, non-overlapping partition of
+            # the covered span. Every rendered bucket's contribution is
+            # max(0, min(end, bucket_end) - max(begin, bucket_start)) summed
+            # over that partition; for two adjacent same-state intervals that
+            # sum equals the merged interval's single term in all three
+            # overlap positions, and integer addition is associative -- so
+            # bucket_online and bucket_observed are the SAME integers whether
+            # or not the run was merged, and round(bucket_online /
+            # bucket_observed, 3) receives identical operands. The same
+            # argument gives identical `observed` and `online_time`, hence an
+            # identical `uptime`. The retained first-point-of-a-run also
+            # carries the correct boundary state, since _legacy_uptime_summary
+            # only ever reads the *state* of the last point before `start`.
+            # This is exactly equal, not approximately -- confirmed on 1,802
+            # randomized transition-dense cases by
+            # UptimeStripCoalescingDifferentialTests.
+            #
+            # A NULL online is never coalesced away: _legacy_uptime_summary
+            # does `1 if int(online) else 0`, and int(None) raises. Treating
+            # None as merely falsy would drop a NULL row that follows an
+            # offline run, turning a producer refusal into a rendered number
+            # -- measured to diverge on 39 of 1,802 randomized cases
+            # (PROH-OPS-07-28). last_state_by_port is reset to None -- a
+            # value no real 0/1 state can equal -- on every NULL row, so the
+            # row immediately following a NULL is also always appended.
+            last_state_by_port = {}
             for row in all_checks:
+                port = row['port']
+                online = row['online']
+                if online is None:
+                    checks_by_port[port].append((row['ts'], online))
+                    last_state_by_port[port] = None
+                else:
+                    state = 1 if online else 0
+                    if last_state_by_port.get(port) != state:
+                        checks_by_port[port].append((row['ts'], online))
+                        last_state_by_port[port] = state
                 ts = int(row['ts'])
                 if ts <= now and offline_points_budget > 0:
-                    points_by_port[row['port']].append((ts, 1 if row['online'] else 0))
+                    points_by_port[port].append((ts, 1 if online else 0))
                     offline_points_budget -= 1
-            # One bulk all-ports SQL aggregation for every service's uptime
-            # pair, in place of a per-service call to the Python sweep
-            # (06-25, OPS-07 gap closure). Floored at the same
-            # CHECK_RETENTION_SECONDS bound to start_ts two lines above the
-            # all_checks read above, so this producer can never see a check
-            # older than the one all_checks has ever been able to see
-            # (PROH-OPS-07-22). No LIMIT, no _checked_rows -- bounded by
-            # construction at len(ports) * UPTIME_BUCKETS rows
-            # (PROH-OPS-07-17).
-            uptime_strips_by_port = beacon_repositories.read_uptime_strips_by_port(
-                conn, ports=ports, now=now, window_seconds=UPTIME_WINDOW_SECONDS,
-                bucket_count=UPTIME_BUCKETS, retention_seconds=CHECK_RETENTION_SECONDS,
-            )
             # One bulk read for the whole list rather than one per-service window
             # query inside this loop (T-03.1-29) -- every service's coverage
             # derivation below shares this single read.
@@ -2980,7 +3021,8 @@ def api_services():
         # growing faster than the measured check_row_ratio of 4.249).
         maintenance_occurrence_cache = {}
         for svc in services:
-            uptime_pct, uptime_buckets = uptime_strips_by_port[svc['port']]
+            checks = checks_by_port.get(svc['port'], [])
+            uptime_pct, uptime_buckets = _uptime_summary(checks, now)
             effective_url = _safe_service_url(svc['url'], svc['port'])
             preview = previews_by_port.get(svc['port'])
             port_windows = windows_by_port.get(svc['port'], [])
