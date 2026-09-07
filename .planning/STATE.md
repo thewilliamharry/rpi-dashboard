@@ -1,12 +1,13 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-milestone_name: milestone
-current_phase: 07
-current_phase_name: optional-advanced-diagnostics
-status: milestone_complete
-stopped_at: All 8 phases closed and verified. Milestone v1.0 is ready to archive — 45/46 requirements Complete; OPS-07 stays Accepted with deviation by design (PROH-OPS-07-08 reserves promotion to a future independent round).
-last_updated: "2026-09-07T00:00:00Z"
+milestone_name: Beacon
+milestone_status: shipped
+milestone_shipped: 2026-09-07
+closeout_type: override_closeout
+status: Awaiting next milestone
+stopped_at: Milestone v1.0 Beacon archived and tagged. Awaiting /gsd-new-milestone.
+last_updated: "2026-09-07T15:24:32.893Z"
 last_activity: 2026-09-07
 last_activity_desc: Milestone close-out — v1.0 re-audited against the fully-built tree, Phase 6 re-verified against its amended criterion 5, Phase 7 verified for the first time, DIA-09 amended (D-07-10) and promoted, planning records reconciled
 progress:
@@ -14,27 +15,27 @@ progress:
   completed_phases: 8
   total_plans: 129
   completed_plans: 127
+current_phase: null
+current_phase_name: null
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-11)
+See: .planning/PROJECT.md (updated 2026-09-07)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Milestone v1.0 is COMPLETE and ready to archive. All 8 phases are closed and verified; 45 of 46 requirements are Complete. OPS-07 is the one exception and stays `Accepted with deviation` by design — seven remediation rounds moved per-request cost 45.07% on Pi hardware but the concurrency-3 p95 only 2.5%, which is the phase's transferable finding, and `PROH-OPS-07-08` reserves promotion to a future independent round. Next: `/gsd-complete-milestone v1.0`. There is no Phase 8 — the roadmap has 8 phases counting the inserted 03.1 (1, 2, 3, 03.1, 4, 5, 6, 7), and an earlier "Next: Phase 08" pointer in this file was a miscount, corrected 2026-09-07. Revisit OPS-07 only if the real request rate rises — see D-DEBT-06-27.
+**Current focus:** Planning the next milestone. v1.0 Beacon shipped 2026-09-07 — 8 phases, 127 of 129 plans executed, closed as `override_closeout`. 45 of 46 v1 requirements Complete; OPS-07 stays `Accepted with deviation` by design (`PROH-OPS-07-08` reserves promotion to a future independent round). Two phase verifications were deliberately left open at close: `06-VERIFICATION.md` `human_needed` for the concurrency-1 HTTP control run, and `07-VERIFICATION.md` `gaps_found` for `PROH-DIA-09-01`'s per-service compose-override escape. 30 items acknowledged and deferred — see `## Deferred Items`. Next: `/gsd-new-milestone`.
 
 ## Current Position
 
-Phase: 8 of 8 complete (last: 07-optional-advanced-diagnostics)
-Plan: 127 of 127 executable — 129 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked do_not_execute in their frontmatter).
-Status: MILESTONE COMPLETE. Every phase is closed with a verification on file. OPS-01..OPS-04 Complete; OPS-07 Accepted with deviation, recorded in 06-VERIFICATION.md's `overrides:` block on 2026-09-07. Three failing hardware acceptance runs stand unsuperseded; no budget, criterion or harness default was ever amended to make them pass. DIA-09 Complete after Phase 7's independent verification round, its wording amended by D-07-10 on ownership grounds (the two shared history APIs belong to TEL-05 and HIS-01..06, not to advanced diagnostics).
-Last activity: 2026-09-07 — milestone close-out: v1.0 re-audited, Phase 6 re-verified against its amended criterion 5, Phase 7 verified for the first time (5/5, all mutation-confirmed), PROH-OPS-07-28 guarded on the shipping path, and the planning records reconciled
+Phase: None active — milestone v1.0 Beacon shipped and archived
+Plan: —
+Status: Awaiting next milestone. Run `/gsd-new-milestone` to define v1.1 or v2.0.
+Last activity: 2026-09-07 — v1.0 archived to `.planning/milestones/`, ROADMAP.md collapsed to a milestone grouping, REQUIREMENTS.md removed for a fresh set, PROJECT.md evolved, retrospective written, tag `v1.0` created
 
-Progress: [██████████] 100%
-
-Phase 07 (optional-advanced-diagnostics) is executed 3/3 and verified 2026-09-07 — all five ROADMAP criteria hold, every one mutation-confirmed. DIA-09 is Complete. Two findings are recorded and left open, neither blocking: PROH-DIA-09-01's guard is evadable via a per-service `environment:` override in docker-compose.yml, and D-DEBT-07-01 (the acceptance harness records elapsed_ms but never status_code) belongs to the next OPS-07 round.
+Test suite at close: 993 passed · 593 subtests · 0 failures.
 
 ## Performance Metrics
 
@@ -125,6 +126,7 @@ Phase 07 (optional-advanced-diagnostics) is executed 3/3 and verified 2026-09-07
 ## Accumulated Context
 
 ### Decisions
+
 - [Phase 6, round 7]: `reduce-producer-input` chosen over rebuilding rollup infrastructure — service_rollups is refuted a second time, independently, and shown "not reconstructible" at any retention level (168/168 rendered buckets straddle an epoch hour, worst apportioning error 0.461).
 - [Phase 6, round 7]: A premise recorded as refuted in the debt register must be re-verified against source before a later round inherits it (`PROH-OPS-07-29`) — round 7 was scoped on exactly the `service_rollups` premise round 6 had already refuted.
 - [Phase 6, round 7]: A differential can prove a reduction correct but never prove it is present — `06-31`'s input-count guard class exists because the correctness differential measured 0 divergences when the reduction was removed entirely (`PROH-OPS-07-28`).
@@ -305,8 +307,73 @@ None yet.
 |----------|------|--------|-------------|
 | Product scope | Remote control, fleet monitoring, accounts, hosted telemetry, and AI root-cause claims | Deferred to later milestone / out of scope | 2026-07-24 |
 
+### Acknowledged at v1.0 milestone close (2026-09-07)
+
+All 30 items below were surfaced by the pre-close artifact audit, acknowledged by the
+operator, and deferred. The milestone was closed as `override_closeout` on this basis.
+None is an unsatisfied requirement; each is a record the project deliberately keeps open.
+Item text is truncated to 180 characters — the full record lives in the named phase file.
+
+| Category | Item | Status |
+|----------|------|--------|
+| verification | Phase 06: 06-VERIFICATION.md | human_needed |
+| verification | Phase 07: 07-VERIFICATION.md | gaps_found |
+| context_question | Phase 05: 05-CONTEXT.md — 3 open question(s) | unresolved |
+| deferred | Phase 03: 1 — 03-09 Task 2 — `dashboard/advanced.js` (`renderServices` latency cell, `stableServiceSort` latency branch) — A service whose `latency_ms` is `null` renders as `0 ms` and sorts  | deferred |
+| deferred | Phase 03: 2 — 03-16 Task 2 — `dashboard/beacon/worker_main.py:296-302` — Review `WR-04` (round 3): the `started` bookkeeping write still gates the work, so a failure to *record* that a job b | deferred |
+| deferred | Phase 03: 3 — 03-16 Task 2 — `dashboard/advanced.js:263-272` — Review `IN-02` (round 3): `formatServiceGapEvidence` prefers `block.count` over `items.length` and `block.open_count` over the  | deferred |
+| deferred | Phase 03: 4 — 03-16 Task 2 — `dashboard/beacon/diagnosis.py:360, 393, 461` — Review `IN-04` (round 3): `attach_service_collection_gaps` documents in-place semantics, mutates in place, return | deferred |
+| deferred | Phase 03: 5 — 03-16 Task 2 — `dashboard/beacon/diagnosis.py:381-386` — Review `IN-06` (round 3): `service['collection_gaps']['items']` is the same list object as `pipeline['streams']['items' | deferred |
+| deferred | Phase 03: 6 — 03-16 Task 2 — `dashboard/advanced.js:529-544` — Review `IN-08` (round 3): an unmeasured latency ranks as `POSITIVE_INFINITY`, so a descending sort puts every unmeasured servic | deferred |
+| deferred | Phase 03: 7 — 03-16 Task 2 — see `03-REVIEW.md` `## Carried forward from round 1 (still open, not re-argued)` — The seventeen round-1 review findings the reviewer verified as still present i | deferred |
+| deferred | Phase 03: 8 — 03-17 Task 1 — `dashboard/app.py:1819-1825` (`worker_process_scan_requests` discovery-busy branch), `dashboard/app.py:1333-1334` (`_legacy_do_uptime_check` under `_uptime_lock` | deferred |
+| deferred | Phase 03: 9 — 03-19 Task 3 — `dashboard/app.py` (`worker_process_scan_requests` discovery-busy branch), `dashboard/app.py` (`_legacy_do_uptime_check` under `_uptime_lock` contention) — Both  | deferred |
+| deferred | Phase 03.1: **File:** `dashboard/style.css` | deferred |
+| deferred | Phase 03.1: **Found during:** Writing Task 3's `#meta-suggestion` visibility tests, plan 03.1-08. The exact same bug pattern was independently discovered and fixed for the new `.meta-suggestio | deferred |
+| deferred | Phase 03.1: **Issue:** `.meta-window-empty { display: flex; ... }` sets `display` unconditionally. This wins the CSS cascade over the browser's built-in `[hidden] { display: none }` rule, so t | deferred |
+| deferred | Phase 03.1: **Verified independently:** a Playwright probe against the live dev server (not a `file://` load, which never applies the stylesheet and masks the bug) confirms `getComputedStyle(. | deferred |
+| deferred | Phase 03.1: **Why deferred rather than fixed here:** `dashboard/style.css` line 749 (`.meta-window-empty`) is outside plan 03.1-08's declared scope — it is owned by the completed, merged plan  | deferred |
+| deferred | Phase 03.1: **Suggested fix (for whichever future plan next touches `dashboard/style.css`):** add `.meta-window-empty[hidden] { display: none; }` immediately after the existing `.meta-window-e | deferred |
+| deferred | Phase 03.1: **User-visible impact:** low but real — a service with existing maintenance windows briefly (or persistently, depending on layout) shows a stray "No maintenance windows yet" box ab | deferred |
+| deferred | Phase 05: The pre-phase baseline `515eee8` runs the full suite fully green (746 passed, 0 failures). | deferred |
+| deferred | Phase 05: After 05-01 the failure reproduced in **2/2** full-suite runs — deterministic, not intermittent. | deferred |
+| deferred | Phase 05: Minimal reproduction, 0.28s: `pytest tests/test_api_and_auth.py::ApiAndAuthTests::test_scan_status_never_reports_degraded_and_stale_together tests/test_runtime_ownership.py::Runtim | deferred |
+| deferred | Phase 05: 05-05: `dashboard/advanced.js`, `tests/test_advanced_ui.py`, `tests/test_history_investigation_ui.py` | deferred |
+| deferred | Phase 05: 05-06: `dashboard/advanced.css`, `tests/test_theme_parity_ui.py` The intra-wave overlap check compares file paths, so it saw no conflict. But the dependency was real and **semantic | deferred |
+| deferred | Phase 05: 1 — 05-01 post-merge gate — `tests/helpers.py` (`load_app`) — `load_app` writes every `extra_env` key into `os.environ` and never restores it, so any test that passes `extra_env` s | deferred |
+| deferred | Phase 05: 2 — 05-03 full-suite verification — `tests/test_ui_safety_integration.py::UiSafetyIntegrationTests::test_stale_to_fresh_page_persists_actions_and_records_recovery` — Real-wall-cloc | deferred |
+| deferred | Phase 06: Fails deterministically: 4/4 runs in isolation (`1 failed` every time, not intermittent). | deferred |
+| deferred | Phase 06: Not caused by 06-12's diff: confirmed by empty `git diff` against the pre-plan baseline for both the test file and the entire `dashboard/` tree. | deferred |
+| deferred | Phase 06: Full suite otherwise green at 839 passed / 561 subtests passed (837 baseline + 4 new `ServicesRouteProfilerGuardTests` tests, all passing) with only this one pre-existing failure p | deferred |
+| deferred | Phase 06: 1 — 06-12 full-suite verification (Task 1) — `tests/test_ui_states.py::UiStateBrowserTests::test_safety_matrix_keeps_recovery_tls_errors_and_narrow_controls_distinct` — Fails at `s | deferred |
+
+**Not closed by this milestone, carried into the next:**
+
+- `06-VERIFICATION.md` stays `human_needed` — the residual concurrency-1 HTTP control run
+  on build `a7c3ef1`. It is explicitly not a condition of the OPS-07 override; it would
+  replace that acceptance's one inferential step (an in-process cProfile at 77.1ms) with a
+  direct measurement.
+
+- `07-VERIFICATION.md` stays `gaps_found` — gap 2, `PROH-DIA-09-01`'s per-service
+  `environment:` override escape in `docker-compose.yml`, found by mutation M8. Recorded,
+  not closed.
+
+- `D-DEBT-06-27` — the named revisit trigger for OPS-07 if the deployment's real request
+  rate rises or services are added.
+
+- `D-DEBT-07-01` — the acceptance harness records `elapsed_ms` but never `status_code`,
+  so a 404 reads as a fast, budget-clearing success. Owned by the next OPS-07 round.
+
+- The seventeen carried-forward `03-REVIEW.md` round-1 findings, visible to the next
+  executor and verifier rather than silently absent.
+
 ## Session Continuity
 
-Last session: 2026-09-06T12:39:10Z
-Stopped at: 06-32 complete — 06-31's build measured at 34.927ms against the 56.820ms bar (PASS); 06-27 and 06-28 remain, each needing the amendment D-DEBT-06-26 enumerates before either can run
+Last session: 2026-09-07
+Stopped at: Milestone v1.0 Beacon closed. Archives written, ROADMAP collapsed, PROJECT.md evolved, RETROSPECTIVE.md started, tag `v1.0` created.
 Resume file: None
+Open blockers carried forward: none blocking. Two non-blocking verification records stay open by decision (Phase 6's concurrency-1 control run; Phase 7's `PROH-DIA-09-01` compose escape).
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
