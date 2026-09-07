@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 06
-current_phase_name: workload-resilience-pi-acceptance
-status: complete
-stopped_at: Phase 06 closed 2026-09-06. All 30 executable plans done (06-23/06-24 superseded). OPS-07 accepted with deviation; OPS-01..04 Complete.
-last_updated: "2026-09-06T16:53:27Z"
-last_activity: 2026-09-06
-last_activity_desc: 06-28 closed the phase — security register 42->88 rows, the /gsd-secure-phase re-audit PROH-OPS-04-05 required since round 5 finally performed
+current_phase: 07
+current_phase_name: optional-advanced-diagnostics
+status: milestone_complete
+stopped_at: All 8 phases closed and verified. Milestone v1.0 is ready to archive — 45/46 requirements Complete; OPS-07 stays Accepted with deviation by design (PROH-OPS-07-08 reserves promotion to a future independent round).
+last_updated: "2026-09-07T00:00:00Z"
+last_activity: 2026-09-07
+last_activity_desc: Milestone close-out — v1.0 re-audited against the fully-built tree, Phase 6 re-verified against its amended criterion 5, Phase 7 verified for the first time, DIA-09 amended (D-07-10) and promoted, planning records reconciled
 progress:
   total_phases: 8
-  completed_phases: 7
-  total_plans: 127
-  completed_plans: 120
+  completed_phases: 8
+  total_plans: 129
+  completed_plans: 127
 ---
 
 # Project State
@@ -23,24 +23,24 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** At a glance, the operator can trust what is running, what is failing, and how the Raspberry Pi and its configured services have behaved over time.
-**Current focus:** Phase 06 is CLOSED. Seven remediation rounds on OPS-07; the route's per-request cost fell 45.07% on Pi hardware and the concurrency-3 p95 moved 2.5%, which is the phase's transferable finding. OPS-07 accepted with deviation on usage grounds, not passed. Next: Phase 08, or revisit OPS-07 only if the real request rate rises — see D-DEBT-06-27.
+**Current focus:** Milestone v1.0 is COMPLETE and ready to archive. All 8 phases are closed and verified; 45 of 46 requirements are Complete. OPS-07 is the one exception and stays `Accepted with deviation` by design — seven remediation rounds moved per-request cost 45.07% on Pi hardware but the concurrency-3 p95 only 2.5%, which is the phase's transferable finding, and `PROH-OPS-07-08` reserves promotion to a future independent round. Next: `/gsd-complete-milestone v1.0`. There is no Phase 8 — the roadmap has 8 phases counting the inserted 03.1 (1, 2, 3, 03.1, 4, 5, 6, 7), and an earlier "Next: Phase 08" pointer in this file was a miscount, corrected 2026-09-07. Revisit OPS-07 only if the real request rate rises — see D-DEBT-06-27.
 
 ## Current Position
 
-Phase: 06 of 08 (workload-resilience-pi-acceptance)
-Plan: 28 of 30 executable — 32 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked do_not_execute in their frontmatter). 06-01 through 06-22, 06-25, 06-26, 06-29, 06-30, 06-31 and 06-32 have all executed. 06-27 and 06-28 remain, each blocked on the amendment D-DEBT-06-26 enumerates.
-Status: COMPLETE. All 30 executable plans executed (32 exist; 06-23/06-24 superseded by ea8689e and never run). OPS-01..OPS-04 Complete; OPS-07 Accepted with deviation. Three failing acceptance runs stand unsuperseded; no budget, criterion or harness default was ever amended to make them pass.
-Last activity: 2026-09-06 — 06-28 performed the security re-audit PROH-OPS-04-05 has required since round 5 (register 42 -> 88 rows, 45 previously-unregistered threats registered, T-06-172 minted) and closed D-DEBT-06-25's re-pinning decision
+Phase: 8 of 8 complete (last: 07-optional-advanced-diagnostics)
+Plan: 127 of 127 executable — 129 plans exist; 06-23 and 06-24 are superseded by the ea8689e revert and will never execute (marked do_not_execute in their frontmatter).
+Status: MILESTONE COMPLETE. Every phase is closed with a verification on file. OPS-01..OPS-04 Complete; OPS-07 Accepted with deviation, recorded in 06-VERIFICATION.md's `overrides:` block on 2026-09-07. Three failing hardware acceptance runs stand unsuperseded; no budget, criterion or harness default was ever amended to make them pass. DIA-09 Complete after Phase 7's independent verification round, its wording amended by D-07-10 on ownership grounds (the two shared history APIs belong to TEL-05 and HIS-01..06, not to advanced diagnostics).
+Last activity: 2026-09-07 — milestone close-out: v1.0 re-audited, Phase 6 re-verified against its amended criterion 5, Phase 7 verified for the first time (5/5, all mutation-confirmed), PROH-OPS-07-28 guarded on the shipping path, and the planning records reconciled
 
-Progress: [█████████░] 93%
+Progress: [██████████] 100%
 
-Phase 07 (optional-advanced-diagnostics) is executed 3/3; DIA-09 stays Pending until an independent verification round.
+Phase 07 (optional-advanced-diagnostics) is executed 3/3 and verified 2026-09-07 — all five ROADMAP criteria hold, every one mutation-confirmed. DIA-09 is Complete. Two findings are recorded and left open, neither blocking: PROH-DIA-09-01's guard is evadable via a per-service `environment:` override in docker-compose.yml, and D-DEBT-07-01 (the acceptance harness records elapsed_ms but never status_code) belongs to the next OPS-07 round.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 86
+- Total plans completed: 127
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -51,9 +51,11 @@ Phase 07 (optional-advanced-diagnostics) is executed 3/3; DIA-09 stays Pending u
 | 1 | 23 | - | - |
 | 02 | 12 | - | - |
 | 03 | 23 | - | - |
-| 03.1 | 10 | - | - |
+| 03.1 | 18 | - | - |
 | 04 | 11 | - | - |
 | 05 | 7 | - | - |
+| 06 | 30 executable (32 exist) | - | - |
+| 07 | 3 | - | - |
 
 **Recent Trend:**
 

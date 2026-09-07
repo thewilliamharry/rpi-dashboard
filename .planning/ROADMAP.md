@@ -16,10 +16,11 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Behavioral Safety & Runtime Ownership** - Preserve working Beacon behavior while making upgrades, background ownership, and outbound access safe. (completed 2026-08-07)
 - [x] **Phase 2: Bounded Telemetry & Retention** - Establish truthful 90-day host and service history with bounded storage and query contracts. (completed 2026-08-11)
 - [x] **Phase 3: Advanced Current Diagnosis** - Let the operator open an advanced workspace for fresh host, service, settings, and pipeline-health diagnosis. (completed 2026-08-20)
-- [ ] **Phase 03.1: Planned Maintenance Recognition (INSERTED)** - Confirm or define expected recurring service restarts without hiding downtime or overruns. (reopened 2026-08-23 — closed on automated verification 2026-08-22; human UAT then found migration 9 could not apply to any existing deployment, see 03.1-UAT.md gaps G-03.1-1 and G-03.1-2)
+- [x] **Phase 03.1: Planned Maintenance Recognition (INSERTED)** - Confirm or define expected recurring service restarts without hiding downtime or overruns. (completed 2026-08-24 — reopened 2026-08-23 after human UAT found migration 9 could not apply to any existing deployment; gaps G-03.1-1, G-03.1-2 and G-03.1-2b are all recorded resolved in 03.1-UAT.md, the migration support floor was fixed, and all 18 plans executed. Checkbox reconciled 2026-09-07.)
 - [x] **Phase 4: Historical Investigation** - Turn retained telemetry into honest range-based charts, service history, and incident investigation. (completed 2026-08-26)
 - [x] **Phase 5: Theme-Parity Analytics Experience** - Make the dashboard and advanced workspace cohesive, responsive, accessible, and equivalent in both themes. (completed 2026-08-28)
-- [ ] **Phase 6: Workload Resilience & Pi Acceptance** - Ensure discovery and previews remain bounded best-effort work and prove Beacon holds up under Pi-class load.
+- [x] **Phase 6: Workload Resilience & Pi Acceptance** - Ensure discovery and previews remain bounded best-effort work and prove Beacon holds up under Pi-class load. (completed 2026-09-06 — 30 of 30 executable plans; OPS-01..04 Complete, OPS-07 Accepted with deviation on usage grounds after seven remediation rounds and three failing hardware runs that stand unsuperseded. Checkbox reconciled 2026-09-07.)
+- [x] **Phase 7: Optional Advanced Diagnostics** - Run as a services-only dashboard on hosts already monitored elsewhere, with advanced diagnostics off by configuration and costing nothing when off. (completed 2026-09-07 — 3/3 plans; verified 5/5, all mutation-confirmed; DIA-09 Complete after the independent round, scope amended by D-07-10. Line added 2026-09-07: the phase was previously absent from this list.)
 
 ## Phase Details
 
@@ -204,7 +205,7 @@ Plans:
   3. Operator can inspect every configured or discovered service's status, latency or failure class, state duration, criticality, tags, and effective health rule.
   4. Operator can view effective retention, displayed resolution, database pressure, worker freshness, collection gaps, and background-job health, then change supported presentation, refresh, range, and filtering preferences without being offered remote-control actions.
 
-**Plans**: 23/23 plans executed (22/23 executed — 03-18/03-19 closed round-5's background-job-health finding; 03-20/03-21 closed the one Critical and four Warnings 03-19-REVIEW.md's round-6 code review found in that same closure; 03-22 closed the two gaps 03-VERIFICATION.md round 7 found on the same background-job-health clause; 03-23 closes the one cosmetic gap 03-UAT.md found — pending)
+**Plans**: 23/23 plans executed (03-18/03-19 closed round-5's background-job-health finding; 03-20/03-21 closed the one Critical and four Warnings 03-19-REVIEW.md's round-6 code review found in that same closure; 03-22 closed the two gaps 03-VERIFICATION.md round 7 found on the same background-job-health clause; 03-23 closed the one cosmetic gap 03-UAT.md found — all executed, verified round 9 `passed` 5/5)
 
 - [x] 03-07-PLAN.md
 
@@ -402,7 +403,7 @@ Plans:
   4. Loading, empty, stale, unknown, degraded, and error states are visibly and meaningfully distinct in both themes.
   5. UI-contract or visual-regression coverage verifies shared capabilities and important states in both themes.
 
-**Plans**: 7/7 plans executed (6 executed; 1 gap-closure plan pending)
+**Plans**: 7/7 plans executed (6 original + 1 gap-closure plan, all executed; verified `passed` 5/5)
 
 Plans:
 **Wave 1**
@@ -463,7 +464,7 @@ Plans:
 > by this amendment. The deployment was measured under 8-way load, it degraded, and that is on the
 > record.
 
-**Plans**: 22/32 plans executed (**2 input-reduction plans added 2026-09-06 after the round-7 planner re-refuted the `service_rollups` re-scope in `06-GUARD-DECISION.md` §8** — `06-31` at wave 26 and `06-32` at wave 27, the runnable tail of the phase; `06-31` opens with a blocking `checkpoint:decision` because rejecting a recorded operator decision is one-way. 6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added and executed 2026-09-02; 6 fix-round plans added 2026-09-03, of which `06-19`–`06-22` executed and were then reverted by `ea8689e`; **4 cost-model plans added 2026-09-05**; **2 join-reshape plans added 2026-09-06 after `06-26` REFUTED option C** — `06-29` at wave 24 and `06-30` at wave 25, both sequenced AFTER `06-27`/`06-28`'s waves 22/23 by number but gating them in practice: `06-26`'s stop condition blocks `06-27` until `06-PROFILE-4.md` reads PASS, so the runnable order is `06-29` -> `06-30` -> (only on PASS) `06-27` -> `06-28`). `06-23` and `06-24` are superseded by that revert and are not executed. Phase does NOT seal. Round 4's hardware diagnostic returned INCONCLUSIVE with 4 of 5 checks holding; the user chose `fix-now` at `06-18`'s blocking checkpoint, reversing `D-DEBT-06-01`'s three-round deferral. Round 5 lands both halves of the fix in sequence with a hardware measurement between them. OPS-07 remains Pending — `PROH-OPS-07-08` scopes promotion to an independent verification round.
+**Plans**: 30/30 executable plans executed — 32 exist, `06-23` and `06-24` superseded by the `ea8689e` revert and never run (**2 input-reduction plans added 2026-09-06 after the round-7 planner re-refuted the `service_rollups` re-scope in `06-GUARD-DECISION.md` §8** — `06-31` at wave 26 and `06-32` at wave 27, the runnable tail of the phase; `06-31` opens with a blocking `checkpoint:decision` because rejecting a recorded operator decision is one-way. 6/6 original round; 4 gap-closure plans added 2026-09-01; 4 further gap-closure plans added and executed 2026-09-02; 4 diagnostic gap-closure plans added and executed 2026-09-02; 6 fix-round plans added 2026-09-03, of which `06-19`–`06-22` executed and were then reverted by `ea8689e`; **4 cost-model plans added 2026-09-05**; **2 join-reshape plans added 2026-09-06 after `06-26` REFUTED option C** — `06-29` at wave 24 and `06-30` at wave 25, both sequenced AFTER `06-27`/`06-28`'s waves 22/23 by number but gating them in practice: `06-26`'s stop condition blocks `06-27` until `06-PROFILE-4.md` reads PASS, so the runnable order is `06-29` -> `06-30` -> (only on PASS) `06-27` -> `06-28`). `06-23` and `06-24` are superseded by that revert and are not executed. Phase does NOT seal. Round 4's hardware diagnostic returned INCONCLUSIVE with 4 of 5 checks holding; the user chose `fix-now` at `06-18`'s blocking checkpoint, reversing `D-DEBT-06-01`'s three-round deferral. Round 5 lands both halves of the fix in sequence with a hardware measurement between them. OPS-07 remains Pending in this phase's own record — `PROH-OPS-07-08` scopes promotion to an independent verification round. **Closed 2026-09-06: the operator accepted OPS-07 with deviation on usage grounds (D-DEBT-06-20, D-DEBT-06-27), recorded in the verification channel's `overrides:` block on 2026-09-07. It is `Accepted with deviation`, never `Complete`.**
 
 - [x] 06-01-PLAN.md — Tracer: relocate thumbnail blobs off the primary telemetry path into a bounded store
 - [x] 06-02-PLAN.md — Version-10 upgrade path plus thumbnail TTL, byte budget, and hourly reap
@@ -816,14 +817,15 @@ operative content is the measured equality of front-page cost across the toggle.
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
+Phases execute in numeric order: 1 → 2 → 3 → 03.1 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Behavioral Safety & Runtime Ownership | 23/23 | Complete    | 2026-08-07 |
 | 2. Bounded Telemetry & Retention | 12/12 | Complete    | 2026-08-11 |
 | 3. Advanced Current Diagnosis | 23/23 | Complete    | 2026-08-20 |
+| 03.1 Planned Maintenance Recognition (INSERTED) | 18/18 | Complete    | 2026-08-24 |
 | 4. Historical Investigation | 11/11 | Complete    | 2026-08-26 |
 | 5. Theme-Parity Analytics Experience | 7/7 | Complete    | 2026-08-28 |
-| 6. Workload Resilience & Pi Acceptance | 10/10 | In Progress|  |
-| 7. Optional Advanced Diagnostics | 3/3 | Executed    | DIA-09 stays Pending — promotion belongs to an independent verification round (TEL-06 / PROH-OPS-07-08 precedent) |
+| 6. Workload Resilience & Pi Acceptance | 30/30 executable (32 exist; 06-23/06-24 superseded) | Complete    | 2026-09-06 — OPS-07 Accepted with deviation, see D-DEBT-06-20/-06-27 |
+| 7. Optional Advanced Diagnostics | 3/3 | Complete    | 2026-09-07 — verified 5/5, DIA-09 promoted to Complete after the independent round; scope amended by D-07-10 |
