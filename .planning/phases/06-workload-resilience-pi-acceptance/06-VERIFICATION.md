@@ -1,10 +1,17 @@
 ---
 phase: 06-workload-resilience-pi-acceptance
 verified: 2026-09-07T08:03:39Z
-status: gaps_found
-score: 4/5 must-haves verified
+status: human_needed
+score: 5/5 must-haves verified (1 by override)
 behavior_unverified: 0
-overrides_applied: 0
+overrides_applied: 1
+overrides:
+  - must_have: "A Raspberry Pi-class run at single-operator load — concurrency 3, 600s, every declared route budget unchanged — demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling"
+    reason: "Accepted with deviation on usage grounds, per the operator decision of 2026-09-06 recorded in 06-ACCEPTANCE-C3-RUN3.md, .planning/REQUIREMENTS.md:74 and .planning/STATE.md, and entered into this channel on 2026-09-07. Cadence, resources and recovery all PASS. /api/services misses its 500ms p95 (662.3ms, build a7c3ef1 = HEAD) only under a closed-loop harness load measured at 34.5x the deployment's real 0.067 req/s per-route rate. No budget, criterion, assertion or harness default was moved — verified independently this round (PROH-OPS-07-01 and PROH-OPS-07-10 intact; ROUTE_BUDGETS_MS byte-identical across 807776a, 32781e5 and HEAD; amendment commit 63db9ef touched three planning files and zero lines of code). The measured failure is NOT retired by this override — all three failing c3 runs stand on the record in the gaps block below, per this phase's convention that no measurement is superseded. OPS-07 stays 'Accepted with deviation', never 'Complete', per PROH-OPS-07-08. Revisit if the real request rate rises or services are added — see D-DEBT-06-27."
+    accepted_by: "thewilliamharry"
+    accepted_at: "2026-09-06T16:21:50Z"
+    recorded_at: "2026-09-07T00:00:00Z"
+    residual: "The concurrency-1 HTTP control run on build a7c3ef1 remains outstanding (see human_verification below). It is not a condition of this override — it would replace the acceptance's one inferential step (a cProfile in-process 77.1ms) with a direct measurement."
 prohibitions:
   - statement: "PROH-OPS-07-01 — a route budget may never be tuned so that a failing measurement passes"
     status: verified
@@ -27,7 +34,9 @@ prohibitions:
     verification: judgment
     evidence: "`.planning/REQUIREMENTS.md:73` still carries `- [ ]` (unchecked) for OPS-07 and the traceability row at :158 reads `Accepted with deviation`, not `Complete`. `06-27-SUMMARY.md` states in `key-decisions` that it 'does not mark OPS-07 anything but Pending'. The promotion decision was taken separately by the operator in `1f0ce4b`."
   - statement: "PROH-OPS-07-28 — a NULL `online` row is never coalesced away by the strip input reduction"
-    status: unverified
+    status: upheld
+    previously: "unverified — correct in code but unguarded on the shipping path, as this round found by mutation"
+    closed_at: "2026-09-07"
     flagged: true
     verification: test
     evidence: "The branch IS PRESENT and correct at `dashboard/app.py:2969-2978`. But it is NOT ENFORCED on the shipping route: this verification collapsed the NULL branch on the real route (mutation M2) and the ENTIRE 993-test suite stayed green. See gap 2. No live exposure — no writer produces a NULL — so this is flagged, not blocking."
@@ -46,7 +55,9 @@ re_verification:
     - "None. The `/api/services` uptime regression that round 3 recorded as a `regressions:` entry is closed and re-proved closed by mutation. No new correctness regression found. The full suite is independently confirmed green at HEAD: 993 passed, 593 subtests, 0 failures, 5m36s (`cd dashboard && uv run --frozen pytest -q`)."
 gaps:
   - truth: "A Raspberry Pi-class run at single-operator load — concurrency 3, 600s, every declared route budget unchanged — demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling"
-    status: failed
+    status: accepted_with_deviation
+    measured_status: failed
+    override_ref: "overrides[0] — accepted 2026-09-06, recorded in this file 2026-09-07. The measurement below is unchanged and unretired."
     reason: "The gating run WAS performed on real Pi-class hardware (aarch64/raspi) and returned `overall_passed: false`. Three independent runs, all failing, all on the same single route: `/api/services` p95 635.6ms (run 1), 679.3ms (run 2), 662.3ms (run 3) against a 500ms budget. Run 3's build `a7c3ef1` is code-identical to HEAD, so this is HEAD's measured result, not a stale build's. Three of the criterion's four clauses PASS outright — resource-budget compliance (worker RSS 553.6MB < 1GiB, web 117.1MB < 256MiB), recovery (all 12 `background_job_health` rows `succeeded`, no `error_class`) and uninterrupted essential sampling (`assertions.cadence` `{passed: true, failures: []}`, J1-J4 all `fresh`). ONLY the 'responsive interaction' clause fails, and only on one of six exercised routes. Independently recomputed p50/p95 from the raw 16,547 latency samples in `beacon-c3-run3.json` rather than trusting the report's table: `/api/services` p95 = 662.3ms, confirming every figure. SEPARATELY: the operator recorded decision (a) 'accept the deviation' on 2026-09-06 (`1f0ce4b`), and `.planning/REQUIREMENTS.md:158` reads `Accepted with deviation` — NOT `Complete`. That acceptance is legitimate and well-documented but it is not a measurement, and it has not been entered into this file's `overrides:` channel, so this truth is scored as measured: FAILED. See 'Suggested override' in the body."
     artifacts:
       - path: ".planning/phases/06-workload-resilience-pi-acceptance/beacon-c3-run3.json"
@@ -61,7 +72,9 @@ gaps:
       - "OPTIONAL, and explicitly NOT required to close this gap: option (b) from `06-ACCEPTANCE-C3-RUN3.md` — re-derive the harness's load model to a think-time-bearing client shape calibrated against `app.js`'s actual polling rate. The record already warns that this and the forbidden move look identical from outside; if pursued it must be documented at least as carefully as `D-DEBT-06-20`'s amendment was."
       - "OPTIONAL: option (c) — a round 8 attributing `D-DEBT-06-27`'s selective 6.9x inflation. The structural candidate is already named and confirmed present at HEAD: `api_services` holds `_db_lock` across 200 lines of mostly-Python work (app.py:2875-3075). Four of this phase's seven rounds already chased a hypothesis that did not fully explain the result; scope it to confirm-or-refute a named mechanism, not to search."
   - truth: "A NULL `online` row is never coalesced away by 06-31's input reduction: the producer still refuses the same inputs it refuses at HEAD, with the same exception type (`PROH-OPS-07-28`, `06-31-PLAN.md` must_haves)"
-    status: partial
+    status: closed
+    closed_at: "2026-09-07"
+    closed_by: "tests/test_services_route_scaling.py::UptimeStripCoalescingDifferentialTests::test_the_route_never_coalesces_a_null_row_away — added 2026-09-07 in response to this finding. Binds the SHIPPING path, not the test-file mirror: seeds a NULL immediately after an offline run (rows at now-5000/0, now-4900/0, now-4850/None, now-4000/1), drives the real /api/services through a real database, and captures what api_services actually hands _uptime_summary via a spy that deliberately does NOT forward (a NULL reaching the producer raises by design — int(None) at app.py:1184 — which test_reader_raises_naming_the_null_only_port already covers). Asserts the NULL survives the reduction, that the row following it is also appended, and that the route agrees with this file'"'"'s mirror on a NULL-bearing fixture. PROVED DIAGNOSTIC: re-applying mutation M2 (collapsing the NULL branch to `state = 1 if online else 0`) fails it with `(ts, None) not found in [...]`, while the other three tests in the same class stay green — confirming this verification'"'"'s finding that they were blind to the mutation. app.py restored byte-identical afterwards; no production code changed."
     reason: "The CODE is correct — `dashboard/app.py:2969-2978` appends every NULL row unconditionally and resets `last_state_by_port[port] = None` so the row following a NULL is also always appended. The PROOF does not exist on the shipping path. This verification collapsed the NULL branch on the real route (mutation M2: replace the two-branch body with `state = 1 if online else 0` so `None` is treated as merely falsy) and the ENTIRE 993-test suite stayed green — the only failure was the separately-disclosed `(function, line)` lock-audit line-shift, which my edit triggered incidentally and which `D-DEBT-06-25` documents as expected. Root cause: `UptimeStripCoalescingDifferentialTests` asserts NULL preservation against `_reduce_to_state_changes`, a MIRROR copy that lives in the test file; the single test that binds the mirror to the real route (`test_mirror_agrees_with_the_route_on_its_own_loop`) seeds a fixture of only 0/1 rows and contains no NULL. So the mirror is NULL-tested and the route is not. This is the same shape as `D-DEBT-06-10` and `D-DEBT-06-22`: a green gate over an unexercised path. Severity is WARNING, not blocker — `service_checks.online` is nullable in schema (`migrations.py:120`, no `NOT NULL`), but both writers (`app.py:1468` and `:1665`) bind 0/1 integers, so no shipping code path currently produces a NULL. This is an unguarded defensive invariant with no live exposure."
     artifacts:
       - path: "tests/test_services_route_scaling.py"

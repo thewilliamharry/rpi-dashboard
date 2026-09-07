@@ -430,6 +430,20 @@ fixing.
 
 ---
 
+**2026-09-07 addendum — a third member, found during Phase 6's re-verification round.** A full-suite
+run during the 2026-09-07 re-verification returned `1 failed, 993 passed, 593 subtests` on
+`tests/test_ui_states.py::UiStateBrowserTests::test_safety_matrix_keeps_recovery_tls_errors_and_narrow_controls_distinct`
+— a Playwright browser test, and NOT one of the two tests this entry names. Re-run alone it passes
+(`1 passed, 993 deselected in 9.54s`), the same green-in-isolation signature the other members show.
+The run that surfaced it added one test to `test_services_route_scaling.py` and changed no production
+code (`git diff dashboard/` empty at the time of the run), so the failure is not attributable to that
+change. Recorded here rather than absorbed into "the known flake" because the flaky SET is now three
+tests across three files (worker ownership, services route scaling, UI states) and spans two
+different execution models (unittest and Playwright) — which is a broader shape than this entry's
+original "2 tests" framing, and worth knowing before anyone reads a single red result as a
+regression. Unchanged conclusion: the acceptance criterion stays "no NEW failures outside the
+known-flaky set", and this entry's own list is what that set means.
+
 ### D-DEBT-06-11 — the offline-interval reconstruction path's row cap silently bounds `maintenance_attributed_seconds`
 
 | Field | Value |

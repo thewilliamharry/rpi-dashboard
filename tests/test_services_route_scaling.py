@@ -2074,6 +2074,85 @@ class UptimeStripCoalescingDifferentialTests(unittest.TestCase):
             'api_services actually handed _uptime_summary',
         )
 
+    def test_the_route_never_coalesces_a_null_row_away(self):
+        """`PROH-OPS-07-28` on the SHIPPING path, not on this file's mirror.
+
+        Every other NULL assertion in this class runs against
+        `_reduce_to_state_changes`, and the one test that binds the mirror to
+        the real route (`test_mirror_agrees_with_the_route_on_its_own_loop`,
+        above) seeds a fixture of only 0/1 rows. So collapsing api_services'
+        own NULL branch to `state = 1 if online else 0` -- treating None as
+        merely falsy -- leaves the entire suite green while dropping a NULL
+        that follows an offline run. That is the defect this test exists to
+        catch, and it is the same shape as `D-DEBT-06-10` and
+        `D-DEBT-06-22`: a green gate over an unexercised path.
+
+        The NULL is seeded immediately after an offline run -- the exact
+        case the phase measured diverging on 39 of 1,802 randomized cases.
+
+        The spy deliberately does NOT forward the captured rows to the real
+        `_uptime_summary`: a NULL reaching it is a *producer refusal*
+        (`_legacy_uptime_summary` does `1 if int(online) else 0` and
+        `int(None)` raises), which `test_reader_raises_naming_the_null_only_port`
+        already covers. What is unproven anywhere else, and proven here, is
+        that the NULL survives the route's reduction in order to get there.
+        """
+        appmod = self.appmod
+        port = 91002
+        now = int(time.time())
+        rows = [
+            (now - 6000, 1), (now - 5900, 1),
+            (now - 5000, 0), (now - 4900, 0),
+            (now - 4850, None),
+            (now - 4000, 1),
+        ]
+        with appmod._db_lock:
+            conn = appmod.get_db()
+            conn.execute(
+                "INSERT INTO services(port,title,first_seen,last_seen,is_online,state_since) "
+                "VALUES(?,?,?,?,?,?)",
+                (port, 'MirrorNull', now - 6000, now, 1, now - 60),
+            )
+            for ts, online in rows:
+                conn.execute(
+                    'INSERT INTO service_checks(ts, port, online) VALUES (?,?,?)',
+                    (ts, port, online),
+                )
+            conn.commit()
+            conn.close()
+
+        captured = []
+        original = appmod._uptime_summary
+
+        def spy(checks, spy_now):
+            captured.append((spy_now, list(checks)))
+            return original([], spy_now)
+
+        with mock.patch.object(appmod, '_uptime_summary', side_effect=spy):
+            response = appmod.app.test_client().get('/api/services')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(captured), 1, 'expected exactly one _uptime_summary call for one seeded service')
+        _route_now, route_checks = captured[0]
+        route_checks = sorted(route_checks, key=lambda r: r[0])
+
+        self.assertIn(
+            (now - 4850, None), route_checks,
+            'api_services coalesced a NULL online row away. A NULL following an '
+            'offline run must reach _uptime_summary so the producer can refuse it '
+            '(PROH-OPS-07-28); dropping it turns a refusal into a rendered number.',
+        )
+        self.assertIn(
+            (now - 4000, 1), route_checks,
+            'the row immediately following a NULL must also always be appended -- '
+            'last_state_by_port is reset to None on every NULL precisely so that no '
+            'real 0/1 state can compare equal to it',
+        )
+        self.assertEqual(
+            route_checks, _reduce_to_state_changes(sorted(rows, key=lambda r: r[0])),
+            "this file's mirror of the reduction rule diverged from what "
+            'api_services actually handed _uptime_summary, on a NULL-bearing fixture',
+        )
+
 
 class UptimeStripInputReductionGuardTests(unittest.TestCase):
     """Pins that api_services' input to the strip producer is a function of
