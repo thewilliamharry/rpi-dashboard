@@ -1,89 +1,132 @@
 ---
 phase: 06-workload-resilience-pi-acceptance
-verified: 2026-09-02T19:00:25Z
+verified: 2026-09-07T08:03:39Z
 status: gaps_found
 score: 4/5 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
+prohibitions:
+  - statement: "PROH-OPS-07-01 — a route budget may never be tuned so that a failing measurement passes"
+    status: verified
+    verification: test
+    evidence: "`ROUTE_BUDGETS_MS` (tests/pi_load_acceptance.py:103) is BYTE-IDENTICAL to its introduction in `807776a` (06-06, 2026-09-01). Verified by extracting the dict block at `807776a`, at `32781e5` (06-07) and at HEAD and diffing all three: no difference. `git log -L '/^ROUTE_BUDGETS_MS = {/,/^}/'` names exactly one commit in the block's entire history."
+  - statement: "PROH-OPS-07-10 — a success criterion may never be weakened because the code could not meet it"
+    status: verified
+    verification: test
+    evidence: "The criterion-5 amendment is commit `63db9ef` (2026-09-04). `git show --stat 63db9ef` touches THREE files, all planning Markdown: `.planning/REQUIREMENTS.md`, `.planning/ROADMAP.md`, `06-DEBT.md`. Zero lines of `dashboard/` or `tests/`. Independently confirmed that `assert_response_times`, `assert_resource_budget`, `assert_cadence` and `_routes_for_ports` are untouched since 06-06 (`807776a`) and `_load_worker` since 06-07 (`5e29ab3`) — all five predate the amendment. Harness defaults remain `--concurrency 8` (line 1792) and `--duration 600` (line 1781); the gating run passes `--concurrency 3` explicitly on the command line, exactly as the amendment note claims."
+  - statement: "The criterion-5 amendment's justification is usage, not difficulty"
+    status: verified
+    verification: test
+    evidence: "Every claim in the ROADMAP block quote checked against source. `dashboard/app.js:795` is `Promise.allSettled([loadStats(), loadHistory(), loadScan(), loadServices(), loadEvents()])` — five parallel calls at page load. `setInterval` at :796 (5000ms, loadStats+loadScan), :797 (15000ms, loadServices+loadEvents), :798 (60000ms, loadHistory). That is 33 requests per 60s = 0.55 req/s per tab, matching the note's 'roughly 0.5 requests per second'. `/api/services` specifically: 1/15s = 0.067 req/s. The gating harness drove it at 1381 requests / 601s = 2.298 req/s = 34.5x. The amendment describes the deployment accurately and the resulting gate is still ~34x conservative."
+  - statement: "PROH-OPS-07-11 — an instrumented run may never be presented as acceptance evidence"
+    status: verified
+    verification: test
+    evidence: "Parsed `beacon-c3-run3.json` directly: `run_kind: 'acceptance'`, `lock_profile: {}` (empty), `scenario.self_test: false`, `scenario.concurrency: 3`, `scenario.duration_seconds: 600`, `host_machine: aarch64`, `host_node: raspi`, elapsed `1788708625 - 1788708024 = 601s`. All gating properties as declared."
+  - statement: "PROH-OPS-07-08 — OPS-07 may not be promoted by a plan in its own round"
+    status: verified
+    verification: judgment
+    evidence: "`.planning/REQUIREMENTS.md:73` still carries `- [ ]` (unchecked) for OPS-07 and the traceability row at :158 reads `Accepted with deviation`, not `Complete`. `06-27-SUMMARY.md` states in `key-decisions` that it 'does not mark OPS-07 anything but Pending'. The promotion decision was taken separately by the operator in `1f0ce4b`."
+  - statement: "PROH-OPS-07-28 — a NULL `online` row is never coalesced away by the strip input reduction"
+    status: unverified
+    flagged: true
+    verification: test
+    evidence: "The branch IS PRESENT and correct at `dashboard/app.py:2969-2978`. But it is NOT ENFORCED on the shipping route: this verification collapsed the NULL branch on the real route (mutation M2) and the ENTIRE 993-test suite stayed green. See gap 2. No live exposure — no writer produces a NULL — so this is flagged, not blocking."
 re_verification:
   previous_status: gaps_found
   previous_score: 4/5
   gaps_closed:
-    - "The acceptance harness's CPU-sampling defect (D-DEBT-06-06, recorded as ✗ STUB in the round-2 report) is genuinely fixed — tests/pi_load_acceptance.py:509 _cached_handle now returns a run-lifetime per-PID psutil.Process object verified by create_time(), primed once on insert, and _live_role_processes:567 maps every discovered process through it. Confirmed behaviourally on hardware: cpu_sampling.all_samples_zero: false, 594 non-zero web samples, 0 zero samples. The 'resource-budget compliance' clause's CPU half is measured for the first time in this phase."
-    - "The round-2 gap item 'profile api_services' residual per-request cost' is discharged — 06-PROFILE.md attributes 98.653% of measured self time to named buckets and corrects the round-2 report's own prediction, which was materially incomplete (it named 44.479%, missing maintenance_coverage at 29.649%)."
-    - "The round-2 gap item 'reduce that residual cost' is discharged on hardware — 06-13's request-scoped memoization and duplicate-scan removal are present and substantive in dashboard/app.py, dashboard/beacon/maintenance.py and dashboard/beacon/repositories.py, and the control pass now passes cleanly on every route with /api/services p50 down 27.6% (289.0ms → 209.355ms)."
-    - "The round-2 gap item 'a third hardware acceptance run' is discharged as an activity — the run was performed on real hardware (aarch64/raspi, Pi 5 Model B, nproc 4) against b8ed60b, which this verification confirms is code-identical to HEAD (git diff --stat b8ed60b..HEAD -- dashboard/ tests/ is empty). Its result is failing, so the underlying truth does not close."
+    - "The `/api/services` uptime-truncation regression (round-3 gap 2; `D-DEBT-06-10`) is CLOSED and the closure is independently reproduced. `dashboard/app.py:2928`'s `all_checks` query carries no `LIMIT` clause and is preceded by a 40-line comment marking it deliberately unbounded and naming `D-DEBT-06-10`. The row cap is applied in Python at :2939/:2979-2981 against `points_by_port` only, so it reaches the offline-interval reconstruction and never `_uptime_summary`. Not accepted on prose: this verification re-applied the exact defect (mutation M1 — push `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` back into the SQL, with a truncating cap) and confirmed BOTH phase guards fire (`test_the_route_does_not_bound_the_uptime_read_with_the_interval_row_cap`, `test_uptime_pct_is_not_affected_by_the_offline_interval_row_cap`) AND an independently-written end-to-end differential fires, catching a service reporting 6.563% uptime against a true 87.194%. The guard is diagnostic, not decorative — which is precisely what the round-3 report found the ORIGINAL guard was not."
+    - "The round-3 gap item 'instrument `_db_lock` directly under load and report wait-vs-hold per route' is discharged as an activity — rounds 4 and 5 performed it (`06-LOCK-DIAGNOSTIC.md`, `-R5A`, `-R5B`) and the round-3 report's `_db_lock` attribution was confirmed rather than refuted. The consequent FIX is not landed: `ea8689e` reverted 06-20's narrowing and it was never re-landed, so `api_services` still holds the process-wide lock across its entire handler body at HEAD (`dashboard/app.py:2875` to first dedent at :3076)."
+    - "The round-3 gap item 'measure how much of `/api/services`' critical section is actually database work' and 'reduce that residual cost' are discharged. Rounds 6/6.5/7 cut per-request cost substantially: `06-PROFILE-5.md` measured 34.927ms against the pre-06-25 56.820ms bar on the dev host (-38.53%, first round of the phase to beat the baseline), and `06-PI-PROFILE-C.md` reproduced it on the Pi at 77.081ms vs 140.323ms (-45.07%). Both verified against the committed `beacon-pi-profile-{before,after}-{1,2,3}.json`."
+    - "The round-3 gap item 'a fourth hardware acceptance run after a fix' is discharged as an activity, THREE times, under the amended criterion — `06-ACCEPTANCE-C3.md` (2026-09-04, `a33af15`), `06-ACCEPTANCE-C3-RUN2.md` (2026-09-05, `82801cb`) and `06-ACCEPTANCE-C3-RUN3.md` (2026-09-06, `a7c3ef1`). Run 3's build is code-identical to HEAD (`git diff --stat a7c3ef1..HEAD -- dashboard/ tests/` is empty). All three results are failing, so the underlying truth does not close."
+    - "The security-boundary re-close that `PROH-OPS-04-05` had required since round 5 is performed — `06-SECURITY.md` now carries 88 threat rows at HEAD (independently counted), matching 06-28's claimed 42→88 expansion."
   gaps_remaining:
-    - "Truth 5 / OPS-07: the Pi-class acceptance run's own overall_passed is false — three routes exceed their declared p95 budgets under representative concurrent load. The failure has changed shape from round 2: per-request cost is measurably fixed and the residual is concurrency-only."
+    - "Criterion 5: `/api/services` p95 exceeds its 500ms budget on all three concurrency-3 hardware runs (635.6 / 679.3 / 662.3ms). The failure has NARROWED — from five routes over budget in round 1, to three in round 3 at concurrency 8, to exactly one at concurrency 3 — but it has not closed, and run 3 measures HEAD's own code."
   regressions:
-    - "06-13 introduced a data-correctness regression on the essential-monitoring read path. dashboard/app.py:2821-2826's all_checks query was UNBOUNDED before 06-13 (git show 4352198 confirms the removed line: `WHERE port IN ({placeholders}) AND ts >= ? ORDER BY ts ASC`) and now carries `ORDER BY port ASC, ts ASC LIMIT _OFFLINE_INTERVALS_BULK_ROW_LIMIT` (20,000). Those rows populate checks_by_port, which feeds _uptime_summary (dashboard/app.py:2874) — so the 20,000-row cap, previously confined to the offline-interval/maintenance-attribution path, now truncates the uptime computation as well. 06-PROFILE.md §5 measured this cap as ALREADY REACHED at 8 services / 8 days (25,278 rows). Reproduced behaviourally during this verification: a service whose true uptime is 20.833% is reported by /api/services as 100.0% when the cap truncates its newest rows. The outage is silently erased in the optimistic direction. No test asserts uptime output under truncation — tests/test_services_route_scaling.py:352 exercises the truncation path but asserts only status_code == 200 and the SQL LIMIT shape."
+    - "None. The `/api/services` uptime regression that round 3 recorded as a `regressions:` entry is closed and re-proved closed by mutation. No new correctness regression found. The full suite is independently confirmed green at HEAD: 993 passed, 593 subtests, 0 failures, 5m36s (`cd dashboard && uv run --frozen pytest -q`)."
 gaps:
-  - truth: "A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling"
+  - truth: "A Raspberry Pi-class run at single-operator load — concurrency 3, 600s, every declared route budget unchanged — demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling"
     status: failed
-    reason: "The third acceptance run was executed on real Pi-class hardware against this round's build (b8ed60b, confirmed code-identical to HEAD) and returned overall_passed: false. Three of six exercised routes exceeded their declared p95 budgets under concurrency 8 / 600s: /api/services (1732.3ms vs 500ms), /api/scan-status (656.5ms vs 500ms), /api/advanced/current (2382.2ms vs 2000ms). Cadence (OPS-01) and RSS resource budgets passed, and the CPU column is a real measurement for the first time (mean 165.504% of 400% available). The failure is now concurrency-only: the concurrency-1 control pass passes cleanly on every route. CONTRARY TO 06-DEBT.md D-DEBT-06-09, the serialization mechanism IS attributable from evidence already in this repository — see artifacts below. It is _db_lock, and the phase's own reopening test was not diagnostic."
+    reason: "The gating run WAS performed on real Pi-class hardware (aarch64/raspi) and returned `overall_passed: false`. Three independent runs, all failing, all on the same single route: `/api/services` p95 635.6ms (run 1), 679.3ms (run 2), 662.3ms (run 3) against a 500ms budget. Run 3's build `a7c3ef1` is code-identical to HEAD, so this is HEAD's measured result, not a stale build's. Three of the criterion's four clauses PASS outright — resource-budget compliance (worker RSS 553.6MB < 1GiB, web 117.1MB < 256MiB), recovery (all 12 `background_job_health` rows `succeeded`, no `error_class`) and uninterrupted essential sampling (`assertions.cadence` `{passed: true, failures: []}`, J1-J4 all `fresh`). ONLY the 'responsive interaction' clause fails, and only on one of six exercised routes. Independently recomputed p50/p95 from the raw 16,547 latency samples in `beacon-c3-run3.json` rather than trusting the report's table: `/api/services` p95 = 662.3ms, confirming every figure. SEPARATELY: the operator recorded decision (a) 'accept the deviation' on 2026-09-06 (`1f0ce4b`), and `.planning/REQUIREMENTS.md:158` reads `Accepted with deviation` — NOT `Complete`. That acceptance is legitimate and well-documented but it is not a measurement, and it has not been entered into this file's `overrides:` channel, so this truth is scored as measured: FAILED. See 'Suggested override' in the body."
     artifacts:
+      - path: ".planning/phases/06-workload-resilience-pi-acceptance/beacon-c3-run3.json"
+        issue: "`overall_passed: false`; `failure_reasons: ['/api/services: p95 662.3ms exceeds budget 500ms']`. Admissible as OPS-07 evidence on every gating property (`run_kind: acceptance`, `lock_profile: {}`, `concurrency: 3`, `duration_seconds: 600`, `self_test: false`, `host_machine: aarch64`, `host_node: raspi`, 601s elapsed) — which is what makes the failure count."
       - path: "dashboard/app.py"
-        issue: "api_services holds the process-wide `_db_lock` (declared at line 127 as a bare threading.Lock) across its ENTIRE handler body: the `with _db_lock, database_access(DB_PATH) as conn:` block opens at line 2785 and the first dedent back to function level is line 2925 (`return jsonify(result)`). Every expensive computation sits inside it — _uptime_summary (2874), beacon_maintenance.coverage (2886), attributed_downtime_seconds (2893), offline_intervals_from_points_by_port (2850). By 06-PROFILE.md's own bucket table only 17.958% of that work is SQL (sql_fetch 15.620 + sql_execute 2.338); the other 82.042% is pure-Python computation executed while holding a global mutex. 5 of the 6 exercised routes take this same lock (/api/services 2785, /api/history 2539, /api/thumbnail 3093, /api/thumbnail-status 3108, /api/scan-status 3172); only /api/advanced/current does not (it calls beacon_diagnosis.get_current_diagnosis, and dashboard/beacon/diagnosis.py contains no lock of any kind — grep for _db_lock/threading.Lock returns zero hits)."
-      - path: "tests/pi_load_acceptance.py"
-        issue: "The load generator makes the attribution decisive rather than inferred. _routes_for_ports (line 371) builds a FIXED rotation whose index 0 is '/api/services' and whose index 1 is '/api/scan-status' — adjacent. _load_worker (line ~600) is closed-loop: `route = routes[index % len(routes)]`, one request in flight per thread, no think time. All 8 threads are started in a tight loop and begin at index 0 simultaneously. Consequence: every thread issues /api/scan-status the instant it finishes /api/services, while up to 7 sibling threads are still inside /api/services holding _db_lock. The arithmetic confirms it exactly — /api/scan-status's excess wait (242.614 − 3.281 = 239.333ms) is 1.143x one /api/services critical section (209.355ms control p50), i.e. one full holder plus ~14% GIL stretch. This also explains the 13x p50 spread AMONG lock-taking routes that D-DEBT-06-09 leaves unexplained: degradation tracks rotation distance from /api/services (scan-status idx1 +239ms; thumbnail-status idx2 +18ms; history idx3 +36ms; thumbnails idx5-12 +22ms), not each route's own cost."
-      - path: ".planning/phases/06-workload-resilience-pi-acceptance/06-DEBT.md"
-        issue: "D-DEBT-06-01's second reopening test is not diagnostic, so 'it did not fire' carries no information about _db_lock. The test asks whether the UNLOCKED /api/advanced/current recovers while locked routes stay over budget. But that route is an 82.281ms CPU/GIL-bound route — the most expensive non-services route in the mix — so it degrades under 8-way concurrency on a shared interpreter whether or not _db_lock is the serializer for everything else. The test can only fire if the GIL contribution is negligible, which the same run measures it is not. Two independent mechanisms were treated as mutually exclusive alternatives. Separately, D-DEBT-06-09's and 06-ACCEPTANCE-ROUND3.md's inference that mean_cpu_percent 165.504 'weakens the one-interpreter hypothesis' because it is not 'a hard pin near 100%' is unsound: a single CPython process routinely exceeds 100% while the GIL is fully saturated, because GIL-releasing C code adds CPU on top of the GIL-bound 100% — the documents name that exact mechanism (SQLite's C driver releases the GIL) and then draw the opposite conclusion from it. 100% GIL-bound Python + ~65% parallel C is a textbook-consistent reading of 165.504%."
+        issue: "The mechanism the round-3 report attributed and rounds 4-5 measured is STILL PRESENT at HEAD and unfixed. `api_services` takes the process-wide `_db_lock` (declared line 139) at line 2875 and the first dedent back to function level is line 3076 — the lock spans the entire handler body, including all the Python computation. 06-20 narrowed this to database reads only; `ea8689e` reverted that narrowing and it was never re-landed. `D-DEBT-06-27`'s round-7 finding (two routes inflating 6.9x under concurrency 3 while four are unaffected, 'consistent with lock contention') is recorded as an untested hypothesis. This is the honest reason the route still misses, and it is disclosed rather than hidden."
+      - path: ".planning/phases/06-workload-resilience-pi-acceptance/06-PI-PROFILE-C.md"
+        issue: "Not a defect in the artifact — a gap in the ACCEPTANCE'S EVIDENCE CHAIN. The operator's stated reasoning is 'at the real rate the route's measured cost is segment A's 77.1ms'. That 77.081ms figure is real, Pi-class, and on the correct build — but it is `wall_ms_unprofiled` from a cProfile-instrumented IN-PROCESS measurement, not an HTTP p95 through gunicorn at any concurrency. No concurrency-1 HTTP control run exists on the accepted build `a7c3ef1`; the most recent c1 HTTP evidence is 289.0ms p50 / 300.1ms p95 from round 5, on the older build segment A measures at 140.323ms. Both numbers are comfortably inside 500ms so the conclusion is very likely right, but 'meets its budget at real usage' currently rests on an inferential step rather than a direct measurement."
     missing:
-      - "Instrument _db_lock directly under the concurrency-8 load and report, per route and per request: time spent WAITING to acquire the lock versus time spent HOLDING it. This is the single measurement that converts the attribution above from strong inference to direct evidence. Prediction to falsify: /api/scan-status will show ~0ms hold and ~240ms median wait; /api/services will show ~200-500ms hold and a wait that grows with the number of siblings queued ahead of it. A wrapper recording monotonic timestamps around the acquire in a contextmanager replacing the bare `with _db_lock` is sufficient — no fix, no topology change."
-      - "Measure lock utilisation (fraction of wall time _db_lock is held by anyone) over the acceptance window, and attribute it by route. The control-pass figures already imply /api/services alone accounts for >=35% (1020 completions x 209ms / 600s) BEFORE any load-induced stretch of its 82%-Python critical section; confirm whether utilisation under load crosses the ~0.85 threshold where M/G/1 queueing delay goes superlinear. This determines whether the fix is narrowing the lock's scope or reducing the critical section, and by how much."
-      - "Separate the GIL contribution from the lock contribution by measuring them independently rather than inferring one from the other's absence. For the GIL: sample per-thread state (or run under a GIL-contention profiler) to get gil-wait time for /api/advanced/current, the one route that takes no lock. Do NOT reuse D-DEBT-06-01's reopening test — this verification finds it non-diagnostic, and the round should record that finding rather than run it a third time. Note the decisive bound already available: an 8-thread interpreter can stretch a CPU-bound route at most ~8x, but /api/scan-status degraded 74x, so the GIL provably cannot be that route's dominant mechanism."
-      - "Measure how much of /api/services' critical section is actually database work needing the lock's protection. 06-PROFILE.md already puts it at 17.958% on a laptop; confirm the split on the Pi under load. This sizes the payoff of the obvious candidate fix — releasing _db_lock after the reads and performing the uptime sweep, maintenance coverage and offline-interval reconstruction outside it — without committing to that fix this round."
-      - "Re-run the acceptance harness on real Pi-class hardware only AFTER a fix chosen against the diagnostic measurements above. PROH-OPS-07-01 forbids tuning budgets (verified intact this round: ROUTE_BUDGETS_MS at tests/pi_load_acceptance.py:102 is unchanged since 06-07 and its values match those the report cites) and PROH-OPS-07-02 forbids treating anything but a genuine hardware run as OPS-07 evidence."
-  - truth: "Beacon keeps essential monitoring reliable (phase goal clause) — /api/services reports correct uptime for every monitored service"
-    status: failed
-    reason: "Regression introduced by 06-13 this round. The all_checks query in api_services was unbounded before 06-13 and now carries LIMIT 20000 with ORDER BY port ASC; its rows feed _uptime_summary. 06-PROFILE.md §5 measured the cap as already reached at 8 services / 8 days. Reproduced behaviourally during this verification: with the cap truncating a port's newest rows, /api/services reports uptime_pct 100.0 for a service whose true uptime is 20.833 — a real outage silently erased, in the optimistic direction, on the primary monitoring surface. This does not falsify any single ROADMAP success criterion as literally worded (SC1 is about sampling cadence, and sampling/storage are unaffected) which is why the score stays 4/5, but it is a direct hit on the phase goal's own 'keeps essential monitoring reliable' clause and it was introduced, not inherited."
+      - "EITHER accept the deviation formally in this file's `overrides:` frontmatter (block ready to paste in the body below), which converts this truth to `PASSED (override)` and makes the operator's already-recorded decision a first-class part of the verification verdict — OR close the gap by measurement."
+      - "One `--concurrency 1 --duration 600` acceptance run on the Pi against `a7c3ef1`/HEAD. This is the cheapest item on this list and it converts the acceptance's central claim from inference to direct HTTP measurement at single-operator load. `06-ACCEPTANCE-RUNBOOK.md` already documents the exact invocation, including the sqlite3-CLI-not-installed detail. Prediction to falsify: `/api/services` p95 lands between 77ms and 300ms, well inside budget."
+      - "OPTIONAL, and explicitly NOT required to close this gap: option (b) from `06-ACCEPTANCE-C3-RUN3.md` — re-derive the harness's load model to a think-time-bearing client shape calibrated against `app.js`'s actual polling rate. The record already warns that this and the forbidden move look identical from outside; if pursued it must be documented at least as carefully as `D-DEBT-06-20`'s amendment was."
+      - "OPTIONAL: option (c) — a round 8 attributing `D-DEBT-06-27`'s selective 6.9x inflation. The structural candidate is already named and confirmed present at HEAD: `api_services` holds `_db_lock` across 200 lines of mostly-Python work (app.py:2875-3075). Four of this phase's seven rounds already chased a hypothesis that did not fully explain the result; scope it to confirm-or-refute a named mechanism, not to search."
+  - truth: "A NULL `online` row is never coalesced away by 06-31's input reduction: the producer still refuses the same inputs it refuses at HEAD, with the same exception type (`PROH-OPS-07-28`, `06-31-PLAN.md` must_haves)"
+    status: partial
+    reason: "The CODE is correct — `dashboard/app.py:2969-2978` appends every NULL row unconditionally and resets `last_state_by_port[port] = None` so the row following a NULL is also always appended. The PROOF does not exist on the shipping path. This verification collapsed the NULL branch on the real route (mutation M2: replace the two-branch body with `state = 1 if online else 0` so `None` is treated as merely falsy) and the ENTIRE 993-test suite stayed green — the only failure was the separately-disclosed `(function, line)` lock-audit line-shift, which my edit triggered incidentally and which `D-DEBT-06-25` documents as expected. Root cause: `UptimeStripCoalescingDifferentialTests` asserts NULL preservation against `_reduce_to_state_changes`, a MIRROR copy that lives in the test file; the single test that binds the mirror to the real route (`test_mirror_agrees_with_the_route_on_its_own_loop`) seeds a fixture of only 0/1 rows and contains no NULL. So the mirror is NULL-tested and the route is not. This is the same shape as `D-DEBT-06-10` and `D-DEBT-06-22`: a green gate over an unexercised path. Severity is WARNING, not blocker — `service_checks.online` is nullable in schema (`migrations.py:120`, no `NOT NULL`), but both writers (`app.py:1468` and `:1665`) bind 0/1 integers, so no shipping code path currently produces a NULL. This is an unguarded defensive invariant with no live exposure."
     artifacts:
-      - path: "dashboard/app.py"
-        issue: "Lines 2821-2826: `SELECT ts, port, online FROM service_checks WHERE port IN (...) AND ts >= ? ORDER BY port ASC, ts ASC LIMIT ?` bound to beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT. Line 2828-2829 populates checks_by_port from this result; line 2874 passes it to _uptime_summary. The in-code comment justifies the LIMIT solely as preserving the offline-interval read's bound and does not acknowledge that it now also gates the uptime sweep. The comment's claim that at-limit behaviour costs 'only the highest-numbered port(s) their newest in-window rows' also understates it: a port entirely past the cutoff receives zero rows."
       - path: "tests/test_services_route_scaling.py"
-        issue: "test_the_route_bounds_checks_by_port_rows_through_the_limit_constant (line 352) patches the limit to 5 against 20 inserted rows — it actively exercises the truncation path — but asserts only response.status_code == 200 and that the SQL carries 'LIMIT 5'. Nothing asserts what uptime_pct, uptime_buckets or availability become when rows are dropped, so the regression is invisible to the suite. This is why the full suite is green at 854/561 with the defect present."
-      - path: "dashboard/beacon/repositories.py"
-        issue: "_OFFLINE_INTERVALS_BULK_ROW_LIMIT = 20000 (line 1105) is now load-bearing for two different concerns with different correctness requirements — a memory/DoS bound on an offline-interval read, and (newly, via app.py) the completeness of the uptime computation. 06-13-SUMMARY.md explicitly declined to file a discrete debt entry for the row-cap finding ('No separate Deferred-section entry was added'), so 06-DEBT.md carries no D-DEBT row for it; it survives only as prose inside D-DEBT-06-01 and 06-PROFILE.md §6."
+        issue: "`test_mirror_agrees_with_the_route_on_its_own_loop` (the one test that binds the test-file mirror to the real route) uses `rows = [(now-6000,1),(now-5900,1),(now-5800,1),(now-5000,0),(now-4900,0),(now-4000,1),(now-2000,0),(now-1900,0)]` — every value is 0 or 1. `UptimeStripCoalescingDifferentialTests` does exercise NULLs, but only against `_reduce_to_state_changes`, the mirror function defined at line 1852 of this same test file, not against `dashboard/app.py`."
     missing:
-      - "A decision on whether /api/services' uptime computation may be truncated at all. If not, the uptime sweep needs its rows unbounded (or bounded per-port rather than globally) while the offline-interval reconstruction keeps its own cap — the two consumers have different correctness requirements and should not share one bound."
-      - "A test that asserts /api/services' uptime OUTPUT under truncation, not merely that a LIMIT clause is present. The existing bound test already sets up the exact conditions; it needs output assertions added. The reproduction used by this verification (two ports, the higher-numbered one offline for its newest half, limit patched to truncate mid-dataset, compare uptime_pct against the untruncated run) is sufficient and takes under a second."
-      - "A discrete debt entry for the pre-existing _OFFLINE_INTERVALS_BULK_ROW_LIMIT finding in read_service_offline_intervals_by_port (the maintenance_attributed_seconds truncation), which this verification agrees is separable from Phase 6 but which currently has no ID of its own in 06-DEBT.md and can therefore be lost."
+      - "Add one NULL row to `test_mirror_agrees_with_the_route_on_its_own_loop`'s fixture, positioned immediately after an offline run (the exact case `PROH-OPS-07-28` names — the divergence the phase measured on 39 of 1,802 randomized cases). The test already captures what the route hands `_uptime_summary` via its `spy`, so no new machinery is needed; the mirror already handles NULL correctly, so the assertion will pass at HEAD and fail against mutation M2. Roughly a two-line change."
 deferred: []
-human_verification: []
-
+human_verification:
+  - test: "Run the acceptance harness on the Pi at single-operator concurrency against HEAD's build: `--concurrency 1 --duration 600`, uninstrumented (confirm `/api/diagnostics/lock-profile` returns 404 before starting), `run_kind: acceptance`, `self_test: false`. `06-ACCEPTANCE-RUNBOOK.md` carries the exact invocation and the three invocations that silently produce inadmissible results."
+    expected: "`/api/services` p95 comfortably inside its 500ms budget — predicted between 77ms and 300ms. This is the single measurement that would convert the operator's acceptance rationale from an inferential step (a cProfile in-process 77.1ms) into a direct HTTP measurement at the rate the deployment actually generates."
+    why_human: "Requires real Raspberry Pi-class hardware with the live Docker deployment. `PROH-OPS-07-02` forbids treating anything but a genuine hardware run as OPS-07 evidence, and no CI or dev-host substitute is admissible."
+  - test: "Decide the disposition of criterion 5 in this file's `overrides:` channel. The operator's 'accept the deviation' decision of 2026-09-06 is recorded in `.planning/REQUIREMENTS.md`, `.planning/STATE.md` and `06-ACCEPTANCE-C3-RUN3.md`, but not here — so this verification scores the truth as measured (FAILED) rather than accepted."
+    expected: "Either the ready-to-paste `overrides:` block in the body is added to this frontmatter (making the score 5/5 with `overrides_applied: 1`), or the deviation is left unaccepted at the verification layer and the gap stands as written."
+    why_human: "A verifier cannot grant its own override. Accepting a measured failure is a governance decision reserved to the operator, and `PROH-OPS-07-08` scopes OPS-07's promotion to an independent round — this one — precisely so the acceptance is visible rather than absorbed."
 ---
 
-> ## Orchestrator addendum — 2026-09-02, after this report was written
+> ## Superseded rounds — condensed 2026-09-07
 >
-> **Not a verifier finding.** Recorded by the orchestrator so a later reader (and the round-4 planner)
-> does not re-plan work that has already landed. The report above is preserved verbatim.
+> Following this phase's convention that no measurement is superseded, only added to. The prior
+> report's findings are preserved below in compressed form; every one of them has since been
+> discharged or carried forward into this round's `re_verification` block.
 >
-> **The second failed truth in this report — the `/api/services` uptime regression — is CLOSED.**
-> Fixed in `bcad398`. The `all_checks` query is unbounded again; the 20,000-row cap now applies in
-> Python, after the `ts <= now` filter, replicating exactly what
-> `read_service_offline_intervals_by_port`'s own `LIMIT` shed, so it reaches only the
-> offline-interval reconstruction and never `_uptime_summary`. 06-13's dedup and its measured 27.6%
-> control-pass improvement are retained. The defective guard this report names
-> (`test_the_route_bounds_checks_by_port_rows_through_the_limit_constant`, which asserted SQL shape
-> and a `200`) is **inverted** to assert the uptime read carries no `LIMIT`, and a new
-> mutation-verified test pins the uptime *value* across a lowered cap — it fails `90.0 != 100.0`
-> against the pre-fix code. Root cause and the planning lesson are recorded as `D-DEBT-06-10`.
+> **Round 1 (2026-09-01, `gaps_found` 4/5).** OPS-07's first hardware run failed with ALL FIVE
+> exercised routes over budget (`/api/services` p95 10010.9ms). Surfaced two blocking defects —
+> `/api/services` costing ~2.5s CPU per request, and a harness resource oracle sampling an unrelated
+> application on the same host. Recorded as `06-UAT.md` gap `G-06-1`.
 >
-> **Two further findings from `06-REVIEW-ROUND3.md` are also fixed** (`631381f`), both
-> mutation-verified: CR-02 (`_window_from_row_cached` keyed on `id(row)` without pinning the
-> referent — reproduced returning the wrong `Window` at iteration 1 of 2000) and CR-03 (`--self-test`
-> skipped CPU priming and reported `primed_pid_count: 0`, the exact signature 06-11 added to flag a
-> broken CPU column).
+> **Round 2 (2026-09-02, `gaps_found` 4/5).** Recorded the harness CPU column as a structural `0.0`
+> (✗ STUB) and asked for the residual per-request cost to be profiled and reduced.
 >
-> **This report's attribution of the serialization to `_db_lock` is accepted.** Every link was
-> re-verified independently against source, and `D-DEBT-06-09` has been updated from "measured but
-> not attributed" to carry the attribution, the arithmetic, and the withdrawal of the two inferences
-> this report identifies as unsound. Round 4 is therefore scoped to **confirm or refute a named
-> mechanism**, not to search an open field.
+> **Round 3 (2026-09-02, `gaps_found` 4/5).** Confirmed the CPU-sampling fix behaviourally on
+> hardware (594 non-zero web samples, `all_samples_zero: false`). Confirmed `06-13`'s memoization as
+> substantive with `/api/services` control p50 down 27.6% (289.0 → 209.355ms). Third hardware run
+> still failed with three routes over budget at concurrency 8. Its two load-bearing contributions:
 >
-> **Still open, and the whole of round 4's scope:** the five `missing:` items under Truth 5 above.
-> Suite at the time of this addendum: **859 passed, 561 subtests, 0 failed**.
-
+> 1. **It named the serialization mechanism as `_db_lock`** from evidence already in the repository,
+>    against `D-DEBT-06-09`'s position that the mechanism was unattributable. The chain: the lock is
+>    a single process-wide `threading.Lock` taken by 5 of 6 exercised routes; `api_services` holds it
+>    across its entire handler body of which only ~18% is SQL; the harness's rotation puts
+>    `/api/scan-status` immediately after `/api/services`; and `/api/scan-status`' excess wait
+>    (239.333ms) is 1.143x one `/api/services` critical section. It also showed
+>    `D-DEBT-06-01`'s reopening test was non-diagnostic and that the "165.504% CPU weakens the
+>    one-interpreter hypothesis" inference was unsound. **Rounds 4 and 5's instrumented Pi passes
+>    confirmed this attribution rather than refuting it.** It remains structurally true at HEAD.
+> 2. **It caught a data-correctness regression that the entire green test suite could not see** —
+>    `06-13` had extended `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` onto the uptime path, so a service with
+>    a real outage reported 100.0% uptime behind a fully-populated 168-hour bar. Fixed in `bcad398`,
+>    recorded as `D-DEBT-06-10`, and **re-proved closed by mutation in this round.**
+>
+> **Orchestrator addendum (2026-09-02).** Recorded that the uptime regression was closed in `bcad398`
+> with a mutation-verified output-level guard replacing the SQL-shape-only one; that
+> `06-REVIEW-ROUND3.md`'s CR-02 (`_window_from_row_cached` keyed on `id(row)`) and CR-03
+> (`--self-test` reporting `primed_pid_count: 0`) were fixed in `631381f`; and that the `_db_lock`
+> attribution was accepted, with `D-DEBT-06-09` updated to carry it.
+>
+> **Rounds 4-7 (2026-09-03 → 2026-09-06), not previously verified.** Round 4's diagnostic returned
+> INCONCLUSIVE; the operator chose `fix-now`. Round 5 landed the lock narrowing (`06-20`) and then
+> **reverted it in `ea8689e`**, superseding `06-23`/`06-24`. Criterion 5 was amended on 2026-09-04.
+> Round 6 (`06-25`/`06-26`) moved the uptime strip to bulk SQL and was **REFUTED** at +315.8%.
+> Round 6.5 (`06-29`/`06-30`) reshaped the join to -70.71%, still 21.8% over the bar, and decided
+> `revert-route-wiring`. Round 7 (`06-31`/`06-32`) reverted `06-25`'s wiring and reduced the strip's
+> input to state-change points only: **34.927ms against the 56.820ms bar, the first round of the
+> phase to beat the pre-`06-25` baseline.** `06-27` then measured that build on the Pi (-45.07% per
+> request) and ran the third gating acceptance run, which failed. `06-28` re-closed the security
+> boundary (42 → 88 threat rows).
 
 ---
 
@@ -91,9 +134,28 @@ human_verification: []
 
 **Phase Goal:** Beacon keeps essential monitoring reliable while discovery and previews operate as bounded, recoverable best-effort work on Raspberry Pi-class hardware.
 
-**Verified:** 2026-09-02T19:00:25Z
+**Verified:** 2026-09-07T08:03:39Z
 **Status:** gaps_found
-**Re-verification:** Yes — third round, after gap-closure plans `06-11`–`06-14`. Supersedes the round-2 report (`gaps_found`, 4/5).
+**Score:** 4/5
+**Re-verification:** Yes — **round 4 of verification**, after plans `06-15` through `06-32` (the prior report predates `06-15`). Supersedes the 2026-09-02 report, condensed above.
+
+**Verified against the AMENDED criterion 5** as it reads in `.planning/ROADMAP.md` today
+(amended `63db9ef`, 2026-09-04), not the original "representative load" wording the prior report used.
+
+## The headline answer
+
+**Criterion 5 is FAILED as measured, and separately Accepted-with-deviation as dispositioned. Both
+are true and they are not in conflict.**
+
+- The gating concurrency-3 acceptance run **was** performed on real Pi-class hardware — three times.
+- All three returned `overall_passed: false`, failing on the same single route.
+- Run 3's build is **code-identical to HEAD**, so the failure is the current code's failure.
+- The operator accepted the deviation on usage grounds on 2026-09-06. That acceptance is legitimate,
+  well-reasoned, and correctly recorded — but it is a governance act, not a measurement, and it has
+  not been entered into this file's `overrides:` channel.
+
+`.planning/STATE.md`'s two claims are both **accurate at HEAD**: OPS-07 is recorded as accepted with
+deviation on usage grounds rather than passed, and all three failing runs stand unsuperseded.
 
 ## Goal Achievement
 
@@ -101,162 +163,337 @@ human_verification: []
 
 | # | Truth (ROADMAP Success Criterion) | Status | Evidence |
 |---|------|--------|----------|
-| 1 | Metric sampling and service checks remain within their accepted cadence while discovery, previews, cleanup, and analytics queries are active | ✓ VERIFIED | No regression. `dashboard/beacon/worker_main.py`'s `'metrics'`/`'cleanup'` lane split still present; `tests/test_workload_resilience.py:522 CadenceUnderContentionTests` present and passing in this verification's own full-suite run. Now backed by a **third** hardware run: `assertions.cadence.passed: true`, `failures: []`, J1–J4 never stale, on both round-3 passes. Cadence has now held on every hardware run this phase has produced, including the one whose latency assertions failed — which is the stronger result, since it shows essential sampling survives the very contention that breaks responsiveness. |
-| 2 | Preview work has one serialized browser owner, bounded deadlines and retries, and a visible non-fatal degraded state instead of blocking core monitoring | ✓ VERIFIED | No regression. `queues.py` retry/backoff and the degraded badge unchanged. WR-02's `has_thumb`-before-`preview_status` precedence fix survives `06-13`'s edits to the same file — now at `dashboard/app.py:3149` (shifted from 3100-3116 by `06-13`'s additions above it), with the precedence rationale intact at 3132-3140. `tests/test_api_and_auth.py:316 test_thumb_state_precedence_across_the_four_has_thumb_and_preview_status_combinations` present and passing. |
-| 3 | Thumbnail data expires within a bounded managed store and no longer puts large preview blobs on Beacon's primary telemetry path | ✓ VERIFIED | No regression. Migration 10 and `ThumbnailStoreRepository` (`dashboard/beacon/repositories.py:709`) untouched this round; TTL/budget reap intact; passing in the full-suite run. |
-| 4 | Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage | ✓ VERIFIED | No regression. WAL, `tests/test_workload_resilience.py:747 ConcurrentAccessTests` and `tests/test_migrations.py:1425 InventoryTests` all present and passing. WR-01's third `mode=ro&immutable=1` fallback still present (`dashboard/beacon/inventory.py:128`). `_db_lock`'s scope is unchanged this round — `06-13` and `06-14` touched no line of it, so `T-06-24`'s closure evidence in `06-SECURITY.md` remains valid. (Note: this truth is about *correctness* under concurrency, which holds. The same lock's *performance* consequence is Truth 5's finding — they are not in conflict; `_db_lock` is doing its job correctly and expensively.) |
-| 5 | A Raspberry Pi-class representative-load run demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling | ✗ FAILED | `overall_passed: false` on real hardware (`aarch64`/`raspi`, Pi 5 Model B, `nproc` 4) against `b8ed60b`, which this verification independently confirmed is code-identical to `HEAD` (`git diff --stat b8ed60b..HEAD -- dashboard/ tests/` → empty; the four commits since are documentation only). Three routes over budget under concurrency 8 / 600s. **The failure has changed shape and is materially narrower than round 2's** — see below. |
+| 1 | Metric sampling and service checks remain within their accepted cadence while discovery, previews, cleanup, and analytics queries are active | ✓ VERIFIED | Lane split intact at HEAD: `dashboard/beacon/worker_main.py:465-466` declares separate `ThreadPoolExecutor(1)` for `'metrics'` and `'cleanup'`, with J1/J2 pinned to `executor='metrics'` (:84-85) and J8's hourly retention pass to `executor='cleanup'` (:91) — the comment at :457-459 states the OPS-01 intent explicitly. `CadenceUnderContentionTests` present at `tests/test_workload_resilience.py:524` and passing in this verification's own clean full-suite run. **Backed by the amended criterion's own hardware run**, parsed from raw JSON not from the report: `assertions.cadence` = `{"failures": [], "passed": true}`, all four `freshness_by_job` states `fresh` (J1 0s, J2 0s, J3 200s, J4 20s), across the full 601s window at concurrency 3. Cadence has now held on **every** hardware run this phase has produced, including all six that failed on latency. |
+| 2 | Preview work has one serialized browser owner, bounded deadlines and retries, and a visible non-fatal degraded state instead of blocking core monitoring | ✓ VERIFIED | No regression. `dashboard/beacon/queues.py:28` `PREVIEW_STATUS_DEGRADED = 'degraded'`; bounded deadlines throughout (`deadline_ts` at :55, :347, :369, :373, :415-420) with lease-based serialized ownership (`lease_owner`/`lease_until` at :475, :500). WR-02's precedence fix survives every subsequent edit — now at `dashboard/app.py:3282-3286`, with the rationale ("a servable stored thumbnail outranks a degraded latest preview request") intact. `queues.py` untouched since round 3. |
+| 3 | Thumbnail data expires within a bounded managed store and no longer puts large preview blobs on Beacon's primary telemetry path | ✓ VERIFIED | No regression. Migration 10 (`dashboard/beacon/migrations.py:604-624`) creates `thumbnails(port, data, mime, captured_ts, source, expires_ts)` with `idx_thumbnails_expires`, backfills every existing blob, and `UPDATE services SET thumb_data=NULL, thumb_mime=NULL` — the whole sequence inside the migration's `BEGIN IMMEDIATE` per `PROH-OPS-03-01`. `ThumbnailStoreRepository` at `repositories.py:709`. **Confirmed on hardware at concurrency 3**: `assertions.resources.passed: true`, worker RSS 553,615,360 B against a 1 GiB limit, web RSS 117,129,216 B against 256 MiB. |
+| 4 | Beacon recovers predictably from restarts, concurrent web/worker database activity, and failed background jobs, as proven by automated runtime and persistence coverage | ✓ VERIFIED | No regression. WAL in force: `dashboard/beacon/db.py:27` `JOURNAL_MODE = 'WAL'`, applied per connection at :201, with `configured_journal_mode` at :209 for verification. `WalModeTests` (:690), `ConcurrentAccessTests` (:749) and `NarrowedShapeConcurrentAccessTests` (:945) all present in `tests/test_workload_resilience.py` and passing. **Confirmed on hardware**: all 12 `background_job_health` rows read `state: succeeded` with no `error_class`. Note the same non-conflict the round-3 report identified: `_db_lock` is doing its correctness job here, and expensively — truth 5's finding is the same lock's performance consequence, not a contradiction of this one. |
+| 5 | A Raspberry Pi-class run at single-operator load — concurrency 3, 600s, every declared route budget unchanged — demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling | ✗ FAILED | `overall_passed: false` on real hardware (`host_machine: aarch64`, `host_node: raspi`) against `a7c3ef1`, **independently confirmed code-identical to HEAD** (`git diff --stat a7c3ef1..HEAD -- dashboard/ tests/` → empty). Three of four clauses PASS. The fourth — responsive interaction — fails on exactly one of six routes: `/api/services` p95 662.3ms vs a 500ms budget, the third consecutive independent miss (635.6 / 679.3 / 662.3). Separately **Accepted with deviation** by recorded operator decision, which this report does not treat as a pass. |
 
-**Score:** 4/5 truths verified; 1 failed (measured, not untested). 0 present-but-behavior-unverified. The score does not capture the newly-introduced uptime-truncation regression, which sits under the phase goal's "keeps essential monitoring reliable" clause rather than under any single success criterion's literal wording; it is recorded as a second gap and as a `regressions:` entry.
+**Score:** 4/5 truths verified. 0 present-but-behavior-unverified. 0 overrides applied.
 
-### Truth 5, characterised precisely
+---
 
-**Agreed: per-request cost is fixed; what remains is concurrency-only.** The evidence supports this without reservation. The concurrency-1 control pass returns `overall_passed: true` with every route inside budget and comfortable headroom (`/api/services` 227.4ms p95 against a 500ms budget). `/api/services`' control p50 fell 27.6% (289.0 → 209.355ms), and `06-13`'s two named fixes are present and substantive in the code, not just claimed. Round-2 → round-3 p95 improved on all three failing routes (−29.7%, −63.5%, −13.1%). Nothing in the acceptance failure is reachable at concurrency 1.
+## Truth 5, settled
 
-**Not agreed: that the remaining failure is unattributable.** `D-DEBT-06-09` records it as "measured to be serialization but not yet attributed," and the next round was scoped as diagnostic on that basis. This verification finds the mechanism **is** attributable from evidence already in the repository, and names it: **`_db_lock`**.
+### The open question: was the gating run ever performed, and what did it return?
 
-The chain, each link independently verified above and in the tables below:
+**Yes — three times, all on real Pi-class hardware, all failing.** This was verified from the raw
+committed artifacts, not from SUMMARY prose.
 
-1. `_db_lock` is a single process-wide `threading.Lock` (`dashboard/app.py:127`) taken by **5 of the 6** exercised routes. Only `/api/advanced/current` is exempt.
-2. `/api/services` holds it across its **entire handler body** (lines 2785–2924; first dedent at 2925). Per `06-PROFILE.md`'s own bucket table, **82.042%** of that work is non-SQL Python — the uptime sweep, maintenance coverage, and offline-interval reconstruction all execute under a global mutex.
-3. The harness's rotation places `/api/scan-status` **immediately after** `/api/services` (`tests/pi_load_acceptance.py:371`), and `_load_worker` is closed-loop with all 8 threads started simultaneously at index 0. Every thread therefore requests `scan-status` the instant it leaves `/api/services`, while siblings are still inside holding the lock.
-4. The arithmetic closes it: `/api/scan-status`'s excess wait is **239.333ms**, which is **1.143×** one `/api/services` critical section (209.355ms) — one full holder plus ~14% GIL stretch. A 3.281ms route whose latency equals one holder's service time is the textbook signature of a shared mutex, not of computation.
-5. It also explains what `D-DEBT-06-09` leaves unexplained — the **13× p50 spread among routes that all take the same lock**. Degradation tracks rotation distance from `/api/services`, not route cost: scan-status (idx 1) +239ms, thumbnail-status (idx 2) +18ms, history (idx 3) +36ms, thumbnails (idx 5–12) +22ms.
-6. And it survives the obvious falsification: an 8-thread interpreter can stretch a CPU-bound route by at most ~8×, but `/api/scan-status` degraded **74×**. The GIL provably cannot be that route's dominant mechanism; a lock can.
+| Run | Date | Build | Build vs HEAD | `/api/services` p95 | Result |
+|---|---|---|---|---|---|
+| 1 (`06-ACCEPTANCE-C3.md`) | 2026-09-04 | `a33af15` | 5 files differ | 635.6ms | FAIL +27% |
+| 2 (`06-ACCEPTANCE-C3-RUN2.md`) | 2026-09-05 | `82801cb` | 5 files differ | 679.3ms | FAIL +36% |
+| 3 (`06-ACCEPTANCE-C3-RUN3.md`) | 2026-09-06 | `a7c3ef1` | **identical** | **662.3ms** | **FAIL +32.5%** |
 
-**Why the phase concluded otherwise.** `D-DEBT-06-01`'s second reopening test is not diagnostic. It uses `/api/advanced/current`'s recovery as the discriminator for `_db_lock` — but that route is the most expensive non-`/api/services` route in the mix (82.281ms control p50) and takes no lock, so it degrades from GIL/CPU contention regardless of the lock's state. The test can only fire if the GIL contribution is negligible, which the same run measures it is not. Two independent, co-existing mechanisms were treated as mutually exclusive alternatives, so "the test did not fire" was read as evidence for `_db_lock`'s innocence when it carries no information either way. `_db_lock` and the GIL are not competing hypotheses — they **compose**: the GIL stretches the 82%-Python critical section, and the lock then serializes every other route behind the stretched section.
+Run 3 is the one that matters for this verification, because it is the only one measuring the code
+that is actually in the tree.
 
-**A second inference to correct.** `06-ACCEPTANCE-ROUND3.md` and `D-DEBT-06-09` both argue that `mean_cpu_percent` 165.504 "weakens the one-interpreter hypothesis" because it is not "a hard pin near 100%." This is unsound. A single CPython process routinely exceeds 100% while the GIL is fully saturated, because GIL-releasing C extension code runs concurrently on top of the GIL-bound 100% — and both documents name that exact mechanism ("SQLite's C code releases the GIL") one sentence before drawing the opposite conclusion from it. 100% GIL-bound Python plus ~65% parallel C is a fully consistent reading of 165.504%. Likewise, "roughly 2.3 of 4 cores idle" is not neutral evidence about *which* serializer is responsible — idle capacity alongside high latency is the generic symptom of serialization, and is equally predicted by a mutex, by the GIL, or by both.
+**Admissibility, parsed directly from `beacon-c3-run3.json`:**
 
-**What this changes.** The diagnostic round remains the right call — the attribution above is strong inference from aggregate figures plus code structure, and it should be confirmed by direct lock-wait/lock-hold instrumentation rather than adopted on argument (this phase has now twice adopted an unconfirmed single-cause hypothesis). But the round should be scoped to *confirm or refute a specific named mechanism* with a falsifiable prediction, not to search an open field. `gaps[].missing` above is written to that shape.
+| Property | Value | Required |
+|---|---|---|
+| `run_kind` | `acceptance` | ✓ |
+| `scenario.concurrency` | `3` | ✓ |
+| `scenario.duration_seconds` | `600` (601s elapsed) | ✓ |
+| `scenario.self_test` | `false` | ✓ |
+| `lock_profile` | `{}` (uninstrumented) | ✓ `PROH-OPS-07-11` |
+| `host_machine` / `host_node` | `aarch64` / `raspi` | ✓ `PROH-OPS-07-02` |
+
+**Percentiles recomputed from the raw samples, not read from the report's table.** The JSON carries
+`route_latencies_ms` — 16,547 individual measurements. Recomputing p50/p95 independently:
+
+| route | n | p50 | p95 | budget | result |
+|---|---:|---:|---:|---:|---|
+| `/api/services` | 1381 | 530.1 | **662.3** | 500 | **FAIL** |
+| `/api/advanced/current` | 1380 | 508.1 | 549.6 | 2000 | pass |
+| `/api/scan-status` | 1380 | 8.1 | 192.1 | 500 | pass |
+| `/api/thumbnail/<port>` | 9646 | 7.8 | 204.5 | 1500 | pass |
+| `/api/history` | 1380 | 17.6 | 38.4 | 2000 | pass |
+| `/api/thumbnail-status` | 1380 | 8.5 | 11.8 | 750 | pass |
+
+Every figure reproduces. The reports are accurate.
+
+**The failure has narrowed monotonically across the phase** — five routes over budget in round 1,
+three in round 3 at concurrency 8, exactly one at concurrency 3 — but it has not closed.
+
+### Is the criterion met, failed, or accepted-with-deviation?
+
+**Plainly: FAILED as measured; Accepted-with-deviation as dispositioned.**
+
+The criterion's own text requires the run to *demonstrate responsive interaction*. It did not, on the
+route whose budget rationale is specifically "a slow response here is a slow-feeling UI". No reading
+of the amended text makes 662.3ms against 500ms a pass.
+
+The operator's acceptance (recorded 2026-09-06 in `1f0ce4b`, present at HEAD in
+`.planning/REQUIREMENTS.md:74`, `.planning/STATE.md` and `06-ACCEPTANCE-C3-RUN3.md`) is a separate
+and legitimate act. Its arithmetic was checked and holds exactly:
+
+- `dashboard/app.js:797` polls `loadServices` every 15,000ms → **0.067 req/s**. ✓
+- The harness drove `/api/services` at 1381 / 601s = **2.298 req/s** inside a 16,547 / 601 = **27.5
+  req/s** total offered load, closed-loop with zero think time. ✓ (report says 2.30 and 27.6)
+- 2.298 / 0.067 = **34.5x** the real per-route rate. ✓
+
+The record is also unusually candid about its own limits: it states the decision "is not a claim that
+the route passes its budget", that all three failing runs stand unsuperseded, that option (b) remains
+unexercised, and that `D-DEBT-06-27`'s untested contention finding is the condition under which the
+acceptance should be revisited.
+
+**Why this report still scores it FAILED.** `PROH-OPS-07-08` reserves OPS-07's promotion to an
+independent verification round — this one. The mechanism by which an operator decision enters a
+verification verdict is the `overrides:` frontmatter channel, and no such entry exists in this file.
+Scoring the truth as passed on the strength of a decision recorded elsewhere would do exactly what
+`PROH-OPS-07-08` exists to prevent: make the acceptance invisible in the verdict. So the measurement
+stands as the score, and the acceptance is surfaced as a decision awaiting its channel.
+
+### Suggested override
+
+**This looks intentional.** The deviation is a documented, dated, reasoned operator decision, and this
+is the correct channel for it. To make the acceptance a first-class part of the verification verdict,
+add to this file's frontmatter:
+
+```yaml
+overrides:
+  - must_have: "A Raspberry Pi-class run at single-operator load — concurrency 3, 600s, every declared route budget unchanged — demonstrates responsive interaction, resource-budget compliance, recovery, and uninterrupted essential sampling"
+    reason: "Accepted with deviation on usage grounds, per the operator decision of 2026-09-06 recorded in 06-ACCEPTANCE-C3-RUN3.md, .planning/REQUIREMENTS.md:74 and .planning/STATE.md. Cadence, resources and recovery all PASS. /api/services misses its 500ms p95 (662.3ms) only under a closed-loop harness load measured at 34.5x the deployment's real 0.067 req/s per-route rate. No budget, criterion, assertion or harness default was moved — verified independently this round (PROH-OPS-07-01 and PROH-OPS-07-10 intact). OPS-07 stays 'Accepted with deviation', never 'Complete', per PROH-OPS-07-08. Revisit if the real request rate rises or services are added — see D-DEBT-06-27."
+    accepted_by: "thewilliamharry"
+    accepted_at: "2026-09-06T16:21:50Z"
+```
+
+Adding this makes the score **5/5** with `overrides_applied: 1` and the status `human_needed` (the
+concurrency-1 confirmation run would remain outstanding). Leaving it out keeps the gap as written.
+Either is defensible; the choice is the operator's, not the verifier's.
+
+---
+
+## The amendment audit
+
+The ROADMAP block quote makes four checkable claims about criterion 5's 2026-09-04 amendment. **All
+four hold**, verified against source and git history rather than against the note itself.
+
+| Claim | Status | Evidence |
+|---|---|---|
+| Every route budget unchanged | ✓ VERIFIED | `ROUTE_BUDGETS_MS` (`tests/pi_load_acceptance.py:103`, not 102 — a one-line drift from edits above it) extracted at `807776a` (06-06), at `32781e5` (06-07) and at HEAD: **byte-identical across all three**. `git log -L` over the exact dict block returns ONE commit in its entire history — its introduction on 2026-09-01. Never touched. |
+| `assert_response_times`, `assert_resource_budget`, `assert_cadence`, `_routes_for_ports`, `_load_worker` untouched | ✓ VERIFIED | Per-function `git log -L`: the first four last changed in `807776a` (06-06, 2026-09-01); `_load_worker` in `5e29ab3` (06-07, 2026-09-01). All five predate the 2026-09-04 amendment by three days. |
+| Harness defaults untouched; the gating run passes `--concurrency 3` explicitly | ✓ VERIFIED | `tests/pi_load_acceptance.py:1792` still declares `'--concurrency', type=int, default=8`; :1781 `'--duration', type=int, default=600`. The default was NOT quietly moved to 3. `beacon-c3-run3.json`'s `scenario.concurrency: 3` came from the command line. |
+| The justification is usage, not difficulty | ✓ VERIFIED | Every source claim in the note reproduces. `dashboard/app.js:795` is `Promise.allSettled([loadStats(), loadHistory(), loadScan(), loadServices(), loadEvents()])` — five parallel calls (the note cites line 784; phase 7's comments shifted it by 11). `setInterval` at :796/:797/:798 = 5s/15s/60s exactly as described. Arithmetic: 33 requests per 60s = 0.55 req/s per tab, matching "roughly 0.5". The resulting gate is still ~34.5x the real per-route rate — conservative, not lenient. |
+| The amendment itself moved no code | ✓ VERIFIED | `git show --stat 63db9ef` → three files, all planning Markdown (`REQUIREMENTS.md`, `ROADMAP.md`, `06-DEBT.md`), 76 insertions, 2 deletions. **Zero lines under `dashboard/` or `tests/`.** |
+
+**Conclusion: the amendment is legitimate.** Nothing that could turn a failing measurement into a
+passing one moved with it. `PROH-OPS-07-01` and `PROH-OPS-07-10` are structurally intact. The
+criterion was narrowed because the load model was wrong about the deployment — and the deployment's
+actual behaviour, read out of `app.js`, confirms it was.
+
+---
+
+## The data-correctness regression: closed, and re-proved closed
+
+The prior report's second failed truth — `06-13` extending `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` onto
+the uptime path, so a service with a real outage reported 100.0% — is **CLOSED**. Not accepted on
+prose; reproduced.
+
+**Static evidence.** `dashboard/app.py:2928`'s `all_checks` query is
+`SELECT ts, port, online FROM service_checks WHERE port IN (...) AND ts >= ? ORDER BY port ASC, ts ASC`
+— **no `LIMIT` clause**. It is preceded by a 40-line comment beginning `DELIBERATELY UNBOUNDED`,
+which names both consumers, states that dropping rows here "does not degrade the metric, it falsifies
+it", and cites `D-DEBT-06-10`. The cap survives as a Python budget (`offline_points_budget`,
+:2939) decremented only inside the `points_by_port` branch (:2979-2981), after the `ts <= now`
+filter — so it reaches the offline-interval reconstruction and never `_uptime_summary`.
+
+**Behavioural evidence (mutation M1).** This verification re-applied the exact defect — pushed the
+cap back into the SQL with a truncating value — and confirmed the guards fire:
+
+| Guard | Under M1 |
+|---|---|
+| `test_the_route_does_not_bound_the_uptime_read_with_the_interval_row_cap` | ✗ FAILED (correctly) |
+| `test_uptime_pct_is_not_affected_by_the_offline_interval_row_cap` | ✗ FAILED (correctly) |
+| This verification's own independent end-to-end differential | ✗ FAILED (correctly) — `6.563 != 87.194` |
+
+`tests/test_services_route_scaling.py:439` asserts the **output** (`uptime_pct` equality between a
+full and a capped read) and carries its own fixture guard (`assertLess(full, 99.0)`) so it cannot go
+vacuous. This is the direct inverse of the guard the prior report found defective, which asserted
+only SQL shape and a `200`. The lesson took.
+
+## 06-31's input reduction: exact, and no truncation reintroduced
+
+`06-31` reverted `06-25`'s bulk-SQL wiring and put the strip back on the Python producer
+`_uptime_summary`, but fed a **reduced, state-change-only** subset. The concern is whether that
+reduction is exactly equal, or a second silent truncation wearing different clothes.
+
+**It is exact.** Verified by an independently-written end-to-end differential — own seed (777001),
+own fixture strategy, deliberately unlike the phase's own mirror-based test — which drove the **real**
+`/api/services` route against a **real** SQLite database and compared its **actual** `uptime_pct` and
+all 168 `uptime_buckets` against `_reference_uptime_summary`, the verbatim pre-optimization
+O(buckets x intervals) oracle, computed over the **full, unreduced** row stream:
+
+```
+[VERIFIER] 12 services, 4012 raw rows -> 1581 state-change points (39.4%);
+           uptime_pct range 5.292..98.262
+1 passed
+```
+
+- **39.4% retained** — the reduction is genuinely shedding 60.6% of input, so the test is not
+  trivially comparing an unreduced stream against itself.
+- **uptime_pct range 5.292–98.262** — real, observable downtime; the fixture is not vacuous.
+- **Every `uptime_pct` and every 168-element bucket array matched the unreduced reference exactly**
+  for all 12 services.
+
+Structurally, `checks_by_port` carries **no budget of any kind** — only `points_by_port` is bounded —
+so the reduction cannot truncate. It sheds only rows that repeat the preceding state.
+
+**The reduction's presence is also guarded.** Mutation m3 (remove the reduction entirely) fails three
+tests: `test_mirror_agrees_with_the_route_on_its_own_loop`,
+`test_reduced_input_count_tracks_transitions_not_stored_volume` and
+`test_reduced_input_count_holds_on_a_mostly_unobserved_window`. Note that this verification's own
+correctness differential **passes** under m3 — confirming the phase's own stated insight
+(`PROH-OPS-07-28`) that a correctness differential can never detect a reduction's absence.
+
+## New finding: the NULL rule is correct in code but unproven on the shipping path
+
+Recorded as gap 2 and as a flagged prohibition. In brief: mutation M2 collapsed the NULL branch on
+the **real route**, and all 993 tests stayed green. The NULL assertion lives against
+`_reduce_to_state_changes`, a mirror in the test file; the one test binding that mirror to the route
+uses a fixture containing no NULL. No live exposure — both `service_checks` writers
+(`app.py:1468`, `:1665`) bind 0/1 integers — so this is a warning, closable by adding one NULL row to
+an existing fixture.
+
+This is the third instance in this phase of the same pattern the user flagged (`D-DEBT-06-10`,
+`D-DEBT-06-22`): a green gate over a path nothing exercises. It is worth naming as a pattern rather
+than only as an item.
+
+---
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `tests/pi_load_acceptance.py` (CPU sampling) | Working per-PID handle cache replacing the round-2 structural `0.0` | ✓ VERIFIED (was ✗ STUB) | `_cached_handle` (line 509) returns the cached `psutil.Process` when `create_time()` confirms identity, replaces and primes on PID recycle, and `_live_role_processes` (line 567) maps every discovered process through it. Confirmed **behaviourally on hardware**: `all_samples_zero: false`, 594 non-zero web samples, 0 zero samples, `handle_cache: "per_pid_run_lifetime"`. |
-| `tests/pi_load_acceptance.py` (`cpu_sampling` provenance) | Reader-facing block stating whether the CPU column is trustworthy | ✓ VERIFIED | Lines 807-836 emit `handle_cache`, `primed_pid_count`, `nonzero_sample_count`, `all_samples_zero`. Correctly excluded from `failure_reasons` per `PROH-OPS-07-01`. |
-| `tests/pi_load_acceptance.py` (`ROUTE_BUDGETS_MS`) | Unchanged — no budget tuning | ✓ VERIFIED | Line 102. Values (`/api/services` 500, `/api/scan-status` 500, `/api/advanced/current` 2000) match those the failure report cites. `git log -L` shows last touched in `06-07`; `git diff 32781e5..HEAD` shows no budget lines changed. **`PROH-OPS-07-01` intact.** |
-| `dashboard/beacon/maintenance.py` | Request-scoped memo for the occurrence walk | ✓ VERIFIED | `_window_from_row_cached` (132), `_local_occurrence_epochs(..., cache=None)` (174), `coverage(..., *, cache=None)` (255), `_covering_boundaries` (501), `attributed_downtime_seconds` (552). Keyword-only, defaults `None`, so every non-opted-in caller is byte-identical by construction. |
-| `dashboard/app.py` (duplicate scan removal) | Offline intervals reconstructed from already-fetched rows | ✓ VERIFIED | `read_service_offline_interval_boundaries_by_port` (2847, strictly-before-`start_ts`, genuinely non-duplicative) + `offline_intervals_from_points_by_port` (2850) replace the second full-window read. Memo threaded at 2887/2894. |
-| `dashboard/app.py` (row bound) | Bound preserved via the named constant | ⚠️ VERIFIED BUT HARMFUL | The bound is correctly wired to `beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT` (2825), not a drifting literal — the stated requirement is met. But applying it to `all_checks`, which was previously unbounded, extends truncation onto the uptime path. See Anti-Patterns. |
-| `tests/test_services_route_scaling.py` (cost guard) | Guard against regression toward the unmemoized cost | ✓ VERIFIED | `test_maintenance_coverage_cost_is_no_longer_dominated_by_unmemoized_occurrence_walks` (752). Thresholds `small < 100.0ms` / `large < 400.0ms` sit ~3× above shipped (≈30/133ms) and ~3× below unmemoized (276.2/1322.4ms) — real mid-band placement. Mutation-verified by the executor (disabling both `cache=` call sites and re-measuring). See the deviation judgment below. |
-| `tests/test_module_boundaries.py` (topology pin) | Source-level pin on `--workers 1 --threads 8` | ✓ VERIFIED | `test_the_deployment_pins_its_gunicorn_concurrency_model` present; executor reports mutation-verification in both directions. |
-| `06-PROFILE.md` | Cost attribution driving the fix decision | ✓ VERIFIED | `attributed_pct` 98.653 at the real 8-service/8-day shape; `check_row_ratio` 4.249 measured (not assumed); host difference and non-transferability of absolute ms disclaimed explicitly per `PROH-OPS-07-09`. Notably corrects the round-2 report's own prediction as materially incomplete — a self-critical finding the phase surfaced against itself. |
-| `06-ACCEPTANCE-ROUND3.md` | Durable record of the third run | ✓ VERIFIED | Both passes, degradation factors, cadence, resources, `cpu_sampling`, `scenario`, and the `mem_limit`-not-kernel-enforced finding all recorded. Records the failure plainly rather than writing around it. |
-| `06-DEBT.md` | Round-3 dispositions | ⚠️ VERIFIED WITH RESERVATION | Structure and dispositions are present and honest (06-06 discharged, 06-02 evaluated, 06-08/06-09 added). Two inferences inside `D-DEBT-06-01`/`D-DEBT-06-09` do not survive scrutiny (the non-diagnostic reopening test; the 165.504% GIL reading) — see Truth 5. Additionally, the `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` finding has **no `D-DEBT` ID of its own**, by `06-13`'s explicit choice. |
-| `.planning/REQUIREMENTS.md` | OPS-07 unchanged and Pending | ✓ VERIFIED | Line 72 `- [ ] **OPS-07**` unchecked; line 155 `| OPS-07 | Phase 6 | Pending |`. `git diff --quiet` holds. **`PROH-OPS-07-08` intact.** |
+| `tests/pi_load_acceptance.py` (`ROUTE_BUDGETS_MS`) | Unchanged — no budget tuning | ✓ VERIFIED | Line 103. Byte-identical at `807776a`, `32781e5` and HEAD. One commit in its whole history. `PROH-OPS-07-01` intact. |
+| `tests/pi_load_acceptance.py` (assertions + load generator) | Unchanged across the amendment | ✓ VERIFIED | `assert_response_times`/`assert_resource_budget`/`assert_cadence`/`_routes_for_ports` last touched `807776a`; `_load_worker` `5e29ab3`. Both 2026-09-01, three days before the amendment. |
+| `tests/pi_load_acceptance.py` (defaults) | `--concurrency` default not moved to 3 | ✓ VERIFIED | :1792 `default=8`; :1781 `default=600`. The gating run supplies `3` explicitly. |
+| `beacon-c3-run3.json` | Admissible, uninstrumented, Pi-class acceptance evidence at c3/600s | ✓ VERIFIED (result FAILING) | All six gating properties confirmed by direct parse. 16,547 raw latency samples present and independently re-percentiled. |
+| `dashboard/app.py` (`all_checks`) | Unbounded uptime read | ✓ VERIFIED | :2928, no `LIMIT`. Cap applied in Python to `points_by_port` only. Mutation-verified. |
+| `dashboard/app.py` (strip input reduction) | Exact state-change reduction, NULL-preserving | ⚠️ PARTIAL | Reduction exact (end-to-end differential, 12 services, all buckets matched) and present (m3 caught by 3 tests). NULL branch present at :2969-2978 but **unguarded on the route** (M2 undetected). |
+| `dashboard/beacon/worker_main.py` | Metrics/cleanup lane separation | ✓ VERIFIED | :465-466 two `ThreadPoolExecutor(1)`; J1/J2 `executor='metrics'`, J8 `executor='cleanup'`. |
+| `dashboard/beacon/migrations.py` (migration 10) | Bounded TTL thumbnail store, blobs off `services` | ✓ VERIFIED | :604-624. Table + `idx_thumbnails_expires` + backfill + `UPDATE services SET thumb_data=NULL, thumb_mime=NULL`, all inside the migration transaction. |
+| `dashboard/beacon/db.py` | WAL in force | ✓ VERIFIED | :27 `JOURNAL_MODE = 'WAL'`, applied :201, verifiable via `configured_journal_mode` :209. |
+| `dashboard/beacon/queues.py` | Bounded preview deadlines/retries + degraded state | ✓ VERIFIED | :28 `PREVIEW_STATUS_DEGRADED`; `deadline_ts` and `lease_owner`/`lease_until` throughout. |
+| `dashboard/beacon/repositories.py` (`read_uptime_strips_by_port`) | Retained, unreferenced by production | ⚠️ ORPHANED — **disclosed** | Zero production callers (`grep` across the tree returns only `tests/`). Explicitly recorded as `D-DEBT-06-24` with the retention rationale, "not left to be rediscovered as dead code". Correctly disclosed; not a finding. |
+| `06-SECURITY.md` | Boundary re-closed against HEAD | ✓ VERIFIED | 88 threat rows independently counted, matching 06-28's claimed 42 → 88. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
-|------|-----|-----|--------|---------|
-| Pi build `b8ed60b` | working tree `HEAD` (`b13afea`) | code identity | ✓ WIRED | `git diff --stat b8ed60b..HEAD -- dashboard/ tests/` is empty. The four intervening commits are documentation only. The hardware result therefore applies to the code under verification — this is what makes it authoritative rather than stale. |
-| `dashboard/app.py` `api_services` | `beacon_maintenance.coverage` / `attributed_downtime_seconds` | `cache=maintenance_occurrence_cache` | ✓ WIRED | Lines 2887, 2894. One dict created per request, shared across every service's calls. |
-| `dashboard/app.py` `api_services` | `beacon_repositories.offline_intervals_from_points_by_port` | reconstruction from `points_by_port` | ✓ WIRED | Line 2850; boundary query at 2847 reads strictly before `start_ts`, so it is genuinely non-duplicative. |
-| `dashboard/app.py` `all_checks` LIMIT | `beacon_repositories._OFFLINE_INTERVALS_BULK_ROW_LIMIT` | live constant reference | ✓ WIRED | Line 2825 — the same named constant, not a copied literal. Correctly wired; the problem is the consumer set, not the wiring. |
-| `dashboard/app.py` `all_checks` | `_uptime_summary` | `checks_by_port` | 🛑 WIRED, NEWLY TRUNCATED | 2828-2829 → 2874. This link is why the LIMIT is a correctness change, not only a bound. Previously unbounded on this path. |
-| `tests/pi_load_acceptance.py` `_live_role_processes` | `_cached_handle` | per-tick mapping | ✓ WIRED | Line 567. Hardware run confirms the cache is effective (`nonzero_sample_count: 594`, `zero_sample_count: 0`). |
-| `/api/advanced/current` | `_db_lock` | (absence) | ✓ CONFIRMED ABSENT | `dashboard/app.py:2491-2512` calls `beacon_diagnosis.get_current_diagnosis`; `dashboard/beacon/diagnosis.py` contains zero `_db_lock`/`threading.Lock` references. The phase's claim is correct — but load-bearing in a way that does not support the conclusion drawn from it. |
+|---|---|---|---|---|
+| `dashboard/app.py::api_services` | `service_checks` (unbounded read) | `conn.execute` at :2928 | ✓ WIRED | No `LIMIT`. Feeds `checks_by_port` -> `_uptime_summary`. |
+| `checks_by_port` | `_uptime_summary` | :3024 onward | ✓ WIRED, ✓ DATA FLOWS | Real query -> real reduction -> real rendered `uptime_pct`/`uptime_buckets`. Proved end-to-end against an independent oracle, not by inspection. |
+| `points_by_port` | offline-interval reconstruction | `offline_points_budget` :2939, :2979-2981 | ✓ WIRED | Cap correctly isolated to this consumer only. |
+| `api_services` | `_db_lock` | `with _db_lock, database_access(...)` :2875 | ⚠️ WIRED — **whole-body scope** | First dedent at :3076. 200 lines of mostly-Python work under a process-wide mutex. 06-20's narrowing reverted by `ea8689e`, never re-landed. Correct, and the standing performance mechanism behind truth 5. |
+| `worker_main` J8 (`cleanup_history`) | `'cleanup'` executor | `executor='cleanup'` :91 | ✓ WIRED | Off the metrics lane, as OPS-01 requires. |
+| `06-31` reduction | `tests/test_services_route_scaling.py` guards | m3 mutation | ✓ WIRED | 3 tests fire on removal. |
+| `06-31` NULL branch | any test | M2 mutation | ✗ NOT WIRED | 993/993 green under mutation. Gap 2. |
 
-### Data-Flow Trace (Level 4)
-
-| Artifact | Data Variable | Source | Produces Real Data | Status |
-|----------|---------------|--------|--------------------|--------|
-| `/api/services` | `uptime_pct`, `uptime_buckets`, `availability` | `checks_by_port` ← `all_checks` (`LIMIT 20000`) | **No** above 20,000 in-window rows | 🛑 TRUNCATED — reproduced: true 20.833% reported as 100.0% |
-| `/api/services` | `maintenance_attributed_seconds` | `offline_intervals_by_port` ← same bounded `all_checks` | Partial at scale (pre-existing concern, same cap) | ⚠️ STATIC-AT-LIMIT |
-| `/api/services` | `preview_status`, `has_thumb`, `tls_unverified` | live `conn.execute` reads | Yes | ✓ FLOWING |
-| acceptance report | `cpu_sampling.mean_cpu_percent` | `_cached_handle` → `psutil.cpu_percent(interval=None)` | Yes — first time this phase | ✓ FLOWING (was ✗ DISCONNECTED) |
-| acceptance report | `assertions.resources` RSS | `proc.memory_info().rss` summed over live PIDs | Yes | ✓ FLOWING |
-
-### Behavioral Spot-Checks
+### Behavioural Spot-Checks
 
 | Behavior | Command | Result | Status |
-|----------|---------|--------|--------|
-| Full suite green, re-run once independently on a quiet tree | `time uv run --project dashboard python -m pytest -q` | `854 passed, 561 subtests passed in 255.05s (0:04:15)`, exit 0 | ✓ PASS — matches the stated 854/561/0 baseline exactly |
-| Pi build matches verified code | `git diff --stat b8ed60b..HEAD -- dashboard/ tests/` | empty | ✓ PASS |
-| Route budgets not tuned | `sed -n '102,110p' tests/pi_load_acceptance.py` + `git log -L102,115` | values match the report; last touched `06-07` | ✓ PASS (`PROH-OPS-07-01`) |
-| `_db_lock` spans the whole `api_services` body | dedent scan of `dashboard/app.py:2785-2925` | no line returns to function indent until 2925; `_uptime_summary`/`coverage`/`attributed_downtime_seconds` all inside | ✓ CONFIRMED |
-| `/api/advanced/current` takes no lock | `grep -n "_db_lock\|threading.Lock" dashboard/beacon/diagnosis.py` | zero hits | ✓ CONFIRMED |
-| Harness rotation adjacency | `sed -n '371,384p' tests/pi_load_acceptance.py` | idx 0 `/api/services`, idx 1 `/api/scan-status` | ✓ CONFIRMED — the attribution's keystone |
-| GIL cannot explain 74× | arithmetic: max 8-thread stretch = 8×; observed 74× | 242.614 / 3.281 = 73.9× ≫ 8× | ✓ CONFIRMED |
-| Lock-wait arithmetic | `(242.614 − 3.281) / 209.355` | **1.143** — one critical section + ~14% | ✓ CONFIRMED |
-| **Uptime truncation reproduction** | throwaway harness: 2 ports × 60 checks, higher port offline for its newest half, limit patched to truncate | untruncated `{9002: 20.833%}` vs truncated `{9002: 100.0%}` — **DIFFERS: True** | 🛑 **FAIL — regression reproduced** |
+|---|---|---|---|
+| Full suite green at HEAD, clean tree | `cd dashboard && uv run --frozen pytest -q` | `993 passed, 593 subtests passed in 336.88s`, exit 0 | ✓ PASS |
+| Uptime output survives the row cap (D-DEBT-06-10) | mutation M1 + `pytest -k` | 2 phase guards + 1 independent differential all FAIL correctly | ✓ PASS |
+| Strip reduction is exactly equal end-to-end | independent differential vs `_reference_uptime_summary` over unreduced input | 12/12 services, all `uptime_pct` and all 168 buckets identical; 4012 -> 1581 points | ✓ PASS |
+| Strip reduction is detectably present | mutation m3 + `pytest -k` | 3 tests FAIL correctly | ✓ PASS |
+| NULL row is never coalesced away | mutation M2 + full suite | `993 passed` — **undetected** | ✗ FAIL |
+| Acceptance run percentiles reproduce from raw samples | recompute p50/p95 over `route_latencies_ms` | `/api/services` p95 662.3ms — matches report exactly | ✓ PASS |
+| Run-3 build equals HEAD | `git diff --stat a7c3ef1..HEAD -- dashboard/ tests/` | empty | ✓ PASS |
+| Criterion-5 amendment moved no code | `git show --stat 63db9ef` | 3 planning `.md` files only | ✓ PASS |
+
+*Note: the tree was fully restored after every mutation; `git diff` against HEAD is empty and the
+verifier's scratch test file was removed.*
 
 ### Probe Execution
 
 | Probe | Command | Result | Status |
-|-------|---------|--------|--------|
-| Real Pi-class acceptance run (`tests/pi_load_acceptance.py`, non-self-test) | Performed by the operator on real hardware; not re-executable from this environment (no Pi access). Treated as measured authoritative evidence, not routed to `human_needed`. | Control (c1, 120s): `overall_passed: true`. Acceptance (c8, 600s): `overall_passed: false`, 3 routes over budget | FAILED (authoritative) |
-| Full regression suite | `uv run --project dashboard python -m pytest -q` | 854 passed, 561 subtests, 0 failed | PASS |
+|---|---|---|---|
+| — | `find scripts -path '*/tests/probe-*.sh'` | no matches | SKIPPED — this project uses a pytest suite and the checked-in `tests/pi_load_acceptance.py` harness rather than shell probes |
 
 ### Requirements Coverage
 
-| Requirement | Source Plan | Description | Status | Evidence |
-|-------------|-------------|-------------|--------|----------|
-| OPS-01 | 06-04, 06-07, 06-08, 06-10, 06-14 | Cadence holds under contention | ✓ SATISFIED | Held on all three hardware runs including the failing one; `REQUIREMENTS.md` reads Complete |
-| OPS-02 | 06-03, 06-09 | Bounded preview retry, degraded state | ✓ SATISFIED | WR-02 fix survives `06-13`'s edits to the same file; Complete |
-| OPS-03 | 06-01, 06-02 | Bounded thumbnail store off primary telemetry path | ✓ SATISFIED | Untouched this round; Complete |
-| OPS-04 | 06-05, 06-09, 06-10 | Restart/concurrency/failed-job automated coverage | ✓ SATISFIED | `_db_lock` unchanged, so `T-06-24`'s closure holds; Complete |
-| OPS-07 | 06-06, 06-07, 06-08, 06-10, 06-11, 06-13, 06-14 | Pi-class acceptance run | ✗ BLOCKED | Run performed three times; round-3 `overall_passed: false`. **Correctly recorded as Pending.** |
+| Requirement | Description | Status | Evidence |
+|---|---|---|---|
+| OPS-01 | Metric sampling and service checks continue within cadence while discovery, previews, cleanup and analytics are active | ✓ SATISFIED | Truth 1. Lane split in code, `CadenceUnderContentionTests` green, and `assertions.cadence.passed: true` with J1-J4 all `fresh` on hardware at concurrency 3. `REQUIREMENTS.md:152` `Complete`. |
+| OPS-02 | Serialized browser ownership, bounded deadlines/retries, visible non-fatal degraded state | ✓ SATISFIED | Truth 2. `REQUIREMENTS.md:153` `Complete`. |
+| OPS-03 | Thumbnail storage/expiry bounded, no large blobs on the primary telemetry path | ✓ SATISFIED | Truth 3. Migration 10 + hardware RSS well inside budget. `REQUIREMENTS.md:154` `Complete`. |
+| OPS-04 | Automated tests cover migrations, restart recovery, concurrent access, scheduler ownership, failed jobs | ✓ SATISFIED | Truth 4. 993 tests green; 12/12 hardware job rows `succeeded`. `REQUIREMENTS.md:155` `Complete`. |
+| OPS-07 | Pi-class acceptance run at concurrency 3 verifies responsiveness, resource budgets, recovery and sampling continuity | ✗ BLOCKED (accepted with deviation) | Truth 5. Run performed three times, failing each time on `/api/services` p95. `REQUIREMENTS.md:73` still `- [ ]`; :158 reads `Accepted with deviation`, correctly NOT `Complete` per `PROH-OPS-07-08`. |
 
-No orphaned requirements — all 5 phase requirement IDs appear in plan frontmatter and in `REQUIREMENTS.md`'s Phase 6 mapping.
-
-**OPS-07 disposition — agreed, and correctly recorded.** `REQUIREMENTS.md` line 72 is unchecked and line 155 reads Pending; `git diff --quiet -- .planning/REQUIREMENTS.md` holds across `06-14`. Three independent reasons converge, and it is worth separating them because they are often conflated:
-
-1. **Dispositive:** the run failed. `overall_passed: false` means OPS-07 is not satisfied on the merits, so no promotion question arises at all.
-2. **Procedural (`D-DEBT-06-08`, `PROH-OPS-07-08`):** a gap-closure round may not promote its own requirement. The `TEL-06`/`03-17` precedent in `STATE.md` is correctly cited and correctly applied. I am the independent round that precedent names, and I confirm the disposition is right — but I am confirming a *Pending* status, not withholding a promotion I would otherwise grant.
-3. **Not yet reached:** even had the run passed, the CPU column had never been a real measurement before this round, so the "resource-budget compliance" clause would have had only one round of trustworthy evidence behind it.
-
-`D-DEBT-06-08` states point 2 clearly and explicitly notes that promotion "is not yet even a live question." That is accurate and well-scoped. Recorded correctly.
+**Orphaned requirements:** none. `grep` over `REQUIREMENTS.md` maps exactly OPS-01/02/03/04/07 to
+Phase 6, and all five are claimed and addressed.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
-|------|------|---------|----------|--------|
-| `dashboard/app.py` | 2821-2826 → 2874 | A previously-unbounded query gains a `LIMIT` whose rows feed a second, unrelated consumer (`_uptime_summary`), silently truncating a user-facing correctness value | 🛑 **Blocker** | At a scale the phase itself measured as already reached (8 services / 8 days), a service that was offline for most of the window is reported at 100% uptime. Reproduced behaviourally during this verification. Directly contradicts the phase goal's "keeps essential monitoring reliable" clause. |
-| `tests/test_services_route_scaling.py` | 352-421 | A test that sets up a failure condition and asserts only structure (`status_code == 200`, SQL shape), never output | ⚠️ Warning | This is precisely why 854/561 is green with the blocker above present. The test exercises truncation and looks away from its effect. |
-| `dashboard/app.py` | 2785-2924 | A global mutex held across ~82% non-database Python computation | ⚠️ Warning (correctness is fine; this is the performance mechanism) | The identified root cause of Truth 5's failure. Not a defect in `_db_lock` itself — it is doing exactly what it was added to do — but its *scope* makes `/api/services` a ~200ms global serialization point at concurrency 1 and worse under load. |
-| `06-DEBT.md` | `D-DEBT-06-01`, `D-DEBT-06-09` | A non-diagnostic test reported as exculpatory evidence; a CPU reading interpreted against the mechanism the same paragraph names | ⚠️ Warning | Led the phase to record the failure as unattributable and to scope the next round as an open search rather than a targeted confirmation. |
-| `06-DEBT.md` | (absent) | A named correctness-adjacent finding with no debt ID | ⚠️ Warning | `06-13-SUMMARY.md` explicitly declined to file the `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` finding as its own entry. It now survives only as prose inside another entry, and its blast radius has since grown. |
-
-No `TBD`/`FIXME`/`XXX` debt markers in any file modified by this round's plans (`dashboard/app.py`, `dashboard/beacon/maintenance.py`, `dashboard/beacon/repositories.py`, `tests/pi_load_acceptance.py`, `tests/test_services_route_scaling.py`, `tests/test_module_boundaries.py`, `tests/test_workload_resilience.py`). No stub patterns in this round's new code — the round-2 report's one stub (`tests/pi_load_acceptance.py`'s CPU sampling) is genuinely fixed.
-
-### The `06-13` deviation — judged legitimate
-
-The plan asked the `maintenance_coverage` cost guard to assert `growth_ratio < half the measured check_row_ratio` (the profiler's `not_proportional_to_check_count` classification). The guard instead asserts absolute cost reduction. **This is a legitimate deviation, not a quietly weakened criterion**, on four grounds:
-
-1. **The plan's criterion was mathematically unreachable by the chosen mechanism.** If cost = `call_count(days) × cost_per_call` and memoization reduces only `cost_per_call` by a factor `k`, the ratio `cost(8d)/cost(2d)` is `call_count(8d)/call_count(2d)` — with `k` cancelling exactly. Memoization alone provably cannot move the growth ratio. The measured drop that did occur (7.564 → ≈5.96–6.06) comes from differing cache hit rates between shapes, not from the mechanism the criterion was testing. The plan specified a criterion its own prescribed intervention could not satisfy; that is a planning error, and the executor was right to surface it rather than contort the fix toward an unreachable bar.
-2. **The replacement still guards the shipped change.** Disabling the memoization returns `maintenance_coverage` to 276.2/1322.4ms, well above the 100/400ms thresholds — so the guard trips. The executor mutation-verified exactly this by removing both `cache=` call sites, re-measuring, and restoring. That is the right evidence and it is the evidence a non-tautological guard requires.
-3. **The thresholds are honestly placed.** ~3× above shipped and ~3× below unmemoized is a genuine mid-band, not a bar set just under the current number.
-4. **It was documented in three places** (guard docstring, `06-13-SUMMARY.md` Deviations, `D-DEBT-06-01`'s "Honest limit"), each carrying both measured baselines. Nothing was hidden.
-
-**One reservation, recorded rather than held against it:** the replacement is an absolute-millisecond assertion and therefore host-dependent, where the original was a ratio and host-independent. It could pass on a fast machine while the behaviour regressed on a Pi. Given the original was unattainable, this is the better of the two available options — but it is a strictly less portable guard, and a future round could strengthen it by asserting the *ratio between memo-enabled and memo-disabled runs of the same shape*, which would restore host-independence while remaining reachable.
-
-### The `_OFFLINE_INTERVALS_BULK_ROW_LIMIT` finding — split verdict
-
-The question posed was whether the row-cap finding belongs in this phase's gap set or is separable. It is **both**, because it is two different findings that `06-13` merged:
-
-- **The pre-existing half is separable.** `read_service_offline_intervals_by_port`'s cap truncates `maintenance_attributed_seconds` — a Phase-3.1 maintenance-attribution value, not essential monitoring. It predates Phase 6, needs its own fleet-scale sizing decision, and does not bear on OPS-07's latency clause. Filing as debt was the right call. **One correction, though:** it was *not* actually filed. `06-13-SUMMARY.md` explicitly declined to add a Deferred entry ("No separate Deferred-section entry was added to avoid duplicating the same finding"), so `06-DEBT.md` carries no `D-DEBT` ID for it. A finding recorded only as prose inside another entry is one an auditor can lose. It should get an ID.
-- **The half `06-13` created is not separable.** Applying that same cap to `all_checks` — previously unbounded — extended truncation onto `_uptime_summary`, the primary monitoring surface. That is a regression introduced this round, at a scale the phase's own profiling documented as already reached, with a user-visible failure mode that is optimistic rather than fail-safe (100% shown for a 20.833% service), and with no test coverage of the consequence. It belongs in this phase's gap set and is recorded there.
+|---|---|---|---|---|
+| `dashboard/app.py`, `dashboard/beacon/repositories.py`, `dashboard/beacon/worker_main.py`, `tests/pi_load_acceptance.py`, `tests/test_services_route_scaling.py` | — | `TBD` / `FIXME` / `XXX` | — | **None found.** Debt-marker gate passes; all deferred work carries a `D-DEBT-06-NN` ID in `06-DEBT.md` (27 entries, `D-DEBT-06-01` through `-27`, count independently confirmed). |
+| `tests/test_lock_profile.py` | 2244-2262 | `(function, line)` pinning of the lock audit | ℹ️ INFO | Observed firsthand: an unrelated edit to `app.py` shifted 9 lock sites and failed `test_every_db_lock_site_is_covered_by_the_audit`. This is exactly the brittleness `D-DEBT-06-25` documents, and the decision to retain `(function, line)` over `(function, ordinal)` was taken explicitly and recorded (Option A, `06-32`). **Behaves as documented — disclosed, not a defect.** |
+| `dashboard/beacon/repositories.py` | `UPTIME_STRIP_QUERY`, `read_uptime_strips_by_port` | Production function with zero production callers | ℹ️ INFO | Referenced only from `tests/`. Fully and accurately disclosed as `D-DEBT-06-24` with the retention rationale. |
+| `.planning/.../06-UAT.md` | frontmatter + `## Gaps` | Record staleness | ⚠️ WARNING | `status: complete` while carrying unresolved gap `G-06-1` whose numbers (`/api/services` p95 10010.9ms etc.) are from 2026-09-01 and **two load models out of date** — they predate both the harness CPU-sampling fix and the concurrency-8 → 3 amendment. Not a code defect, but a future reader could take those figures as current. Worth a one-line pointer to `06-ACCEPTANCE-C3-RUN3.md`. |
 
 ### Human Verification Required
 
-None. The hardware run is measured, authoritative evidence and is treated as such rather than routed to human verification. Every finding in this report was verified programmatically or reproduced behaviourally in this environment.
+#### 1. Concurrency-1 acceptance run on the Pi against HEAD
 
-## Gaps Summary
+**Test:** Run the harness at `--concurrency 1 --duration 600`, uninstrumented (confirm
+`/api/diagnostics/lock-profile` returns 404 first), `run_kind: acceptance`, `self_test: false`.
+`06-ACCEPTANCE-RUNBOOK.md` carries the exact invocation and the three that silently produce
+inadmissible results.
+**Expected:** `/api/services` p95 comfortably inside 500ms — predicted 77–300ms.
+**Why human:** Requires real Pi-class hardware with the live Docker deployment; `PROH-OPS-07-02`
+admits no substitute. **Why it matters:** this is the single cheapest measurement that would convert
+the acceptance decision's central claim from an inferential step (a cProfile in-process 77.1ms, plus
+an HTTP c1 figure from a superseded build) into a direct HTTP measurement at single-operator load on
+the shipped build.
 
-Four of five success criteria hold, with no regressions against any of them. Truth 1 is now the strongest it has been — cadence held on all three hardware runs, including the one whose latency assertions failed, which is a better result than a clean run would have been: essential sampling demonstrably survives the exact contention that breaks responsiveness. The suite is green at **854 passed, 561 subtests, 0 failed**, re-run once independently here, matching the stated baseline exactly.
+#### 2. Decide criterion 5's disposition in this file's `overrides:` channel
 
-**Truth 5 remains failed, but the failure is much narrower than round 2's and is now, in this verification's assessment, attributable.** `06-13` did what it set out to do: the concurrency-1 control pass is clean on every route, and per-request cost is no longer the binding constraint. What remains appears only under concurrency. The phase recorded that residual as "serialization, mechanism unattributed" and scoped the next round as an open diagnostic search. This verification finds the mechanism identifiable from evidence already committed: `/api/services` holds the process-wide `_db_lock` across its entire handler, 82% of which is non-SQL Python; five of six exercised routes take that same lock; the harness's rotation puts `/api/scan-status` immediately after `/api/services` in a closed loop with all eight threads starting in lockstep; and `/api/scan-status`'s excess wait is 1.143× exactly one `/api/services` critical section. The GIL cannot be the dominant mechanism for that route — eight threads cap the possible stretch at ~8×, and 74× was observed. The phase reached the opposite conclusion because `D-DEBT-06-01`'s reopening test is not diagnostic: it uses an unlocked, GIL-bound 82ms route as the discriminator for a lock, so it cannot fire while any GIL cost exists, and its silence was misread as exculpatory. The next round should still be diagnostic — this attribution deserves direct lock-wait instrumentation before a fix is built on it, and this phase has twice adopted an unconfirmed hypothesis — but it should confirm or refute a named mechanism against a falsifiable prediction rather than search an open field. `gaps[].missing` is written to that shape and states what to measure, not what to build.
+**Test:** Either paste the ready-made `overrides:` block (body, "Suggested override") into this
+frontmatter, or leave the gap standing.
+**Expected:** With the override → 5/5, `overrides_applied: 1`, status `human_needed`. Without →
+4/5, status `gaps_found`, as written.
+**Why human:** A verifier cannot grant its own override. `PROH-OPS-07-08` reserves this decision to an
+independent round precisely so the acceptance is visible rather than silently absorbed.
 
-**A second, newly-introduced gap.** `06-13` bounded a query that was previously unbounded, and those rows feed the uptime computation as well as the offline-interval reconstruction the bound was meant for. At the 8-service / 8-day scale `06-PROFILE.md` itself measured as already exceeding the cap, `/api/services` now reports a service that was offline for most of the window as 100% up — reproduced behaviourally during this verification (true 20.833%, reported 100.0%). The failure is silent and optimistic, on the surface operators trust most, and the suite cannot see it because the one test that exercises truncation asserts only the SQL shape. This does not falsify any single success criterion as literally worded, which is why the score stays 4/5 — but it is a direct hit on the phase goal's own "keeps essential monitoring reliable" clause, and the goal, not the wording, is what this verification is measuring against.
+### Gaps Summary
 
-**OPS-07's disposition is correct.** It stays Pending on the merits — the run failed — and the `D-DEBT-06-08` self-certification rule that would independently prevent promotion is correctly recorded and correctly scoped. `PROH-OPS-07-01`, `PROH-OPS-07-02` and `PROH-OPS-07-08` are all verified intact: budgets unchanged since `06-07` and matching the cited figures, the only OPS-07 evidence is a genuine hardware run, and `REQUIREMENTS.md` is byte-identical across this round.
+**One criterion fails, and it fails honestly.** Beacon's essential-monitoring half of the phase goal
+is delivered and holds under exactly the load the amended criterion specifies: cadence, resources,
+recovery and sampling continuity all pass on real Pi hardware at concurrency 3. Discovery and
+previews are bounded, recoverable and non-blocking. Four of five success criteria are verified
+without reservation.
 
-This phase does not seal.
+What does not close is responsiveness on one route. `/api/services` has missed its 500ms p95 on three
+independent hardware runs spanning builds whose per-request cost differs by 45% — and the p95 moved
+2.5% between the last two. That is itself the finding: **the residual gap is not per-request cost.**
+Round 7 cut the route's cost nearly in half and the p95 barely noticed. The structural candidate is
+still sitting in the code and was confirmed present at HEAD — `api_services` holds a process-wide
+mutex across 200 lines of predominantly Python work (`app.py:2875-3075`), the narrowing that would
+have addressed it having been reverted in `ea8689e` and never re-landed. `D-DEBT-06-27` records the
+selective 6.9x inflation consistent with that mechanism as untested.
+
+The phase's response was to accept the deviation on usage grounds, and that response is defensible:
+the harness load is 34.5x the deployment's real per-route rate, the arithmetic checks out against
+`app.js`, and — this is the part worth crediting — **nothing was tuned to make the failure go away.**
+Every budget, every assertion, every harness default and the load generator itself are byte-identical
+to their 2026-09-01 originals. The criterion amendment moved three Markdown files and zero lines of
+code. Three failing runs stand unsuperseded. `PROH-OPS-07-01` and `PROH-OPS-07-10` were not merely
+respected in letter; the phase went out of its way to make the distinction auditable.
+
+Two things are still owed. First, the acceptance's own supporting number is a profiled in-process
+cost, not an HTTP measurement — one concurrency-1 run would close that, cheaply. Second, this
+verification found a fresh instance of the phase's own recurring failure mode: `06-31`'s
+NULL-preservation rule is asserted against a mirror in the test file, and mutating it away on the
+real route leaves all 993 tests green. It has no live exposure and is a two-line fix, but it is the
+third time in this phase a green gate has covered an unexercised path, and that pattern deserves
+naming more than this particular instance deserves alarm.
 
 ---
 
-_Verified: 2026-09-02T19:00:25Z_
-_Verifier: Claude (gsd-verifier)_
+_Verified: 2026-09-07T08:03:39Z_
+_Verifier: Claude (gsd-verifier) — round 4, goal-backward against the amended criterion 5_
