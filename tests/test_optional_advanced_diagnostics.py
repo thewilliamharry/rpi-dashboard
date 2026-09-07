@@ -115,6 +115,19 @@ _ORIGINAL_ENABLE_ADVANCED_DIAGNOSTICS = 'unset'  # sentinel distinct from None
 # result can never move because an unrelated module ran first.
 _DEFAULT_SETTINGS_PAYLOAD_ENV = {
     'ENABLE_ADVANCED_DIAGNOSTICS': '1',
+    # TZ is pinned for the same reason every settings var below is: `load_app`
+    # copies extra_env into os.environ and never removes it (tests/helpers.py:65),
+    # so this module inherits whatever the last module to run set. That is not
+    # hypothetical -- tests/test_history_investigation_ui.py:48 deliberately
+    # loads the app under TZ='Australia/Sydney' to prove D-05 (Pi-configured
+    # local time, not the browser's), and it sorts ahead of this module. Without
+    # this pin, `pytest -k "Toggle or EnabledResponseGolden"` fails both golden
+    # assertions: the captured body carries Sydney-rendered local times and the
+    # comparison run renders UTC. It fails loudly rather than silently, but it
+    # makes the golden's verdict depend on which tests ran before it, which is
+    # exactly what this module's rule above exists to prevent. Found by the
+    # 2026-09-07 Phase 7 verification.
+    'TZ': 'UTC',
     'METRIC_SAMPLE_SECONDS': '5',
     'DISCOVERY_TIMEOUT_SECONDS': '180',
     'TELEMETRY_RAW_DAYS': '7',

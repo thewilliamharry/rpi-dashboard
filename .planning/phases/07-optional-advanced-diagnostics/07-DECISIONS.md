@@ -221,3 +221,84 @@ operator exporting a disabling shell variable immediately before running an acce
 through undetected by the acceptance harness itself: `tests/pi_load_acceptance.py`'s own `_load_worker`
 never inspects response status, so a 404 from a disabled route is recorded as a fast success. This
 phase is forbidden from modifying that file, so it records the hole rather than closing it.
+
+---
+
+## D-07-10 — DIA-09's "serving none of its routes" amended to name the four routes advanced diagnostics owns
+
+**Decided** 2026-09-07, by the operator, on the finding of Phase 7's first verification
+(`07-VERIFICATION.md`, same date). Recorded here rather than absorbed, following the precedent
+`D-DEBT-06-20` set when Phase 6's success criterion 5 was amended.
+
+**What was found.** All five ROADMAP success criteria for Phase 7 pass, every one
+mutation-confirmed. But DIA-09's own wording is wider than criterion 2's. Criterion 2 enumerates
+four paths; DIA-09 said "serving none of **its** routes". Two routes consumed exclusively by
+`dashboard/advanced.js` are not gated by `ENABLE_ADVANCED_DIAGNOSTICS`. Reproduced independently on
+a disabled build:
+
+```
+ENABLE_ADVANCED_DIAGNOSTICS = False
+  404  /advanced                 /advanced.css      /advanced.js      /api/advanced/current
+  200  /api/telemetry/history    308 bytes    (1 connection,  6 statements)
+  200  /api/events/history       274 bytes    (1 connection,  3 statements)
+```
+
+The finding was genuinely undocumented — excluding `07-VERIFICATION.md`, neither route string
+appears in any Phase 7 PLAN, SUMMARY, DEBT or DECISIONS entry. It was missed, not scoped out.
+
+**The decision: amend DIA-09's wording; leave both routes ungated.**
+
+**Why this is legitimate — ownership, not difficulty.** Neither route is advanced diagnostics'.
+
+| route | built by | serves | verified under |
+|---|---|---|---|
+| `/api/telemetry/history` | Phase 2 — plans `02-01`, `02-06`, `02-07`, `02-10`, `02-11` | **TEL-05** ("Historical APIs select an appropriate resolution and enforce a bounded response-point budget") | `02-VERIFICATION.md`, `passed` 4/4 |
+| `/api/events/history` | Phase 4 — plans `04-02`, `04-06` through `04-11` | **HIS-01..06** | `04-VERIFICATION.md`, `passed` 6/6 |
+
+Neither was created by Phase 3 (advanced diagnosis) or Phase 7. `advanced.js` is their current sole
+consumer, which is a fact about today's front ends, not about who owns the contract. Gating them
+behind `ENABLE_ADVANCED_DIAGNOSTICS` would mean that turning advanced diagnostics off also 404s two
+APIs that TEL-05 and HIS-01..06 promise and that two passed phase verifications already certify —
+putting one requirement in direct conflict with seven others.
+
+**The distinction that matters, stated as `D-DEBT-06-20` states it.** Amending a requirement because
+the code could not meet it is exactly what `PROH-OPS-07-01` and `PROH-OPS-07-10` forbid. This
+amendment is legitimate only because the wording was wrong about the system's ownership boundaries.
+The direction of effort is the check: **gating the two routes is the *easier* work** — two gates in
+`D-07-02`'s existing shape plus two subtest rows, which the verification costed at roughly an hour.
+This amendment is more expensive to justify than the change it declines to make. That is the
+opposite of the forbidden move, and it is why the amendment is recorded at this length.
+
+**The counter-argument, stated rather than omitted.** A reasonable reader can hold that "its routes"
+should mean *every route the advanced page needs*, on the grounds that the operator's intent in
+DIA-09 is a deployment that serves no advanced surface at all — and under this amendment, a disabled
+deployment still answers two advanced-only data APIs to anyone who asks. That reading is coherent.
+It was rejected because the toggle would then silently revoke TEL-05 and HIS-01..06, and because a
+requirement whose scope is "whatever the page happens to call" is not stable — it would re-widen
+every time `advanced.js` gained a fetch.
+
+**Residual, accepted knowingly.** With the toggle off, `/api/telemetry/history` and
+`/api/events/history` still serve live data while their only consumer is gone. Concretely:
+
+- These are read-only, bounded, already-validated telemetry reads — the same exposure any Beacon
+  deployment has with advanced diagnostics on, and Beacon's deployment model is trusted-LAN,
+  local-only (see `PROJECT.md`), so this is not a new privilege boundary.
+- ROADMAP criterion 3 ("costs nothing when off") is unaffected and remains verified: it measures the
+  services front page's own request set, and the front page never calls either route
+  (`dashboard/app.js` contains zero references to both).
+- What is genuinely lost is the cleanliness of "a services-only dashboard" as a *surface* claim. A
+  future milestone wanting that literally should introduce a separate, explicit switch for the
+  historical APIs rather than overloading `ENABLE_ADVANCED_DIAGNOSTICS`, whose contract this decision
+  fixes as "the four advanced surfaces".
+
+**ROADMAP consistency.** No ROADMAP change is required: criterion 2 already enumerates exactly the
+four routes this amendment names, so the roadmap and the requirement now agree where previously they
+did not. The pre-existing divergence between them is what this verification surfaced.
+
+**What this does NOT retire.** `D-DEBT-07-01` stands unchanged — the acceptance harness still records
+only `elapsed_ms` and never `status_code`, so a disabled deployment would report
+`/api/advanced/current`'s budget cleared while never exercising it. That remains owned by the next
+OPS-07 round in Phase 6. Nor does it retire the verification's second finding: `PROH-DIA-09-01`'s
+guard is evadable by setting `ENABLE_ADVANCED_DIAGNOSTICS: "0"` in the `web` service's own
+`environment:` block in `docker-compose.yml` — a pattern that file already uses at lines 110-112 —
+with both guard tests still passing. That is recorded in `07-VERIFICATION.md` and left open.

@@ -41,7 +41,7 @@
 - [x] **DIA-06**: Selecting a service, incident, or time range updates related host, service, and event views as one investigation context.
 - [x] **DIA-07**: Correlated views present observed evidence without asserting an unsupported root cause.
 - [x] **DIA-08**: The operator can view effective monitoring settings and change supported analytics presentation, refresh, range, and filtering preferences without exposing remote-control actions.
-- [ ] **DIA-09**: The operator can disable advanced diagnostics for a deployment that is already monitored elsewhere, hiding the page and its entry point and serving none of its routes, while the services front page keeps working unchanged.
+- [x] **DIA-09**: The operator can disable advanced diagnostics for a deployment that is already monitored elsewhere, hiding the page and its entry point and serving none of the four routes advanced diagnostics owns (`/advanced`, `/advanced.css`, `/advanced.js`, `/api/advanced/current`), while the services front page keeps working unchanged. *Wording amended 2026-09-07 (was "serving none of its routes"): the shared telemetry and incident-history APIs `/api/telemetry/history` and `/api/events/history` stay ungated by the toggle, because they are Phase 2 and Phase 4 deliverables owned by TEL-05 and HIS-01..06 rather than advanced diagnostics' own routes. Justification, counter-argument and residual in 07-DECISIONS.md D-07-10.*
 
 ### Historical Investigation
 
@@ -135,7 +135,7 @@ Every v1 requirement maps to exactly one roadmap phase.
 | DIA-06 | Phase 4 | Complete |
 | DIA-07 | Phase 4 | Complete |
 | DIA-08 | Phase 3 + Phase 4 | Complete |
-| DIA-09 | Phase 7 | Pending |
+| DIA-09 | Phase 7 | Complete |
 | HIS-01 | Phase 4 | Complete |
 | HIS-02 | Phase 4 | Complete |
 | HIS-03 | Phase 4 | Complete |

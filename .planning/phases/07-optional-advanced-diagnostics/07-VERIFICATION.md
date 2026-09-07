@@ -2,6 +2,7 @@
 phase: 07-optional-advanced-diagnostics
 verified: 2026-09-07T11:30:00Z
 status: gaps_found
+status_note: "Gap 1 (DIA-09 scope) closed by operator amendment D-07-10 on 2026-09-07; DIA-09 promoted to Complete. Gap 2 (PROH-DIA-09-01's per-service compose-override escape) remains open and is recorded, not closed. The TZ non-hermeticity noted in the body was fixed the same day by pinning TZ='UTC' in this module's _DEFAULT_SETTINGS_PAYLOAD_ENV."
 score: 5/5 must-haves verified (ROADMAP success criteria 1-5, all mutation-confirmed)
 behavior_unverified: 0
 overrides_applied: 0
@@ -19,6 +20,7 @@ prohibitions:
     evidence: "Independently confirmed present at HEAD and NOT re-raised as a Phase 7 defect, per 07-DEBT.md's opening instruction. `_load_worker` (tests/pi_load_acceptance.py:425-446) discards `session.get`'s return value and records only `elapsed_ms`; `assert_response_times` (:373-401) receives only `latencies_by_route` and has no status information even in principle. `ROUTE_BUDGETS_MS` (:103-110) declares `/api/advanced/current: 2000`. Phase 7's scope fence forbade editing that file and `git status --porcelain tests/pi_load_acceptance.py` is clean. Owner named: the next OPS-07 round in Phase 6. Recorded here for continuity only."
 gaps:
   - truth: "DIA-09 — the operator can disable advanced diagnostics ... hiding the page and its entry point and SERVING NONE OF ITS ROUTES, while the services front page keeps working unchanged"
+    resolution: "CLOSED BY AMENDMENT 2026-09-07 — operator decision D-07-10 (07-DECISIONS.md). DIA-09's wording now names the four routes advanced diagnostics owns; `/api/telemetry/history` and `/api/events/history` stay ungated because they are Phase 2 and Phase 4 deliverables owned by TEL-05 and HIS-01..06, verified under 02-VERIFICATION.md and 04-VERIFICATION.md, and gating them would have the toggle silently revoke seven other requirements. The amendment is justified by ownership, not by difficulty: gating the two routes was the CHEAPER option (two gates in D-07-02's shape plus two subtest rows), so the direction-of-effort check that PROH-OPS-07-10 exists to apply is satisfied. The measurement below is unchanged and unretired — both routes still answer 200 on a disabled build, and D-07-10 records that as a knowingly accepted residual. DIA-09 promoted to Complete (REQUIREMENTS.md:44 and :138)."
     status: failed
     reason: "Two API routes that exist solely to serve the advanced workspace are not gated by the toggle. With ENABLE_ADVANCED_DIAGNOSTICS=0 they answer 200 and do real database work. This is a gap against the REQUIREMENT's wording, not against ROADMAP success criterion 2, which enumerates exactly four paths and is literally satisfied. It is not covered by 07-DEBT.md, 07-DECISIONS.md, or any 07-0x PLAN/SUMMARY: `grep -rn 'telemetry/history|events/history' .planning/phases/07-optional-advanced-diagnostics/` returns ZERO hits, so this is not a documented scope-out being re-litigated."
     artifacts:
@@ -58,7 +60,8 @@ human_verification:
   - test: "Before the next Pi OPS-07 acceptance round, confirm on the running deployment that advanced diagnostics is ENABLED — e.g. `curl -s -o /dev/null -w '%{http_code}' http://raspi.local/advanced` returns 200, and `docker compose config | grep ENABLE_ADVANCED_DIAGNOSTICS` resolves to a value in {1,true,yes,on}."
     expected: "200 from /advanced, and a resolved compose value that `load_settings` parses as enabled."
     why_human: "PROH-DIA-09-01 constrains the RUNTIME environment of a hand-run acceptance round. No test in this repository can observe the shell an operator exports before invoking the harness, and D-DEBT-07-01 establishes that the harness itself would score the resulting 404s as fast successes. This is the residual the compose-default guard explicitly does not close."
-  - test: "Decide whether `/api/telemetry/history` and `/api/events/history` are 'its routes' under DIA-09 (gap 1) — gate them, or amend DIA-09's wording."
+  - test: "RESOLVED 2026-09-07 — see D-07-10. Decide whether `/api/telemetry/history` and `/api/events/history` are 'its routes' under DIA-09 (gap 1) — gate them, or amend DIA-09's wording."
+    resolved: "Wording amended; routes left ungated; DIA-09 promoted to Complete. The counter-argument (that 'its routes' should mean every route the advanced page needs) is recorded in D-07-10 rather than omitted, along with the residual: a disabled deployment still answers two advanced-only data APIs."
     expected: "A recorded decision. If gated, DIA-09 is promotable; if the wording is amended, the amendment must be justified by usage rather than by difficulty (PROH-OPS-07-10's standard, applied by analogy)."
     why_human: "This is a scope judgement about what the advanced workspace IS, not a defect with a mechanically correct answer. It also decides whether DIA-09 moves to Complete this round."
   - test: "Decide whether PROH-DIA-09-01's guard should also refuse a per-service compose override (gap 2)."
